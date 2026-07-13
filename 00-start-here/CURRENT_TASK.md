@@ -2,11 +2,11 @@
 
 ## Immediate Goal
 
-Pre-M0 setup: initialize the git repo, write the repo-root `AGENTS.md` (THE LAW + build-loop roles), then hand Milestone M0 to Codex (GPT-5.6).
+M0 implementation is done (pending live verification). Run the M0 exit criterion live test against DeepSeek, then start M1: RouteResolver full catalog.
 
 ## Why This Matters
 
-The build loop (Claude plans → Codex implements → Opus 4.8 gates) can't start until the repo and AGENTS.md exist — both the M0 prompt and the Opus review gate assume them.
+The workspace is green offline (tests + clippy), but M0 only counts as done when the harness fixes a failing test in a real repo end-to-end via `deepseek-v4-flash`. M1's live route/pricing verification builds on that proven path.
 
 ## Current Status
 
@@ -14,11 +14,12 @@ Completed:
 
 - Master Plan v0.1 + Appendix A (provider/access architecture) + Appendix B (verified model catalog), research through July 11, 2026.
 - Project OS folder structure adapted from ProjectStarterTemplate (July 12).
-- M0 handoff prompt re-pointed from "Codex 5.5" to GPT-5.6 (see `../05-ai-collaboration/CODEX.md`).
+- M0 implemented by the Fable 5 multi-agent workflow: all five crates, integration green, 53 tests passed + clippy `-D warnings` clean (see `BUILD_LOG.md`).
+- M0 hardening pass: 6 adversarial review findings addressed.
 
 In progress:
 
-- Pre-M0 setup (this task).
+- M0 exit criterion live test (this task).
 
 Blocked:
 
@@ -26,7 +27,7 @@ Blocked:
 
 ## Next Action
 
-`git init` in this folder, add `.gitignore` (`.nosis/`, secrets patterns), write repo-root `AGENTS.md`, first commit. Then paste the M0 prompt from `../05-ai-collaboration/CODEX.md` into Codex CLI.
+`nh key add deepseek`, then `nh run "fix the failing test" --model deepseek-v4-flash` on a sample repo with a failing test. Confirm the approval prompt gates every shell command and receipts land in `.nosis/receipts.jsonl`. Then M1: RouteResolver full catalog.
 
 ## Do Not Do Yet
 
@@ -39,6 +40,5 @@ Blocked:
 
 This task is done when:
 
-- Repo is initialized with root AGENTS.md and a first commit.
-- Codex has the M0 brief and starts implementing.
 - M0 exit criterion is met: the harness fixes a failing test in a sample repo end-to-end via `deepseek-v4-flash`, writing JSONL receipts, with `cargo test` and `cargo clippy -- -D warnings` clean.
+- The live run is recorded in `BUILD_LOG.md` and M1 (RouteResolver full catalog) is picked up as the next task.
