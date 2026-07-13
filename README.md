@@ -10,6 +10,8 @@ Terminal agent harness (Rust) for open-weight models — DeepSeek V4, Kimi K2.x,
 - `nh init` — scaffold `.nosis/` and a starter `catalog.toml` in your repo.
 - `nh key add deepseek` — store your DeepSeek API key in the OS keyring (nh-vault).
 - `nh run "fix the failing test" --model deepseek-v4-flash` — run the agent; every shell command stops at a y/N approval prompt, and each turn is logged to `.nosis/receipts.jsonl`.
+- `nh run "…" --think none|low|high|max` — set thinking effort for the run; flag absent defaults per route dialect (High on always-thinking/glm-hm, None on deepseek-nhm/none).
+- `nh chat` — interactive session; `/model` and `/provider` switch routes mid-session (history and cumulative usage preserved), `/price` shows live peak/off-peak pricing.
 
 ## First Read Order
 

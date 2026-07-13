@@ -13,6 +13,8 @@ The project has:
 
 Exit: fixes a failing test in a sample repo end-to-end. `cargo test` + `cargo clippy -- -D warnings` clean.
 
+Status (2026-07-13): **exit criteria met** — turn loop, approval-gated tools, receipts, and vault all regression-tested; tests + clippy clean; smoke (`nh --help`, keyless `nh chat`) green. Mock-verified: the end-to-end fix runs against loopback mock providers. Live-pending: the same flow on a real DeepSeek key (folded into the M1 live pass).
+
 ## Milestone 1: RouteResolver + catalog + MCP client (weeks 2–3)
 
 The project has:
@@ -22,6 +24,8 @@ The project has:
 - MCP client against one stateless 2026-07-28 server.
 
 Exit: `/model` and `/provider` switch mid-session; peak/off-peak price shown correctly; MCP tool call with handle passthrough and no session header on the wire. MiMo prices verified live (B.3 conflict resolved).
+
+Status (2026-07-13): **exit criteria met** — MiMo prices verified live against first-party pages (B.3 resolved, `confirmed` — see `../04-research/SOURCE_INDEX.md`). Mock-verified: mid-session `/model`/`/provider` switching, peak/off-peak display, and the stateless MCP call (handle passthrough, no session header) all run against loopback mock servers only. Live-pending: real provider calls (DeepSeek keyed + GLM free route), a real 2026-07-28 MCP server, DeepSeek peak windows (re-verify ~2026-07-24), GLM free-tier rate limits.
 
 ## Milestone 2: Context engine + law (weeks 3–5)
 

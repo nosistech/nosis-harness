@@ -2,6 +2,26 @@
 
 Record every meaningful session here.
 
+## 2026-07-13: M1 build finalized (Fable 5 multi-agent workflow)
+
+Builder:
+
+- Claude (Fable 5, Claude Code) — multi-agent workflow: architect + 4 parallel crate builders, integrator, 4 adversarial reviewers, hardening pass
+
+What changed:
+
+- M1 implemented end-to-end per CONTRACTS_M1.md: full 5-provider catalog with clock-aware pricing, Anthropic Messages wire adapter, thinking-mode dialects + `nh run --think`, stateless MCP client (2026-07-28 draft), and `nh chat` with mid-session `/model`/`/provider` switching and cost HUD. Integration green after merging the crate builders' outputs.
+- 4 adversarial review findings addressed (fixes detailed in the M1 hardening entry below).
+- Price verification pass (full detail: `../04-research/SOURCE_INDEX.md`, 2026-07-13 section): all four API providers checked against their OWN pricing/docs pages — DeepSeek, Kimi, MiMo, and GLM base prices and base URLs are all first-party CONFIRMED. MiMo plan-B.3 conflict RESOLVED first-party (current `mimo.mi.com/docs/pricing` matches the marketplace figures, superseding the May 27 cut notice; `verify_live` → `confirmed`). Two earlier Kimi "reported" figures were wrong (kimi-k2.6 is $0.16 hit / $0.95 miss / $4.00 out, not ~$0.55–0.60 in / $2.50–2.65 out; k2.7 highspeed bills 2x standard input) and the catalog's old MiMo host was wrong (fixed to `api.xiaomimimo.com`). Still open, honestly: DeepSeek's peak 2x windows are announcement-only (secondary press, not yet on the first-party pricing page — re-verify on/around 2026-07-24), and GLM free-tier rate limits remain unpublished.
+
+Tests/checks run:
+
+- cargo build --workspace: green. cargo test --workspace: 176 passed, 0 failed, 1 ignored (keyring round-trip; nh-cli 49, nh-core lib 21 + integration 5+4+49, nh-routes 38, nh-vault 10). cargo clippy --workspace --all-targets -- -D warnings: clean. M0 smoke: `nh --help` exit 0; `echo /quit | cargo run -p nh-cli -q -- chat` exit 0 with no key configured (friendly warning to stderr, stdout empty). Committed on main as 0ed3d6d 'M1: full catalog, clock pricing, Anthropic wire, thinking dialects, MCP client, chat session'.
+
+Next step:
+
+- Live provider verification (DeepSeek keyed run + GLM free-route run), then M2: context engine + law.
+
 ## 2026-07-13: M1 hardening — adversarial-review fixes
 
 Builder:
