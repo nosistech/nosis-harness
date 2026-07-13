@@ -1,0 +1,200 @@
+//! Integration tests for the agent loop - no network, scripted ChatClient.
+
+use std::sync::{Arc, Mutex};
+
+use nh_core::agent::AgentLoop;
+use nh_core::receipt::{FailureClass, Outcome, ReceiptWriter};
+use nh_core::wire::{ChatClient, ChatMessage, ChatRequest, ChatResponse, ToolCallReq, Usage};
+use nh_tools::{Tool, ToolCtx, ToolSpec};
+
+/// Obviously fake test secret (never a real key shape in use).
+const FAKE_SECRET: &str = "sk-test-00000000";
+
+/// Pops scripted responses in order; errors if the script runs out.
+struct ScriptedClient {
+    responses: Mutex<Vec<ChatResponse>>,
+}
+
+impl ChatClient for ScriptedClient {
+    fn complete(&self, _req: &ChatRequest) -> anyhow::Result<ChatResponse> {
+        let mut responses = self.responses.lock().unwrap();
+        if responses.is_empty() {
+            anyhow::bail!("scripted client exhausted");
+        }
+        Ok(responses.remove(0))
+    }
+}
+
+/// Always answers with the same tool call - the loop can never finish.
+struct AlwaysToolCallClient;
+
+impl ChatClient for AlwaysToolCallClient {
+    fn complete(&self, _req: &ChatRequest) -> anyhow::Result<ChatResponse> {
+        Ok(tool_call_resp("mystery_tool", r#"{"path":"x"}"#, "call_loop", None))
+    }
+}
+
+/// Always fails, like a provider outage.
+struct FailingClient;
+
+impl ChatClient for FailingClient {
+    fn complete(&self, _req: &ChatRequest) -> anyhow::Result<ChatResponse> {
+        anyhow::bail!("provider returned HTTP 500: overloaded")
+    }
+}
+
+/// Minimal in-test edit_file tool: exact string replace inside ctx.workdir.
+struct TestEditFile;
+
+impl Tool for TestEditFile {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "edit_file".into(),
+            description: "replace old_string with new_string in path".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }
+    }
+    fn execute(&self, args: serde_json::Value, ctx: &ToolCtx) -> anyhow::Result<String> {
+        let path = ctx.workdir.join(args["path"].as_str().unwrap());
+        let text = std::fs::read_to_string(&path)?;
+        let new = text.replace(args["old_string"].as_str().unwrap(), args["new_string"].as_str().unwrap());
+        std::fs::write(&path, new)?;
+        Ok("edited".into())
+    }
+}
+
+fn tool_call_resp(name: &str, arguments: &str, id: &str, usage: Option<Usage>) -> ChatResponse {
+    ChatResponse {
+        message: ChatMessage {
+            role: "assistant".into(),
+            content: None,
+            tool_calls: Some(vec![ToolCallReq {
+                id: id.into(),
+                name: name.into(),
+                arguments: arguments.into(),
+            }]),
+            tool_call_id: None,
+        },
+        finish_reason: "tool_calls".into(),
+        usage,
+    }
+}
+
+fn text_resp(text: &str, usage: Option<Usage>) -> ChatResponse {
+    ChatResponse {
+        message: ChatMessage {
+            role: "assistant".into(),
+            content: Some(text.into()),
+            tool_calls: None,
+            tool_call_id: None,
+        },
+        finish_reason: "stop".into(),
+        usage,
+    }
+}
+
+fn agent_in(dir: &std::path::Path, client: Box<dyn ChatClient>, tools: Vec<Box<dyn Tool>>, max_turns: u32) -> AgentLoop {
+    AgentLoop {
+        client,
+        tools,
+        ctx: ToolCtx { workdir: dir.to_path_buf(), approve: Box::new(|_| true) },
+        receipts: ReceiptWriter {
+            path: dir.join(".nosis").join("receipts.jsonl"),
+            scrubber: nh_vault::Scrubber::new(vec![FAKE_SECRET.to_string()]),
+        },
+        model_id: "mock-model".into(),
+        max_turns,
+        on_event: None,
+    }
+}
+
+fn receipt_lines(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join(".nosis").join("receipts.jsonl"))
+        .expect("receipts file must exist")
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn edits_file_passes_and_scrubs_receipt() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("main.py"), "def f():\n    return 1\n").unwrap();
+
+    let script = vec![
+        tool_call_resp(
+            "edit_file",
+            r#"{"path":"main.py","old_string":"return 1","new_string":"return 2"}"#,
+            "call_1",
+            Some(Usage { prompt_tokens: 10, completion_tokens: 5, cached_tokens: Some(2) }),
+        ),
+        text_resp("done", Some(Usage { prompt_tokens: 20, completion_tokens: 3, cached_tokens: None })),
+    ];
+    let mut agent = agent_in(
+        dir.path(),
+        Box::new(ScriptedClient { responses: Mutex::new(script) }),
+        vec![Box::new(TestEditFile)],
+        8,
+    );
+    let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = events.clone();
+    agent.on_event = Some(Box::new(move |line| sink.lock().unwrap().push(line.to_string())));
+
+    let task = format!("fix main.py; stray key in task: {FAKE_SECRET}");
+    let (text, receipt) = agent.run(&task).unwrap();
+
+    assert_eq!(text, "done");
+    assert_eq!(receipt.outcome, Outcome::Pass);
+    assert_eq!(receipt.turns, 2);
+    assert_eq!(receipt.tool_calls, 1);
+    let usage = receipt.usage.expect("usage accumulated");
+    assert_eq!(usage.prompt_tokens, 30);
+    assert_eq!(usage.completion_tokens, 8);
+    assert_eq!(usage.cached_tokens, Some(2));
+
+    let edited = std::fs::read_to_string(dir.path().join("main.py")).unwrap();
+    assert!(edited.contains("return 2"));
+    assert!(!edited.contains("return 1"));
+
+    let lines = receipt_lines(dir.path());
+    assert_eq!(lines.len(), 1, "exactly one receipt per run");
+    assert!(lines[0].contains(r#""outcome":"pass""#));
+    assert!(lines[0].contains("[REDACTED]"), "secret must be redacted");
+    assert!(!lines[0].contains(FAKE_SECRET), "secret must not leak into receipts");
+
+    assert_eq!(events.lock().unwrap().as_slice(), ["turn 1: edit_file main.py"]);
+}
+
+#[test]
+fn endless_tool_calls_hit_max_turns_and_write_timeout_receipt() {
+    let dir = tempfile::tempdir().unwrap();
+    // No tools registered: also proves unknown tool names never crash the loop.
+    let mut agent = agent_in(dir.path(), Box::new(AlwaysToolCallClient), vec![], 3);
+
+    let (text, receipt) = agent.run("never finishes").unwrap();
+
+    assert_eq!(receipt.outcome, Outcome::Timeout);
+    assert_eq!(receipt.failure_class, Some(FailureClass::Constraint));
+    assert_eq!(receipt.turns, 3);
+    assert_eq!(receipt.tool_calls, 3);
+    assert!(text.contains("3 turns"));
+
+    let lines = receipt_lines(dir.path());
+    assert_eq!(lines.len(), 1, "exactly one receipt per run");
+    assert!(lines[0].contains(r#""outcome":"timeout""#));
+    assert!(lines[0].contains(r#""failure_class":"constraint""#));
+}
+
+#[test]
+fn provider_error_writes_fail_receipt_and_returns_err() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut agent = agent_in(dir.path(), Box::new(FailingClient), vec![], 5);
+
+    let err = agent.run("anything").unwrap_err();
+    assert!(err.to_string().contains("HTTP 500"));
+
+    let lines = receipt_lines(dir.path());
+    assert_eq!(lines.len(), 1, "exactly one receipt per run");
+    assert!(lines[0].contains(r#""outcome":"fail""#));
+    assert!(lines[0].contains(r#""failure_class":"verification""#));
+}

@@ -11,7 +11,11 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 zeroize.workspace = true
+rpassword = "7"
 nh-core = { path = "../nh-core" }
 nh-routes = { path = "../nh-routes" }
 nh-tools = { path = "../nh-tools" }
 nh-vault = { path = "../nh-vault" }
+
+[dev-dependencies]
+tempfile.workspace = true
