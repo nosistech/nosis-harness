@@ -2,6 +2,27 @@
 
 Record every meaningful session here.
 
+## 2026-07-13: M0 hardening (adversarial review fixes)
+
+Builder:
+
+- Claude (Fable 5, Claude Code) — hardening agent
+
+What changed:
+
+- nh-cli: every stderr path now passes the Scrubber — progress lines, the approval prompt, and the final `nh:` error line; model-supplied text is also control-char-escaped (`sanitize_line`) so \r/ANSI cannot spoof the approval gate, with a visible truncation marker past 500 chars.
+- nh-tools: `exec_shell` strips `NH_*_KEY` env vars from the child, closing the key-exfiltration-to-disk path via the env fallback.
+- nh-routes: `from_toml` rejects banned route keys AND banned `model_id` values (clean alias can no longer smuggle a dead id onto the wire).
+- nh-cli: `nh init` writes a starter catalog.toml (embedded repo-root catalog — still data), so `nh run` works in a fresh repo; missing-catalog error now says "run `nh init` to create one".
+
+Tests/checks run:
+
+- `cargo test --workspace` (62 passed, 1 ignored keyring round-trip), `cargo clippy --workspace --all-targets -- -D warnings` — green. Manual: `nh init` + `nh run` flow in a fresh temp dir reaches the key prompt.
+
+Next step:
+
+- M1: live route/pricing verification against providers.
+
 ## 2026-07-12: M0 implemented (turn loop, tools, vault, routes, CLI)
 
 Builder:
