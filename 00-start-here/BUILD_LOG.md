@@ -15,7 +15,7 @@ What changed:
 
 Tests/checks run:
 
-- `cargo build --workspace`, `cargo test --workspace` (43 passed, 1 ignored keyring round-trip), `cargo clippy --workspace --all-targets -- -D warnings` — all green.
+- `cargo build --workspace`, `cargo test --workspace` (53 passed, 1 ignored keyring round-trip), `cargo clippy --workspace --all-targets -- -D warnings` — all green.
 
 Next step:
 
