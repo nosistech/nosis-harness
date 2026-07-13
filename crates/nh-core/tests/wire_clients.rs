@@ -23,6 +23,15 @@ struct Captured {
 
 /// Accepts ONE connection, captures the request, answers with canned JSON.
 fn one_shot_server(status: u16, response_body: String) -> (String, mpsc::Receiver<Captured>) {
+    one_shot_server_with(status, String::new(), response_body)
+}
+
+/// Like `one_shot_server`, with extra response headers ("name: value\r\n"…).
+fn one_shot_server_with(
+    status: u16,
+    extra_headers: String,
+    response_body: String,
+) -> (String, mpsc::Receiver<Captured>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = mpsc::channel();
@@ -67,7 +76,7 @@ fn one_shot_server(status: u16, response_body: String) -> (String, mpsc::Receive
             .unwrap_or(serde_json::Value::Null);
         tx.send(Captured { path, headers, body }).ok();
         let resp = format!(
-            "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response_body}",
+            "HTTP/1.1 {status} X\r\n{extra_headers}content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response_body}",
             response_body.len()
         );
         stream.write_all(resp.as_bytes()).ok();
@@ -193,6 +202,32 @@ fn anthropic_max_tokens_follows_route_max_out_below_cap() {
     let client = make_client(&r, Zeroizing::new(FAKE_SECRET.into()));
     client.complete(&req(vec![msg("user", Some("hi"))], ThinkingEffort::None)).unwrap();
     assert_eq!(rx.recv().unwrap().body["max_tokens"], 4096);
+}
+
+#[test]
+fn cross_host_redirects_are_refused_never_followed() {
+    // Regression (adversarial review): reqwest forwards custom headers like
+    // x-api-key across cross-host redirects, so following one would hand the
+    // key to whoever controls the Location header. Both wire clients must
+    // surface the redirect as an HTTP error and never contact the target.
+    let (attacker_url, attacker_rx) = one_shot_server(200, ANTHROPIC_OK.into());
+    for wire in [Wire::AnthropicMessages, Wire::OpenAi] {
+        let (url, _rx) = one_shot_server_with(
+            307,
+            format!("location: {attacker_url}/v1/messages\r\n"),
+            String::new(),
+        );
+        let r = route(&url, wire, ThinkingDialect::None, false, &[], None);
+        let client = make_client(&r, Zeroizing::new(FAKE_SECRET.into()));
+        let err = client
+            .complete(&req(vec![msg("user", Some("hi"))], ThinkingEffort::None))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("HTTP 307"), "redirect surfaces as an HTTP error: {err}");
+    }
+    // complete() already returned for both wires - if a redirect had been
+    // followed, the attacker's capture would be in the channel by now.
+    assert!(attacker_rx.try_recv().is_err(), "cross-host redirect was followed - key leaked");
 }
 
 #[test]

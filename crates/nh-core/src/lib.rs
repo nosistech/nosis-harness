@@ -6,7 +6,45 @@ pub mod wire {
     //! `make_client` picks the client from the route's wire and captures per-route
     //! policy (thinking dialect, reasoning persistence, quirks) at construction.
     use nh_routes::ThinkingDialect;
+    use std::time::Duration;
     use zeroize::Zeroizing;
+
+    /// Non-streaming completions from thinking routes legitimately run for
+    /// minutes; reqwest's blocking default would abort every request at 30 s.
+    /// Generous total cap instead - a dead host still fails fast on connect.
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+    const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// One HTTP client config for both wire clients: explicit timeouts (never
+    /// the hidden 30 s blocking default) and no redirect following - reqwest
+    /// forwards custom headers like `x-api-key` across cross-host redirects,
+    /// so a redirecting endpoint must surface as a friendly HTTP error, not
+    /// silently mail the key to whoever controls the Location header.
+    /// Panics only where `Client::new` would (TLS backend unavailable).
+    fn http_client() -> reqwest::blocking::Client {
+        reqwest::blocking::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("HTTP client")
+    }
+
+    /// Friendly send-failure line: a slow provider is not an unreachable one.
+    fn send_error(url: &str, e: &reqwest::Error) -> anyhow::Error {
+        anyhow::anyhow!("{}", send_error_line(url, e.is_timeout() && !e.is_connect(), &e.to_string()))
+    }
+
+    fn send_error_line(url: &str, timed_out: bool, detail: &str) -> String {
+        if timed_out {
+            format!(
+                "provider at {url} did not answer within {}s - retry, or switch to another route",
+                REQUEST_TIMEOUT.as_secs()
+            )
+        } else {
+            format!("could not reach provider at {url}: {detail}")
+        }
+    }
 
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     pub struct ChatMessage {
@@ -128,7 +166,7 @@ pub mod wire {
             Self {
                 base_url,
                 api_key,
-                http: reqwest::blocking::Client::new(),
+                http: http_client(),
                 policy: OpenAiPolicy::default(),
             }
         }
@@ -143,7 +181,7 @@ pub mod wire {
                 .bearer_auth(self.api_key.as_str())
                 .json(&build_body(req, self.policy))
                 .send()
-                .map_err(|e| anyhow::anyhow!("could not reach provider at {url}: {e}"))?;
+                .map_err(|e| send_error(&url, &e))?;
             let status = resp.status();
             let body = resp.text().unwrap_or_default();
             if !status.is_success() {
@@ -369,7 +407,7 @@ pub mod wire {
 
     impl AnthropicMessagesClient {
         pub fn new(base_url: String, api_key: Zeroizing<String>, max_tokens: u64) -> Self {
-            Self { base_url, api_key, max_tokens, http: reqwest::blocking::Client::new() }
+            Self { base_url, api_key, max_tokens, http: http_client() }
         }
     }
 
@@ -383,7 +421,7 @@ pub mod wire {
                 .header("anthropic-version", "2023-06-01")
                 .json(&build_anthropic_body(req, self.max_tokens))
                 .send()
-                .map_err(|e| anyhow::anyhow!("could not reach provider at {url}: {e}"))?;
+                .map_err(|e| send_error(&url, &e))?;
             let status = resp.status();
             let body = resp.text().unwrap_or_default();
             if !status.is_success() {
@@ -603,6 +641,28 @@ pub mod wire {
         fn endpoint_trims_trailing_slash() {
             assert_eq!(endpoint("https://api.example.com/"), "https://api.example.com/chat/completions");
             assert_eq!(endpoint("https://api.example.com"), "https://api.example.com/chat/completions");
+        }
+
+        #[test]
+        fn timeout_error_says_what_happened_and_what_to_do() {
+            let line = send_error_line("https://api.example.com/chat/completions", true, "op timed out");
+            assert_eq!(
+                line,
+                "provider at https://api.example.com/chat/completions did not answer within 600s \
+                 - retry, or switch to another route"
+            );
+            // Non-timeout failures keep the reachability wording and the detail.
+            let line = send_error_line("https://api.example.com/chat/completions", false, "dns error");
+            assert!(line.starts_with("could not reach provider at "), "got: {line}");
+            assert!(line.ends_with("dns error"), "got: {line}");
+        }
+
+        #[test]
+        fn request_timeout_outlives_slow_thinking_turns() {
+            // Guard against the hidden 30 s blocking-client default sneaking back:
+            // thinking routes (kimi/glm at High) routinely exceed 30 s per turn.
+            assert!(REQUEST_TIMEOUT >= Duration::from_secs(300), "got: {REQUEST_TIMEOUT:?}");
+            assert!(CONNECT_TIMEOUT <= Duration::from_secs(30), "dead hosts must fail fast");
         }
 
         #[test]
