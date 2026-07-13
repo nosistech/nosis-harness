@@ -74,6 +74,7 @@ fn tool_call_resp(name: &str, arguments: &str, id: &str, usage: Option<Usage>) -
                 arguments: arguments.into(),
             }]),
             tool_call_id: None,
+            reasoning_content: None,
         },
         finish_reason: "tool_calls".into(),
         usage,
@@ -87,6 +88,7 @@ fn text_resp(text: &str, usage: Option<Usage>) -> ChatResponse {
             content: Some(text.into()),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         },
         finish_reason: "stop".into(),
         usage,
@@ -104,6 +106,7 @@ fn agent_in(dir: &std::path::Path, client: Box<dyn ChatClient>, tools: Vec<Box<d
         },
         model_id: "mock-model".into(),
         max_turns,
+        thinking: nh_core::wire::ThinkingEffort::None,
         on_event: None,
     }
 }
@@ -183,6 +186,55 @@ fn endless_tool_calls_hit_max_turns_and_write_timeout_receipt() {
     assert_eq!(lines.len(), 1, "exactly one receipt per run");
     assert!(lines[0].contains(r#""outcome":"timeout""#));
     assert!(lines[0].contains(r#""failure_class":"constraint""#));
+}
+
+#[test]
+fn run_with_history_carries_context_and_writes_one_receipt_per_task() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = vec![text_resp("four", None), text_resp("five", None)];
+    let mut agent = agent_in(
+        dir.path(),
+        Box::new(ScriptedClient { responses: Mutex::new(script) }),
+        vec![],
+        8,
+    );
+
+    let mut history: Vec<ChatMessage> = Vec::new();
+    let (text, receipt) = agent.run_with_history(&mut history, "what is 2+2?").unwrap();
+    assert_eq!(text, "four");
+    assert_eq!(receipt.outcome, Outcome::Pass);
+    // system + user + assistant
+    assert_eq!(history.len(), 3);
+    assert_eq!(history[0].role, "system");
+    assert_eq!(history[1].role, "user");
+    assert_eq!(history[2].content.as_deref(), Some("four"));
+
+    let (text, _) = agent.run_with_history(&mut history, "add one").unwrap();
+    assert_eq!(text, "five");
+    // Same session: no second system message, prior turns still present.
+    assert_eq!(history.len(), 5);
+    assert_eq!(history[3].role, "user");
+    assert_eq!(history[4].content.as_deref(), Some("five"));
+    assert_eq!(history.iter().filter(|m| m.role == "system").count(), 1);
+
+    assert_eq!(receipt_lines(dir.path()).len(), 2, "one receipt per task");
+}
+
+#[test]
+fn run_with_history_keeps_tool_turns_even_on_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut agent = agent_in(dir.path(), Box::new(AlwaysToolCallClient), vec![], 2);
+
+    let mut history: Vec<ChatMessage> = Vec::new();
+    let (_, receipt) = agent.run_with_history(&mut history, "never finishes").unwrap();
+
+    assert_eq!(receipt.outcome, Outcome::Timeout);
+    // system, user, then (assistant tool-call + tool result) per turn.
+    assert_eq!(history.len(), 6);
+    assert_eq!(history[2].role, "assistant");
+    assert_eq!(history[3].role, "tool");
+    assert_eq!(history[4].role, "assistant");
+    assert_eq!(history[5].role, "tool");
 }
 
 #[test]
