@@ -39,6 +39,13 @@ pub struct EditFile;
 /// shell, captures stdout+stderr+exit code.
 pub struct ExecShell;
 
+/// Env vars that may hold harness secrets: the `NH_<ENTRY>_KEY` vault fallback
+/// shape (nh-vault). Case-insensitive — Windows env names are.
+fn is_secret_env_var(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    upper.starts_with("NH_") && upper.ends_with("_KEY")
+}
+
 /// Pull a required string argument out of the tool-call args.
 fn str_arg<'a>(args: &'a serde_json::Value, key: &str) -> anyhow::Result<&'a str> {
     args.get(key)
@@ -187,18 +194,27 @@ impl Tool for ExecShell {
             // Ok-shaped so the model can read the denial and adapt, not crash the turn.
             return Ok(format!("user denied: {command}"));
         }
-        let output = if cfg!(windows) {
-            std::process::Command::new("cmd")
-                .args(["/C", command])
-                .current_dir(&ctx.workdir)
-                .output()
+        let mut cmd = if cfg!(windows) {
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/C", command]);
+            c
         } else {
-            std::process::Command::new("sh")
-                .args(["-c", command])
-                .current_dir(&ctx.workdir)
-                .output()
+            let mut c = std::process::Command::new("sh");
+            c.args(["-c", command]);
+            c
+        };
+        cmd.current_dir(&ctx.workdir);
+        // THE LAW: no plaintext key ever hits disk. The child must not inherit the
+        // NH_<ENTRY>_KEY vault fallback, or an approved `echo $NH_X_KEY > f`
+        // would exfiltrate the key into the workdir.
+        for (name, _) in std::env::vars_os() {
+            if is_secret_env_var(&name.to_string_lossy()) {
+                cmd.env_remove(&name);
+            }
         }
-        .with_context(|| format!("could not run command: {command}"))?;
+        let output = cmd
+            .output()
+            .with_context(|| format!("could not run command: {command}"))?;
         let code = output
             .status
             .code()
@@ -387,6 +403,35 @@ mod tests {
             .unwrap();
         assert!(result.contains("exit code: 0"), "got: {result}");
         assert!(result.contains("hello"), "got: {result}");
+    }
+
+    #[test]
+    fn secret_env_var_shape_is_detected_case_insensitively() {
+        assert!(is_secret_env_var("NH_DEEPSEEK_KEY"));
+        assert!(is_secret_env_var("nh_test_entry_key"));
+        assert!(!is_secret_env_var("PATH"));
+        assert!(!is_secret_env_var("NH_WORKDIR"));
+        assert!(!is_secret_env_var("MY_KEY"));
+    }
+
+    #[test]
+    fn exec_child_never_sees_nh_key_env_fallback() {
+        std::env::set_var("NH_EXECTEST_KEY", "sk-test-0000-exec");
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_with(dir.path(), true);
+        let command = if cfg!(windows) {
+            "echo [%NH_EXECTEST_KEY%]"
+        } else {
+            "echo [${NH_EXECTEST_KEY:-unset}]"
+        };
+        let result = ExecShell
+            .execute(json!({"command": command}), &ctx)
+            .unwrap();
+        std::env::remove_var("NH_EXECTEST_KEY");
+        assert!(
+            !result.contains("sk-test-0000-exec"),
+            "child must not inherit NH_*_KEY: {result}"
+        );
     }
 
     #[test]
