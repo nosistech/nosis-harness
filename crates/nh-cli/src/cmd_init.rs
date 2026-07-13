@@ -6,6 +6,11 @@ use std::path::Path;
 /// .nosis/.gitignore: runtime artifacts and auth material never reach git.
 const GITIGNORE: &str = "# nosis-harness runtime artifacts - never commit\nreceipts.jsonl\n*.log\nauth*\n";
 
+/// Starter route catalog for repos that have none, so `nh run` works right after
+/// `nh init`. Catalog stays DATA: this embeds the repo-root catalog.toml at build
+/// time - routes are never hard-coded in Rust.
+const CATALOG_STARTER: &str = include_str!("../../../catalog.toml");
+
 /// Pre-commit secret guard. The `{4,}` tails keep the pattern from matching its own
 /// source line, so committing this repo does not trip the hook on itself.
 const PRE_COMMIT: &str = "#!/bin/sh\n\
@@ -26,7 +31,8 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Create .nosis/, .nosis/.gitignore, and (when .git/ exists) the pre-commit hook.
+/// Create .nosis/, .nosis/.gitignore, a starter catalog.toml (when the repo has
+/// none), and (when .git/ exists) the pre-commit hook.
 /// Returns one confirmation line per thing created; ["already set up"] when nothing was.
 /// Existing files are never overwritten. No .git directory → hook skipped silently.
 pub fn init_at(root: &Path) -> anyhow::Result<Vec<String>> {
@@ -42,6 +48,12 @@ pub fn init_at(root: &Path) -> anyhow::Result<Vec<String>> {
     if !gitignore.is_file() {
         fs::write(&gitignore, GITIGNORE)?;
         lines.push("created .nosis/.gitignore".to_string());
+    }
+
+    let catalog = root.join("catalog.toml");
+    if !catalog.is_file() {
+        fs::write(&catalog, CATALOG_STARTER)?;
+        lines.push("created catalog.toml (starter routes - edit to add providers)".to_string());
     }
 
     let git_dir = root.join(".git");
@@ -71,7 +83,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn creates_nosis_and_gitignore_then_is_idempotent() {
+    fn creates_nosis_gitignore_and_catalog_then_is_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
         let lines = init_at(tmp.path()).unwrap();
 
@@ -80,11 +92,31 @@ mod tests {
         assert!(gi.contains("receipts.jsonl"));
         assert!(gi.contains("*.log"));
         assert!(gi.contains("auth*"));
-        // no .git in the tempdir → exactly two things created, hook skipped silently
-        assert_eq!(lines.len(), 2);
+        // no .git in the tempdir → exactly three things created, hook skipped silently
+        assert_eq!(lines.len(), 3);
 
         let again = init_at(tmp.path()).unwrap();
         assert_eq!(again, vec!["already set up".to_string()]);
+    }
+
+    #[test]
+    fn starter_catalog_parses_and_resolves_a_route() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_at(tmp.path()).unwrap();
+        let text = fs::read_to_string(tmp.path().join("catalog.toml")).unwrap();
+        // The starter catalog must be usable by `nh run` as-is (and contain no
+        // banned ids - from_toml rejects those).
+        let resolver = nh_routes::RouteResolver::from_toml(&text).unwrap();
+        assert!(!resolver.available().is_empty());
+    }
+
+    #[test]
+    fn never_overwrites_an_existing_catalog() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("catalog.toml"), "# user's own catalog\n").unwrap();
+        init_at(tmp.path()).unwrap();
+        let text = fs::read_to_string(tmp.path().join("catalog.toml")).unwrap();
+        assert!(text.contains("user's own catalog"));
     }
 
     #[test]
@@ -93,7 +125,7 @@ mod tests {
         fs::create_dir(tmp.path().join(".git")).unwrap();
 
         let lines = init_at(tmp.path()).unwrap();
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.len(), 4);
 
         let hook_path = tmp.path().join(".git").join("hooks").join("pre-commit");
         let hook = fs::read_to_string(&hook_path).unwrap();

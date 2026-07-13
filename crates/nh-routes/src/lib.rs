@@ -74,6 +74,20 @@ impl RouteResolver {
             .map_err(|e| anyhow!("catalog.toml is invalid: {e} - fix the file and retry"))?;
         let mut routes = BTreeMap::new();
         for (id, r) in raw.routes {
+            // The ban list applies to catalog data too: a clean alias must not
+            // smuggle a banned model_id onto the wire.
+            for banned in [id.as_str(), r.model_id.as_str()] {
+                if is_banned(banned) {
+                    return Err(match replacement_for(banned) {
+                        Some(replacement) => anyhow!(
+                            "catalog route '{id}': {banned} is dead - use {replacement}"
+                        ),
+                        None => anyhow!(
+                            "catalog route '{id}': {banned} is a dead model id - remove it from catalog.toml"
+                        ),
+                    });
+                }
+            }
             let wire = match r.wire.as_str() {
                 "openai" => Wire::OpenAi,
                 "anthropic" => Wire::AnthropicMessages,
@@ -207,6 +221,43 @@ mod tests {
         assert!(msg.contains("no-such-model"), "must echo the bad id: {msg}");
         assert!(msg.contains("deepseek-v4-flash"), "must list routes: {msg}");
         assert!(msg.contains("deepseek-v4-pro"), "must list routes: {msg}");
+    }
+
+    #[test]
+    fn catalog_alias_hiding_banned_model_id_is_rejected() {
+        // A clean route key must not smuggle a banned model_id onto the wire.
+        let toml = format!(
+            r#"
+            [routes.flash]
+            provider = "p"
+            model_id = "{}"
+            base_url = "https://example.invalid"
+            wire = "openai"
+            vault_entry = "p"
+        "#,
+            BANNED_EXACT[0]
+        );
+        let msg = RouteResolver::from_toml(&toml).err().expect("must fail").to_string();
+        assert!(msg.contains("dead"), "must say the id is dead: {msg}");
+        assert!(msg.contains("deepseek-v4-flash"), "must name the replacement: {msg}");
+    }
+
+    #[test]
+    fn catalog_banned_route_key_is_rejected() {
+        let banned_key = format!("{}0test", BANNED_PREFIXES[0]);
+        let toml = format!(
+            r#"
+            [routes."{banned_key}"]
+            provider = "p"
+            model_id = "clean-model"
+            base_url = "https://example.invalid"
+            wire = "openai"
+            vault_entry = "p"
+        "#
+        );
+        let msg = RouteResolver::from_toml(&toml).err().expect("must fail").to_string();
+        assert!(msg.contains("dead"), "must say the id is dead: {msg}");
+        assert!(msg.contains("remove it from catalog.toml"), "must be actionable: {msg}");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! nh - the Nosis Harness CLI. M0 surface: init / key / run.
 //! UX IS THE PRODUCT: every message short, concrete, actionable. Errors say what to do
-//! next, never stack traces. Approval prompts show the exact command, one line, y/N.
+//! next, never stack traces. Approval prompts show the command on one safe line
+//! (scrubbed, control chars escaped), y/N, default deny.
 
 use clap::{Parser, Subcommand};
 
@@ -51,8 +52,11 @@ fn main() -> anyhow::Result<()> {
         Cmd::Run { task, model, max_turns } => cmd_run::run(&task, &model, max_turns),
     };
     // UX: one friendly line, what to do next, exit 1. Never a debug dump.
+    // Every output path passes the Scrubber - this final line included (key
+    // literals are scrubbed at the source; this catches key shapes).
     if let Err(err) = result {
-        eprintln!("nh: {err}");
+        let scrubber = nh_vault::Scrubber::new(vec![]);
+        eprintln!("nh: {}", cmd_run::safe_line(&scrubber, &err.to_string()));
         std::process::exit(1);
     }
     Ok(())

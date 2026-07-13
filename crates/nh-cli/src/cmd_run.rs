@@ -24,11 +24,19 @@ pub fn run(task: &str, model: &str, max_turns: u32) -> anyhow::Result<()> {
 
     let vault = EnvFallbackVault { inner: KeyringVault };
     let key = vault.get(&route.vault_entry)?;
-    // The scrubber holds the literal so no output path can leak it.
+    // Scrubbers hold the literal so no output path can leak it - receipts, stdout,
+    // AND every stderr path (progress lines, approval prompt) pass one.
     let key_literal: String = key.as_str().to_owned();
 
     let client = OpenAiCompatClient::new(route.base_url.clone(), key);
-    let ctx = ToolCtx { workdir: cwd, approve: Box::new(approve_on_stdin) };
+    let approve_scrubber = Scrubber::new(vec![key_literal.clone()]);
+    let event_scrubber = Scrubber::new(vec![key_literal.clone()]);
+    let ctx = ToolCtx {
+        workdir: cwd,
+        // Model-supplied commands are scrubbed + control-char-escaped before display
+        // so the approval gate always shows one faithful line.
+        approve: Box::new(move |action| approve_on_stdin(&safe_line(&approve_scrubber, action))),
+    };
     let receipts = ReceiptWriter {
         path: root.join(".nosis").join("receipts.jsonl"),
         scrubber: Scrubber::new(vec![key_literal.clone()]),
@@ -40,13 +48,15 @@ pub fn run(task: &str, model: &str, max_turns: u32) -> anyhow::Result<()> {
         receipts,
         model_id: route.model_id.clone(),
         max_turns,
-        on_event: Some(Box::new(|line| eprintln!("  {line}"))),
+        on_event: Some(Box::new(move |line| eprintln!("  {}", safe_line(&event_scrubber, line)))),
     };
 
     eprintln!("running {} (max {max_turns} turns)", route.model_id);
-    let (answer, receipt) = agent.run(task)?;
-
     let scrubber = Scrubber::new(vec![key_literal]);
+    let (answer, receipt) = agent
+        .run(task)
+        .map_err(|e| anyhow::anyhow!("{}", scrubber.scrub(&e.to_string())))?;
+
     println!("{}", scrubber.scrub(&answer));
     let usage = receipt.usage.clone().unwrap_or_default();
     println!(
@@ -75,12 +85,43 @@ fn find_catalog(start: &Path) -> anyhow::Result<(PathBuf, String)> {
             return Ok((dir.to_path_buf(), text));
         }
     }
-    anyhow::bail!("no catalog.toml found - run from the repo root")
+    anyhow::bail!("no catalog.toml found - run `nh init` to create one")
 }
 
-/// Approval gate: one line on stderr, exact command shown, default deny.
-fn approve_on_stdin(action: &str) -> bool {
-    eprint!("  approve? {action}  [y/N] ");
+/// Max chars of untrusted text shown on one terminal line before a visible marker.
+const MAX_DISPLAY_CHARS: usize = 500;
+
+/// Scrub secrets, then escape for display. Every stderr line built from
+/// model-controlled text goes through this - one choke point.
+pub(crate) fn safe_line(scrubber: &Scrubber, text: &str) -> String {
+    sanitize_line(&scrubber.scrub(text))
+}
+
+/// Render untrusted text as one safe terminal line: control characters (\n, \r,
+/// ESC/ANSI, …) become visible escapes so model output cannot spoof the display,
+/// and very long text truncates with an explicit marker.
+fn sanitize_line(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() {
+            escaped.extend(c.escape_debug());
+        } else {
+            escaped.push(c);
+        }
+    }
+    let len = escaped.chars().count();
+    if len > MAX_DISPLAY_CHARS {
+        let head: String = escaped.chars().take(MAX_DISPLAY_CHARS).collect();
+        format!("{head}… (+{} more chars)", len - MAX_DISPLAY_CHARS)
+    } else {
+        escaped
+    }
+}
+
+/// Approval gate: one line on stderr, default deny. `display` is the command
+/// already scrubbed and control-char-escaped by the caller (see `safe_line`).
+fn approve_on_stdin(display: &str) -> bool {
+    eprint!("  approve? {display}  [y/N] ");
     let _ = io::stderr().flush();
     let mut line = String::new();
     if io::stdin().read_line(&mut line).is_err() {
@@ -115,7 +156,7 @@ mod tests {
         let nested = tmp.path().join("deep").join("nowhere");
         fs::create_dir_all(&nested).unwrap();
         let err = find_catalog(&nested).unwrap_err();
-        assert!(err.to_string().contains("run from the repo root"));
+        assert!(err.to_string().contains("nh init"), "got: {err}");
     }
 
     #[test]
@@ -125,5 +166,38 @@ mod tests {
         assert!(!is_yes("\n"));
         assert!(!is_yes("n\n"));
         assert!(!is_yes("whatever\n"));
+    }
+
+    #[test]
+    fn sanitize_line_escapes_control_chars_visibly() {
+        // A spoof attempt: CR + ANSI erase-line to hide the real command.
+        let spoofed = "echo safe\r\x1b[2K && rm -rf /";
+        let display = sanitize_line(spoofed);
+        assert!(!display.chars().any(|c| c.is_control()), "got: {display}");
+        assert!(display.contains("\\r"), "CR must be visible: {display}");
+        assert!(display.contains("\\u{1b}"), "ESC must be visible: {display}");
+        assert!(display.contains("rm -rf /"), "payload must stay visible: {display}");
+    }
+
+    #[test]
+    fn sanitize_line_truncates_with_visible_marker() {
+        let display = sanitize_line(&"x".repeat(600));
+        assert!(display.chars().count() < 600, "got len {}", display.chars().count());
+        assert!(display.contains("(+100 more chars)"), "got: {display}");
+        // Short text passes through untouched.
+        assert_eq!(sanitize_line("cargo test"), "cargo test");
+    }
+
+    #[test]
+    fn safe_line_redacts_key_shapes_and_literals_before_stderr() {
+        let scrubber = Scrubber::new(vec!["fake-literal-secret".to_string()]);
+        let line = safe_line(
+            &scrubber,
+            "curl -H 'Authorization: sk-test-00000000' fake-literal-secret\x1b[1A",
+        );
+        assert!(!line.contains("sk-test-00000000"), "got: {line}");
+        assert!(!line.contains("fake-literal-secret"), "got: {line}");
+        assert!(line.contains("[REDACTED]"), "got: {line}");
+        assert!(!line.chars().any(|c| c.is_control()), "got: {line}");
     }
 }
