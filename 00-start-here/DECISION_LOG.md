@@ -2,6 +2,24 @@
 
 Use this for fast decisions. Large technical decisions live in `../02-architecture/ARCHITECTURE_DECISIONS.md`.
 
+## 2026-07-13: M1 contract amendments ratified with orchestrator authority
+
+Decision:
+
+CONTRACTS_M1.md froze the M1 public surface with amendments through the architect only, but four integration/hardening deviations were ratified with orchestrator authority instead and recorded in CONTRACTS_M1.md §7: keyless `nh chat` startup (warning + REPL, exit 0 on `/quit`), the `peak <multiplier>x until HH:MM` footer format, nh-tools crate-root re-exports of the MCP items, and `nh run --think none|low|high|max` with per-dialect defaults.
+
+Why:
+
+The gaps surfaced after the architect's pass finished; blocking a green integration to re-convene the architect adds process without value (THE LAW: simple). All four are additive-only and written into the contract itself, so the frozen-surface audit trail stays intact.
+
+Tradeoffs:
+
+- Two ratification authorities for one contract — rule: orchestrator amendments must be additive-only and land in §7 with a date.
+
+Review later:
+
+no
+
 ## 2026-07-12: ProjectStarterTemplate adopted as project OS
 
 Decision:
