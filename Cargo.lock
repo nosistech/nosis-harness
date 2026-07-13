@@ -743,12 +743,14 @@ name = "nh-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "nh-core",
  "nh-routes",
  "nh-tools",
  "nh-vault",
  "rpassword",
+ "serde_json",
  "tempfile",
  "zeroize",
 ]
@@ -774,6 +776,7 @@ name = "nh-routes"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "serde",
  "toml",
 ]
@@ -783,9 +786,12 @@ name = "nh-tools"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "nh-vault",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
+ "toml",
 ]
 
 [[package]]
