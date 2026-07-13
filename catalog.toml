@@ -1,0 +1,25 @@
+# Nosis Harness route catalog — data, not code (Architecture Decision 3).
+# price_confidence: confirmed | reported | verify_live. DeepSeek prices are ¥/M tokens, off-peak base;
+# peak (Beijing 9:00-12:00, 14:00-18:00) = 2x on cache-miss/output. Clock-aware pricing lands in M1.
+
+[routes.deepseek-v4-flash]
+provider = "deepseek"
+model_id = "deepseek-v4-flash"
+base_url = "https://api.deepseek.com"
+wire = "openai"
+vault_entry = "deepseek"
+modality = ["text"]
+context = 1000000
+price_confidence = "reported"
+valid_until = "2026-07-24"
+
+[routes.deepseek-v4-pro]
+provider = "deepseek"
+model_id = "deepseek-v4-pro"
+base_url = "https://api.deepseek.com"
+wire = "openai"
+vault_entry = "deepseek"
+modality = ["text"]
+context = 1000000
+price_confidence = "reported"
+valid_until = "2026-07-24"

@@ -1,0 +1,17 @@
+[package]
+name = "nh-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "nh"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+zeroize.workspace = true
+nh-core = { path = "../nh-core" }
+nh-routes = { path = "../nh-routes" }
+nh-tools = { path = "../nh-tools" }
+nh-vault = { path = "../nh-vault" }
