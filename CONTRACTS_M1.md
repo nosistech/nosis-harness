@@ -440,3 +440,12 @@ the confirmed catalog data at integration — catalog is data-of-record
    with the original bare `peak` wording; blessed as the canonical format.
 3. **§3.6 — crate-root re-exports.** nh-tools additionally re-exports the §3
    public items at crate root (`pub use mcp::{…}`). Purely additive.
+4. **§5.1 — `nh run --think` (ratified at hardening, 2026-07-13, orchestrator
+   authority).** `nh run` gains one optional flag,
+   `--think <none|low|high|max>`, mapping 1:1 onto `ThinkingEffort`. Flag
+   absent → default per route dialect: `always-thinking` / `glm-hm` → High,
+   `deepseek-nhm` / `none` → None (cheap by default on effort-toggle routes).
+   `nh chat` applies the same per-dialect default on start and on every
+   `/model` / `/provider` switch. Additive only; every other `run` flag and
+   message is unchanged, and the mapping lives in one function
+   (`cmd_run::effort_for`).
