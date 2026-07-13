@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 clap.workspace = true
 zeroize.workspace = true
 rpassword = "7"
@@ -18,4 +19,5 @@ nh-tools = { path = "../nh-tools" }
 nh-vault = { path = "../nh-vault" }
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile.workspace = true

@@ -7,6 +7,9 @@ edition.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
+reqwest.workspace = true
+nh-vault = { path = "../nh-vault" }
 
 [dev-dependencies]
 tempfile.workspace = true

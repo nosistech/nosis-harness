@@ -5,6 +5,13 @@ use anyhow::{bail, Context};
 use serde_json::json;
 use std::path::{Component, Path, PathBuf};
 
+pub mod mcp;
+
+pub use mcp::{
+    load_mcp_config, mcp_tools, McpAuth, McpClient, McpServerConfig, McpToolInfo, McpToolset,
+    McpTrust,
+};
+
 /// OpenAI-function-shaped tool description, serialized into requests.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolSpec {

@@ -1,10 +1,11 @@
-//! nh — the Nosis Harness CLI. M0 surface: init / key / run.
+//! nh — the Nosis Harness CLI. M0 surface: init / key / run; M1 adds chat.
 //! UX IS THE PRODUCT: every message short, concrete, actionable. Errors say what to do
 //! next, never stack traces. Approval prompts show the command on one safe line
 //! (scrubbed, control chars escaped), y/N, default deny.
 
 use clap::{Parser, Subcommand};
 
+mod cmd_chat;
 mod cmd_init;
 mod cmd_key;
 mod cmd_run;
@@ -35,6 +36,15 @@ enum Cmd {
         /// Max agent turns before giving up with a timeout receipt
         #[arg(long, default_value_t = 20)]
         max_turns: u32,
+        /// Thinking effort (default picked per route dialect)
+        #[arg(long, value_enum)]
+        think: Option<cmd_run::ThinkArg>,
+    },
+    /// Chat with a model — /model and /provider switch routes mid-session
+    Chat {
+        /// Model id from catalog.toml
+        #[arg(long, default_value = "deepseek-v4-flash")]
+        model: String,
     },
 }
 
@@ -49,7 +59,8 @@ fn main() -> anyhow::Result<()> {
     let result = match cli.cmd {
         Cmd::Init => cmd_init::run(),
         Cmd::Key { action: KeyAction::Add { entry } } => cmd_key::add(&entry),
-        Cmd::Run { task, model, max_turns } => cmd_run::run(&task, &model, max_turns),
+        Cmd::Run { task, model, max_turns, think } => cmd_run::run(&task, &model, max_turns, think),
+        Cmd::Chat { model } => cmd_chat::run(&model),
     };
     // UX: one friendly line, what to do next, exit 1. Never a debug dump.
     // Every output path passes the Scrubber — this final line included (key
@@ -90,10 +101,11 @@ mod tests {
     fn parses_run_with_defaults() {
         let cli = Cli::try_parse_from(["nh", "run", "fix the failing test"]).unwrap();
         match cli.cmd {
-            Cmd::Run { task, model, max_turns } => {
+            Cmd::Run { task, model, max_turns, think } => {
                 assert_eq!(task, "fix the failing test");
                 assert_eq!(model, "deepseek-v4-flash");
                 assert_eq!(max_turns, 20);
+                assert_eq!(think, None, "no --think = per-dialect default");
             }
             _ => panic!("expected run"),
         }
@@ -112,10 +124,11 @@ mod tests {
         ])
         .unwrap();
         match cli.cmd {
-            Cmd::Run { task, model, max_turns } => {
+            Cmd::Run { task, model, max_turns, think } => {
                 assert_eq!(task, "review the diff");
                 assert_eq!(model, "deepseek-v4-pro");
                 assert_eq!(max_turns, 5);
+                assert_eq!(think, None);
             }
             _ => panic!("expected run"),
         }
@@ -124,5 +137,42 @@ mod tests {
     #[test]
     fn run_requires_a_task() {
         assert!(Cli::try_parse_from(["nh", "run"]).is_err());
+    }
+
+    #[test]
+    fn parses_run_think_levels() {
+        use cmd_run::ThinkArg;
+        let cases =
+            [("none", ThinkArg::None), ("low", ThinkArg::Low), ("high", ThinkArg::High), ("max", ThinkArg::Max)];
+        for (value, want) in cases {
+            let cli = Cli::try_parse_from(["nh", "run", "task", "--think", value]).unwrap();
+            match cli.cmd {
+                Cmd::Run { think, .. } => assert_eq!(think, Some(want), "--think {value}"),
+                _ => panic!("expected run"),
+            }
+        }
+    }
+
+    #[test]
+    fn run_rejects_unknown_think_level() {
+        assert!(Cli::try_parse_from(["nh", "run", "task", "--think", "ultra"]).is_err());
+    }
+
+    #[test]
+    fn parses_chat_with_default_model() {
+        let cli = Cli::try_parse_from(["nh", "chat"]).unwrap();
+        match cli.cmd {
+            Cmd::Chat { model } => assert_eq!(model, "deepseek-v4-flash"),
+            _ => panic!("expected chat"),
+        }
+    }
+
+    #[test]
+    fn parses_chat_with_model_override() {
+        let cli = Cli::try_parse_from(["nh", "chat", "--model", "kimi-k2.6"]).unwrap();
+        match cli.cmd {
+            Cmd::Chat { model } => assert_eq!(model, "kimi-k2.6"),
+            _ => panic!("expected chat"),
+        }
     }
 }

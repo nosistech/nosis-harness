@@ -8,18 +8,46 @@ use std::path::{Path, PathBuf};
 
 use nh_core::agent::AgentLoop;
 use nh_core::receipt::{Outcome, ReceiptWriter};
-use nh_core::wire::OpenAiCompatClient;
-use nh_routes::{RouteResolver, Wire};
+use nh_core::wire::{make_client, ThinkingEffort};
+use nh_routes::{RouteClass, RouteResolver, ThinkingDialect};
 use nh_tools::{builtin_tools, ToolCtx};
 use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, Vault};
 
-pub fn run(task: &str, model: &str, max_turns: u32) -> anyhow::Result<()> {
+/// What callers print when a route resolves to a subscription delegate (M4 scope).
+pub(crate) const DELEGATE_MSG: &str = "delegate routes arrive in M4 — pick an api route";
+
+/// `--think` levels; clap renders them as none|low|high|max.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum ThinkArg {
+    None,
+    Low,
+    High,
+    Max,
+}
+
+/// Map the `--think` flag to a wire `ThinkingEffort`. When the flag is absent,
+/// default per route dialect: routes that always think (or only think high/max)
+/// run at High; effort-toggle routes stay at None — cheap until the user asks.
+pub(crate) fn effort_for(think: Option<ThinkArg>, dialect: ThinkingDialect) -> ThinkingEffort {
+    match think {
+        Some(ThinkArg::None) => ThinkingEffort::None,
+        Some(ThinkArg::Low) => ThinkingEffort::Low,
+        Some(ThinkArg::High) => ThinkingEffort::High,
+        Some(ThinkArg::Max) => ThinkingEffort::Max,
+        None => match dialect {
+            ThinkingDialect::AlwaysThinking | ThinkingDialect::GlmHm => ThinkingEffort::High,
+            ThinkingDialect::DeepseekNhm | ThinkingDialect::None => ThinkingEffort::None,
+        },
+    }
+}
+
+pub fn run(task: &str, model: &str, max_turns: u32, think: Option<ThinkArg>) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let (root, catalog) = find_catalog(&cwd)?;
     let resolver = RouteResolver::from_toml(&catalog)?;
     let route = resolver.resolve(model)?;
-    if route.wire != Wire::OpenAi {
-        anyhow::bail!("{model} uses the anthropic wire — not supported yet, pick an openai-wire model");
+    if route.class == RouteClass::Delegate {
+        anyhow::bail!("{DELEGATE_MSG}");
     }
 
     let vault = EnvFallbackVault { inner: KeyringVault };
@@ -28,7 +56,7 @@ pub fn run(task: &str, model: &str, max_turns: u32) -> anyhow::Result<()> {
     // AND every stderr path (progress lines, approval prompt) pass one.
     let key_literal: String = key.as_str().to_owned();
 
-    let client = OpenAiCompatClient::new(route.base_url.clone(), key);
+    let client = make_client(&route, key);
     let approve_scrubber = Scrubber::new(vec![key_literal.clone()]);
     let event_scrubber = Scrubber::new(vec![key_literal.clone()]);
     let ctx = ToolCtx {
@@ -42,12 +70,13 @@ pub fn run(task: &str, model: &str, max_turns: u32) -> anyhow::Result<()> {
         scrubber: Scrubber::new(vec![key_literal.clone()]),
     };
     let mut agent = AgentLoop {
-        client: Box::new(client),
+        client,
         tools: builtin_tools(),
         ctx,
         receipts,
         model_id: route.model_id.clone(),
         max_turns,
+        thinking: effort_for(think, route.thinking_dialect),
         on_event: Some(Box::new(move |line| eprintln!("  {}", safe_line(&event_scrubber, line)))),
     };
 
@@ -77,7 +106,7 @@ pub fn run(task: &str, model: &str, max_turns: u32) -> anyhow::Result<()> {
 }
 
 /// Walk up from `start` looking for catalog.toml; return its directory and contents.
-fn find_catalog(start: &Path) -> anyhow::Result<(PathBuf, String)> {
+pub(crate) fn find_catalog(start: &Path) -> anyhow::Result<(PathBuf, String)> {
     for dir in start.ancestors() {
         let candidate = dir.join("catalog.toml");
         if candidate.is_file() {
@@ -120,7 +149,7 @@ fn sanitize_line(text: &str) -> String {
 
 /// Approval gate: one line on stderr, default deny. `display` is the command
 /// already scrubbed and control-char-escaped by the caller (see `safe_line`).
-fn approve_on_stdin(display: &str) -> bool {
+pub(crate) fn approve_on_stdin(display: &str) -> bool {
     eprint!("  approve? {display}  [y/N] ");
     let _ = io::stderr().flush();
     let mut line = String::new();
@@ -186,6 +215,30 @@ mod tests {
         assert!(display.contains("(+100 more chars)"), "got: {display}");
         // Short text passes through untouched.
         assert_eq!(sanitize_line("cargo test"), "cargo test");
+    }
+
+    #[test]
+    fn think_flag_overrides_any_dialect() {
+        let cases = [
+            (ThinkArg::None, ThinkingEffort::None),
+            (ThinkArg::Low, ThinkingEffort::Low),
+            (ThinkArg::High, ThinkingEffort::High),
+            (ThinkArg::Max, ThinkingEffort::Max),
+        ];
+        for (arg, want) in cases {
+            assert_eq!(effort_for(Some(arg), ThinkingDialect::DeepseekNhm), want);
+            assert_eq!(effort_for(Some(arg), ThinkingDialect::AlwaysThinking), want);
+        }
+    }
+
+    #[test]
+    fn think_default_follows_route_dialect() {
+        // Always-thinking and high/max-only routes run at High; effort-toggle
+        // routes stay at None until the user asks (cheap by default).
+        assert_eq!(effort_for(None, ThinkingDialect::AlwaysThinking), ThinkingEffort::High);
+        assert_eq!(effort_for(None, ThinkingDialect::GlmHm), ThinkingEffort::High);
+        assert_eq!(effort_for(None, ThinkingDialect::DeepseekNhm), ThinkingEffort::None);
+        assert_eq!(effort_for(None, ThinkingDialect::None), ThinkingEffort::None);
     }
 
     #[test]
