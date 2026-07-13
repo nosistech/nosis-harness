@@ -18,6 +18,11 @@ const SPEC_DEFAULT: &str = "2026-07-28";
 const SPEC_FALLBACK: &str = "2025-11-25";
 /// Pinned default when `tools/list` carries no `result._meta.ttlMs` (CONTRACTS_M1 §3.2).
 const DEFAULT_TTL_MS: u64 = 60_000;
+/// MCP tool calls (browser runs, long jobs) can legitimately take minutes;
+/// reqwest's blocking default would kill them at 30 s. Generous total cap —
+/// a dead server still fails fast on connect.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Approval prompts show args on one line, truncated to stay scannable.
 const ARGS_SUMMARY_MAX: usize = 120;
 
@@ -166,7 +171,13 @@ impl McpClient {
     pub fn new(config: McpServerConfig) -> Self {
         Self {
             config,
-            http: reqwest::blocking::Client::new(),
+            // Explicit timeouts, never the hidden 30 s blocking default.
+            // Panics only where `Client::new` would (TLS backend unavailable).
+            http: reqwest::blocking::Client::builder()
+                .timeout(REQUEST_TIMEOUT)
+                .connect_timeout(CONNECT_TIMEOUT)
+                .build()
+                .expect("HTTP client"),
             next_id: AtomicU64::new(1),
             cache: Mutex::new(None),
         }

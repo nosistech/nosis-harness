@@ -2,6 +2,27 @@
 
 Record every meaningful session here.
 
+## 2026-07-13: M1 hardening — adversarial-review fixes
+
+Builder:
+
+- Claude (Fable 5, Claude Code) — M1 hardening agent
+
+What changed:
+
+- Wire-client HTTP config (nh-core): both clients now build via one `http_client()` — explicit 600 s request timeout + 10 s connect timeout (reqwest's blocking default silently aborted every request at 30 s, killing long thinking turns) and `redirect::Policy::none()` (reqwest forwards custom headers like `x-api-key` across cross-host redirects — a redirecting endpoint is now a friendly HTTP error, never a key leak). Timeout failures get their own actionable line ("provider at <url> did not answer within 600s — retry, or switch to another route") instead of the misleading "could not reach provider". `McpClient` got the same explicit timeouts.
+- `nh chat` keyless recovery (nh-cli): a keyless start now retries the real connection at the next task, so `nh key add <provider>` in another terminal works without restarting the session; reconnect registers the new key on every scrub path (shared `install_client` helper with `/model`/`/provider`).
+- CONTRACTS_M1.md §7 amendment 4 (orchestrator authority): ratified `nh run --think none|low|high|max` + per-dialect defaults (always-thinking/glm-hm → High, deepseek-nhm/none → None) — closes the frozen-surface gap flagged in review.
+- Deleted the reviewer's truncated `adv_redirect_probe.rs` (marked DELETE AFTER REVIEW, did not compile); its concern lives on as the `cross_host_redirects_are_refused_never_followed` regression test in `wire_clients.rs`.
+
+Tests/checks run:
+
+- `cargo test --workspace` (180 passed, 1 ignored keyring round-trip, 0 failed; 4 new tests: timeout error line, timeout floor guard, redirect refusal on both wires, keyless reconnect), `cargo clippy --workspace --all-targets -- -D warnings` clean. Smoke: `echo /quit | nh chat` exit 0 keyless; `nh run --help` surface unchanged.
+
+Next step:
+
+- M1 exit demo against a live key (unchanged from integration entry).
+
 ## 2026-07-13: M1 integration — workspace green, contracts reconciled
 
 Builder:

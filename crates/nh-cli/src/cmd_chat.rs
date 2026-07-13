@@ -38,6 +38,9 @@ struct ChatSession {
     key_literals: Vec<String>,
     scrubber: SharedScrubber,
     connect: ConnectFn,
+    /// False after a keyless start (stand-in client installed); tasks retry the
+    /// real connection first, so `nh key add` works without restarting the chat.
+    connected: bool,
     /// Clock and local UTC offset, injected so /price and footer tests are exact.
     now: Box<dyn Fn() -> DateTime<Utc>>,
     local_offset: FixedOffset,
@@ -62,11 +65,11 @@ pub fn run(model: &str) -> anyhow::Result<()> {
     // No key yet? Chat still starts (§4: EOF or /quit → exit 0): warn once and
     // install a stand-in client that re-surfaces this error only when a task runs.
     // Commands (/model, /provider, /price, /tools, /quit) all work keyless.
-    let (client, key_literals) = match connect(&route) {
-        Ok((client, literal)) => (client, vec![literal]),
+    let (client, key_literals, connected) = match connect(&route) {
+        Ok((client, literal)) => (client, vec![literal], true),
         Err(e) => {
             eprintln!("warning: {e}");
-            (Box::new(NotConnected { msg: e.to_string() }) as Box<dyn ChatClient>, Vec::new())
+            (Box::new(NotConnected { msg: e.to_string() }) as Box<dyn ChatClient>, Vec::new(), false)
         }
     };
     let scrubber: SharedScrubber = Arc::new(RwLock::new(Scrubber::new(key_literals.clone())));
@@ -113,6 +116,7 @@ pub fn run(model: &str) -> anyhow::Result<()> {
         key_literals,
         scrubber,
         connect,
+        connected,
         now: Box::new(Utc::now),
         local_offset: *chrono::Local::now().offset(),
         mcp_warnings,
@@ -209,6 +213,17 @@ fn handle_command(s: &mut ChatSession, cmd: &str, out: &mut dyn Write, err: &mut
 /// Run one task through the shared session history; answer to stdout, footer to
 /// stderr. A failed call is one friendly line and the session keeps going.
 fn run_task(s: &mut ChatSession, task: &str, out: &mut dyn Write, err: &mut dyn Write) {
+    // Keyless start? Retry the real connection now — a key added mid-session
+    // (`nh key add <provider>` in another terminal) works without restarting.
+    if !s.connected {
+        match (s.connect)(&s.route) {
+            Ok((client, literal)) => install_client(s, client, literal),
+            Err(e) => {
+                print_err(s, err, &e.to_string());
+                return;
+            }
+        }
+    }
     match s.agent.run_with_history(&mut s.history, task) {
         Ok((answer, receipt)) => {
             let _ = writeln!(out, "{}", scrub_text(&s.scrubber, &answer));
@@ -223,8 +238,22 @@ fn run_task(s: &mut ChatSession, task: &str, out: &mut dyn Write, err: &mut dyn 
     }
 }
 
-/// Switch the live route, keeping history and session usage. New key joins the
-/// Scrubber on every output path (stdout, stderr closures, receipts).
+/// Swap in a live client. Its key literal joins the Scrubber on every output
+/// path (stdout, stderr closures, receipts) before the client ever runs.
+fn install_client(s: &mut ChatSession, client: Box<dyn ChatClient>, literal: String) {
+    if !literal.is_empty() && !s.key_literals.contains(&literal) {
+        s.key_literals.push(literal);
+    }
+    match s.scrubber.write() {
+        Ok(mut guard) => *guard = Scrubber::new(s.key_literals.clone()),
+        Err(poisoned) => *poisoned.into_inner() = Scrubber::new(s.key_literals.clone()),
+    }
+    s.agent.receipts.scrubber = Scrubber::new(s.key_literals.clone());
+    s.agent.client = client;
+    s.connected = true;
+}
+
+/// Switch the live route, keeping history and session usage.
 fn switch_to(s: &mut ChatSession, route: ResolvedRoute, out: &mut dyn Write, err: &mut dyn Write) {
     if route.class == RouteClass::Delegate {
         print_err(s, err, DELEGATE_MSG);
@@ -232,15 +261,7 @@ fn switch_to(s: &mut ChatSession, route: ResolvedRoute, out: &mut dyn Write, err
     }
     match (s.connect)(&route) {
         Ok((client, literal)) => {
-            if !literal.is_empty() && !s.key_literals.contains(&literal) {
-                s.key_literals.push(literal);
-            }
-            match s.scrubber.write() {
-                Ok(mut guard) => *guard = Scrubber::new(s.key_literals.clone()),
-                Err(poisoned) => *poisoned.into_inner() = Scrubber::new(s.key_literals.clone()),
-            }
-            s.agent.receipts.scrubber = Scrubber::new(s.key_literals.clone());
-            s.agent.client = client;
+            install_client(s, client, literal);
             s.agent.model_id = route.model_id.clone();
             s.agent.thinking = effort_for(None, route.thinking_dialect);
             s.route = route;
@@ -558,6 +579,7 @@ mod tests {
             scrubber: Arc::new(RwLock::new(Scrubber::new(key_literals.clone()))),
             key_literals,
             connect,
+            connected: true,
             now: Box::new(off_peak_now),
             local_offset: beijing_offset(),
             mcp_warnings: Vec::new(),
@@ -818,17 +840,47 @@ mod tests {
         assert_eq!(out.lines().count(), 3, "one line per tool: {out}");
     }
 
+    /// Puts a session into the keyless-start state: stand-in client installed,
+    /// not connected, and every reconnect attempt failing with the vault error.
+    fn make_keyless(s: &mut ChatSession) {
+        s.agent.client = Box::new(NotConnected {
+            msg: "no key found for \"deepseek\" — run `nh key add deepseek`".into(),
+        });
+        s.connected = false;
+        s.connect = Box::new(|route| {
+            anyhow::bail!("no key found for \"{}\" — run `nh key add {}`", route.vault_entry, route.vault_entry)
+        });
+    }
+
     #[test]
     fn keyless_session_runs_commands_and_task_says_how_to_add_the_key() {
         let tmp = tempfile::tempdir().unwrap();
         let (mut s, _calls) = test_session("deepseek-v4-flash", tmp.path());
-        s.agent.client = Box::new(NotConnected {
-            msg: "no key found for \"deepseek\" — run `nh key add deepseek`".into(),
-        });
+        make_keyless(&mut s);
         let (out, err) = drive(&mut s, &["/price", "hello", "/quit"]);
         assert!(out.contains("off-peak"), "/price works keyless: {out}");
         assert!(!out.contains("hello"), "no answer on stdout: {out}");
         assert!(err.contains("nh key add deepseek"), "task error says what to do: {err}");
+    }
+
+    #[test]
+    fn keyless_session_reconnects_once_the_key_arrives() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, calls) = test_session("deepseek-v4-flash", tmp.path());
+        // Keyless start, but the key arrives before the next task (the user ran
+        // `nh key add deepseek` in another terminal): test_session's connect
+        // succeeds, so the retry must swap in the real client and answer.
+        s.agent.client = Box::new(NotConnected {
+            msg: "no key found for \"deepseek\" — run `nh key add deepseek`".into(),
+        });
+        s.connected = false;
+        let (out, err) = drive(&mut s, &["hello", "again"]);
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "real client answered both tasks");
+        assert!(out.contains("ok"), "answer on stdout: {out}");
+        assert!(!err.contains("no key found"), "stale error must not resurface: {err}");
+        assert!(s.connected, "session marked connected after the retry");
+        // The reconnect registered the new key on the scrub path.
+        assert!(s.key_literals.contains(&"fake-key-deepseek".to_string()), "got: {:?}", s.key_literals);
     }
 
     // ------------------------------------------------------------- scrubbing
