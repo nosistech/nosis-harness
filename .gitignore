@@ -1,0 +1,9 @@
+/target
+**/target/
+.nosis/receipts.jsonl
+.nosis/*.log
+.nosis/auth*
+*.key
+*.pem
+.env
+.claude/settings.local.json

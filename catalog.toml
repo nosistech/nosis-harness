@@ -1,0 +1,366 @@
+# Nosis Harness route catalog - DATA, not code (AGENTS.md hard rule).
+# Prices and capabilities verified against first-party provider docs on 2026-07-26.
+#
+# Schema, per route:
+#   class               "api" (direct, token-metered) | "local" (explicit loopback route) |
+#                       "delegate" (subscription child CLI - M4)
+#   wire                "openai" | "anthropic"
+#   modality            array of "text" | "image" | "video" | "audio"
+#   context / max_out   tokens; present only where known - never guessed
+#   thinking_dialect    "deepseek-nhm" | "kimi-toggle" | "always-thinking" |
+#                       "always-thinking-effort" | "glm-hm" | "none"
+#   preserve_reasoning  true = reasoning_content always persists across turns (plan A.10.5)
+#   preserve_when_thinking true = reasoning_content persists only while thinking is active
+#   quirks              wire quirks the adapters match by exact string
+#   [routes.<id>.price] currency "CNY"|"USD" · unit "per_million_tokens" ·
+#                       cache_hit / cache_miss / output (per M tokens) ·
+#                       price_confidence "confirmed"|"reported"|"verify_live"
+#   [routes.<id>.price.peak]  multiplier · timezone (fixed offset, no DST) ·
+#                       windows ["HH:MM-HH:MM", ...] local to that timezone,
+#                       start inclusive, end exclusive.
+
+# ------------------------------------------------------------------ DeepSeek (plan B.1)
+# USD rates, limits, and the OpenAI-wire URL re-confirmed 2026-07-26 on
+# api-docs.deepseek.com/quick_start/pricing. That page no longer publishes the old
+# 2x peak schedule, so no peak multiplier is applied.
+
+[routes.deepseek-v4-pro]
+provider = "deepseek"
+model_id = "deepseek-v4-pro"
+base_url = "https://api.deepseek.com"
+wire = "openai"
+vault_entry = "deepseek"
+class = "api"
+modality = ["text"]
+context = 1000000
+max_out = 384000
+thinking_dialect = "deepseek-nhm"
+preserve_reasoning = false
+preserve_when_thinking = true
+quirks = ["empty-reasoning-content-on-tool-replay"]
+
+[routes.deepseek-v4-pro.price]
+currency = "USD"
+unit = "per_million_tokens"
+cache_hit = 0.003625
+cache_miss = 0.435
+output = 0.87
+price_confidence = "confirmed"
+
+[routes.deepseek-v4-flash]
+provider = "deepseek"
+model_id = "deepseek-v4-flash"
+base_url = "https://api.deepseek.com"
+wire = "openai"
+vault_entry = "deepseek"
+class = "api"
+modality = ["text"]
+context = 1000000
+max_out = 384000
+thinking_dialect = "deepseek-nhm"
+preserve_reasoning = false
+preserve_when_thinking = true
+quirks = ["empty-reasoning-content-on-tool-replay"]
+
+[routes.deepseek-v4-flash.price]
+currency = "USD"
+unit = "per_million_tokens"
+cache_hit = 0.0028
+cache_miss = 0.14
+output = 0.28
+price_confidence = "confirmed"
+
+# ------------------------------------------------------------------ Kimi / Moonshot (plan B.2)
+# K2.7 protocol nuances are adapter-enforced: always-thinking (never send a mode
+# toggle) and preserve_reasoning ON (reasoning persists across turns or the model
+# degrades - plan A.2 / A.10.5). MoonViT vision lives in the coding model itself.
+
+[routes."kimi-k2.7-code"]
+provider = "kimi"
+model_id = "kimi-k2.7-code"
+base_url = "https://api.moonshot.ai/v1" # confirmed 2026-07-26 (platform.kimi.ai/docs/api/overview)
+wire = "openai"
+vault_entry = "kimi"
+class = "api"
+modality = ["text", "image", "video"]
+context = 262144
+thinking_dialect = "always-thinking"
+preserve_reasoning = true
+quirks = []
+
+[routes."kimi-k2.7-code".price]
+currency = "USD"
+unit = "per_million_tokens"
+cache_hit = 0.19
+cache_miss = 0.95
+output = 4.00
+price_confidence = "confirmed" # 2026-07-26 platform.kimi.ai/docs/pricing/chat-k27-code
+
+# Highspeed serving of the same model (~180 tok/s): human-waiting turns only.
+[routes."kimi-k2.7-code-highspeed"]
+provider = "kimi"
+model_id = "kimi-k2.7-code-highspeed"
+base_url = "https://api.moonshot.ai/v1" # confirmed 2026-07-26 (platform.kimi.ai/docs/api/overview)
+wire = "openai"
+vault_entry = "kimi"
+class = "api"
+modality = ["text", "image", "video"]
+context = 262144
+thinking_dialect = "always-thinking"
+preserve_reasoning = true
+quirks = []
+
+[routes."kimi-k2.7-code-highspeed".price]
+currency = "USD"
+unit = "per_million_tokens"
+cache_hit = 0.38  # was 0.19 (reported) - first-party page lists 2x standard input rates
+cache_miss = 1.90 # was 0.95 (reported)
+output = 8.00
+price_confidence = "confirmed" # 2026-07-26 platform.kimi.ai/docs/pricing/chat-k27-code
+
+# K3 model, limits, effort tiers, and prices re-verified first-party 2026-07-28
+# against platform.kimi.ai/docs/guide/kimi-k3-quickstart, /docs/api/chat,
+# platform.kimi.ai pricing, and www.kimi.com/code/docs/en/kimi-code/models.html
+# (the exact full-context setting is 1048576).
+[routes."kimi-k3"]
+provider = "kimi"
+model_id = "kimi-k3"
+base_url = "https://api.moonshot.ai/v1"
+wire = "openai"
+vault_entry = "kimi"
+class = "api"
+modality = ["text", "image", "video"]
+context = 1048576
+max_out = 1048576
+thinking_dialect = "always-thinking-effort"
+preserve_reasoning = true
+quirks = []
+
+[routes."kimi-k3".price]
+currency = "USD"
+unit = "per_million_tokens"
+cache_hit = 0.30
+cache_miss = 3.00
+output = 15.00
+price_confidence = "confirmed" # 2026-07-28 platform.kimi.ai
+
+# K2.6 supports an explicit thinking toggle and requires reasoning replay while enabled.
+[routes."kimi-k2.6"]
+provider = "kimi"
+model_id = "kimi-k2.6"
+base_url = "https://api.moonshot.ai/v1" # confirmed 2026-07-26 (platform.kimi.ai/docs/api/overview)
+wire = "openai"
+vault_entry = "kimi"
+class = "api"
+modality = ["text", "image", "video"]
+context = 262144
+thinking_dialect = "kimi-toggle"
+preserve_reasoning = false
+preserve_when_thinking = true
+quirks = []
+
+[routes."kimi-k2.6".price]
+currency = "USD"
+unit = "per_million_tokens"
+cache_hit = 0.16    # was 0.60 worst-case; cache-hit rate now published first-party
+cache_miss = 0.95   # was 0.60 (reported range) - first-party page supersedes
+output = 4.00       # was 2.65 (reported range) - first-party page supersedes
+price_confidence = "confirmed" # 2026-07-26 platform.kimi.ai/docs/pricing/chat-k26
+
+# ------------------------------------------------------------------ MiMo / Xiaomi (plan B.3)
+# Plan B.3 pricing conflict RESOLVED and rechecked 2026-07-26: Xiaomi's own pricing page
+# (mimo.mi.com/docs/pricing, the redirect target of platform.xiaomimimo.com) lists
+# the lower marketplace-side rates, superseding the May 27 $1/$3 notice.
+# preserve_reasoning ON: reasoning history must persist in thinking+tools mode (plan A.3).
+
+[routes."mimo-v2.5-pro"]
+provider = "mimo"
+model_id = "mimo-v2.5-pro"
+base_url = "https://api.xiaomimimo.com/v1" # confirmed 2026-07-26 (mimo.mi.com first-api-call docs)
+wire = "openai"
+vault_entry = "mimo"
+class = "api"
+modality = ["text"] # text-only: verified live 2026-07-30 (404 no endpoints support image input)
+context = 1000000
+max_out = 131072
+thinking_dialect = "kimi-toggle"
+preserve_reasoning = true
+quirks = []
+
+[routes."mimo-v2.5-pro".price]
+currency = "USD"
+unit = "per_million_tokens"
+cache_hit = 0.0036 # was 0.20 (reported) - first-party page supersedes
+cache_miss = 0.435 # conflict resolved: platform page lists $0.435, not the May 27 $1.00
+output = 0.87      # conflict resolved: platform page lists $0.87, not $3.00
+price_confidence = "confirmed" # 2026-07-26 mimo.mi.com/docs/en-US/price/pay-as-you-go
+
+[routes."mimo-v2.5"]
+provider = "mimo"
+model_id = "mimo-v2.5"
+base_url = "https://api.xiaomimimo.com/v1" # confirmed 2026-07-26 (mimo.mi.com first-api-call docs)
+wire = "openai"
+vault_entry = "mimo"
+class = "api"
+modality = ["text", "image", "video", "audio"] # cheapest 1M-context multimodal route (plan B.8)
+context = 1000000
+max_out = 131072
+thinking_dialect = "kimi-toggle"
+preserve_reasoning = true
+quirks = []
+
+[routes."mimo-v2.5".price]
+currency = "USD"
+unit = "per_million_tokens"
+cache_hit = 0.0028 # was 0.14 worst-case; cache-hit rate now published first-party
+cache_miss = 0.14
+output = 0.28
+price_confidence = "confirmed" # 2026-07-26 mimo.mi.com/docs/en-US/price/pay-as-you-go
+
+# ------------------------------------------------------------------ GLM / Z.ai (plan B.4)
+# Free routes are the $0 CI/smoke-test lane. Zeros confirmed on Z.ai's own pricing
+# page 2026-07-26 - free tiers stay rate-limited (limits unpublished) and can change.
+
+[routes."glm-5.2"]
+provider = "glm"
+model_id = "glm-5.2"
+base_url = "https://api.z.ai/api/paas/v4" # confirmed 2026-07-26 (docs.z.ai quick-start)
+wire = "openai"
+vault_entry = "glm"
+class = "api"
+modality = ["text"]
+context = 1000000
+max_out = 128000
+thinking_dialect = "glm-hm" # explicit disable or normalized High/Max effort
+preserve_reasoning = false
+quirks = []
+
+[routes."glm-5.2".price]
+currency = "USD"
+unit = "per_million_tokens"
+cache_hit = 0.26
+cache_miss = 1.40
+output = 4.40
+price_confidence = "confirmed" # 2026-07-26 docs.z.ai/guides/overview/pricing
+
+[routes."glm-4.7-flash"]
+provider = "glm"
+model_id = "glm-4.7-flash"
+base_url = "https://api.z.ai/api/paas/v4" # confirmed 2026-07-26 (docs.z.ai quick-start)
+wire = "openai"
+vault_entry = "glm"
+class = "api"
+modality = ["text"]
+context = 200000  # confirmed 2026-07-28 (docs.z.ai/guides/llm/glm-4.7 - Flash shares the 4.7 spec row)
+max_out = 128000  # confirmed 2026-07-28 (same row: 128K max output)
+thinking_dialect = "none"
+preserve_reasoning = false
+quirks = []
+
+[routes."glm-4.7-flash".price] # FREE (plan B.4)
+currency = "USD"
+unit = "per_million_tokens"
+cache_hit = 0.0
+cache_miss = 0.0
+output = 0.0
+price_confidence = "confirmed" # 2026-07-26 docs.z.ai/guides/overview/pricing lists this model as Free
+
+[routes."glm-4.6v-flash"]
+provider = "glm"
+model_id = "glm-4.6v-flash"
+base_url = "https://api.z.ai/api/paas/v4" # confirmed 2026-07-26 (docs.z.ai quick-start)
+wire = "openai"
+vault_entry = "glm"
+class = "api"
+modality = ["text", "image"] # free VISION route - $0 image understanding (plan B.4)
+context = 128000  # confirmed 2026-07-28 (docs.z.ai/guides/vlm/glm-4.6v - GLM-4.6V-Flash: 128K)
+max_out = 32000   # confirmed 2026-07-28 (Z.ai chat-completion API reference: 32K output cap)
+thinking_dialect = "none"
+preserve_reasoning = false
+quirks = []
+
+[routes."glm-4.6v-flash".price] # FREE (plan B.4)
+currency = "USD"
+unit = "per_million_tokens"
+cache_hit = 0.0
+cache_miss = 0.0
+output = 0.0
+price_confidence = "confirmed" # 2026-07-26 docs.z.ai/guides/overview/pricing lists this model as Free
+
+[routes."glm-4.5-flash"]
+provider = "glm"
+model_id = "glm-4.5-flash"
+base_url = "https://api.z.ai/api/paas/v4" # confirmed 2026-07-26 (docs.z.ai quick-start)
+wire = "openai"
+vault_entry = "glm"
+class = "api"
+modality = ["text"]
+context = 128000  # confirmed 2026-07-28 (docs.z.ai/guides/llm/glm-4.5 - glm-4.5-flash has its own row)
+max_out = 96000   # confirmed 2026-07-28 (same row: 96K max output)
+thinking_dialect = "none"
+preserve_reasoning = false
+quirks = []
+
+[routes."glm-4.5-flash".price] # FREE, rate-limited (plan B.4)
+currency = "USD"
+unit = "per_million_tokens"
+cache_hit = 0.0
+cache_miss = 0.0
+output = 0.0
+price_confidence = "confirmed" # 2026-07-26 docs.z.ai/guides/overview/pricing lists this model as Free
+
+# ------------------------------------------------------------------ Local routes (user-filled)
+# Local routes are explicit-selection-only: `nh why`, resolve_capable, provider
+# defaults, and top-tier cost anchors deliberately consider class = "api" only.
+#
+# Before uncommenting either template, replace all three `<fill ...>` values.
+# `model_id`, `context`, and `max_out` are deliberately not shipped: the loaded
+# model, quantisation, and runtime flags determine them on the user's machine.
+# Blank values are the catalog's never-guessed rule working as designed.
+#
+# `max_out` is mandatory. Without it, the OpenAI client fallback is 65,536
+# tokens, which exceeds most local context windows. Verify max_out <= context.
+#
+# llama.cpp is the reference path because it fails closed on context overflow.
+#
+# [routes.local-llama-cpp]
+# provider = "llama.cpp"
+# model_id = "<fill exact server model id or --alias>"
+# base_url = "http://127.0.0.1:8080/v1"
+# wire = "openai"
+# vault_entry = "llama-cpp-local"
+# class = "local"
+# modality = ["text"]
+# context = <fill configured context tokens>
+# max_out = <fill safe output cap tokens>
+#
+# [routes.local-llama-cpp.price]
+# currency = "USD"
+# unit = "per_million_tokens"
+# cache_hit = 0.0
+# cache_miss = 0.0
+# output = 0.0
+# price_confidence = "confirmed"
+#
+# OLLAMA QUIRK: on context overflow, Ollama silently truncates the oldest
+# messages server-side. The OpenAI-compatible response provides no signal, so
+# the harness cannot detect or report the discarded history.
+#
+# [routes.local-ollama]
+# provider = "ollama"
+# model_id = "<fill exact Ollama model tag>"
+# base_url = "http://127.0.0.1:11434/v1"
+# wire = "openai"
+# vault_entry = "ollama-local"
+# class = "local"
+# modality = ["text"]
+# context = <fill configured context tokens>
+# max_out = <fill safe output cap tokens>
+#
+# [routes.local-ollama.price]
+# currency = "USD"
+# unit = "per_million_tokens"
+# cache_hit = 0.0
+# cache_miss = 0.0
+# output = 0.0
+# price_confidence = "confirmed"
