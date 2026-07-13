@@ -23,6 +23,25 @@ Next step:
 
 - M1: live route/pricing verification against providers.
 
+## 2026-07-12: M0 build finalized (Fable 5 multi-agent workflow)
+
+Builder:
+
+- Claude (Fable 5, Claude Code) — multi-agent workflow: 5 parallel crate builders, integrator, 3 adversarial reviewers, hardening pass
+
+What changed:
+
+- M0 implemented end-to-end across all five crates via the multi-agent workflow; integration green after merging the crate builders' outputs.
+- 6 adversarial review findings addressed (fixes detailed in the M0 hardening entry above).
+
+Tests/checks run:
+
+- 53 passed; 0 failed; 1 ignored (keyring_round_trip) across 6 test binaries: nh-core unit 12, nh-cli 8, nh-core integration 3, nh-routes 10, nh-tools 10, nh-vault 10 (+1 ignored); doc-tests 0; clippy -D warnings clean.
+
+Next step:
+
+- Verify live against DeepSeek (`nh key add deepseek`, then `nh run` on a sample repo), then M1.
+
 ## 2026-07-12: M0 implemented (turn loop, tools, vault, routes, CLI)
 
 Builder:

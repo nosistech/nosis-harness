@@ -4,6 +4,13 @@ Terminal agent harness (Rust) for open-weight models — DeepSeek V4, Kimi K2.x,
 
 **Canonical spec:** `NOSIS_HARNESS_Master_Plan.md` (root). Appendices A/B supersede Sections 1 and 3 where they conflict. The folders below are the working layer on top of it.
 
+## Quickstart
+
+- `cargo build --release` — build the workspace (binary at `target/release/nh`).
+- `nh init` — scaffold `.nosis/` and a starter `catalog.toml` in your repo.
+- `nh key add deepseek` — store your DeepSeek API key in the OS keyring (nh-vault).
+- `nh run "fix the failing test" --model deepseek-v4-flash` — run the agent; every shell command stops at a y/N approval prompt, and each turn is logged to `.nosis/receipts.jsonl`.
+
 ## First Read Order
 
 1. `00-start-here/MASTER_CONTEXT.md`
