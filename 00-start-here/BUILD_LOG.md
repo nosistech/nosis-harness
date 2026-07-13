@@ -2,6 +2,25 @@
 
 Record every meaningful session here.
 
+## 2026-07-12: M0 implemented (turn loop, tools, vault, routes, CLI)
+
+Builder:
+
+- Claude (Fable 5, Claude Code) — 5 parallel crate builders + integrator
+
+What changed:
+
+- Implemented all locked `todo!()` contracts across `nh-core` (AgentLoop, OpenAiCompatClient, receipts), `nh-routes` (RouteResolver, catalog parsing, banned-string rejection), `nh-tools` (read_file / edit_file / exec_shell behind approval gate; denial is an Ok-shaped "user denied: <command>" tool result), `nh-vault` (OS keyring + env fallback + Scrubber), `nh-cli` (init / key / run).
+- Sanctioned contract addition: `AgentLoop.on_event: Option<Box<dyn Fn(&str) + Send>>` for progress lines; nh-cli wires it to stderr. Field set is now frozen.
+
+Tests/checks run:
+
+- `cargo build --workspace`, `cargo test --workspace` (43 passed, 1 ignored keyring round-trip), `cargo clippy --workspace --all-targets -- -D warnings` — all green.
+
+Next step:
+
+- M1: live route/pricing verification against providers.
+
 ## 2026-07-12: Project OS created
 
 Builder:
