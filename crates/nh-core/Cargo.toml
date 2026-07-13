@@ -1,0 +1,18 @@
+[package]
+name = "nh-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+zeroize.workspace = true
+reqwest.workspace = true
+nh-tools = { path = "../nh-tools" }
+nh-vault = { path = "../nh-vault" }
+nh-routes = { path = "../nh-routes" }
+
+[dev-dependencies]
+tempfile.workspace = true

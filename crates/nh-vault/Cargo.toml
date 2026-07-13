@@ -1,0 +1,10 @@
+[package]
+name = "nh-vault"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+keyring.workspace = true
+zeroize.workspace = true
+regex.workspace = true
