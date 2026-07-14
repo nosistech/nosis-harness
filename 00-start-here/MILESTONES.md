@@ -60,3 +60,39 @@ The project has:
 - Sandbox tiers (Windows: approval-gating + restricted tokens; Linux: Landlock/seccomp; macOS: Seatbelt — honest docs about the difference), headless `nh exec`, docs, launch post.
 
 Exit: public release. Do not ship nh-mcp server publicly until the MCP final spec lands (July 28).
+
+## Milestone 6: Multimodal orchestration (post-launch — added 2026-07-14, Carlos)
+
+Rationale: nosis is the **conductor, not the instruments.** M0–M5 build the best coding conductor.
+M6 adds media *instruments* so the SAME routing / fleet / scheduler / governance orchestrates
+generation pipelines (manga, anime, audio, game assets) — not just code. Reuses the RouteResolver
+(the `modality` flags already exist), the fleet ledger, the off-peak scheduler, and receipts.
+Scope stays narrow per THE LAW: nosis calls existing generation models/APIs; it does NOT train them.
+
+The project has:
+
+- **Generation routes** — image / video / audio model endpoints as catalog routes behind the
+  existing RouteResolver, using the `modality` flags; a new wire-adapter class for generation APIs
+  (submit → poll → fetch-artifact), distinct from the chat-completion wires. Catalog stays data.
+- **Generation tools / MCP** — tools the agent loop can call to produce/fetch artifacts
+  (text→image, image→video, text→speech, music); artifacts land in a workspace media dir and are
+  referenced (by handle, never inlined) in receipts. Every call still passes the approval/law gate.
+- **Pipeline orchestration** — a declarative multi-step media pipeline (e.g. script → storyboard →
+  panels → voice → music → assemble) run through the fleet with off-peak cost routing and one
+  receipt per step; idempotent resume applies.
+- **Media preview surface** — media is not previewable in a TUI, so the plan's v2 **Axum web
+  companion dashboard** (KORVIN pattern) gains a media/diff preview view. This is also the GUI wedge
+  (phone review), with the TUI staying minimal.
+
+Exit (testable, not vibes):
+
+- One end-to-end pipeline turns a text brief into a finished artifact with EVERY step in the ledger
+  and reproducible via idempotent resume (reference target: "brief → 4-page manga" → PNG pages +
+  per-step receipts; a `kill -9` mid-run resumes without redoing completed steps).
+- Cost HUD + budget hard-stop work across generation routes (image/video priced per-artifact, not
+  per-token); no fake projected cost.
+- No generation tool bypasses the approval/law gate; prompts + artifact metadata pass the scrubber.
+
+Non-goals (honest): training generative models; fully autonomous feature-length anime or AAA games
+end-to-end — those are limited by the generation models themselves, not by the harness. M6 makes
+nosis the cheapest, most auditable *orchestrator* of whatever generation models exist at the time.
