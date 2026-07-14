@@ -19,7 +19,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use nh_core::agent::AgentLoop;
-use nh_core::receipt::ReceiptWriter;
+use nh_core::receipt::{FailureClass, Outcome, Receipt, ReceiptWriter};
 use nh_core::wire::{cache_hit_pct, make_client, ChatClient, ChatMessage, ThinkingEffort, Usage};
 use nh_law::{Autonomy, Law, PolicyView, Verdict};
 use nh_routes::{ResolvedRoute, RouteClass, RouteResolver, ThinkingDialect};
@@ -42,6 +42,10 @@ type ConnectFn =
 
 const EVENT_POLL: Duration = Duration::from_millis(50);
 const BUDGET_REASON: &str = "budget reached";
+const RESTORE_DEFERRED: &str = "restore arrives in a later slice";
+const MAX_NOTIFY_CHARS: usize = 160;
+const TELEGRAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const TELEGRAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The single status shown by the semáforo.
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +54,109 @@ pub enum Status {
     Working,
     Waiting,
     Blocked(String),
+}
+
+/// Optional remote notification settings loaded once before terminal takeover.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NotifyConfig {
+    pub telegram: Option<TelegramNotifyConfig>,
+}
+
+/// Non-secret Telegram settings. The bot token always comes from nh-vault.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramNotifyConfig {
+    pub enabled: bool,
+    pub chat_id: String,
+}
+
+impl NotifyConfig {
+    fn telegram_enabled(&self) -> bool {
+        self.telegram
+            .as_ref()
+            .is_some_and(|telegram| telegram.enabled && !telegram.chat_id.trim().is_empty())
+    }
+}
+
+/// Parse the small optional `.nosis/notify.toml` surface.
+pub fn parse_notify_config(text: &str) -> anyhow::Result<NotifyConfig> {
+    let value: toml::Value = toml::from_str(text).context("invalid notify configuration")?;
+    let Some(raw_telegram) = value.get("telegram") else {
+        return Ok(NotifyConfig::default());
+    };
+    let telegram = raw_telegram
+        .as_table()
+        .context("[telegram] must be a table")?;
+    let enabled = match telegram.get("enabled") {
+        Some(value) => value
+            .as_bool()
+            .context("telegram.enabled must be true or false")?,
+        None => false,
+    };
+    let chat_id = match telegram.get("chat_id") {
+        Some(value) => value
+            .as_str()
+            .context("telegram.chat_id must be a string")?
+            .trim()
+            .to_owned(),
+        None => String::new(),
+    };
+    if enabled && chat_id.is_empty() {
+        anyhow::bail!("telegram.chat_id is required when telegram is enabled");
+    }
+    Ok(NotifyConfig {
+        telegram: Some(TelegramNotifyConfig { enabled, chat_id }),
+    })
+}
+
+/// One completed task projected from its receipt and in-memory answer.
+#[derive(Debug, Clone)]
+pub struct TimelineEntry {
+    pub turn: usize,
+    pub ts_utc: String,
+    pub model_id: String,
+    pub task: String,
+    pub turns: u32,
+    pub tool_calls: u32,
+    pub outcome: Outcome,
+    pub failure_class: Option<FailureClass>,
+    pub usage: Option<Usage>,
+    pub answer: String,
+    pub compacted: bool,
+}
+
+impl TimelineEntry {
+    /// Build a timeline row without mutating the source receipt.
+    pub fn from_receipt(turn: usize, receipt: Receipt, answer: String, compacted: bool) -> Self {
+        Self {
+            turn,
+            ts_utc: receipt.ts_utc,
+            model_id: receipt.model_id,
+            task: short_text(&receipt.task, 120),
+            turns: receipt.turns,
+            tool_calls: receipt.tool_calls,
+            outcome: receipt.outcome,
+            failure_class: receipt.failure_class,
+            usage: receipt.usage,
+            answer,
+            compacted,
+        }
+    }
+
+    fn tokens(&self) -> (u64, u64, u64) {
+        self.usage.as_ref().map_or((0, 0, 0), |usage| {
+            (
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                usage.cached_tokens.unwrap_or(0),
+            )
+        })
+    }
+}
+
+/// Additive worker payload carrying the receipt alongside its existing answer event.
+pub struct TimelineSummary {
+    pub receipt: Receipt,
+    pub answer: String,
 }
 
 /// One immutable row in the discoverability palette.
@@ -86,6 +193,7 @@ impl McpState {
 enum PaletteAction {
     Quit,
     TrustDial,
+    Timeline,
     Palette,
     ScrollUp,
     ScrollDown,
@@ -98,6 +206,11 @@ enum PaletteAction {
 enum Overlay {
     None,
     TrustDial,
+    Timeline {
+        selected: usize,
+        inspecting: bool,
+        note: Option<String>,
+    },
     Palette {
         filter: String,
         selected: usize,
@@ -110,6 +223,7 @@ pub enum AgentEvent {
     Progress(String),
     Approval(ApprovalRequest),
     Usage(Usage),
+    TaskReceipt(TimelineSummary),
     Answer(String),
     Failed(String),
 }
@@ -129,6 +243,7 @@ pub struct TuiConfig {
     pub repo_root: PathBuf,
     pub workdir: PathBuf,
     pub palette_entries: Vec<PaletteEntry>,
+    pub notify: NotifyConfig,
 }
 
 #[derive(Clone, Copy)]
@@ -160,6 +275,8 @@ pub struct App {
     policy_view: PolicyView,
     palette_entries: Vec<PaletteEntry>,
     overlay: Overlay,
+    timeline: Vec<TimelineEntry>,
+    current_task_compacted: bool,
 }
 
 impl App {
@@ -190,6 +307,8 @@ impl App {
             policy_view,
             palette_entries,
             overlay: Overlay::None,
+            timeline: Vec::new(),
+            current_task_compacted: false,
         }
     }
 
@@ -231,6 +350,7 @@ impl App {
             return None;
         }
         self.input.clear();
+        self.current_task_compacted = false;
         self.push_line(&format!("> {task}"), TranscriptKind::Task);
         self.status = Status::Working;
         Some(task)
@@ -362,6 +482,11 @@ fn builtin_palette_entries() -> Vec<PaletteEntry> {
             PaletteAction::TrustDial,
         ),
         (
+            "timeline (l)",
+            "view session receipts and answers",
+            PaletteAction::Timeline,
+        ),
+        (
             "palette (?)",
             "find commands and tools",
             PaletteAction::Palette,
@@ -383,7 +508,7 @@ fn builtin_palette_entries() -> Vec<PaletteEntry> {
         ),
         (
             "timeline restore (R)",
-            "timeline restore — arrives in a later slice",
+            RESTORE_DEFERRED,
             PaletteAction::Reserved,
         ),
     ];
@@ -446,10 +571,81 @@ impl PaletteEntry {
     }
 }
 
+fn short_text(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let head: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
+fn outcome_name(outcome: Outcome) -> &'static str {
+    match outcome {
+        Outcome::Pass => "pass",
+        Outcome::Fail => "fail",
+        Outcome::Partial => "partial",
+        Outcome::Skip => "skip",
+        Outcome::Timeout => "timeout",
+    }
+}
+
+fn failure_class_name(class: FailureClass) -> &'static str {
+    match class {
+        FailureClass::Context => "context",
+        FailureClass::Constraint => "constraint",
+        FailureClass::Verification => "verification",
+        FailureClass::Planning => "planning",
+    }
+}
+
+fn is_compaction_progress(line: &str) -> bool {
+    let line = line.to_ascii_lowercase();
+    line.contains("context ") && line.contains('%') && line.contains("compacted")
+}
+
+fn timeline_row(entry: &TimelineEntry) -> String {
+    let (input, output, cached) = entry.tokens();
+    let compacted = if entry.compacted { "  [compact]" } else { "" };
+    format!(
+        "#{}  {}  {input}/{output}/{cached}{compacted}",
+        entry.turn,
+        outcome_name(entry.outcome)
+    )
+}
+
+fn timeline_detail_lines(entry: &TimelineEntry) -> Vec<String> {
+    let (input, output, cached) = entry.tokens();
+    let failure = entry
+        .failure_class
+        .map(failure_class_name)
+        .unwrap_or("none");
+    vec![
+        format!("TURN #{}", entry.turn),
+        format!("timestamp: {}", entry.ts_utc),
+        format!("model: {}", entry.model_id),
+        format!("task: {}", entry.task),
+        format!("outcome: {}", outcome_name(entry.outcome)),
+        format!("agent turns: {}", entry.turns),
+        format!("tool calls: {}", entry.tool_calls),
+        format!("failure class: {failure}"),
+        format!("tokens: {input} in / {output} out / {cached} cached"),
+        format!("compacted: {}", if entry.compacted { "yes" } else { "no" }),
+        String::new(),
+        format!("answer: {}", entry.answer),
+    ]
+}
+
 /// Fold one worker event into application state.
 pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
     match event {
-        AgentEvent::Progress(line) => app.push_line(&format!("  {line}"), TranscriptKind::Progress),
+        AgentEvent::Progress(line) => {
+            if is_compaction_progress(&line) {
+                app.current_task_compacted = true;
+            }
+            app.push_line(&format!("  {line}"), TranscriptKind::Progress);
+        }
         AgentEvent::Approval(request) => {
             let line = format!("approve? {}  [y/N]", request.prompt);
             app.push_line(&line, TranscriptKind::Approval);
@@ -461,6 +657,16 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
             if app.budget_reached() {
                 app.status = Status::Blocked(BUDGET_REASON.into());
             }
+        }
+        AgentEvent::TaskReceipt(summary) => {
+            let turn = app.timeline.len().saturating_add(1);
+            let compacted = std::mem::take(&mut app.current_task_compacted);
+            app.timeline.push(TimelineEntry::from_receipt(
+                turn,
+                summary.receipt,
+                summary.answer,
+                compacted,
+            ));
         }
         AgentEvent::Answer(answer) => {
             app.push_text("  ", &answer, TranscriptKind::Answer);
@@ -477,6 +683,111 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
         }
     }
     &app.status
+}
+
+/// Build the short, scrubbed Telegram body for a state that needs attention.
+pub fn notify_message(status: &Status, scrubber: &Scrubber) -> Option<String> {
+    let raw = match status {
+        Status::Waiting => "nosis: waiting on your approval".to_owned(),
+        Status::Blocked(reason) => format!("nosis: blocked — {reason}"),
+        Status::Idle | Status::Working => return None,
+    };
+    let safe = nh_vault::safe_line(scrubber, &raw);
+    Some(short_text(&safe, MAX_NOTIFY_CHARS.saturating_sub(1)))
+}
+
+trait NotifySender: Send + Sync {
+    fn send(&self, telegram: &TelegramNotifyConfig, body: &str) -> anyhow::Result<()>;
+}
+
+struct TelegramSender;
+
+impl NotifySender for TelegramSender {
+    fn send(&self, telegram: &TelegramNotifyConfig, body: &str) -> anyhow::Result<()> {
+        let vault = EnvFallbackVault {
+            inner: KeyringVault,
+        };
+        let token = vault
+            .get("telegram")
+            .map_err(|_| anyhow::anyhow!("telegram notify failed"))?;
+        let client = reqwest::blocking::Client::builder()
+            .connect_timeout(TELEGRAM_CONNECT_TIMEOUT)
+            .timeout(TELEGRAM_REQUEST_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| anyhow::anyhow!("telegram notify failed"))?;
+        let response = client
+            .post(format!(
+                "https://api.telegram.org/bot{}/sendMessage",
+                token.as_str()
+            ))
+            .form(&[("chat_id", telegram.chat_id.as_str()), ("text", body)])
+            .send()
+            .map_err(|_| anyhow::anyhow!("telegram notify failed"))?;
+        if !response.status().is_success() {
+            anyhow::bail!("telegram notify failed");
+        }
+        Ok(())
+    }
+}
+
+struct Notifier {
+    config: NotifyConfig,
+    sender: Arc<dyn NotifySender>,
+    failures: Receiver<()>,
+    failure_tx: Sender<()>,
+}
+
+impl Notifier {
+    fn new(config: NotifyConfig, sender: Arc<dyn NotifySender>) -> Self {
+        let (failure_tx, failures) = mpsc::channel();
+        Self {
+            config,
+            sender,
+            failures,
+            failure_tx,
+        }
+    }
+
+    fn notify(&self, status: &Status, scrubber: &SharedScrubber) {
+        if !self.config.telegram_enabled() {
+            return;
+        }
+        let Some(telegram) = self.config.telegram.clone() else {
+            return;
+        };
+        let body = match scrubber.read() {
+            Ok(guard) => notify_message(status, &guard),
+            Err(poisoned) => notify_message(status, &poisoned.into_inner()),
+        };
+        let Some(body) = body else {
+            return;
+        };
+        let sender = Arc::clone(&self.sender);
+        let failure_tx = self.failure_tx.clone();
+        if thread::Builder::new()
+            .name("nh-telegram".into())
+            .spawn(move || {
+                if sender.send(&telegram, &body).is_err() {
+                    let _ = failure_tx.send(());
+                }
+            })
+            .is_err()
+        {
+            let _ = self.failure_tx.send(());
+        }
+    }
+}
+
+fn drain_notify_failures(app: &mut App, notifier: &Notifier) {
+    while notifier.failures.try_recv().is_ok() {
+        app.push_line("telegram notify failed", TranscriptKind::Progress);
+    }
+}
+
+fn entered_notify_state(previous: &Status, current: &Status) -> bool {
+    (matches!(current, Status::Waiting) && !matches!(previous, Status::Waiting))
+        || (matches!(current, Status::Blocked(_)) && !matches!(previous, Status::Blocked(_)))
 }
 
 /// Run the full-screen TUI until the user quits.
@@ -514,6 +825,7 @@ fn run_with_connect(
         policy_view,
         config.palette_entries,
     );
+    let notifier = Notifier::new(config.notify, Arc::new(TelegramSender));
     let mut worker = spawn_worker(WorkerConfig {
         route,
         law: config.law,
@@ -529,7 +841,7 @@ fn run_with_connect(
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).context("could not open the terminal")?;
     terminal.clear().context("could not clear the terminal")?;
-    let result = ui_loop(&mut terminal, &mut app, &mut worker);
+    let result = ui_loop(&mut terminal, &mut app, &mut worker, &notifier);
     drop(terminal);
     result
 }
@@ -684,22 +996,34 @@ fn worker_loop(
                     connected = true;
                 }
                 Err(error) => {
-                    let _ =
-                        events.send(AgentEvent::Failed(safe_line(&scrubber, &error.to_string())));
+                    let reason = safe_line(&scrubber, &error.to_string());
+                    let _ = events.send(AgentEvent::Failed(reason.clone()));
+                    let _ = events.send(AgentEvent::TaskReceipt(failed_timeline_summary(
+                        &route.model_id,
+                        &task,
+                        &reason,
+                    )));
                     continue;
                 }
             }
         }
         match agent.run_with_history(&mut history, &task) {
             Ok((answer, receipt)) => {
-                if let Some(usage) = receipt.usage {
-                    add_usage(&mut session_usage, &usage);
+                if let Some(usage) = &receipt.usage {
+                    add_usage(&mut session_usage, usage);
                     let _ = events.send(AgentEvent::Usage(session_usage.clone()));
                 }
-                let _ = events.send(AgentEvent::Answer(answer));
+                let _ = events.send(AgentEvent::Answer(answer.clone()));
+                let _ = events.send(AgentEvent::TaskReceipt(TimelineSummary { receipt, answer }));
             }
             Err(error) => {
-                let _ = events.send(AgentEvent::Failed(safe_line(&scrubber, &error.to_string())));
+                let reason = safe_line(&scrubber, &error.to_string());
+                let _ = events.send(AgentEvent::Failed(reason.clone()));
+                let _ = events.send(AgentEvent::TaskReceipt(failed_timeline_summary(
+                    &route.model_id,
+                    &task,
+                    &reason,
+                )));
             }
         }
     }
@@ -744,6 +1068,22 @@ fn add_usage(total: &mut Usage, usage: &Usage) {
     }
 }
 
+fn failed_timeline_summary(model_id: &str, task: &str, reason: &str) -> TimelineSummary {
+    TimelineSummary {
+        receipt: Receipt {
+            ts_utc: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            model_id: model_id.to_owned(),
+            task: task.to_owned(),
+            turns: 0,
+            tool_calls: 0,
+            outcome: Outcome::Fail,
+            failure_class: Some(FailureClass::Verification),
+            usage: None,
+        },
+        answer: format!("error: {reason}"),
+    }
+}
+
 fn verdict_to_guard(verdict: Verdict) -> Guard {
     match verdict {
         Verdict::Allow => Guard::Allow,
@@ -763,16 +1103,21 @@ fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
     worker: &mut Worker,
+    notifier: &Notifier,
 ) -> anyhow::Result<()> {
     loop {
         loop {
             match worker.events.try_recv() {
                 Ok(agent_event) => {
+                    let previous = app.status.clone();
                     let ring = matches!(agent_event, AgentEvent::Approval(_))
                         && !matches!(app.status, Status::Waiting);
                     apply_event(app, agent_event);
                     if ring {
                         ring_bell();
+                    }
+                    if entered_notify_state(&previous, &app.status) {
+                        notifier.notify(&app.status, &app.scrubber);
                     }
                 }
                 Err(TryRecvError::Empty) => break,
@@ -781,6 +1126,7 @@ fn ui_loop(
                 }
             }
         }
+        drain_notify_failures(app, notifier);
 
         terminal
             .draw(|frame| render(frame, app))
@@ -841,6 +1187,13 @@ fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
     match key.code {
         KeyCode::Char('q') if app.input.is_empty() => return UiAction::Quit,
         KeyCode::Char('t') if app.input.is_empty() => app.overlay = Overlay::TrustDial,
+        KeyCode::Char('l') if app.input.is_empty() => {
+            app.overlay = Overlay::Timeline {
+                selected: app.timeline.len().saturating_sub(1),
+                inspecting: false,
+                note: None,
+            };
+        }
         KeyCode::Char('?') if app.input.is_empty() => {
             app.overlay = Overlay::Palette {
                 filter: String::new(),
@@ -885,18 +1238,61 @@ fn reduce_overlay_key(app: &mut App, key: KeyEvent) -> UiAction {
         return UiAction::None;
     }
 
+    let timeline_len = app.timeline.len();
+    if let Overlay::Timeline {
+        selected,
+        inspecting,
+        note,
+    } = &mut app.overlay
+    {
+        timeline_key(timeline_len, selected, inspecting, note, key);
+        return UiAction::None;
+    }
+
     let activated = match &mut app.overlay {
         Overlay::Palette {
             filter,
             selected,
             detail,
         } => palette_key(&app.palette_entries, filter, selected, detail, key),
-        Overlay::None | Overlay::TrustDial => None,
+        Overlay::None | Overlay::TrustDial | Overlay::Timeline { .. } => None,
     };
     let Some(entry) = activated else {
         return UiAction::None;
     };
     activate_palette_entry(app, entry)
+}
+
+fn timeline_key(
+    entry_count: usize,
+    selected: &mut usize,
+    inspecting: &mut bool,
+    note: &mut Option<String>,
+    key: KeyEvent,
+) {
+    match key.code {
+        KeyCode::Up => {
+            *selected = selected.saturating_sub(1);
+            *inspecting = false;
+            *note = None;
+        }
+        KeyCode::Down => {
+            if entry_count > 0 {
+                *selected = selected.saturating_add(1).min(entry_count - 1);
+            }
+            *inspecting = false;
+            *note = None;
+        }
+        KeyCode::Enter if entry_count > 0 => {
+            *selected = (*selected).min(entry_count - 1);
+            *inspecting = true;
+            *note = None;
+        }
+        KeyCode::Char('R') => {
+            *note = Some(RESTORE_DEFERRED.into());
+        }
+        _ => {}
+    }
 }
 
 fn palette_key(
@@ -948,6 +1344,14 @@ fn activate_palette_entry(app: &mut App, entry: PaletteEntry) -> UiAction {
         PaletteAction::Quit => UiAction::Quit,
         PaletteAction::TrustDial => {
             app.overlay = Overlay::TrustDial;
+            UiAction::None
+        }
+        PaletteAction::Timeline => {
+            app.overlay = Overlay::Timeline {
+                selected: app.timeline.len().saturating_sub(1),
+                inspecting: false,
+                note: None,
+            };
             UiAction::None
         }
         PaletteAction::Palette => {
@@ -1008,6 +1412,11 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App) {
     match &app.overlay {
         Overlay::None => {}
         Overlay::TrustDial => render_trust_dial(frame, app, area),
+        Overlay::Timeline {
+            selected,
+            inspecting,
+            note,
+        } => render_timeline(frame, app, area, *selected, *inspecting, note.as_deref()),
         Overlay::Palette {
             filter,
             selected,
@@ -1032,6 +1441,83 @@ fn render_trust_dial(frame: &mut Frame<'_>, app: &App, area: Rect) {
         Paragraph::new(lines).style(Style::default().fg(Color::White).bg(Color::Black)),
         area,
     );
+}
+
+fn render_timeline(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    selected: usize,
+    inspecting: bool,
+    note: Option<&str>,
+) {
+    frame.render_widget(Clear, area);
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .split(area);
+    let visible_rows = usize::from(columns[0].height.saturating_sub(3).max(1));
+    let start = selected.saturating_add(1).saturating_sub(visible_rows);
+    let mut rail = vec![
+        Line::from(safe_line(&app.scrubber, "TIMELINE — newest at bottom")),
+        Line::from(safe_line(
+            &app.scrubber,
+            "Up/Down: move | Enter: inspect | R: restore | Esc: close",
+        )),
+        Line::from(safe_line(&app.scrubber, "")),
+    ];
+    if app.timeline.is_empty() {
+        rail.push(Line::from(safe_line(&app.scrubber, "no completed turns")));
+    } else {
+        rail.extend(
+            app.timeline
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(visible_rows)
+                .map(|(index, entry)| {
+                    let marker = if index == selected { "> " } else { "  " };
+                    let line =
+                        safe_line(&app.scrubber, &format!("{marker}{}", timeline_row(entry)));
+                    let style = if index == selected {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+                    Line::from(Span::styled(line, style))
+                }),
+        );
+    }
+
+    let mut detail = Vec::new();
+    if let Some(note) = note {
+        detail.push(Line::from(Span::styled(
+            safe_line(&app.scrubber, note),
+            Style::default().fg(Color::DarkGray),
+        )));
+        detail.push(Line::from(safe_line(&app.scrubber, "")));
+    }
+    if let Some(entry) = app.timeline.get(selected) {
+        let raw = if inspecting {
+            timeline_detail_lines(entry)
+        } else {
+            vec![
+                format!("selected: #{}", entry.turn),
+                format!("task: {}", entry.task),
+                "press Enter to inspect".into(),
+            ]
+        };
+        detail.extend(
+            raw.into_iter()
+                .map(|line| Line::from(safe_line(&app.scrubber, &line))),
+        );
+    }
+
+    let panel_style = Style::default().fg(Color::White).bg(Color::Black);
+    frame.render_widget(Paragraph::new(rail).style(panel_style), columns[0]);
+    frame.render_widget(Paragraph::new(detail).style(panel_style), columns[1]);
 }
 
 fn render_palette(
@@ -1301,7 +1787,7 @@ mod tests {
     use super::*;
     use nh_core::wire::{ChatRequest, ChatResponse};
     use ratatui::backend::TestBackend;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     const TEST_CATALOG: &str = r#"
@@ -1348,6 +1834,34 @@ mod tests {
         )
     }
 
+    fn receipt(task: &str, outcome: Outcome, usage: Option<Usage>) -> Receipt {
+        Receipt {
+            ts_utc: "2026-07-14T12:00:00Z".into(),
+            model_id: "test-route".into(),
+            task: task.into(),
+            turns: 3,
+            tool_calls: 2,
+            outcome,
+            failure_class: (outcome != Outcome::Pass).then_some(FailureClass::Constraint),
+            usage,
+        }
+    }
+
+    fn timeline_event(task: &str, answer: &str) -> AgentEvent {
+        AgentEvent::TaskReceipt(TimelineSummary {
+            receipt: receipt(
+                task,
+                Outcome::Pass,
+                Some(Usage {
+                    prompt_tokens: 10,
+                    completion_tokens: 2,
+                    cached_tokens: Some(4),
+                }),
+            ),
+            answer: answer.into(),
+        })
+    }
+
     #[test]
     fn reducer_drives_every_semaforo_transition() {
         let mut app = test_app(None);
@@ -1392,6 +1906,99 @@ mod tests {
     }
 
     #[test]
+    fn timeline_entry_projects_receipt_outcome_and_tokens() {
+        let entry = TimelineEntry::from_receipt(
+            7,
+            receipt(
+                "summarize the workspace",
+                Outcome::Partial,
+                Some(Usage {
+                    prompt_tokens: 120,
+                    completion_tokens: 30,
+                    cached_tokens: Some(50),
+                }),
+            ),
+            "partial answer".into(),
+            false,
+        );
+
+        assert_eq!(entry.turn, 7);
+        assert_eq!(entry.outcome, Outcome::Partial);
+        assert_eq!(entry.tokens(), (120, 30, 50));
+        assert_eq!(entry.turns, 3);
+        assert_eq!(entry.tool_calls, 2);
+        assert_eq!(entry.answer, "partial answer");
+        assert!(!entry.compacted);
+    }
+
+    #[test]
+    fn compaction_progress_marks_only_the_current_timeline_turn() {
+        let mut app = test_app(None);
+        app.status = Status::Working;
+        apply_event(
+            &mut app,
+            AgentEvent::Progress("context 73% — compacted 8 earlier messages".into()),
+        );
+        apply_event(&mut app, timeline_event("first", "one"));
+        assert!(app.timeline[0].compacted);
+
+        apply_event(&mut app, AgentEvent::Answer("one".into()));
+        app.input = "second".into();
+        assert_eq!(app.dispatch().as_deref(), Some("second"));
+        apply_event(&mut app, timeline_event("second", "two"));
+        assert!(!app.timeline[1].compacted);
+    }
+
+    #[test]
+    fn timeline_reducer_scrubs_and_enter_inspects_the_selected_turn() {
+        let mut app = test_app(None);
+        apply_event(&mut app, timeline_event("first", "answer one"));
+        apply_event(&mut app, timeline_event("second", "answer two"));
+
+        assert_eq!(reduce_key(&mut app, char_key('l')), UiAction::None);
+        match &app.overlay {
+            Overlay::Timeline { selected, .. } => assert_eq!(*selected, 1),
+            _ => panic!("timeline must open"),
+        }
+        reduce_key(&mut app, code_key(KeyCode::Up));
+        reduce_key(&mut app, code_key(KeyCode::Enter));
+        match &app.overlay {
+            Overlay::Timeline {
+                selected,
+                inspecting,
+                ..
+            } => {
+                assert_eq!(*selected, 0);
+                assert!(*inspecting);
+                assert_eq!(app.timeline[*selected].answer, "answer one");
+            }
+            _ => panic!("timeline must stay open"),
+        }
+        assert_eq!(app.timeline.len(), 2);
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn timeline_restore_key_only_shows_the_deferral_note() {
+        let mut app = test_app(None);
+        apply_event(&mut app, timeline_event("first", "answer"));
+        reduce_key(&mut app, char_key('l'));
+        let before_task = app.timeline[0].task.clone();
+
+        assert_eq!(reduce_key(&mut app, char_key('R')), UiAction::None);
+
+        match &app.overlay {
+            Overlay::Timeline { note, .. } => {
+                assert_eq!(note.as_deref(), Some(RESTORE_DEFERRED));
+            }
+            _ => panic!("timeline must stay open"),
+        }
+        assert_eq!(app.timeline.len(), 1);
+        assert_eq!(app.timeline[0].task, before_task);
+        assert!(app.transcript.is_empty());
+    }
+
+    #[test]
     fn palette_filter_is_pure_and_finds_exec_shell() {
         let entries = builtin_palette_entries();
         let before = entries.clone();
@@ -1406,6 +2013,9 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(entries, before);
+        assert!(filter_palette(&entries, "timeline")
+            .iter()
+            .any(|entry| entry.name == "timeline (l)"));
     }
 
     #[test]
@@ -1482,7 +2092,7 @@ mod tests {
 
     #[test]
     fn overlays_suppress_task_dispatch_and_escape_restores_base_view() {
-        for opener in ['t', '?'] {
+        for opener in ['t', '?', 'l'] {
             let mut app = test_app(None);
             assert_eq!(reduce_key(&mut app, char_key(opener)), UiAction::None);
             assert_ne!(app.overlay, Overlay::None);
@@ -1603,6 +2213,142 @@ mod tests {
     }
 
     #[test]
+    fn notify_message_is_short_scrubbed_and_control_safe() {
+        let secret = "fake-telegram-secret";
+        let scrubber = Scrubber::new(vec![secret.into()]);
+        let waiting = notify_message(&Status::Waiting, &scrubber).unwrap();
+        assert_eq!(waiting, "nosis: waiting on your approval");
+
+        let blocked = notify_message(
+            &Status::Blocked(format!("reason={secret}\r\x1b[2K {}", "x".repeat(300))),
+            &scrubber,
+        )
+        .unwrap();
+        assert!(blocked.contains("[REDACTED]"), "got: {blocked}");
+        assert!(!blocked.contains(secret), "got: {blocked}");
+        assert!(!blocked.chars().any(char::is_control), "got: {blocked}");
+        assert!(
+            blocked.chars().count() <= MAX_NOTIFY_CHARS,
+            "got: {blocked}"
+        );
+        assert!(notify_message(&Status::Idle, &scrubber).is_none());
+    }
+
+    #[test]
+    fn notify_transition_fires_once_when_waiting_or_blocked_is_entered() {
+        assert!(entered_notify_state(&Status::Working, &Status::Waiting));
+        assert!(entered_notify_state(
+            &Status::Working,
+            &Status::Blocked("offline".into())
+        ));
+        assert!(!entered_notify_state(&Status::Waiting, &Status::Waiting));
+        assert!(!entered_notify_state(
+            &Status::Blocked("first".into()),
+            &Status::Blocked("second".into())
+        ));
+        assert!(!entered_notify_state(&Status::Working, &Status::Idle));
+    }
+
+    struct MockNotifySender {
+        calls: Arc<AtomicUsize>,
+        attempted: Sender<()>,
+        fail: bool,
+    }
+
+    impl NotifySender for MockNotifySender {
+        fn send(&self, _telegram: &TelegramNotifyConfig, _body: &str) -> anyhow::Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let _ = self.attempted.send(());
+            if self.fail {
+                anyhow::bail!("injected notify failure");
+            }
+            Ok(())
+        }
+    }
+
+    fn enabled_notify_config() -> NotifyConfig {
+        NotifyConfig {
+            telegram: Some(TelegramNotifyConfig {
+                enabled: true,
+                chat_id: "123456789".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn disabled_notify_config_makes_no_send_attempt() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (attempted, attempts) = mpsc::channel();
+        let notifier = Notifier::new(
+            NotifyConfig::default(),
+            Arc::new(MockNotifySender {
+                calls: Arc::clone(&calls),
+                attempted,
+                fail: false,
+            }),
+        );
+        let scrubber = Arc::new(RwLock::new(Scrubber::new(Vec::new())));
+
+        notifier.notify(&Status::Waiting, &scrubber);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(attempts.try_recv().is_err());
+        assert!(notifier.failures.try_recv().is_err());
+    }
+
+    #[test]
+    fn enabled_notify_uses_injected_sender_without_network() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (attempted, attempts) = mpsc::channel();
+        let notifier = Notifier::new(
+            enabled_notify_config(),
+            Arc::new(MockNotifySender {
+                calls: Arc::clone(&calls),
+                attempted,
+                fail: false,
+            }),
+        );
+        let scrubber = Arc::new(RwLock::new(Scrubber::new(Vec::new())));
+
+        notifier.notify(&Status::Waiting, &scrubber);
+
+        attempts.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(notifier.failures.try_recv().is_err());
+    }
+
+    #[test]
+    fn failing_notify_adds_exactly_one_dim_warning_and_session_continues() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (attempted, attempts) = mpsc::channel();
+        let notifier = Notifier::new(
+            enabled_notify_config(),
+            Arc::new(MockNotifySender {
+                calls: Arc::clone(&calls),
+                attempted,
+                fail: true,
+            }),
+        );
+        let mut app = test_app(None);
+        app.status = Status::Blocked("offline".into());
+
+        notifier.notify(&app.status, &app.scrubber);
+        attempts.recv_timeout(Duration::from_secs(1)).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while app.transcript.is_empty() && std::time::Instant::now() < deadline {
+            drain_notify_failures(&mut app, &notifier);
+            thread::yield_now();
+        }
+        drain_notify_failures(&mut app, &notifier);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(app.transcript.len(), 1);
+        assert_eq!(app.transcript[0].text, "telegram notify failed");
+        assert!(matches!(app.transcript[0].kind, TranscriptKind::Progress));
+        assert_eq!(app.status, Status::Blocked("offline".into()));
+    }
+
+    #[test]
     fn rendered_line_is_redacted_and_has_no_control_characters() {
         let secret = "hunter2-fake-tui-secret";
         let scrubber = Arc::new(RwLock::new(Scrubber::new(vec![secret.into()])));
@@ -1658,6 +2404,44 @@ mod tests {
             detail: None,
         };
         let backend = TestBackend::new(100, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(rendered.contains("[REDACTED]"), "got: {rendered}");
+        assert!(!rendered.contains(secret), "got: {rendered}");
+        assert!(!rendered.contains('\r'), "got: {rendered}");
+        assert!(!rendered.contains('\x1b'), "got: {rendered}");
+    }
+
+    #[test]
+    fn rendered_timeline_scrubs_every_receipt_and_answer_line() {
+        let secret = "sk-timeline-00000000";
+        let mut app = test_app(None);
+        apply_event(
+            &mut app,
+            AgentEvent::TaskReceipt(TimelineSummary {
+                receipt: receipt(
+                    &format!("task value={secret}\r\x1b[2K"),
+                    Outcome::Pass,
+                    None,
+                ),
+                answer: format!("answer value={secret}\r\x1b[2K"),
+            }),
+        );
+        app.overlay = Overlay::Timeline {
+            selected: 0,
+            inspecting: true,
+            note: None,
+        };
+        let backend = TestBackend::new(120, 20);
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal.draw(|frame| render(frame, &app)).unwrap();
@@ -1762,11 +2546,19 @@ mod tests {
                 .commands
                 .send(WorkerCommand::Task(task.into()))
                 .unwrap();
-            loop {
+            let mut saw_answer = false;
+            let mut saw_receipt = false;
+            while !saw_answer || !saw_receipt {
                 match worker.events.recv_timeout(Duration::from_secs(2)).unwrap() {
                     AgentEvent::Answer(answer) => {
                         assert_eq!(answer, "ok");
-                        break;
+                        saw_answer = true;
+                    }
+                    AgentEvent::TaskReceipt(summary) => {
+                        assert_eq!(summary.receipt.task, task);
+                        assert_eq!(summary.receipt.outcome, Outcome::Pass);
+                        assert_eq!(summary.answer, "ok");
+                        saw_receipt = true;
                     }
                     AgentEvent::Usage(_) | AgentEvent::Progress(_) => {}
                     AgentEvent::Approval(_) => panic!("mock never asks for approval"),
@@ -1808,6 +2600,14 @@ mod tests {
                 assert!(!reason.chars().any(char::is_control), "got: {reason}");
             }
             _ => panic!("keyless task must fail with one friendly line"),
+        }
+        match worker.events.recv_timeout(Duration::from_secs(2)).unwrap() {
+            AgentEvent::TaskReceipt(summary) => {
+                assert_eq!(summary.receipt.task, "hello");
+                assert_eq!(summary.receipt.outcome, Outcome::Fail);
+                assert!(summary.answer.starts_with("error: "));
+            }
+            _ => panic!("failed task must still produce one timeline receipt"),
         }
         worker.stop();
         if let Some(join) = worker.join.take() {
