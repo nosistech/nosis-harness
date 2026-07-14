@@ -306,7 +306,7 @@ fn print_price(s: &ChatSession, out: &mut dyn Write) {
         out,
         "{} | {} | in {:.4} hit / {:.4} miss | out {:.4} | {}/M tokens | confidence {}",
         s.route.id,
-        peak_status(&s.route, now, s.local_offset),
+        s.route.peak_status(now, s.local_offset),
         quote.cache_hit,
         quote.cache_miss,
         quote.output,
@@ -338,7 +338,7 @@ fn footer(s: &ChatSession) -> String {
     let mut line = format!(
         "{} | {} | session tokens {} in / {} out / {} cached",
         s.route.id,
-        peak_status(&s.route, (s.now)(), s.local_offset),
+        s.route.peak_status((s.now)(), s.local_offset),
         s.session_in,
         s.session_out,
         s.session_cached
@@ -347,45 +347,6 @@ fn footer(s: &ChatSession) -> String {
         line.push_str(&format!(" | cache {pct:.0}%"));
     }
     line
-}
-
-/// Peak indicator: "peak 2x until HH:MM" (window boundary shown in the user's
-/// local time), "off-peak", or "no price data". Same math as `price_at`:
-/// windows are evaluated in the route's fixed-offset timezone, end exclusive.
-fn peak_status(route: &ResolvedRoute, now: DateTime<Utc>, local: FixedOffset) -> String {
-    let Some(quote) = route.price_at(now) else { return "no price data".into() };
-    if !quote.peak {
-        return "off-peak".into();
-    }
-    // quote.peak == true implies a peak table with a window containing `now`;
-    // fall back to a bare "peak" rather than ever panicking on display.
-    let Some(peak) = route.price.as_ref().and_then(|p| p.peak.as_ref()) else {
-        return "peak".into();
-    };
-    let Some(route_tz) = FixedOffset::east_opt(peak.utc_offset_secs) else { return "peak".into() };
-    let route_local = now.with_timezone(&route_tz);
-    let t = route_local.time();
-    let Some((_, end)) = peak.windows.iter().find(|(start, end)| t >= *start && t < *end) else {
-        return "peak".into();
-    };
-    let end_dt = match route_local.date_naive().and_time(*end).and_local_timezone(route_tz) {
-        chrono::LocalResult::Single(dt) => dt,
-        _ => return "peak".into(),
-    };
-    format!(
-        "peak {}x until {}",
-        trim_multiplier(peak.multiplier),
-        end_dt.with_timezone(&local).format("%H:%M")
-    )
-}
-
-/// "2" for 2.0, "1.5" for 1.5 - no trailing ".0" noise in the HUD.
-fn trim_multiplier(m: f64) -> String {
-    if (m - m.round()).abs() < 1e-9 {
-        format!("{m:.0}")
-    } else {
-        format!("{m}")
-    }
 }
 
 /// Load MCP tools from `.nosis/mcp.toml` when it exists. Any failure - unreadable
@@ -954,12 +915,21 @@ mod tests {
         let route = resolver.resolve("deepseek-v4-flash").unwrap();
         // Beijing 15:00 - inside 14:00-18:00.
         let now = Utc.with_ymd_and_hms(2026, 7, 15, 7, 0, 0).unwrap();
-        assert_eq!(peak_status(&route, now, beijing_offset()), "peak 2x until 18:00");
+        assert_eq!(route.peak_status(now, beijing_offset()), "peak 2x until 18:00");
         // Boundary math: 18:00 itself is off-peak (end exclusive).
         let end = Utc.with_ymd_and_hms(2026, 7, 15, 10, 0, 0).unwrap();
-        assert_eq!(peak_status(&route, end, beijing_offset()), "off-peak");
-        assert_eq!(trim_multiplier(2.0), "2");
-        assert_eq!(trim_multiplier(1.5), "1.5");
+        assert_eq!(route.peak_status(end, beijing_offset()), "off-peak");
+        let fractional = RouteResolver::from_toml(&TEST_CATALOG.replace(
+            "multiplier = 2.0",
+            "multiplier = 1.5",
+        ))
+        .unwrap()
+        .resolve("deepseek-v4-flash")
+        .unwrap();
+        assert_eq!(
+            fractional.peak_status(now, beijing_offset()),
+            "peak 1.5x until 18:00"
+        );
     }
 
     // ------------------------------------------------------------- mcp loading

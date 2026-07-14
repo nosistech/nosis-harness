@@ -9,6 +9,7 @@ mod cmd_chat;
 mod cmd_init;
 mod cmd_key;
 mod cmd_run;
+mod cmd_tui;
 
 fn guard_from(verdict: nh_law::Verdict) -> nh_tools::Guard {
     match verdict {
@@ -57,6 +58,15 @@ enum Cmd {
         #[arg(long, default_value = "deepseek-v4-flash")]
         model: String,
     },
+    /// Open the full-screen terminal UI
+    Tui {
+        /// Model id from catalog.toml
+        #[arg(long, default_value = "deepseek-v4-flash")]
+        model: String,
+        /// Hard session token budget
+        #[arg(long)]
+        budget: Option<u64>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -74,6 +84,7 @@ fn main() -> anyhow::Result<()> {
             cmd_run::run(&task, &model, max_turns, think, autonomy)
         }
         Cmd::Chat { model } => cmd_chat::run(&model),
+        Cmd::Tui { model, budget } => cmd_tui::run(&model, budget),
     };
     // UX: one friendly line, what to do next, exit 1. Never a debug dump.
     // Every output path passes the Scrubber - this final line included (key
@@ -205,6 +216,38 @@ mod tests {
         match cli.cmd {
             Cmd::Chat { model } => assert_eq!(model, "kimi-k2.6"),
             _ => panic!("expected chat"),
+        }
+    }
+
+    #[test]
+    fn parses_tui_with_defaults() {
+        let cli = Cli::try_parse_from(["nh", "tui"]).unwrap();
+        match cli.cmd {
+            Cmd::Tui { model, budget } => {
+                assert_eq!(model, "deepseek-v4-flash");
+                assert_eq!(budget, None);
+            }
+            _ => panic!("expected tui"),
+        }
+    }
+
+    #[test]
+    fn parses_tui_with_model_and_budget() {
+        let cli = Cli::try_parse_from([
+            "nh",
+            "tui",
+            "--model",
+            "kimi-k2.6",
+            "--budget",
+            "12000",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Cmd::Tui { model, budget } => {
+                assert_eq!(model, "kimi-k2.6");
+                assert_eq!(budget, Some(12000));
+            }
+            _ => panic!("expected tui"),
         }
     }
 }

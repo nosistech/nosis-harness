@@ -1,25 +1,15 @@
 [package]
-name = "nh-cli"
+name = "nh-tui"
 version.workspace = true
 edition.workspace = true
-
-[[bin]]
-name = "nh"
-path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
-clap.workspace = true
-zeroize.workspace = true
-rpassword = "7"
+crossterm.workspace = true
+ratatui.workspace = true
 nh-core = { path = "../nh-core" }
 nh-law = { path = "../nh-law" }
 nh-routes = { path = "../nh-routes" }
 nh-tools = { path = "../nh-tools" }
-nh-tui = { path = "../nh-tui" }
 nh-vault = { path = "../nh-vault" }
-
-[dev-dependencies]
-serde_json.workspace = true
-tempfile.workspace = true
