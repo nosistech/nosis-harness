@@ -11,11 +11,13 @@ use std::sync::{Arc, RwLock};
 use chrono::{DateTime, FixedOffset, Utc};
 use nh_core::agent::AgentLoop;
 use nh_core::receipt::ReceiptWriter;
-use nh_core::wire::{make_client, ChatClient, ChatMessage};
+use nh_core::wire::{cache_hit_pct, make_client, ChatClient, ChatMessage};
+use nh_law::LoadOptions;
 use nh_routes::{ResolvedRoute, RouteClass, RouteResolver};
-use nh_tools::{builtin_tools, Tool, ToolCtx};
+use nh_tools::{builtin_tools, Access, Tool, ToolCtx};
 use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, Vault};
 
+use crate::guard_from;
 use crate::cmd_run::{self, effort_for, DELEGATE_MSG};
 
 /// Builds a wire client + its key literal (for the Scrubber) from a route.
@@ -30,6 +32,7 @@ struct ChatSession {
     resolver: RouteResolver,
     route: ResolvedRoute,
     agent: AgentLoop,
+    law_constitution: String,
     history: Vec<ChatMessage>,
     session_in: u64,
     session_out: u64,
@@ -50,6 +53,11 @@ struct ChatSession {
 pub fn run(model: &str) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let (root, catalog) = cmd_run::find_catalog(&cwd)?;
+    let law = nh_law::load(&root, &LoadOptions { cli_autonomy: None });
+    let warning_scrubber = Scrubber::new(Vec::new());
+    for warning in &law.warnings {
+        eprintln!("warning: {}", cmd_run::safe_line(&warning_scrubber, warning));
+    }
     let resolver = RouteResolver::from_toml(&catalog)?;
     let route = resolver.resolve(model)?;
     if route.class == RouteClass::Delegate {
@@ -85,15 +93,21 @@ pub fn run(model: &str) -> anyhow::Result<()> {
 
     let approve_scrubber = Arc::clone(&scrubber);
     let event_scrubber = Arc::clone(&scrubber);
+    let policy = law.policy.clone();
+    let law_constitution = law.constitution;
     let agent = AgentLoop {
         client,
         tools,
-        ctx: ToolCtx {
-            workdir: cwd,
-            approve: Box::new(move |action| {
+        ctx: ToolCtx::new(
+            cwd,
+            Box::new(move |action| {
                 cmd_run::approve_on_stdin(&scrub_line(&approve_scrubber, action))
             }),
-        },
+        )
+        .with_guard(Box::new(move |access| match access {
+            Access::Write(path) => guard_from(policy.write_verdict(path)),
+            Access::Exec(command) => guard_from(policy.exec_verdict(command)),
+        })),
         receipts: ReceiptWriter {
             path: root.join(".nosis").join("receipts.jsonl"),
             scrubber: Scrubber::new(key_literals.clone()),
@@ -101,6 +115,8 @@ pub fn run(model: &str) -> anyhow::Result<()> {
         model_id: route.model_id.clone(),
         max_turns: 20,
         thinking: effort_for(None, route.thinking_dialect),
+        constitution: Some(law_constitution.clone()),
+        context_limit: route.context,
         on_event: Some(Box::new(move |line| {
             eprintln!("  {}", scrub_line(&event_scrubber, line));
         })),
@@ -109,6 +125,7 @@ pub fn run(model: &str) -> anyhow::Result<()> {
         resolver,
         route,
         agent,
+        law_constitution,
         history: Vec::new(),
         session_in: 0,
         session_out: 0,
@@ -264,6 +281,8 @@ fn switch_to(s: &mut ChatSession, route: ResolvedRoute, out: &mut dyn Write, err
             install_client(s, client, literal);
             s.agent.model_id = route.model_id.clone();
             s.agent.thinking = effort_for(None, route.thinking_dialect);
+            s.agent.constitution = Some(s.law_constitution.clone());
+            s.agent.context_limit = route.context;
             s.route = route;
             let _ = writeln!(out, "switched to {}", s.route.id);
         }
@@ -314,16 +333,20 @@ fn print_tools(s: &ChatSession, out: &mut dyn Write, err: &mut dyn Write) {
 }
 
 /// Footer: the always-on cost HUD line, e.g.
-/// `deepseek-v4-flash | peak 2x until 22:00 | session tokens 812 in / 340 out / 512 cached`.
+/// `deepseek-v4-flash | peak 2x until 22:00 | session tokens 812 in / 340 out / 512 cached | cache 63%`.
 fn footer(s: &ChatSession) -> String {
-    format!(
+    let mut line = format!(
         "{} | {} | session tokens {} in / {} out / {} cached",
         s.route.id,
         peak_status(&s.route, (s.now)(), s.local_offset),
         s.session_in,
         s.session_out,
         s.session_cached
-    )
+    );
+    if let Some(pct) = cache_hit_pct(s.session_in, s.session_cached) {
+        line.push_str(&format!(" | cache {pct:.0}%"));
+    }
+    line
 }
 
 /// Peak indicator: "peak 2x until HH:MM" (window boundary shown in the user's
@@ -430,6 +453,7 @@ mod tests {
         wire = "openai"
         vault_entry = "deepseek"
         thinking_dialect = "deepseek-nhm"
+        context = 1000
 
         [routes.deepseek-v4-flash.price]
         currency = "CNY"
@@ -451,6 +475,7 @@ mod tests {
         base_url = "https://example.invalid"
         wire = "openai"
         vault_entry = "kimi"
+        context = 2000
 
         [routes."kimi-k2.6".price]
         currency = "USD"
@@ -558,7 +583,7 @@ mod tests {
         let agent = AgentLoop {
             client,
             tools: builtin_tools(),
-            ctx: ToolCtx { workdir: tmp.to_path_buf(), approve: Box::new(|_| false) },
+            ctx: ToolCtx::new(tmp.to_path_buf(), Box::new(|_| false)),
             receipts: ReceiptWriter {
                 path: tmp.join("receipts.jsonl"),
                 scrubber: Scrubber::new(key_literals.clone()),
@@ -566,12 +591,15 @@ mod tests {
             model_id: route.model_id.clone(),
             max_turns: 20,
             thinking: effort_for(None, route.thinking_dialect),
+            constitution: Some("test constitution\n".into()),
+            context_limit: route.context,
             on_event: None,
         };
         let session = ChatSession {
             resolver,
             route,
             agent,
+            law_constitution: "test constitution\n".into(),
             history: Vec::new(),
             session_in: 0,
             session_out: 0,
@@ -615,6 +643,8 @@ mod tests {
         // Active route changed.
         assert_eq!(s.route.id, "kimi-k2.6");
         assert_eq!(s.agent.model_id, "kimi-k2.6");
+        assert_eq!(s.agent.context_limit, Some(2000));
+        assert_eq!(s.agent.constitution.as_deref(), Some("test constitution\n"));
     }
 
     #[test]
@@ -741,7 +771,9 @@ mod tests {
         let (out, err) = drive(&mut s, &["hello"]);
         assert!(out.contains("ok"), "answer on stdout: {out}");
         assert!(
-            err.contains("deepseek-v4-flash | off-peak | session tokens 12 in / 7 out / 4 cached"),
+            err.contains(
+                "deepseek-v4-flash | off-peak | session tokens 12 in / 7 out / 4 cached | cache 33%"
+            ),
             "footer on stderr: {err}"
         );
     }
@@ -752,7 +784,9 @@ mod tests {
         let (mut s, _calls) = test_session("deepseek-v4-flash", tmp.path());
         let (_out, err) = drive(&mut s, &["one", "/model kimi-k2.6", "two"]);
         assert!(
-            err.contains("kimi-k2.6 | off-peak | session tokens 24 in / 14 out / 8 cached"),
+            err.contains(
+                "kimi-k2.6 | off-peak | session tokens 24 in / 14 out / 8 cached | cache 33%"
+            ),
             "cumulative after switch: {err}"
         );
     }
@@ -763,9 +797,20 @@ mod tests {
         let (mut s, _calls) = test_session("unpriced", tmp.path());
         let (_out, err) = drive(&mut s, &["hello"]);
         assert!(
-            err.contains("unpriced | no price data | session tokens 12 in / 7 out / 4 cached"),
+            err.contains(
+                "unpriced | no price data | session tokens 12 in / 7 out / 4 cached | cache 33%"
+            ),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn footer_omits_cache_chip_before_any_usage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (s, _calls) = test_session("deepseek-v4-flash", tmp.path());
+        let line = footer(&s);
+        assert!(line.contains("session tokens 0 in / 0 out / 0 cached"));
+        assert!(!line.contains("| cache"), "got: {line}");
     }
 
     // ------------------------------------------------------------- loop basics

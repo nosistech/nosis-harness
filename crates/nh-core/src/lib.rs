@@ -96,6 +96,15 @@ pub mod wire {
         pub cached_tokens: Option<u64>,
     }
 
+    /// Session cache-hit percentage from cumulative usage.
+    /// Returns `None` when there are no prompt tokens to divide by.
+    pub fn cache_hit_pct(prompt_tokens: u64, cached_tokens: u64) -> Option<f64> {
+        if prompt_tokens == 0 {
+            return None;
+        }
+        Some((100.0 * cached_tokens as f64 / prompt_tokens as f64).clamp(0.0, 100.0))
+    }
+
     #[derive(Debug, Clone)]
     pub struct ChatResponse {
         pub message: ChatMessage,
@@ -606,6 +615,13 @@ pub mod wire {
     mod tests {
         use super::*;
 
+        #[test]
+        fn cache_hit_percentage_is_optional_and_clamped() {
+            assert_eq!(cache_hit_pct(0, 10), None);
+            assert_eq!(cache_hit_pct(20, 5), Some(25.0));
+            assert_eq!(cache_hit_pct(10, 20), Some(100.0));
+        }
+
         fn msg(role: &str, content: Option<&str>) -> ChatMessage {
             ChatMessage {
                 role: role.into(),
@@ -1055,6 +1071,11 @@ pub mod agent {
     use crate::wire::{ChatClient, ChatMessage, ChatRequest, ThinkingEffort, ToolCallReq, Usage};
     use nh_tools::{Tool, ToolCtx};
 
+    const COMPACT_AT: f64 = 0.70;
+    const COMPACT_TARGET: f64 = 0.50;
+    const KEEP_RECENT: usize = 2;
+    const MESSAGE_OVERHEAD_TOKENS: u64 = 4;
+
     pub struct AgentLoop {
         pub client: Box<dyn ChatClient>,
         pub tools: Vec<Box<dyn Tool>>,
@@ -1065,6 +1086,10 @@ pub mod agent {
         /// Thinking effort sent with every request; the client maps it to the
         /// route's dialect (the loop stays policy-free). Default: no thinking.
         pub thinking: ThinkingEffort,
+        /// Byte-stable system prefix. `None` preserves the M0/M1 default.
+        pub constitution: Option<String>,
+        /// Effective context window. `None` disables compaction.
+        pub context_limit: Option<u64>,
         /// Progress callback: invoked with one short line per tool call
         /// ("turn 2: edit_file src/lib.rs"). Core stays print-free — nh-cli
         /// wires this to its own printer.
@@ -1093,22 +1118,48 @@ pub mod agent {
         ) -> anyhow::Result<(String, Receipt)> {
             let specs: Vec<nh_tools::ToolSpec> = self.tools.iter().map(|t| t.spec()).collect();
             if history.is_empty() {
-                let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-                let system = format!(
-                    "You are a coding agent. Complete the user's task using the available \
-                     tools, then reply with a short final answer. Available tools: {}.",
-                    tool_names.join(", ")
-                );
+                let system = self.constitution.clone().unwrap_or_else(|| {
+                    let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+                    format!(
+                        "You are a coding agent. Complete the user's task using the available \
+                         tools, then reply with a short final answer. Available tools: {}.",
+                        tool_names.join(", ")
+                    )
+                });
                 history.push(plain_msg("system", system));
             }
             history.push(plain_msg("user", task.to_string()));
+
+            #[cfg(debug_assertions)]
+            let prefix_bytes = message_bytes(&history[0]);
 
             let mut turns: u32 = 0;
             let mut tool_calls: u32 = 0;
             let mut usage_total = Usage::default();
             let mut saw_usage = false;
+            let mut latest_prompt_tokens = None;
 
             while turns < self.max_turns {
+                #[cfg(debug_assertions)]
+                debug_assert_eq!(message_bytes(&history[0]), prefix_bytes);
+
+                if let Some(limit) = self.context_limit {
+                    let input_tokens =
+                        latest_prompt_tokens.unwrap_or_else(|| estimate_tokens(history));
+                    if input_tokens as f64 >= COMPACT_AT * limit as f64 {
+                        if let Some(compaction) = compact_history(history, limit) {
+                            let pct = context_percentage(input_tokens, limit);
+                            self.emit(&format!(
+                                "context {pct}% — compacted {} earlier messages",
+                                compaction.messages
+                            ));
+                        }
+                    }
+                }
+
+                #[cfg(debug_assertions)]
+                debug_assert_eq!(message_bytes(&history[0]), prefix_bytes);
+
                 turns += 1;
                 let req = ChatRequest {
                     model: self.model_id.clone(),
@@ -1119,6 +1170,8 @@ pub mod agent {
                 let resp = match self.client.complete(&req) {
                     Ok(r) => r,
                     Err(e) => {
+                        #[cfg(debug_assertions)]
+                        debug_assert_eq!(message_bytes(&history[0]), prefix_bytes);
                         let receipt = self.make_receipt(
                             task,
                             turns,
@@ -1131,6 +1184,7 @@ pub mod agent {
                         return Err(e);
                     }
                 };
+                latest_prompt_tokens = resp.usage.as_ref().map(|u| u.prompt_tokens);
                 if let Some(u) = &resp.usage {
                     saw_usage = true;
                     usage_total.prompt_tokens += u.prompt_tokens;
@@ -1142,6 +1196,8 @@ pub mod agent {
                 history.push(resp.message.clone());
                 let calls = resp.message.tool_calls.clone().unwrap_or_default();
                 if calls.is_empty() {
+                    #[cfg(debug_assertions)]
+                    debug_assert_eq!(message_bytes(&history[0]), prefix_bytes);
                     let text = resp.message.content.clone().unwrap_or_default();
                     let receipt = self.make_receipt(
                         task,
@@ -1166,7 +1222,13 @@ pub mod agent {
                         reasoning_content: None,
                     });
                 }
+
+                #[cfg(debug_assertions)]
+                debug_assert_eq!(message_bytes(&history[0]), prefix_bytes);
             }
+
+            #[cfg(debug_assertions)]
+            debug_assert_eq!(message_bytes(&history[0]), prefix_bytes);
 
             let receipt = self.make_receipt(
                 task,
@@ -1235,6 +1297,79 @@ pub mod agent {
             tool_call_id: None,
             reasoning_content: None,
         }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct Compaction {
+        messages: usize,
+    }
+
+    /// Deterministic fallback estimate used when a provider omits usage.
+    fn estimate_tokens(messages: &[ChatMessage]) -> u64 {
+        messages
+            .iter()
+            .map(|message| {
+                let content_bytes = message.content.as_ref().map_or(0, String::len);
+                let tool_call_bytes = message.tool_calls.as_ref().map_or(0, |calls| {
+                    serde_json::to_vec(calls).map_or(0, |serialized| serialized.len())
+                });
+                let bytes = (content_bytes as u64).saturating_add(tool_call_bytes as u64);
+                bytes.div_ceil(4).saturating_add(MESSAGE_OVERHEAD_TOKENS)
+            })
+            .sum()
+    }
+
+    /// Drop the smallest earlier prefix that brings the retained history under
+    /// target. The last two user turns win over the target when both cannot fit.
+    fn compact_history(history: &mut Vec<ChatMessage>, limit: u64) -> Option<Compaction> {
+        let user_indices: Vec<usize> = history
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter_map(|(index, message)| (message.role == "user").then_some(index))
+            .collect();
+        if user_indices.len() <= KEEP_RECENT {
+            return None;
+        }
+
+        let required_position = user_indices.len() - KEEP_RECENT;
+        let required_start = user_indices[required_position];
+        let target = (COMPACT_TARGET * limit as f64) as u64;
+        let prefix_tokens = estimate_tokens(&history[..1]);
+        let start = user_indices[..=required_position]
+            .iter()
+            .copied()
+            .filter(|index| *index > 1)
+            .find(|index| {
+                prefix_tokens.saturating_add(estimate_tokens(&history[*index..])) <= target
+            })
+            .unwrap_or(required_start);
+        if start <= 1 {
+            return None;
+        }
+
+        let messages = start - 1;
+        let tokens = estimate_tokens(&history[1..start]);
+        history.drain(1..start);
+        let original = history[1].content.take().unwrap_or_default();
+        history[1].content = Some(format!(
+            "[nosis] earlier context compacted: {messages} messages, ~{tokens} tokens elided.\n\n{original}"
+        ));
+
+        Some(Compaction { messages })
+    }
+
+    fn context_percentage(input_tokens: u64, limit: u64) -> u64 {
+        if limit == 0 {
+            100
+        } else {
+            (100.0 * input_tokens as f64 / limit as f64).round() as u64
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    fn message_bytes(message: &ChatMessage) -> Vec<u8> {
+        serde_json::to_vec(message).expect("chat messages serialize")
     }
 
     /// "turn 2: edit_file src/lib.rs" — name plus the key argument, kept short.
