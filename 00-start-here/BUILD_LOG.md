@@ -2,6 +2,91 @@
 
 Record every meaningful session here.
 
+## 2026-07-14: M3 Slice A — orchestrator review + commit gate
+
+Builder:
+
+- Claude (Opus 4.8, Claude Code) — M3 orchestrator: resume, verify, adversarial review, gate, commit
+
+What changed:
+
+- No implementation code (orchestrator does not hand-write milestone code). Resumed after a `/clear`
+  with Slice A's disk state unknown; determined it empirically. A transient CRLF/format pass made
+  `git status` show nh-core/nh-tools/nh-vault as modified — `git diff --numstat HEAD` proved ZERO
+  content change (EOL noise only), so the frozen crates were never touched. Let the in-flight Sol
+  codex finish rather than kill a valid build.
+- Read the full nh-tui surface + wiring. Confirmed: RAII terminal guard + panic hook restore on
+  every exit path; the `approve` closure is Mutex-backed (Send+Sync, no new dep) and default-deny on
+  every failure path; exec still routed through the policy guard (never auto-approved); every
+  rendered string passes `nh_vault::safe_line` (scrub + control-char escape); semáforo is a
+  single-state pure reducer; budget is a hard stop; peak_status lifted (not copy-pasted).
+- One finding fed back to Sol as a bounded hardening pass: the safe_line/sanitize_line display-safety
+  primitive was duplicated in nh-tui — lifted into `nh_vault` (additive), reused by nh-cli + nh-tui
+  (§5.2 congruence). Re-verified green after.
+
+Tests/checks run (orchestrator, independent):
+
+- `cargo test --workspace`: 217 passed, 0 failed, 1 ignored.
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+- Env note: Kaspersky/McAfee on-access scanning blocked execution of the freshly-linked 8 MB
+  `wire_clients` test exe (frozen nh-core, green at M2 and in Sol's run); confirmed green after AV was
+  paused. The three-terminal render-artifact smoke on the Predator remains the manual M3 exit check.
+
+Next step:
+
+- Commit Slice A. Then Slice B (trust-dial view + `?` palette).
+
+## 2026-07-14: M3 Slice A display-safety hardening
+
+Builder:
+
+- Codex (GPT-5.6 Sol) - M3 Slice A hardening implementer
+
+What changed:
+
+- Lifted the canonical scrub-then-control-character-escape-then-truncate display helper into
+  additive `nh_vault::safe_line` and `nh_vault::sanitize_line`, with the 500-character cap kept
+  private to nh-vault.
+- Made nh-cli's existing crate-private helper delegate to nh-vault and made nh-tui use the same
+  implementation through its shared scrubber lock. Rendered output and cmd_chat/cmd_run behavior
+  are unchanged.
+- Moved the control-character and truncation tests to nh-vault while retaining the existing
+  nh-cli redaction and nh-tui rendered-line safety regressions. Recorded the §5.2 congruence
+  amendment in `CONTRACTS_M3.md` §7.
+
+Tests/checks run:
+
+- `cargo test --workspace`: 217 passed, 0 failed, 1 ignored (pre-existing keyring round-trip).
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+
+Next step:
+
+- Orchestrator commit gate for M3 Slice A.
+
+## 2026-07-13: M3 Slice A - TUI core
+
+Builder:
+
+- Codex (GPT-5.6 Sol) - M3 Slice A implementer
+
+What changed:
+
+- Added the `nh-tui` library crate: a channel-backed single-worker agent boundary, pure semaforo reducer, conservative full-screen layout, inline approval flow, scrubbed/sanitized rendering, cumulative usage and budget HUD, hard budget stop, keyless task errors, and panic-safe RAII terminal restoration.
+- Added `nh tui [--model <id>] [--budget <tokens>]`, mirroring chat's catalog/law setup and warning order while keeping the terminal launch keyless.
+- Lifted peak/off-peak status into `nh_routes::ResolvedRoute::peak_status` and shared it with chat and TUI; recorded the additive decision in `CONTRACTS_M3.md` section 7.
+- Added headless reducer, approval, HUD, budget, redaction/control-character, terminal teardown, worker-history, and keyless-start coverage. Slice B/C keys remain reserved no-ops.
+
+Tests/checks run:
+
+- `cargo test --workspace`: 217 passed, 0 failed, 1 ignored (pre-existing keyring round-trip).
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+- `nh tui --help`: compiled command exposes the locked model and budget options.
+- Live visual verification on Windows Terminal, VS Code terminal, and ConHost remains the human M3 Slice A exit check.
+
+Next step:
+
+- Run the three-terminal verify-live matrix, then orchestrator review and commit gate before Slice B.
+
 ## 2026-07-13: M2 orchestrator review + commit gate
 
 Builder:

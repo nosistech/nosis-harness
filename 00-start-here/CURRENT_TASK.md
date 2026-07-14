@@ -2,80 +2,70 @@
 
 ## Immediate Goal
 
-Begin **M3 — the TUI**. M2 (context engine + law) is DONE, orchestrator-verified, and
-committed. M3 is the UX-critical milestone: it is where "UX IS THE PRODUCT" matters most
-(memory [[ux-first-and-the-law]]). Same build loop: Claude plans + writes the contract/brief +
-gates; **GPT-5.6 Sol xhigh implements** via `codex exec` (memory [[m2-m5-codex-sol-directive]]).
+Drive the **M3 (TUI) build loop**. M0/M1/M2 DONE + committed (HEAD `3155949`). **M3 Slice A
+(nh-tui render core + `nh tui`) is DONE**: implemented by Sol, orchestrator-verified (217 pass / 1
+ignored / 0 fail, clippy clean), one hardening pass (display-safety `safe_line` lifted into
+nh-vault), **committed**. Next = **Slice B** (trust-dial view + `?` palette), then **Slice C**
+(timeline view + notify).
 
-## Why This Matters
+## Roles (fixed)
 
-M3 is the face of the harness — the semáforo, the cost HUD, the timeline scrubber, the trust
-dial, the `?` palette. If it renders cleanly and every line is short/concrete/actionable, the
-product feels trustworthy. If it has renderer artifacts on the Predator's terminals, it does not.
+- **Orchestrator = Opus 4.8, high effort** (this session): plans, writes contracts/briefs, runs
+  gates, adversarially reviews, commits, docs. Does NOT hand-write milestone code.
+- **Executor = GPT-5.6 Sol xhigh** via `codex exec` — writes all M3 implementation. Memory
+  [[m2-m5-codex-sol-directive]], [[ux-first-and-the-law]], [[build-loop-resume]].
 
-## Status — M2 COMPLETE (committed)
+## Executor invocation (proven working)
 
-Both exit criteria met and proven by test name; `cargo test --workspace` = 206 passed / 0
-failed / 1 ignored; `cargo clippy --workspace --all-targets -- -D warnings` clean.
+```
+codex exec --skip-git-repo-check -s workspace-write -m gpt-5.6-sol \
+  -c model_reasoning_effort=xhigh "$(cat /c/Users/capv2/AppData/Local/Temp/<brief>.txt)" < /dev/null
+```
+Run in background (harness-tracked); verify empirically after (git diff --numstat HEAD is truth,
+git status EOL flags are noise). Do NOT start a second nosis codex while one writes nosis.
 
-- **Slice A — `crates/nh-law`**: constitution loader + trust/write-hold policy. Byte-stable
-  assembly; repo law cannot raise autonomy or auto-approve (security boundary); bundled block
-  globs → `Verdict::Block`; in-crate glob matcher (case-sensitive by design, §1.4).
-- **Slice B — nh-core context engine**: byte-stable `history[0]` prefix (debug-asserted every
-  turn), `cache_hit_pct`, compaction at 70% (KEEP_RECENT=2, target 0.50, cuts only at user
-  boundaries so tool-pairs never split, marker folded into first retained user msg).
-  **Exit #1: 50-turn cache-hit = 97.70% (>60%)** — `stable_constitution_exceeds_sixty_percent_cache_hits_over_fifty_turns`.
-- **Slice C — nh-tools guard (§2) + nh-cli wiring (§4)**: `Access`/`Guard`/`GuardFn`,
-  `ToolCtx::new`/`with_guard`; edit/exec consult the guard with the workdir-RELATIVE
-  forward-slashed path; Block/Ask denials stay Ok-shaped; `nh run --autonomy ask|auto`; law
-  wired into run + chat (warnings, constitution, context limit, route-switch refresh); cache
-  chips; `nh init` writes `.nosis/law.toml`. **Exit #2: `protected_path_is_blocked_at_auto_end_to_end`**
-  runs the real binary at `--autonomy auto`, the model's edit of `.nosis/law.toml` is blocked
-  (model-readable line), the file is byte-unchanged, exit 0.
-- **Hardening pass (Sol)**: removed dead `exec_ask` plumbing; made the protected-path autonomy
-  test hermetic; documented the case-fold write-hold safety invariant in nh-tools.
+## Slice A — DONE (committed 2026-07-14)
 
-Orchestrator adversarial-review conclusions (see BUILD_LOG M2 entries): write-hold is sound —
-`exec_verdict` can only return Block/Ask (never Allow), Block wins before `is_file`, symlinks
-resolve to canonical target, and the Windows case-fold new-file bypass is NOT reachable via
-`EditFile` (existing-file-only + `canonicalize` normalizes case). Documented for any future
-file-creation tool.
+`crates/nh-tui` (ratatui + crossterm) + `nh tui [--model][--budget]` in nh-cli. Channel-backed
+single worker; Mutex-backed default-deny approval (Send+Sync, no new dep); exec still policy-gated;
+RAII terminal guard + panic hook restore on every exit path; every rendered string via
+`nh_vault::safe_line` (scrub + control-char escape); single-state semáforo pure reducer; cost HUD +
+hard `--budget` stop; bell on entering Waiting. `peak_status` and the `safe_line`/`sanitize_line`
+display-safety primitive both lifted to shared crates (nh-routes, nh-vault) — §7 amendments logged.
+Reserved no-ops for Slice B/C: `?`, `t`, `R`. nh-core/nh-tools untouched.
 
-## Next Action (orchestrator = Opus 4.8 high; executor = GPT-5.6 Sol xhigh)
+Verify-live still open: three-terminal render-artifact smoke (Windows Terminal + VS Code terminal +
+ConHost) on the Predator — the M3 exit criterion, human-checked (not unit-testable).
 
-1. **Scope M3.** Read the master plan §6/§4.5 (TUI) + `MILESTONES.md` M3 + `02-architecture/`
-   + memory [[ux-first-and-the-law]]. Decide the crate shape (likely a new `nh-tui` crate or a
-   `nh-cli` TUI module) and the terminal backend (ratatui/crossterm is the obvious fit; confirm
-   against THE LAW: lightweight, no heavy deps). Exit criterion is renderer-artifact-free on
-   Windows Terminal, VS Code terminal, and ConHost — a Windows-native rendering concern.
-2. **Write `CONTRACTS_M3.md`** (locked public APIs, same pattern as CONTRACTS_M1/M2) + a brief,
-   split into 2–3 slices (large milestone). Candidate slices: (A) status/semáforo + cost HUD
-   render core; (B) timeline scrubber + side-git snapshots + trust dial; (C) `?` palette w/ live
-   MCP state + Telegram notify hook. Keep each slice small.
-3. **Drive Sol** per slice: `codex exec --skip-git-repo-check -s workspace-write -m gpt-5.6-sol
-   -c model_reasoning_effort=xhigh "<brief>" < /dev/null` (background; stdin from /dev/null to
-   avoid the stdin-wait hang; watch for the ~0-CPU stall = kill + retry). Do NOT run two codexes
-   on nosis at once.
-4. **Gate each slice**: `cargo test --workspace` + `cargo clippy … -D warnings` + adversarial
-   review vs THE LAW + the UX rule (every line short/concrete/actionable; no stack traces;
-   drop-if-hard). Rendering can't be proven by unit tests alone — plan a real-terminal smoke on
-   the three Windows terminals for the exit criterion (may need Carlos to eyeball, or a scripted
-   capture). Send findings back to Sol as one hardening pass.
-5. Update `BUILD_LOG.md` + this file; `git commit` M3 together (trailer
-   `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`; body credits Sol as implementer).
+## Next Action — Slice B (CONTRACTS_M3 §2)
+
+1. Write `%TEMP%\brief_m3_sliceB.txt` from CONTRACTS_M3 §2 (trust-dial VIEW over `nh_law::Policy`
+   toggled by `t`; `?` fuzzy palette listing TUI commands + built-in tools + MCP tools/servers with
+   LIVE state from `nh_tools::mcp`). No new deps. Read-only law view. If exposing compiled rules
+   needs a read-only accessor on `nh_law::Policy`, that is an additive §7 amendment (owned strings).
+2. Drive Sol (background codex exec), let it finish, verify empirically.
+3. Verify against the checklist: no nh-core/nh-tools edits; palette filter is a PURE function over a
+   tool list (headless-testable); MCP state string derives from `McpToolset.warnings` (broken
+   mcp.toml → servers shown `stale`/`discover-only`, never a crash); every rendered string scrubbed;
+   `Esc` closes, typing filters, `Enter` runs a command (tools show one-line desc only).
+4. Gate: `cargo test --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`.
+   (If Kaspersky is on, it blocks the 8 MB `wire_clients` test exe — pause AV or exclude
+   `...\nosis-Harness\target`; wire_clients is frozen nh-core, green.)
+5. Adversarial + UX review vs THE LAW + SECURITY_MODEL. One bounded hardening pass to Sol; re-verify.
+6. Update BUILD_LOG + this file; commit Slice B. Then Slice C (§3). Report at the M3 boundary.
 
 ## Do Not Do
 
 - Do NOT hand-write milestone implementation code — Sol implements; Claude plans + gates only.
-- Do NOT start a second codex on nosis while one is running (concurrent workspace-write conflicts).
-- Do NOT commit a slice until it is verified AND its adversarial review + hardening pass is done.
+- Do NOT start a second codex ON NOSIS while one is writing nosis (Carlos's other codex sessions are
+  fine — verify a process is actually writing nosis via `git status`, not by name).
+- Do NOT commit a slice until it is verified AND its hardening pass is done.
 - If `gpt-5.6-sol` stops resolving, or Sol fails the same gate twice → STOP and tell Carlos
   (don't silently fall back to Terra).
 
 ## Definition Of Done (M3)
 
-- Full session renders on Windows Terminal, VS Code terminal, and ConHost with zero renderer
-  artifacts (the milestone exit criterion).
-- Semáforo, cost HUD, timeline scrubber + side-git snapshots, trust dial, `?` palette with live
-  MCP state, Telegram notify hook — all present, each surface a short/scannable line.
+- Full session renders artifact-free on Windows Terminal + VS Code terminal + ConHost (manual smoke).
+- Semáforo, cost HUD, trust-dial view, timeline view + diff-inspect, `?` palette w/ live MCP state,
+  notify hook (bell + Telegram) — all present, each a short/scannable surface.
 - `cargo test --workspace` + `cargo clippy … -D warnings` green; BUILD_LOG updated; committed.
