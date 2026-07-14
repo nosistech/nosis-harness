@@ -2,6 +2,77 @@
 
 Record every meaningful session here.
 
+## 2026-07-14: M3 Slice C — orchestrator review + commit gate (M3 CONTENT-COMPLETE)
+
+Builder:
+
+- Claude (Opus 4.8, Claude Code) — M3 orchestrator: verify, adversarial review, gate, commit
+
+What changed:
+
+- No implementation code. Verified Slice C empirically: frozen nh-core/nh-tools/nh-law/nh-routes
+  diffs are EMPTY; no new workspace dep (nh-tui uses the existing `reqwest.workspace`). Scope is
+  nh-tui + cmd_tui + docs only.
+- Adversarial review of the notify path (highest risk): the Telegram bot token is fetched on the
+  side thread and used only inline in the URL; EVERY reqwest/vault error is mapped to a fixed
+  "telegram notify failed" string, so a URL-with-token can never reach a rendered error. Redirects
+  disabled (Policy::none()), fixed host, 3s/5s timeouts — no token-exfil-via-redirect, no hang. The
+  body passes safe_line + a 160-char cap (proven redacted/control-safe). The POST runs on a
+  short-lived thread drained via a failure channel — render never blocks; notify fires once per
+  Waiting/Blocked transition, not on repeats. Timeline is strictly view-only: `R` shows only the
+  deferral note (no restore, no snapshot store), every rail/detail line scrubbed (TestBackend render
+  test with an sk- secret confirms), compaction flag is task-local. No confirmed defect → no
+  hardening round-trip.
+
+Tests/checks run (orchestrator, independent):
+
+- `cargo test --workspace`: 239 passed, 0 failed, 1 ignored (+12 over Slice B).
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+
+Next step:
+
+- Commit Slice C — **M3 is content-complete** (all §1/§2/§3 surfaces present + green). Remaining M3
+  exit item is the MANUAL three-terminal render smoke on the Predator (Windows Terminal + VS Code
+  terminal + ConHost) and the live Telegram send (needs Carlos's KORVIN bot token). Then M4 (fleet).
+
+## 2026-07-14: M3 Slice C — timeline view + Telegram notifications
+
+Builder:
+
+- Codex (GPT-5.6 Sol) — M3 Slice C implementer
+
+What changed:
+
+- Added the view-only `l` timeline overlay over in-memory task receipts and answers. Rows show the
+  sequential turn, outcome, input/output/cached tokens, and the M2 compaction marker; Up/Down scrub,
+  Enter inspects the selected receipt and answer, and `R` only shows the locked restore deferral.
+  Added the timeline to the `?` palette. No snapshot store or restore path was added.
+- Forwarded successful receipts through an additive nh-tui worker event while preserving the
+  existing Usage/Answer flow. Failed tasks also receive one friendly fail projection without
+  changing frozen nh-core. Compaction is detected solely from the existing `context NN% —
+  compacted ...` progress line for the active task.
+- Added optional `.nosis/notify.toml` loading once in `cmd_tui`, before terminal takeover. Missing or
+  broken config becomes bell-only with one scrubbed stderr warning. Telegram tokens are fetched as
+  vault entry `telegram` on a short-lived side thread; the fixed-host POST has short timeouts and
+  redirects disabled, and URL/token details never enter UI errors.
+- Added pure short notification bodies, transition-driven sends for Waiting/Blocked, an injectable
+  sender seam, and one dim `telegram notify failed` transcript line per failed attempt. Every
+  timeline and notification body string passes the shared nh-vault scrub/display-safety path.
+- Added headless coverage for receipt projection, task-local compaction, timeline selection/inspect,
+  disabled restore, timeline rendering safety, missing/broken/valid config, disabled zero-send,
+  injected successful sends, short scrubbed messages, and one-line failure degradation. nh-core and
+  nh-tools remain unchanged.
+
+Tests/checks run:
+
+- `cargo test --workspace`: 239 passed, 0 failed, 1 ignored (pre-existing keyring round-trip).
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+
+Next step:
+
+- Orchestrator review/commit gate. Slice C's only verify-live item is the real Telegram send with
+  Carlos's bot token/chat id. The previously-open M3 three-terminal renderer smoke remains manual.
+
 ## 2026-07-14: M3 Slice B — orchestrator review + commit gate
 
 Builder:

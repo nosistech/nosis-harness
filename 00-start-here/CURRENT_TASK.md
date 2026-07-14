@@ -24,6 +24,20 @@ codex exec --skip-git-repo-check -s workspace-write -m gpt-5.6-sol \
 Run in background (harness-tracked); verify empirically after (git diff --numstat HEAD is truth,
 git status EOL flags are noise). Do NOT start a second nosis codex while one writes nosis.
 
+## Slice C — DONE (committed 2026-07-14) — M3 CONTENT-COMPLETE
+
+Timeline VIEW (`l`): left-rail turn list from in-memory receipts+answers (turn/outcome/tokens +
+compaction marker), Up/Down scrub, Enter inspects the receipt+answer, `R` shows the deferral note
+only (no restore, no snapshot store). Added to the `?` palette. Notifications: `.nosis/notify.toml`
+([telegram] enabled + chat_id; token via vault entry `telegram`), loaded once in cmd_tui; on
+entering Waiting/Blocked a short scrubbed body POSTs to Telegram on a short-lived side thread
+(redirects off, 3s/5s timeouts, every error → fixed "telegram notify failed" so the token never
+leaks), fires once per transition, failure = one dim line. Additive `AgentEvent::TaskReceipt`;
+nh-core/nh-tools untouched; no new dep (existing reqwest). Gate: 239 pass / 1 ignored, clippy clean.
+
+Remaining M3 exit items (both need Carlos, not code): (1) three-terminal render smoke on the
+Predator; (2) live Telegram send with the KORVIN bot token.
+
 ## Slice B — DONE (committed 2026-07-14)
 
 Trust-dial VIEW (`t`) + `?` discoverability palette. Additive `nh_law::PolicyView` + `Policy::view()`
