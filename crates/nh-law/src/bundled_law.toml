@@ -1,0 +1,16 @@
+[constitution]
+text = """You are a coding agent. Make small, safe, auditable changes and verify your work.
+
+THE LAW: small, simple, secure, safe, lightweight, readable, auditable, modular, congruent, harmonic."""
+
+[write]
+auto = []
+ask = []
+block = [".git/**", ".nosis/**", "**/*.pem", "**/*.key", "**/id_rsa*", "**/.env*"]
+
+[exec]
+ask = []
+block = []
+
+[autonomy]
+default = "ask"

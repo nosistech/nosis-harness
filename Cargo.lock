@@ -746,6 +746,7 @@ dependencies = [
  "chrono",
  "clap",
  "nh-core",
+ "nh-law",
  "nh-routes",
  "nh-tools",
  "nh-vault",
@@ -769,6 +770,15 @@ dependencies = [
  "serde_json",
  "tempfile",
  "zeroize",
+]
+
+[[package]]
+name = "nh-law"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "toml",
 ]
 
 [[package]]

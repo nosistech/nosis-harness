@@ -5,6 +5,7 @@ members = [
     "crates/nh-routes",
     "crates/nh-tools",
     "crates/nh-vault",
+    "crates/nh-law",
     "crates/nh-cli",
 ]
 

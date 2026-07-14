@@ -2,6 +2,116 @@
 
 Record every meaningful session here.
 
+## 2026-07-13: M2 orchestrator review + commit gate
+
+Builder:
+
+- Claude (Opus 4.8, Claude Code) — M2 orchestrator: verification, adversarial review, gate, commit
+
+What changed:
+
+- No implementation code (orchestrator does not hand-write milestone code). Read every M2 slice (nh-law, nh-core context engine, nh-tools guard, nh-cli wiring, m2_exit e2e) and independently re-ran the gate — confirmed green, not just Sol's self-report.
+- Adversarial review vs THE LAW + SECURITY_MODEL. The write-hold holds: guard receives the workdir-relative `/`-joined path; `Verdict::Block` wins before the `is_file` check; symlinks resolve to their canonical target (escapes caught by `starts_with`); and structurally `exec_verdict` can only return `Block`/`Ask` — never `Allow` — so exec is never auto-approved even at `--autonomy auto`. Confirmed the Windows case-fold new-file bypass is NOT reachable through `EditFile` (it only mutates existing files, whose case `canonicalize` normalizes before the guard sees them; missing paths bail before any write).
+- Fed three confirmed findings back to Sol as ONE bounded hardening pass (dead `exec_ask`, non-hermetic protected-path test, undocumented case-fold invariant); re-verified after.
+
+Tests/checks run (orchestrator, independent):
+
+- `cargo test --workspace`: 206 passed, 0 failed, 1 ignored (pre-existing keyring round-trip).
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+- M2 exit #1 PROVEN by name: `stable_constitution_exceeds_sixty_percent_cache_hits_over_fifty_turns` = 97.70% (> 60%).
+- M2 exit #2 PROVEN by name: `protected_path_is_blocked_at_auto_end_to_end` — real `nh run --autonomy auto`, model-readable law block, `.nosis/law.toml` byte-unchanged, exit 0.
+
+Next step:
+
+- Commit all of M2 together, then M3 (TUI).
+
+## 2026-07-13: M2 bounded hardening pass
+
+Builder:
+
+- Codex (GPT-5.6 Sol) — M2 hardening executor
+
+What changed:
+
+- Removed the behaviorless compiled `exec_ask` state and matching work while preserving `[exec] ask` TOML compatibility; shell execution still blocks configured commands and asks for every other command.
+- Made the bundled protected-path autonomy test independent of the developer's real home law.
+- Documented why existing-file canonicalization makes the case-sensitive write-hold safe on case-insensitive filesystems, plus the required guard hardening for any future file-creation tool.
+
+Tests/checks run:
+
+- `cargo test --workspace`: 206 passed, 0 failed, 1 ignored (pre-existing keyring round-trip).
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+
+Next step:
+
+- M2 reviewer and commit gate.
+
+## 2026-07-13: M2 Slice C — nh-tools guard + nh-cli law wiring
+
+Builder:
+
+- Codex (GPT-5.6 Sol) — M2 Slice C executor
+
+What changed:
+
+- Added the locked nh-tools `Access` / `Guard` / `GuardFn` surface and `ToolCtx::new` / `with_guard`. `edit_file` now evaluates normalized workdir-relative forward-slashed paths before any file check or write; Block and Ask denials stay Ok-shaped. `exec_shell` evaluates the command before execution, while shipped policy still routes every non-blocked command through the existing approval gate. MCP adapters retain their independent M1 trust logic.
+- Wired nh-law into both `nh run` and `nh chat`: scrubbed non-fatal warnings, byte-stable constitution, route context windows, policy-backed tool guards, and route-switch context refresh. Added optional `nh run --autonomy ask|auto` with one translation function.
+- Added conditional cache-hit chips to the run summary and chat footer. `nh init` now creates `.nosis/law.toml` from the starter policy without overwriting it.
+- Added the process-level M2 exit test `protected_path_is_blocked_at_auto_end_to_end`; it runs `nh run --autonomy auto`, observes the model-readable law block, and proves `.nosis/law.toml` is unchanged.
+
+Tests/checks run:
+
+- `cargo test --workspace`: 206 passed, 0 failed, 1 ignored (pre-existing keyring round-trip).
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+- Keyless smoke: `echo /quit | nh chat` exited 0 with one actionable missing-key warning.
+
+Next step:
+
+- Orchestrator adversarial review and M2 commit gate.
+
+## 2026-07-13: M2 Slice B — nh-core context engine
+
+Builder:
+
+- Codex (GPT-5.6 Sol) — M2 Slice B executor
+
+What changed:
+
+- Added the locked `AgentLoop.constitution` and `AgentLoop.context_limit` surfaces. A supplied constitution is installed verbatim only when session history is empty; the existing coding-agent/tool-list system message remains the `None` fallback.
+- Added the pure `wire::cache_hit_pct` metric and mechanical 70% context compaction. Compaction preserves the byte-identical system prefix, retains at least two recent user turns from a user boundary, keeps complete tool-call/result groups and reasoning bytes, folds the audit marker into the first retained user message, and emits one concise event.
+- Added context-engine integration coverage for prefix stability, usage-omitted token estimation, compaction invariants, disabled compaction, and the 50-turn prefix-cache exit criterion. The deterministic mock observed a 97.70% cumulative cache-hit rate.
+- Updated the existing `AgentLoop` literals in nh-core tests and nh-cli with `constitution: None` and `context_limit: None`; nh-cli behavior is otherwise unchanged in this slice.
+
+Tests/checks run:
+
+- `cargo test --workspace`: 195 passed, 0 failed, 1 ignored (pre-existing keyring round-trip).
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+
+Next step:
+
+- M2 Slice C: nh-tools guard enforcement and nh-cli law/autonomy/cache-HUD wiring.
+
+## 2026-07-13: M2 Slice A — nh-law leaf crate
+
+Builder:
+
+- Codex (GPT-5.6 Sol) — M2 Slice A executor
+
+What changed:
+
+- Added the `nh-law` leaf crate with the locked constitution, policy, loader, and public types from `CONTRACTS_M2.md` section 1. Bundled and starter policy remain TOML data; the crate depends only on workspace `serde`, `toml`, and `anyhow` plus std.
+- Implemented byte-stable constitution assembly, non-fatal layered loading, CLI/user/bundled autonomy precedence, unioned protections, the repo-cannot-weaken boundary, and the in-crate segment glob matcher. Repository autonomy and auto-approval attempts are ignored with the required warning.
+- Added 11 unit tests covering assembly stability/order/omission, glob and exec matching, verdict precedence, bundled protected paths, source precedence, malformed input, unknown autonomy, and repo-law restrictions.
+
+Tests/checks run:
+
+- `cargo test --workspace`: 191 passed, 0 failed, 1 ignored (pre-existing keyring round-trip).
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+
+Next step:
+
+- M2 Slice B: nh-core stable-prefix cache discipline, cache metric, and compaction.
+
 ## 2026-07-13: M1 build finalized (Fable 5 multi-agent workflow)
 
 Builder:

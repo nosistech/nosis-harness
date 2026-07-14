@@ -10,6 +10,14 @@ mod cmd_init;
 mod cmd_key;
 mod cmd_run;
 
+fn guard_from(verdict: nh_law::Verdict) -> nh_tools::Guard {
+    match verdict {
+        nh_law::Verdict::Allow => nh_tools::Guard::Allow,
+        nh_law::Verdict::Ask => nh_tools::Guard::Ask,
+        nh_law::Verdict::Block(reason) => nh_tools::Guard::Block(reason),
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "nh", about = "Nosis Harness — multi-model terminal agent", version)]
 struct Cli {
@@ -39,6 +47,9 @@ enum Cmd {
         /// Thinking effort (default picked per route dialect)
         #[arg(long, value_enum)]
         think: Option<cmd_run::ThinkArg>,
+        /// Session autonomy override (default comes from law files)
+        #[arg(long, value_enum)]
+        autonomy: Option<cmd_run::AutonomyArg>,
     },
     /// Chat with a model — /model and /provider switch routes mid-session
     Chat {
@@ -59,7 +70,9 @@ fn main() -> anyhow::Result<()> {
     let result = match cli.cmd {
         Cmd::Init => cmd_init::run(),
         Cmd::Key { action: KeyAction::Add { entry } } => cmd_key::add(&entry),
-        Cmd::Run { task, model, max_turns, think } => cmd_run::run(&task, &model, max_turns, think),
+        Cmd::Run { task, model, max_turns, think, autonomy } => {
+            cmd_run::run(&task, &model, max_turns, think, autonomy)
+        }
         Cmd::Chat { model } => cmd_chat::run(&model),
     };
     // UX: one friendly line, what to do next, exit 1. Never a debug dump.
@@ -101,11 +114,12 @@ mod tests {
     fn parses_run_with_defaults() {
         let cli = Cli::try_parse_from(["nh", "run", "fix the failing test"]).unwrap();
         match cli.cmd {
-            Cmd::Run { task, model, max_turns, think } => {
+            Cmd::Run { task, model, max_turns, think, autonomy } => {
                 assert_eq!(task, "fix the failing test");
                 assert_eq!(model, "deepseek-v4-flash");
                 assert_eq!(max_turns, 20);
                 assert_eq!(think, None, "no --think = per-dialect default");
+                assert_eq!(autonomy, None, "no --autonomy = law-file default");
             }
             _ => panic!("expected run"),
         }
@@ -124,11 +138,12 @@ mod tests {
         ])
         .unwrap();
         match cli.cmd {
-            Cmd::Run { task, model, max_turns, think } => {
+            Cmd::Run { task, model, max_turns, think, autonomy } => {
                 assert_eq!(task, "review the diff");
                 assert_eq!(model, "deepseek-v4-pro");
                 assert_eq!(max_turns, 5);
                 assert_eq!(think, None);
+                assert_eq!(autonomy, None);
             }
             _ => panic!("expected run"),
         }
@@ -156,6 +171,23 @@ mod tests {
     #[test]
     fn run_rejects_unknown_think_level() {
         assert!(Cli::try_parse_from(["nh", "run", "task", "--think", "ultra"]).is_err());
+    }
+
+    #[test]
+    fn parses_optional_run_autonomy() {
+        use cmd_run::AutonomyArg;
+        for (value, want) in [("ask", AutonomyArg::Ask), ("auto", AutonomyArg::Auto)] {
+            let cli = Cli::try_parse_from(["nh", "run", "task", "--autonomy", value]).unwrap();
+            match cli.cmd {
+                Cmd::Run { autonomy, .. } => assert_eq!(autonomy, Some(want)),
+                _ => panic!("expected run"),
+            }
+        }
+    }
+
+    #[test]
+    fn run_rejects_unknown_autonomy() {
+        assert!(Cli::try_parse_from(["nh", "run", "task", "--autonomy", "always"]).is_err());
     }
 
     #[test]

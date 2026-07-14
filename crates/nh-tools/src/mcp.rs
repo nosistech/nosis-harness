@@ -467,6 +467,8 @@ impl Tool for McpToolAdapter {
     }
 
     fn execute(&self, args: Value, ctx: &ToolCtx) -> anyhow::Result<String> {
+        // MCP adapters keep their M1 trust policy and intentionally do not
+        // consult ToolCtx.guard; state-mutating calls still use ctx.approve.
         let tool = &self.entry.info.name;
         match self.trust {
             McpTrust::Block => {
@@ -689,13 +691,13 @@ mod tests {
     fn approving_ctx(answer: bool) -> (ToolCtx, Arc<Mutex<Vec<String>>>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let record = Arc::clone(&seen);
-        let ctx = ToolCtx {
-            workdir: PathBuf::from("."),
-            approve: Box::new(move |description| {
+        let ctx = ToolCtx::new(
+            PathBuf::from("."),
+            Box::new(move |description| {
                 record.lock().unwrap().push(description.to_string());
                 answer
             }),
-        };
+        );
         (ctx, seen)
     }
 

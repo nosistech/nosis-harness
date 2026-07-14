@@ -1,0 +1,20 @@
+# Project law may add instructions and protections. It cannot raise autonomy or
+# auto-approve paths; put those choices in the user-global ~/.nosis/law.toml.
+
+[constitution]
+# text = "Add project-specific operating instructions here."
+
+[write]
+# Paths that always require approval.
+ask = []
+# Paths that are never writable by the agent.
+block = [".git/**", ".nosis/**", "**/*.pem", "**/*.key", "**/id_rsa*", "**/.env*"]
+
+[exec]
+# Shell execution always requires approval. These lists may add explicit policy.
+ask = []
+block = []
+
+# User-global law or the CLI controls autonomy:
+# [autonomy]
+# default = "ask"
