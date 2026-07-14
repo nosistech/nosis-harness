@@ -153,7 +153,7 @@ fn factory_openai_wire_posts_chat_completions_with_route_policy() {
             },
             ChatMessage { tool_call_id: Some("c1".into()), ..msg("tool", Some("data")) },
         ],
-        ThinkingEffort::High,
+        ThinkingEffort::None,
     );
     let resp = client.complete(&request).unwrap();
     assert_eq!(resp.message.content.as_deref(), Some("ok"));
@@ -161,8 +161,8 @@ fn factory_openai_wire_posts_chat_completions_with_route_policy() {
     let captured = rx.recv().unwrap();
     assert_eq!(captured.path, "/chat/completions");
     assert_eq!(captured.headers["authorization"], format!("Bearer {FAKE_SECRET}"));
-    // Route policy captured by the factory: dialect mapping + deepseek quirk.
-    assert_eq!(captured.body["reasoning_effort"], "high");
+    // Route policy captured by the factory: non-thinking omission + deepseek quirk.
+    assert!(captured.body.get("reasoning_effort").is_none());
     assert_eq!(captured.body["messages"][1]["reasoning_content"], "");
 }
 
