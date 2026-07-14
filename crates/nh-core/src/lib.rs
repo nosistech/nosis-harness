@@ -305,15 +305,17 @@ pub mod wire {
     ) {
         match dialect {
             ThinkingDialect::DeepseekNhm => {
-                // verify at live test: param name "reasoning_effort" and its values
-                // are unconfirmed (CONTRACTS_M1.md §6 verify-live ledger).
+                // Live-confirmed 2026-07-14: valid values are high|low|medium|max|xhigh.
+                // M1 uses low|high|max; "none" is invalid, so omit for non-thinking.
                 let value = match effort {
-                    // DeepSeek has no low tier — Low maps down to "none".
-                    ThinkingEffort::None | ThinkingEffort::Low => "none",
-                    ThinkingEffort::High => "high",
-                    ThinkingEffort::Max => "max",
+                    ThinkingEffort::None => None,
+                    ThinkingEffort::Low => Some("low"),
+                    ThinkingEffort::High => Some("high"),
+                    ThinkingEffort::Max => Some("max"),
                 };
-                body["reasoning_effort"] = serde_json::Value::String(value.into());
+                if let Some(value) = value {
+                    body["reasoning_effort"] = serde_json::Value::String(value.into());
+                }
             }
             // Kimi K2.7 has no non-thinking mode — never send a toggle.
             ThinkingDialect::AlwaysThinking => {}
@@ -708,10 +710,16 @@ pub mod wire {
 
         #[test]
         fn deepseek_dialect_maps_every_effort_tier() {
-            // verify at live test: values pinned in CONTRACTS_M1.md §2.3.
+            let mut request = req(vec![msg("user", Some("hi"))]);
+            request.thinking = ThinkingEffort::None;
+            let body = build_body(&request, policy(ThinkingDialect::DeepseekNhm, false, false));
+            assert!(
+                body.get("reasoning_effort").is_none(),
+                "None must omit reasoning_effort"
+            );
+
             for (effort, expected) in [
-                (ThinkingEffort::None, "none"),
-                (ThinkingEffort::Low, "none"), // DeepSeek has no low tier
+                (ThinkingEffort::Low, "low"),
                 (ThinkingEffort::High, "high"),
                 (ThinkingEffort::Max, "max"),
             ] {
