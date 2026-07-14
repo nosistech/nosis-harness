@@ -24,6 +24,17 @@ codex exec --skip-git-repo-check -s workspace-write -m gpt-5.6-sol \
 Run in background (harness-tracked); verify empirically after (git diff --numstat HEAD is truth,
 git status EOL flags are noise). Do NOT start a second nosis codex while one writes nosis.
 
+## Slice B — DONE (committed 2026-07-14)
+
+Trust-dial VIEW (`t`) + `?` discoverability palette. Additive `nh_law::PolicyView` + `Policy::view()`
+(owned, read-only; fields still private; §7 amendment). nh-tui overlay reducer (`reduce_key ->
+UiAction`), case-insensitive in-memory palette filter, MCP server/tool rows with
+enabled/auth-ok/stale/discover-only startup state (derived from `McpToolset.warnings` +
+trust/auth), built-in commands + tools, visible deferred `R` note. MCP loaded ONCE in cmd_tui before
+alt-screen (no render-thread network). Every overlay line via `nh_vault::safe_line` (TestBackend
+render test proves scrub + control-char safety). nh-core/nh-tools untouched. Gate: 227 pass / 1
+ignored, clippy clean.
+
 ## Slice A — DONE (committed 2026-07-14)
 
 `crates/nh-tui` (ratatui + crossterm) + `nh tui [--model][--budget]` in nh-cli. Channel-backed
@@ -37,22 +48,27 @@ Reserved no-ops for Slice B/C: `?`, `t`, `R`. nh-core/nh-tools untouched.
 Verify-live still open: three-terminal render-artifact smoke (Windows Terminal + VS Code terminal +
 ConHost) on the Predator — the M3 exit criterion, human-checked (not unit-testable).
 
-## Next Action — Slice B (CONTRACTS_M3 §2)
+## Next Action — Slice C (CONTRACTS_M3 §3), the last M3 slice
 
-1. Write `%TEMP%\brief_m3_sliceB.txt` from CONTRACTS_M3 §2 (trust-dial VIEW over `nh_law::Policy`
-   toggled by `t`; `?` fuzzy palette listing TUI commands + built-in tools + MCP tools/servers with
-   LIVE state from `nh_tools::mcp`). No new deps. Read-only law view. If exposing compiled rules
-   needs a read-only accessor on `nh_law::Policy`, that is an additive §7 amendment (owned strings).
-2. Drive Sol (background codex exec), let it finish, verify empirically.
-3. Verify against the checklist: no nh-core/nh-tools edits; palette filter is a PURE function over a
-   tool list (headless-testable); MCP state string derives from `McpToolset.warnings` (broken
-   mcp.toml → servers shown `stale`/`discover-only`, never a crash); every rendered string scrubbed;
-   `Esc` closes, typing filters, `Enter` runs a command (tools show one-line desc only).
+1. Write `%TEMP%\brief_m3_sliceC.txt` from CONTRACTS_M3 §3: timeline VIEW ONLY (left-rail turn list
+   from in-memory session history/receipts + compaction markers; arrow-scrub; Enter inspects a
+   turn's receipt/answer; `R` stays a disabled seam with the "restore arrives later" note — NO
+   snapshot store) + notifications (terminal bell baseline already in Slice A; add the Telegram hook
+   + `.nosis/notify.toml`, token via nh-vault, scrubbed body, POST on entering Waiting/Blocked on a
+   side thread — never block the render loop; failure = one dim line). No new deps (reqwest blocking
+   exists). Telegram send is verify-live (Carlos's KORVIN bot token) — build + mock-test now.
+2. Drive Sol (background codex exec), let it finish, verify empirically (numstat: nh-core/nh-tools
+   still frozen; timeline is a projection over existing history/receipts, not a new persistence layer).
+3. Verify: message builder produces a short scrubbed body per state; disabled/absent notify.toml =
+   no HTTP; a failing POST (mock) degrades to one warning, session continues; timeline scrub/inspect
+   is pure + headless-tested; `R` shows the deferral note, never restores.
 4. Gate: `cargo test --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`.
-   (If Kaspersky is on, it blocks the 8 MB `wire_clients` test exe — pause AV or exclude
+   (If Kaspersky is ON it blocks the 8 MB `wire_clients` test exe — pause AV or exclude
    `...\nosis-Harness\target`; wire_clients is frozen nh-core, green.)
-5. Adversarial + UX review vs THE LAW + SECURITY_MODEL. One bounded hardening pass to Sol; re-verify.
-6. Update BUILD_LOG + this file; commit Slice B. Then Slice C (§3). Report at the M3 boundary.
+5. Adversarial + UX review vs THE LAW + SECURITY_MODEL. Bounded hardening pass if warranted; re-verify.
+6. Update BUILD_LOG + this file; commit Slice C. **Then M3 is content-complete** — hand Carlos a
+   runnable `nh tui` for the three-terminal render smoke (the M3 exit criterion). Report at the M3
+   boundary; only stop for guardrail conditions.
 
 ## Do Not Do
 

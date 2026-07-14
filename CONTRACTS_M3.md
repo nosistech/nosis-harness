@@ -312,3 +312,6 @@ nh tui [--model <id>] [--budget <tokens>]
 - **2026-07-14 — shared display safety:** safe_line/sanitize_line display-safety helper lifted
   into nh_vault (additive pub `safe_line`/`sanitize_line`), reused by nh-cli + nh-tui, removing
   the nh-tui duplicate — congruence per §5.2. cmd_chat/cmd_run behavior unchanged.
+- **2026-07-14 — trust-dial policy view:** added additive `nh_law::PolicyView` and
+  `Policy::view()`, returning owned copies of autonomy and the four compiled rule classes for the
+  read-only Slice B trust-dial. Policy fields and verdict behavior remain unchanged, per §2.1.

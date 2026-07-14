@@ -2,6 +2,73 @@
 
 Record every meaningful session here.
 
+## 2026-07-14: M3 Slice B — orchestrator review + commit gate
+
+Builder:
+
+- Claude (Opus 4.8, Claude Code) — M3 orchestrator: verify, adversarial review, gate, commit
+
+What changed:
+
+- No implementation code. Verified Slice B empirically: scope is exactly nh-tui + cmd_tui + the
+  additive `nh_law::PolicyView` (+47, owned clones, fields still private, verdict/autonomy behavior
+  unchanged) — `git diff HEAD` on nh-core/nh-tools is EMPTY (frozen surfaces honored).
+- Adversarial review: `reduce_key -> UiAction` is a pure reducer; overlays only open from
+  Idle/Blocked (guarded behind the Working/Waiting checks) so they can't open mid-task; dispatch is
+  suppressed while an overlay is open (proven by test); palette windowing keeps the highlighted
+  index correct; inset/scroll math is saturating. Security: MCP tools are describe-only (no
+  invocation from the palette, §2.2); `mcp_state` derivation matches nh-tools' real warning format;
+  every overlay string passes `nh_vault::safe_line`, with a `TestBackend` render test proving a
+  secret + control chars in a tool description come back `[REDACTED]` with no raw `\r`/`\x1b` in the
+  drawn buffer. Conservative styling + Clear-before-draw keep it ConHost-safe.
+- No confirmed defect → no hardening round-trip (THE LAW: small/simple — don't spend a cycle on a
+  non-finding). One drop-if-hard nicety noted for later: the trust dial doesn't scroll a very long
+  rule list (law lists are small; correctness/security unaffected).
+
+Tests/checks run (orchestrator, independent):
+
+- `cargo test --workspace`: 227 passed, 0 failed, 1 ignored (+10 over Slice A).
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+- `nh tui --help`: launches, exposes `--model` / `--budget`. The three-terminal render-artifact
+  smoke on the Predator remains the manual M3 exit check.
+
+Next step:
+
+- Commit Slice B. Then Slice C (timeline view + notifications: bell + Telegram hook).
+
+## 2026-07-14: M3 Slice B — trust dial + discoverability palette
+
+Builder:
+
+- Codex (GPT-5.6 Sol) — M3 Slice B implementer
+
+What changed:
+
+- Added the additive owned `nh_law::PolicyView` projection and `Policy::view()` accessor for the
+  read-only trust dial; policy fields remain private and verdict/autonomy behavior is unchanged.
+  Logged the pre-authorized §2.1 amendment in `CONTRACTS_M3.md` §7.
+- Added pure nh-tui overlay state and reducers for the `t` trust-dial view and `?` palette. The
+  palette has case-insensitive in-memory filtering, command activation, built-in tool descriptions,
+  the visible deferred `R` note, and MCP server/tool rows with enabled/auth-ok/stale/discover-only
+  startup state. Every overlay line passes the shared `nh_vault::safe_line` path.
+- Made `nh tui` read and discover `.nosis/mcp.toml` once before terminal takeover through the
+  existing nh-tools loader/toolset. Missing/empty config stays empty; malformed or unavailable MCP
+  becomes warning-backed stale/discover-only palette data without crashing. The worker, approval
+  gate, semáforo, HUD, nh-core, and nh-tools are unchanged.
+- Added headless coverage for the owned policy projection, pure palette filtering and MCP state,
+  empty/broken MCP config, trust-dial none rows, overlay dispatch suppression/Esc, palette command
+  activation/tool description, and rendered overlay scrubbing/control safety.
+
+Tests/checks run:
+
+- `cargo test --workspace`: 227 passed, 0 failed, 1 ignored (pre-existing keyring round-trip).
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+
+Next step:
+
+- Orchestrator review/gate for Slice B, then Slice C (timeline view + notifications). The three-
+  terminal render-artifact smoke remains the manual M3 exit check.
+
 ## 2026-07-14: M3 Slice A — orchestrator review + commit gate
 
 Builder:

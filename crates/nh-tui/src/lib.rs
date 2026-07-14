@@ -1,4 +1,4 @@
-//! Slice A TUI: one status, one worker, and a small Windows-safe renderer.
+//! M3 TUI: one status, one worker, and small Windows-safe views.
 
 use std::io::{self, Write};
 use std::panic;
@@ -21,16 +21,18 @@ use crossterm::{
 use nh_core::agent::AgentLoop;
 use nh_core::receipt::ReceiptWriter;
 use nh_core::wire::{cache_hit_pct, make_client, ChatClient, ChatMessage, ThinkingEffort, Usage};
-use nh_law::{Law, Verdict};
+use nh_law::{Autonomy, Law, PolicyView, Verdict};
 use nh_routes::{ResolvedRoute, RouteClass, RouteResolver, ThinkingDialect};
-use nh_tools::{builtin_tools, Access, Guard, ToolCtx};
+use nh_tools::{
+    builtin_tools, Access, Guard, McpAuth, McpServerConfig, McpToolset, McpTrust, ToolCtx,
+};
 use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, Vault};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Wrap},
+    widgets::{Clear, Paragraph, Wrap},
     Frame, Terminal,
 };
 
@@ -48,6 +50,59 @@ pub enum Status {
     Working,
     Waiting,
     Blocked(String),
+}
+
+/// One immutable row in the discoverability palette.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaletteEntry {
+    kind: &'static str,
+    name: String,
+    description: String,
+    state: Option<McpState>,
+    action: PaletteAction,
+}
+
+/// Startup state shown for an MCP server or tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpState {
+    Enabled,
+    AuthOk,
+    Stale,
+    DiscoverOnly,
+}
+
+impl McpState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Enabled => "enabled",
+            Self::AuthOk => "auth-ok",
+            Self::Stale => "stale",
+            Self::DiscoverOnly => "discover-only",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaletteAction {
+    Quit,
+    TrustDial,
+    Palette,
+    ScrollUp,
+    ScrollDown,
+    ScrollEnd,
+    Reserved,
+    Describe,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Overlay {
+    None,
+    TrustDial,
+    Palette {
+        filter: String,
+        selected: usize,
+        detail: Option<String>,
+    },
 }
 
 /// Everything the render loop learns from the worker.
@@ -73,6 +128,7 @@ pub struct TuiConfig {
     pub budget: Option<u64>,
     pub repo_root: PathBuf,
     pub workdir: PathBuf,
+    pub palette_entries: Vec<PaletteEntry>,
 }
 
 #[derive(Clone, Copy)]
@@ -101,10 +157,21 @@ pub struct App {
     scroll_back: u16,
     scrubber: SharedScrubber,
     local_offset: FixedOffset,
+    policy_view: PolicyView,
+    palette_entries: Vec<PaletteEntry>,
+    overlay: Overlay,
 }
 
 impl App {
-    fn new(route: ResolvedRoute, budget: Option<u64>, scrubber: SharedScrubber) -> Self {
+    fn new(
+        route: ResolvedRoute,
+        budget: Option<u64>,
+        scrubber: SharedScrubber,
+        policy_view: PolicyView,
+        mcp_entries: Vec<PaletteEntry>,
+    ) -> Self {
+        let mut palette_entries = builtin_palette_entries();
+        palette_entries.extend(mcp_entries);
         Self {
             status: if budget == Some(0) {
                 Status::Blocked(BUDGET_REASON.into())
@@ -120,6 +187,9 @@ impl App {
             scroll_back: 0,
             scrubber,
             local_offset: *chrono::Local::now().offset(),
+            policy_view,
+            palette_entries,
+            overlay: Overlay::None,
         }
     }
 
@@ -206,6 +276,176 @@ impl App {
     }
 }
 
+/// Project configured MCP servers and discovered tools into immutable palette rows.
+pub fn mcp_palette_entries(configs: &[McpServerConfig], toolset: &McpToolset) -> Vec<PaletteEntry> {
+    if configs.is_empty() {
+        return if toolset.warnings.is_empty() {
+            Vec::new()
+        } else {
+            vec![PaletteEntry {
+                kind: "server",
+                name: "MCP configuration".into(),
+                description: "configuration could not be loaded".into(),
+                state: Some(McpState::Stale),
+                action: PaletteAction::Describe,
+            }]
+        };
+    }
+
+    let specs: Vec<_> = toolset.tools.iter().map(|tool| tool.spec()).collect();
+    let mut entries = Vec::new();
+    for config in configs {
+        let state = mcp_state(config, &toolset.warnings);
+        entries.push(PaletteEntry {
+            kind: "server",
+            name: config.name.clone(),
+            description: "configured MCP server".into(),
+            state: Some(state),
+            action: PaletteAction::Describe,
+        });
+
+        let prefix = format!("mcp__{}__", config.name);
+        for spec in specs.iter().filter(|spec| spec.name.starts_with(&prefix)) {
+            entries.push(PaletteEntry {
+                kind: "tool",
+                name: spec.name.clone(),
+                description: spec.description.clone(),
+                state: Some(state),
+                action: PaletteAction::Describe,
+            });
+        }
+    }
+    entries
+}
+
+/// Case-insensitive substring filter over an in-memory palette.
+pub fn filter_palette<'a>(entries: &'a [PaletteEntry], query: &str) -> Vec<&'a PaletteEntry> {
+    let query = query.to_lowercase();
+    entries
+        .iter()
+        .filter(|entry| {
+            query.is_empty()
+                || entry.kind.to_lowercase().contains(&query)
+                || entry.name.to_lowercase().contains(&query)
+                || entry.description.to_lowercase().contains(&query)
+                || entry
+                    .state
+                    .is_some_and(|state| state.as_str().contains(&query))
+        })
+        .collect()
+}
+
+fn mcp_state(config: &McpServerConfig, warnings: &[String]) -> McpState {
+    if config.trust == McpTrust::Block || config.auth == McpAuth::OAuth2 {
+        return McpState::DiscoverOnly;
+    }
+    let warning_prefix = format!("mcp server \"{}\"", config.name);
+    if warnings
+        .iter()
+        .any(|warning| warning.contains(&warning_prefix))
+    {
+        return McpState::Stale;
+    }
+    match config.auth {
+        McpAuth::ApiKey { .. } => McpState::AuthOk,
+        McpAuth::None => McpState::Enabled,
+        McpAuth::OAuth2 => McpState::DiscoverOnly,
+    }
+}
+
+fn builtin_palette_entries() -> Vec<PaletteEntry> {
+    let commands = [
+        ("quit (q)", "quit Nosis Harness", PaletteAction::Quit),
+        (
+            "trust-dial (t)",
+            "view session autonomy and policy rules",
+            PaletteAction::TrustDial,
+        ),
+        (
+            "palette (?)",
+            "find commands and tools",
+            PaletteAction::Palette,
+        ),
+        (
+            "scroll up (PageUp)",
+            "scroll the transcript up",
+            PaletteAction::ScrollUp,
+        ),
+        (
+            "scroll down (PageDown)",
+            "scroll the transcript down",
+            PaletteAction::ScrollDown,
+        ),
+        (
+            "scroll latest (End)",
+            "return to the newest transcript line",
+            PaletteAction::ScrollEnd,
+        ),
+        (
+            "timeline restore (R)",
+            "timeline restore — arrives in a later slice",
+            PaletteAction::Reserved,
+        ),
+    ];
+    let mut entries: Vec<PaletteEntry> = commands
+        .into_iter()
+        .map(|(name, description, action)| PaletteEntry {
+            kind: "command",
+            name: name.into(),
+            description: description.into(),
+            state: None,
+            action,
+        })
+        .collect();
+    entries.extend(builtin_tools().into_iter().map(|tool| {
+        let spec = tool.spec();
+        PaletteEntry {
+            kind: "tool",
+            name: spec.name,
+            description: spec.description,
+            state: None,
+            action: PaletteAction::Describe,
+        }
+    }));
+    entries
+}
+
+fn trust_dial_lines(view: &PolicyView) -> Vec<String> {
+    let autonomy = match view.autonomy {
+        Autonomy::Ask => "ask",
+        Autonomy::Auto => "auto",
+    };
+    let mut lines = vec![format!("session autonomy: {autonomy}")];
+    append_rules(&mut lines, "auto-approve", &view.auto_paths);
+    append_rules(&mut lines, "always-ask", &view.ask_paths);
+    append_rules(&mut lines, "hard-block/protected", &view.block_paths);
+    append_rules(&mut lines, "blocked command", &view.block_commands);
+    lines
+}
+
+fn append_rules(lines: &mut Vec<String>, label: &str, rules: &[String]) {
+    if rules.is_empty() {
+        lines.push(format!("{label}: none"));
+    } else {
+        lines.extend(rules.iter().map(|rule| format!("{label}: {rule}")));
+    }
+}
+
+impl PaletteEntry {
+    fn line(&self) -> String {
+        match self.state {
+            Some(state) => format!(
+                "{}: {} — {} [{}]",
+                self.kind,
+                self.name,
+                self.description,
+                state.as_str()
+            ),
+            None => format!("{}: {} — {}", self.kind, self.name, self.description),
+        }
+    }
+}
+
 /// Fold one worker event into application state.
 pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
     match event {
@@ -266,7 +506,14 @@ fn run_with_connect(
     if let Ok((_, literal)) = &initial {
         install_literal(&scrubber, &mut Vec::new(), literal.clone());
     }
-    let mut app = App::new(route.clone(), config.budget, Arc::clone(&scrubber));
+    let policy_view = config.law.policy.view();
+    let mut app = App::new(
+        route.clone(),
+        config.budget,
+        Arc::clone(&scrubber),
+        policy_view,
+        config.palette_entries,
+    );
     let mut worker = spawn_worker(WorkerConfig {
         route,
         law: config.law,
@@ -551,31 +798,60 @@ fn ui_loop(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum UiAction {
+    None,
+    Dispatch(String),
+    Quit,
+}
+
 fn handle_key(app: &mut App, worker: &mut Worker, key: KeyEvent) -> bool {
+    match reduce_key(app, key) {
+        UiAction::None => false,
+        UiAction::Quit => true,
+        UiAction::Dispatch(task) => {
+            if worker.commands.send(WorkerCommand::Task(task)).is_err() {
+                apply_event(
+                    app,
+                    AgentEvent::Failed("agent stopped — retry the task".into()),
+                );
+            }
+            false
+        }
+    }
+}
+
+fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         if matches!(app.status, Status::Waiting) {
             app.answer_approval(false);
         }
-        return true;
+        return UiAction::Quit;
+    }
+    if app.overlay != Overlay::None {
+        return reduce_overlay_key(app, key);
     }
     if matches!(app.status, Status::Waiting) {
         app.answer_approval(matches!(key.code, KeyCode::Char('y' | 'Y')));
-        return false;
+        return UiAction::None;
     }
     if matches!(app.status, Status::Working) {
-        return false;
+        return UiAction::None;
     }
     match key.code {
-        KeyCode::Char('q') if app.input.is_empty() => return true,
-        KeyCode::Char('?' | 't' | 'R') if app.input.is_empty() => {}
+        KeyCode::Char('q') if app.input.is_empty() => return UiAction::Quit,
+        KeyCode::Char('t') if app.input.is_empty() => app.overlay = Overlay::TrustDial,
+        KeyCode::Char('?') if app.input.is_empty() => {
+            app.overlay = Overlay::Palette {
+                filter: String::new(),
+                selected: 0,
+                detail: None,
+            };
+        }
+        KeyCode::Char('R') if app.input.is_empty() => {}
         KeyCode::Enter => {
             if let Some(task) = app.dispatch() {
-                if worker.commands.send(WorkerCommand::Task(task)).is_err() {
-                    apply_event(
-                        app,
-                        AgentEvent::Failed("agent stopped — retry the task".into()),
-                    );
-                }
+                return UiAction::Dispatch(task);
             }
         }
         KeyCode::Backspace => {
@@ -594,7 +870,116 @@ fn handle_key(app: &mut App, worker: &mut Worker, key: KeyEvent) -> bool {
         }
         _ => {}
     }
-    false
+    UiAction::None
+}
+
+fn reduce_overlay_key(app: &mut App, key: KeyEvent) -> UiAction {
+    if key.code == KeyCode::Esc {
+        app.overlay = Overlay::None;
+        return UiAction::None;
+    }
+    if matches!(app.overlay, Overlay::TrustDial) {
+        if key.code == KeyCode::Char('t') {
+            app.overlay = Overlay::None;
+        }
+        return UiAction::None;
+    }
+
+    let activated = match &mut app.overlay {
+        Overlay::Palette {
+            filter,
+            selected,
+            detail,
+        } => palette_key(&app.palette_entries, filter, selected, detail, key),
+        Overlay::None | Overlay::TrustDial => None,
+    };
+    let Some(entry) = activated else {
+        return UiAction::None;
+    };
+    activate_palette_entry(app, entry)
+}
+
+fn palette_key(
+    entries: &[PaletteEntry],
+    filter: &mut String,
+    selected: &mut usize,
+    detail: &mut Option<String>,
+    key: KeyEvent,
+) -> Option<PaletteEntry> {
+    match key.code {
+        KeyCode::Backspace => {
+            filter.pop();
+            *selected = 0;
+            *detail = None;
+        }
+        KeyCode::Up => {
+            *selected = selected.saturating_sub(1);
+            *detail = None;
+        }
+        KeyCode::Down => {
+            let count = filter_palette(entries, filter).len();
+            if count > 0 {
+                *selected = selected.saturating_add(1).min(count - 1);
+            }
+            *detail = None;
+        }
+        KeyCode::Enter => {
+            return filter_palette(entries, filter)
+                .get(*selected)
+                .map(|entry| (*entry).clone());
+        }
+        KeyCode::Char(character)
+            if !character.is_control()
+                && !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            filter.push(character);
+            *selected = 0;
+            *detail = None;
+        }
+        _ => {}
+    }
+    None
+}
+
+fn activate_palette_entry(app: &mut App, entry: PaletteEntry) -> UiAction {
+    match entry.action {
+        PaletteAction::Quit => UiAction::Quit,
+        PaletteAction::TrustDial => {
+            app.overlay = Overlay::TrustDial;
+            UiAction::None
+        }
+        PaletteAction::Palette => {
+            app.overlay = Overlay::Palette {
+                filter: String::new(),
+                selected: 0,
+                detail: None,
+            };
+            UiAction::None
+        }
+        PaletteAction::ScrollUp => {
+            app.scroll_back = app.scroll_back.saturating_add(5);
+            app.overlay = Overlay::None;
+            UiAction::None
+        }
+        PaletteAction::ScrollDown => {
+            app.scroll_back = app.scroll_back.saturating_sub(5);
+            app.overlay = Overlay::None;
+            UiAction::None
+        }
+        PaletteAction::ScrollEnd => {
+            app.scroll_back = 0;
+            app.overlay = Overlay::None;
+            UiAction::None
+        }
+        PaletteAction::Reserved | PaletteAction::Describe => {
+            if let Overlay::Palette { detail, .. } = &mut app.overlay {
+                *detail = Some(entry.description);
+            }
+            UiAction::None
+        }
+    }
 }
 
 fn render(frame: &mut Frame<'_>, app: &App) {
@@ -615,6 +1000,105 @@ fn render(frame: &mut Frame<'_>, app: &App) {
         Paragraph::new(input).style(Style::default().fg(Color::Cyan)),
         regions[3],
     );
+    render_overlay(frame, app);
+}
+
+fn render_overlay(frame: &mut Frame<'_>, app: &App) {
+    let area = inset(frame.area());
+    match &app.overlay {
+        Overlay::None => {}
+        Overlay::TrustDial => render_trust_dial(frame, app, area),
+        Overlay::Palette {
+            filter,
+            selected,
+            detail,
+        } => render_palette(frame, app, area, filter, *selected, detail.as_deref()),
+    }
+}
+
+fn render_trust_dial(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let mut raw = vec![
+        "TRUST DIAL — read-only".to_owned(),
+        "t or Esc: close".to_owned(),
+        String::new(),
+    ];
+    raw.extend(trust_dial_lines(&app.policy_view));
+    let lines: Vec<Line<'static>> = raw
+        .into_iter()
+        .map(|line| Line::from(safe_line(&app.scrubber, &line)))
+        .collect();
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(Color::White).bg(Color::Black)),
+        area,
+    );
+}
+
+fn render_palette(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    filter: &str,
+    selected: usize,
+    detail: Option<&str>,
+) {
+    let filtered = filter_palette(&app.palette_entries, filter);
+    let visible_rows = usize::from(area.height.saturating_sub(5).max(1));
+    let start = selected.saturating_add(1).saturating_sub(visible_rows);
+    let mut lines = vec![
+        Line::from(safe_line(&app.scrubber, "COMMANDS + TOOLS")),
+        Line::from(safe_line(&app.scrubber, &format!("filter: {filter}"))),
+        Line::from(safe_line(
+            &app.scrubber,
+            "Up/Down: move | Enter: select | Esc: close",
+        )),
+        Line::from(safe_line(&app.scrubber, "")),
+    ];
+    if filtered.is_empty() {
+        lines.push(Line::from(safe_line(&app.scrubber, "no matches")));
+    } else {
+        lines.extend(
+            filtered
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(visible_rows)
+                .map(|(index, entry)| {
+                    let marker = if index == selected { "> " } else { "  " };
+                    let line = safe_line(&app.scrubber, &format!("{marker}{}", entry.line()));
+                    let style = if index == selected {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+                    Line::from(Span::styled(line, style))
+                }),
+        );
+    }
+    if let Some(detail) = detail {
+        lines.push(Line::from(safe_line(
+            &app.scrubber,
+            &format!("selected: {detail}"),
+        )));
+    }
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(Color::White).bg(Color::Black)),
+        area,
+    );
+}
+
+fn inset(area: Rect) -> Rect {
+    let horizontal = u16::from(area.width > 4) * 2;
+    let vertical = u16::from(area.height > 2);
+    Rect::new(
+        area.x.saturating_add(horizontal),
+        area.y.saturating_add(vertical),
+        area.width.saturating_sub(horizontal.saturating_mul(2)),
+        area.height.saturating_sub(vertical.saturating_mul(2)),
+    )
 }
 
 fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -816,6 +1300,7 @@ impl Drop for PanicHookGuard {
 mod tests {
     use super::*;
     use nh_core::wire::{ChatRequest, ChatResponse};
+    use ratatui::backend::TestBackend;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -841,6 +1326,14 @@ mod tests {
             test_route(),
             budget,
             Arc::new(RwLock::new(Scrubber::new(Vec::new()))),
+            PolicyView {
+                autonomy: Autonomy::Ask,
+                auto_paths: Vec::new(),
+                ask_paths: Vec::new(),
+                block_paths: Vec::new(),
+                block_commands: Vec::new(),
+            },
+            Vec::new(),
         )
     }
 
@@ -899,6 +1392,178 @@ mod tests {
     }
 
     #[test]
+    fn palette_filter_is_pure_and_finds_exec_shell() {
+        let entries = builtin_palette_entries();
+        let before = entries.clone();
+        let filtered = filter_palette(&entries, "ex");
+
+        assert!(
+            filtered.iter().any(|entry| entry.name == "exec_shell"),
+            "got: {:?}",
+            filtered
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(entries, before);
+    }
+
+    #[test]
+    fn mcp_palette_state_uses_auth_trust_and_warnings() {
+        let configs = vec![
+            mcp_config("plain", McpAuth::None, McpTrust::Ask),
+            mcp_config(
+                "keyed",
+                McpAuth::ApiKey {
+                    vault_entry: "keyed".into(),
+                },
+                McpTrust::Auto,
+            ),
+            mcp_config("down", McpAuth::None, McpTrust::Ask),
+            mcp_config("blocked", McpAuth::None, McpTrust::Block),
+        ];
+        let toolset = McpToolset {
+            tools: Vec::new(),
+            warnings: vec!["mcp server \"down\": connection refused".into()],
+        };
+
+        let entries = mcp_palette_entries(&configs, &toolset);
+        let state = |name: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .and_then(|entry| entry.state)
+        };
+        assert_eq!(state("plain"), Some(McpState::Enabled));
+        assert_eq!(state("keyed"), Some(McpState::AuthOk));
+        assert_eq!(state("down"), Some(McpState::Stale));
+        assert_eq!(state("blocked"), Some(McpState::DiscoverOnly));
+    }
+
+    #[test]
+    fn empty_and_broken_mcp_config_project_without_panicking() {
+        let empty = McpToolset {
+            tools: Vec::new(),
+            warnings: Vec::new(),
+        };
+        assert!(mcp_palette_entries(&[], &empty).is_empty());
+
+        let broken = McpToolset {
+            tools: Vec::new(),
+            warnings: vec!["could not parse .nosis/mcp.toml".into()],
+        };
+        let entries = mcp_palette_entries(&[], &broken);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].state, Some(McpState::Stale));
+    }
+
+    #[test]
+    fn trust_dial_uses_plain_none_lines_for_empty_classes() {
+        let lines = trust_dial_lines(&PolicyView {
+            autonomy: Autonomy::Ask,
+            auto_paths: Vec::new(),
+            ask_paths: Vec::new(),
+            block_paths: Vec::new(),
+            block_commands: Vec::new(),
+        });
+
+        assert_eq!(
+            lines,
+            [
+                "session autonomy: ask",
+                "auto-approve: none",
+                "always-ask: none",
+                "hard-block/protected: none",
+                "blocked command: none",
+            ]
+        );
+        assert!(lines.iter().all(|line| !line.trim().is_empty()));
+    }
+
+    #[test]
+    fn overlays_suppress_task_dispatch_and_escape_restores_base_view() {
+        for opener in ['t', '?'] {
+            let mut app = test_app(None);
+            assert_eq!(reduce_key(&mut app, char_key(opener)), UiAction::None);
+            assert_ne!(app.overlay, Overlay::None);
+
+            for character in "work".chars() {
+                assert_eq!(reduce_key(&mut app, char_key(character)), UiAction::None);
+            }
+            assert_eq!(
+                reduce_key(&mut app, code_key(KeyCode::Enter)),
+                UiAction::None
+            );
+            assert!(app.input.is_empty());
+            assert!(app.transcript.is_empty());
+            assert_eq!(app.status, Status::Idle);
+
+            assert_eq!(reduce_key(&mut app, code_key(KeyCode::Esc)), UiAction::None);
+            assert_eq!(app.overlay, Overlay::None);
+        }
+    }
+
+    #[test]
+    fn palette_enter_runs_commands_and_describes_tools() {
+        let mut app = test_app(None);
+        reduce_key(&mut app, char_key('?'));
+        for character in "trust-dial".chars() {
+            reduce_key(&mut app, char_key(character));
+        }
+        assert_eq!(
+            reduce_key(&mut app, code_key(KeyCode::Enter)),
+            UiAction::None
+        );
+        assert_eq!(app.overlay, Overlay::TrustDial);
+
+        let mut app = test_app(None);
+        reduce_key(&mut app, char_key('?'));
+        for character in "quit".chars() {
+            reduce_key(&mut app, char_key(character));
+        }
+        assert_eq!(
+            reduce_key(&mut app, code_key(KeyCode::Enter)),
+            UiAction::Quit
+        );
+
+        let mut app = test_app(None);
+        reduce_key(&mut app, char_key('?'));
+        for character in "exec_shell".chars() {
+            reduce_key(&mut app, char_key(character));
+        }
+        assert_eq!(
+            reduce_key(&mut app, code_key(KeyCode::Enter)),
+            UiAction::None
+        );
+        match &app.overlay {
+            Overlay::Palette { detail, .. } => {
+                assert!(detail.as_deref().is_some_and(|line| !line.is_empty()));
+            }
+            _ => panic!("tool selection must keep the palette open"),
+        }
+    }
+
+    fn mcp_config(name: &str, auth: McpAuth, trust: McpTrust) -> McpServerConfig {
+        McpServerConfig {
+            name: name.into(),
+            url: "https://example.invalid/mcp".into(),
+            spec: "2026-07-28".into(),
+            auth,
+            scopes: Vec::new(),
+            default_mode: None,
+            trust,
+        }
+    }
+
+    fn char_key(character: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)
+    }
+
+    fn code_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
     fn cost_hud_omits_cache_before_usage_and_shows_it_after() {
         let mut app = test_app(None);
         let before = app.hud_line(Utc::now());
@@ -941,7 +1606,19 @@ mod tests {
     fn rendered_line_is_redacted_and_has_no_control_characters() {
         let secret = "hunter2-fake-tui-secret";
         let scrubber = Arc::new(RwLock::new(Scrubber::new(vec![secret.into()])));
-        let mut app = App::new(test_route(), None, scrubber);
+        let mut app = App::new(
+            test_route(),
+            None,
+            scrubber,
+            PolicyView {
+                autonomy: Autonomy::Ask,
+                auto_paths: Vec::new(),
+                ask_paths: Vec::new(),
+                block_paths: Vec::new(),
+                block_commands: Vec::new(),
+            },
+            Vec::new(),
+        );
         apply_event(
             &mut app,
             AgentEvent::Progress(format!("value={secret}\r\x1b[2K")),
@@ -950,6 +1627,52 @@ mod tests {
         assert!(rendered.contains("[REDACTED]"), "got: {rendered}");
         assert!(!rendered.contains(secret), "got: {rendered}");
         assert!(!rendered.chars().any(char::is_control), "got: {rendered}");
+    }
+
+    #[test]
+    fn rendered_overlay_scrubs_descriptions_and_control_characters() {
+        let secret = "hunter2-fake-overlay-secret";
+        let scrubber = Arc::new(RwLock::new(Scrubber::new(vec![secret.into()])));
+        let mut app = App::new(
+            test_route(),
+            None,
+            scrubber,
+            PolicyView {
+                autonomy: Autonomy::Ask,
+                auto_paths: Vec::new(),
+                ask_paths: Vec::new(),
+                block_paths: Vec::new(),
+                block_commands: Vec::new(),
+            },
+            vec![PaletteEntry {
+                kind: "tool",
+                name: "secret-tool".into(),
+                description: format!("value={secret}\r\x1b[2K"),
+                state: Some(McpState::Enabled),
+                action: PaletteAction::Describe,
+            }],
+        );
+        app.overlay = Overlay::Palette {
+            filter: "secret-tool".into(),
+            selected: 0,
+            detail: None,
+        };
+        let backend = TestBackend::new(100, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(rendered.contains("[REDACTED]"), "got: {rendered}");
+        assert!(!rendered.contains(secret), "got: {rendered}");
+        assert!(!rendered.contains('\r'), "got: {rendered}");
+        assert!(!rendered.contains('\x1b'), "got: {rendered}");
     }
 
     #[test]
