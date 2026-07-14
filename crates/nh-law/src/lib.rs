@@ -49,6 +49,16 @@ pub struct Policy {
     exec_block: Vec<String>,
 }
 
+/// Owned, read-only projection of one compiled session policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyView {
+    pub autonomy: Autonomy,
+    pub auto_paths: Vec<String>,
+    pub ask_paths: Vec<String>,
+    pub block_paths: Vec<String>,
+    pub block_commands: Vec<String>,
+}
+
 /// Constitution, policy, and non-fatal source warnings for one session.
 #[derive(Debug, Clone)]
 pub struct Law {
@@ -108,6 +118,17 @@ impl Policy {
 
     pub fn autonomy(&self) -> Autonomy {
         self.autonomy
+    }
+
+    /// Copy the compiled rule classes for read-only user interfaces.
+    pub fn view(&self) -> PolicyView {
+        PolicyView {
+            autonomy: self.autonomy,
+            auto_paths: self.write_auto.clone(),
+            ask_paths: self.write_ask.clone(),
+            block_paths: self.write_block.clone(),
+            block_commands: self.exec_block.clone(),
+        }
     }
 }
 
@@ -613,6 +634,32 @@ text = "operating"
         assert_eq!(auto_policy.write_verdict("migrations/up.sql"), Verdict::Ask);
         assert_eq!(auto_policy.write_verdict("src/lib.rs"), Verdict::Allow);
         assert_eq!(auto_policy.autonomy(), Autonomy::Auto);
+    }
+
+    #[test]
+    fn policy_view_returns_owned_compiled_rule_classes() {
+        let user = parse_law(
+            r#"
+[write]
+auto = ["src/**"]
+ask = ["migrations/**"]
+block = [".nosis/**"]
+
+[exec]
+block = ["git push*"]
+"#,
+        )
+        .unwrap();
+        let mut compiled = compile_policy(Autonomy::Auto, None, Some(&user), None);
+
+        let view = compiled.view();
+        compiled.write_auto[0].push_str("-changed");
+
+        assert_eq!(view.autonomy, Autonomy::Auto);
+        assert_eq!(view.auto_paths, ["src/**"]);
+        assert_eq!(view.ask_paths, ["migrations/**"]);
+        assert_eq!(view.block_paths, [".nosis/**"]);
+        assert_eq!(view.block_commands, ["git push*"]);
     }
 
     #[test]
