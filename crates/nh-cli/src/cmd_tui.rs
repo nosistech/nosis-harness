@@ -5,7 +5,7 @@ use std::path::Path;
 use nh_law::LoadOptions;
 use nh_routes::RouteResolver;
 use nh_tools::McpToolset;
-use nh_tui::{mcp_palette_entries, PaletteEntry, TuiConfig};
+use nh_tui::{mcp_palette_entries, parse_notify_config, NotifyConfig, PaletteEntry, TuiConfig};
 use nh_vault::Scrubber;
 
 use crate::cmd_run;
@@ -29,6 +29,14 @@ pub fn run(model: &str, budget: Option<u64>) -> anyhow::Result<()> {
             cmd_run::safe_line(&warning_scrubber, warning)
         );
     }
+    let mut notify_warnings = Vec::new();
+    let notify = load_notify_config(&repo_root, &mut notify_warnings);
+    for warning in &notify_warnings {
+        eprintln!(
+            "warning: {}",
+            cmd_run::safe_line(&warning_scrubber, warning)
+        );
+    }
     let resolver = RouteResolver::from_toml(&catalog)?;
     nh_tui::run(TuiConfig {
         resolver,
@@ -38,6 +46,7 @@ pub fn run(model: &str, budget: Option<u64>) -> anyhow::Result<()> {
         repo_root,
         workdir,
         palette_entries,
+        notify,
     })
 }
 
@@ -83,6 +92,31 @@ fn load_mcp_palette(root: &Path, warnings: &mut Vec<String>) -> Vec<PaletteEntry
     }
 }
 
+/// Load notification settings once, before nh-tui takes terminal ownership.
+fn load_notify_config(root: &Path, warnings: &mut Vec<String>) -> NotifyConfig {
+    let path = root.join(".nosis").join("notify.toml");
+    if !path.is_file() {
+        warnings.push(".nosis/notify.toml not found - using bell only".into());
+        return NotifyConfig::default();
+    }
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) => {
+            warnings.push(format!(
+                "could not read .nosis/notify.toml ({error}) - using bell only"
+            ));
+            return NotifyConfig::default();
+        }
+    };
+    match parse_notify_config(&text) {
+        Ok(config) => config,
+        Err(error) => {
+            warnings.push(format!(".nosis/notify.toml: {error} - using bell only"));
+            NotifyConfig::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,5 +146,49 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("palette marks MCP stale"));
+    }
+
+    #[test]
+    fn absent_and_broken_notify_config_are_bell_only_with_one_warning() {
+        let root = tempfile::tempdir().unwrap();
+        let mut warnings = Vec::new();
+        let absent = load_notify_config(root.path(), &mut warnings);
+        assert_eq!(absent, NotifyConfig::default());
+        assert_eq!(warnings.len(), 1);
+
+        std::fs::create_dir_all(root.path().join(".nosis")).unwrap();
+        std::fs::write(
+            root.path().join(".nosis").join("notify.toml"),
+            "not [ valid",
+        )
+        .unwrap();
+        warnings.clear();
+        let broken = load_notify_config(root.path(), &mut warnings);
+        assert_eq!(broken, NotifyConfig::default());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("using bell only"));
+    }
+
+    #[test]
+    fn valid_notify_config_enables_telegram_without_a_token_in_toml() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".nosis")).unwrap();
+        std::fs::write(
+            root.path().join(".nosis").join("notify.toml"),
+            "[telegram]\nenabled = true\nchat_id = \"123456789\"\n",
+        )
+        .unwrap();
+        let mut warnings = Vec::new();
+
+        let config = load_notify_config(root.path(), &mut warnings);
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            config.telegram,
+            Some(nh_tui::TelegramNotifyConfig {
+                enabled: true,
+                chat_id: "123456789".into(),
+            })
+        );
     }
 }
