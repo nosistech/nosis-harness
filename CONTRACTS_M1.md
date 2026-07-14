@@ -168,7 +168,7 @@ pub enum ThinkingEffort { #[default] None, Low, High, Max }
 
 | dialect | OpenAI wire behavior |
 |---|---|
-| `deepseek-nhm` | body param `"reasoning_effort"`: None→`"none"`, Low→`"none"` (DeepSeek has no low tier), High→`"high"`, Max→`"max"`. **ASSUMPTION — VERIFY LIVE**: param name and values are unconfirmed; keep the mapping in one function with a `// verify at live test` comment. |
+| `deepseek-nhm` | body param `"reasoning_effort"`: None→omit, Low→`"low"`, High→`"high"`, Max→`"max"`. **LIVE-CONFIRMED 2026-07-14**: valid values are `high\|low\|medium\|max\|xhigh`; `medium`/`xhigh` exist but are unused, and `"none"` is invalid. |
 | `always-thinking` | never send any toggle, whatever the requested effort (Kimi K2.7 has no non-thinking mode). |
 | `glm-hm` | M1 sends no toggle (GLM thinking is High/Max server-side; mapping verified live in M2). |
 | `none` | omit entirely. |
@@ -410,7 +410,7 @@ All workspace-version (`.workspace = true`); nothing new enters
 
 | item | where | note |
 |---|---|---|
-| `reasoning_effort` param name/values | §2.3, nh-core | deepseek-nhm mapping — still open |
+| `reasoning_effort` param name/values | §2.3, nh-core | **CONFIRMED via live test 2026-07-14** — `high\|low\|medium\|max\|xhigh`; omit for non-thinking (`"none"` rejected) |
 | Kimi/MiMo/GLM base URLs | catalog.toml | **RESOLVED 2026-07-13** — confirmed first-party; MiMo host is `api.xiaomimimo.com/v1` |
 | MiMo prices | catalog.toml | **RESOLVED 2026-07-13** — plan B.3 conflict settled first-party (`mimo.mi.com/docs/pricing`); now `confirmed` |
 | Kimi K2.6 cache-hit rate | catalog.toml | **RESOLVED 2026-07-13** — published first-party: $0.16/M |
