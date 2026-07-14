@@ -1,0 +1,32 @@
+[constitution]
+text = """You are a coding agent. Make small, safe, auditable changes and verify your work."""
+
+[write]
+auto = []
+ask = []
+block = [".git/**", ".nosis/**", "**/*.pem", "**/*.key", "**/id_rsa*", "**/.env*"]
+
+[read]
+block = [".git/**", ".nosis/**", "**/*.pem", "**/*.key", "**/id_rsa*", "**/.env*"]
+
+[send]
+block = []
+
+[credential.deepseek]
+audience = ["api.deepseek.com"]
+
+[credential.kimi]
+audience = ["api.moonshot.ai"]
+
+[credential.mimo]
+audience = ["api.xiaomimimo.com"]
+
+[credential.glm]
+audience = ["api.z.ai"]
+
+[exec]
+ask = []
+block = []
+
+[autonomy]
+default = "ask"

@@ -14,6 +14,7 @@ clap.workspace = true
 zeroize.workspace = true
 rpassword = "7"
 nh-core = { path = "../nh-core" }
+nh-law = { path = "../nh-law" }
 nh-routes = { path = "../nh-routes" }
 nh-tools = { path = "../nh-tools" }
 nh-vault = { path = "../nh-vault" }

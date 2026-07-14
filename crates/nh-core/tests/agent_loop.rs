@@ -99,7 +99,7 @@ fn agent_in(dir: &std::path::Path, client: Box<dyn ChatClient>, tools: Vec<Box<d
     AgentLoop {
         client,
         tools,
-        ctx: ToolCtx { workdir: dir.to_path_buf(), approve: Box::new(|_| true) },
+        ctx: ToolCtx::new(dir.to_path_buf(), Box::new(|_| true)),
         receipts: ReceiptWriter {
             path: dir.join(".nosis").join("receipts.jsonl"),
             scrubber: nh_vault::Scrubber::new(vec![FAKE_SECRET.to_string()]),
@@ -107,6 +107,8 @@ fn agent_in(dir: &std::path::Path, client: Box<dyn ChatClient>, tools: Vec<Box<d
         model_id: "mock-model".into(),
         max_turns,
         thinking: nh_core::wire::ThinkingEffort::None,
+        constitution: None,
+        context_limit: None,
         on_event: None,
     }
 }

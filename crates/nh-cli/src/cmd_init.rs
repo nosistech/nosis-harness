@@ -31,8 +31,8 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Create .nosis/, .nosis/.gitignore, a starter catalog.toml (when the repo has
-/// none), and (when .git/ exists) the pre-commit hook.
+/// Create .nosis/, .nosis/.gitignore, starter catalog/law files (when absent),
+/// and (when .git/ exists) the pre-commit hook.
 /// Returns one confirmation line per thing created; ["already set up"] when nothing was.
 /// Existing files are never overwritten. No .git directory → hook skipped silently.
 pub fn init_at(root: &Path) -> anyhow::Result<Vec<String>> {
@@ -54,6 +54,12 @@ pub fn init_at(root: &Path) -> anyhow::Result<Vec<String>> {
     if !catalog.is_file() {
         fs::write(&catalog, CATALOG_STARTER)?;
         lines.push("created catalog.toml (starter routes - edit to add providers)".to_string());
+    }
+
+    let law = nosis.join("law.toml");
+    if !law.is_file() {
+        fs::write(&law, nh_law::STARTER_LAW_TOML)?;
+        lines.push("created .nosis/law.toml (starter policy)".to_string());
     }
 
     let git_dir = root.join(".git");
@@ -92,8 +98,10 @@ mod tests {
         assert!(gi.contains("receipts.jsonl"));
         assert!(gi.contains("*.log"));
         assert!(gi.contains("auth*"));
-        // no .git in the tempdir → exactly three things created, hook skipped silently
-        assert_eq!(lines.len(), 3);
+        let law = fs::read_to_string(tmp.path().join(".nosis").join("law.toml")).unwrap();
+        assert_eq!(law, nh_law::STARTER_LAW_TOML);
+        // no .git in the tempdir → exactly four things created, hook skipped silently
+        assert_eq!(lines.len(), 4);
 
         let again = init_at(tmp.path()).unwrap();
         assert_eq!(again, vec!["already set up".to_string()]);
@@ -120,12 +128,22 @@ mod tests {
     }
 
     #[test]
+    fn never_overwrites_an_existing_law() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join(".nosis")).unwrap();
+        fs::write(tmp.path().join(".nosis").join("law.toml"), "# user's policy\n").unwrap();
+        init_at(tmp.path()).unwrap();
+        let text = fs::read_to_string(tmp.path().join(".nosis").join("law.toml")).unwrap();
+        assert_eq!(text, "# user's policy\n");
+    }
+
+    #[test]
     fn installs_pre_commit_hook_when_git_exists() {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir(tmp.path().join(".git")).unwrap();
 
         let lines = init_at(tmp.path()).unwrap();
-        assert_eq!(lines.len(), 4);
+        assert_eq!(lines.len(), 5);
 
         let hook_path = tmp.path().join(".git").join("hooks").join("pre-commit");
         let hook = fs::read_to_string(&hook_path).unwrap();

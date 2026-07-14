@@ -12,6 +12,22 @@ pub use mcp::{
     McpTrust,
 };
 
+/// What a tool is about to do. Write paths are normalized and workdir-relative.
+pub enum Access<'a> {
+    Write(&'a str),
+    Exec(&'a str),
+}
+
+/// The guard's answer. Block carries a short user-facing reason.
+pub enum Guard {
+    Allow,
+    Ask,
+    Block(String),
+}
+
+/// Consulted before any mutation.
+pub type GuardFn = Box<dyn Fn(&Access) -> Guard + Send + Sync>;
+
 /// OpenAI-function-shaped tool description, serialized into requests.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolSpec {
@@ -27,6 +43,27 @@ pub struct ToolCtx {
     /// Returning false denies the action. UX: the description shown to the user must be
     /// short, concrete, and scannable (the command itself, not prose around it).
     pub approve: Box<dyn Fn(&str) -> bool + Send + Sync>,
+    pub guard: GuardFn,
+}
+
+impl ToolCtx {
+    /// Default guard preserves M0/M1 behavior: edits proceed and exec asks.
+    pub fn new(workdir: PathBuf, approve: Box<dyn Fn(&str) -> bool + Send + Sync>) -> Self {
+        Self {
+            workdir,
+            approve,
+            guard: Box::new(|access| match access {
+                Access::Write(_) => Guard::Allow,
+                Access::Exec(_) => Guard::Ask,
+            }),
+        }
+    }
+
+    /// Install a policy-backed guard.
+    pub fn with_guard(mut self, guard: GuardFn) -> Self {
+        self.guard = guard;
+        self
+    }
 }
 
 pub trait Tool: Send + Sync {
@@ -79,7 +116,19 @@ fn normalize_lexically(path: &Path) -> PathBuf {
 /// Resolve `rel` against the workdir. Refuses any path that escapes the workdir
 /// (canonicalize + starts_with; lexical normalization for not-yet-existing paths,
 /// so a missing file can still get a clear "file not found" from the caller).
-fn resolve_in_workdir(workdir: &Path, rel: &str) -> anyhow::Result<PathBuf> {
+/// The returned guard path uses the same resolved path, made relative and joined
+/// with `/` on every platform.
+///
+/// The write-hold remains sound with case-sensitive globs on case-insensitive
+/// filesystems because `EditFile` only mutates existing files: `canonicalize`
+/// returns their real on-disk case for the guard (for example, `.GIT/config`
+/// becomes `.git/config`). Missing paths retain typed case only in the lexical
+/// branch, then fail with "file not found" before any write.
+///
+/// WARNING: any future file-creation tool must canonicalize or case-fold its guard
+/// path (or the guard must case-fold there), or variants such as `.GIT/x` and `.ENV`
+/// could bypass `.git/**` and `**/.env*`.
+fn resolve_in_workdir(workdir: &Path, rel: &str) -> anyhow::Result<(PathBuf, String)> {
     let root = workdir
         .canonicalize()
         .with_context(|| format!("working directory not found: {}", workdir.display()))?;
@@ -92,7 +141,14 @@ fn resolve_in_workdir(workdir: &Path, rel: &str) -> anyhow::Result<PathBuf> {
     if !resolved.starts_with(&root) {
         bail!("refused: {rel} escapes the working directory");
     }
-    Ok(resolved)
+    let relative = resolved
+        .strip_prefix(&root)
+        .expect("resolved path was checked inside workdir")
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    Ok((resolved, relative))
 }
 
 impl Tool for ReadFile {
@@ -115,7 +171,7 @@ impl Tool for ReadFile {
 
     fn execute(&self, args: serde_json::Value, ctx: &ToolCtx) -> anyhow::Result<String> {
         let path = str_arg(&args, "path")?;
-        let resolved = resolve_in_workdir(&ctx.workdir, path)?;
+        let (resolved, _) = resolve_in_workdir(&ctx.workdir, path)?;
         if !resolved.is_file() {
             bail!("file not found: {path} - check the path against the working directory");
         }
@@ -158,7 +214,17 @@ impl Tool for EditFile {
         if old.is_empty() {
             bail!("old_string is empty - provide the exact text to replace");
         }
-        let resolved = resolve_in_workdir(&ctx.workdir, path)?;
+        let (resolved, relative) = resolve_in_workdir(&ctx.workdir, path)?;
+        match (ctx.guard)(&Access::Write(&relative)) {
+            Guard::Block(reason) => return Ok(format!("blocked by law: {reason}")),
+            Guard::Ask => {
+                let action = format!("edit {relative}");
+                if !(ctx.approve)(&action) {
+                    return Ok(format!("user denied: {action}"));
+                }
+            }
+            Guard::Allow => {}
+        }
         if !resolved.is_file() {
             bail!("file not found: {path} - check the path against the working directory");
         }
@@ -196,10 +262,16 @@ impl Tool for ExecShell {
 
     fn execute(&self, args: serde_json::Value, ctx: &ToolCtx) -> anyhow::Result<String> {
         let command = str_arg(&args, "command")?;
-        // SECURITY INVARIANT: the approval gate runs before the command, no exceptions.
-        if !(ctx.approve)(command) {
-            // Ok-shaped so the model can read the denial and adapt, not crash the turn.
-            return Ok(format!("user denied: {command}"));
+        match (ctx.guard)(&Access::Exec(command)) {
+            Guard::Block(reason) => return Ok(format!("blocked by law: {reason}")),
+            Guard::Ask => {
+                // SECURITY INVARIANT: shipped policy always routes exec through approval.
+                if !(ctx.approve)(command) {
+                    // Ok-shaped so the model can read the denial and adapt, not crash the turn.
+                    return Ok(format!("user denied: {command}"));
+                }
+            }
+            Guard::Allow => {}
         }
         let mut cmd = if cfg!(windows) {
             let mut c = std::process::Command::new("cmd");
@@ -246,10 +318,7 @@ mod tests {
     use std::sync::Arc;
 
     fn ctx_with(workdir: &Path, approve: bool) -> ToolCtx {
-        ToolCtx {
-            workdir: workdir.to_path_buf(),
-            approve: Box::new(move |_| approve),
-        }
+        ToolCtx::new(workdir.to_path_buf(), Box::new(move |_| approve))
     }
 
     #[test]
@@ -382,14 +451,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_seen = calls.clone();
-        let ctx = ToolCtx {
-            workdir: dir.path().to_path_buf(),
-            approve: Box::new(move |cmd| {
+        let ctx = ToolCtx::new(
+            dir.path().to_path_buf(),
+            Box::new(move |cmd| {
                 assert_eq!(cmd, "echo pwned > marker.txt");
                 calls_seen.fetch_add(1, Ordering::SeqCst);
                 false
             }),
-        };
+        );
         let result = ExecShell
             .execute(json!({"command": "echo pwned > marker.txt"}), &ctx)
             .unwrap();
@@ -457,5 +526,134 @@ mod tests {
         let ctx = ctx_with(dir.path(), true);
         let err = ReadFile.execute(json!({}), &ctx).unwrap_err().to_string();
         assert_eq!(err, "missing required argument: path");
+    }
+
+    #[test]
+    fn protected_edit_is_ok_shaped_and_leaves_file_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let protected = dir.path().join(".nosis").join("law.toml");
+        std::fs::create_dir_all(protected.parent().unwrap()).unwrap();
+        std::fs::write(&protected, "before").unwrap();
+        let ctx = ToolCtx::new(dir.path().to_path_buf(), Box::new(|_| true)).with_guard(
+            Box::new(|access| match access {
+                Access::Write(path) if *path == ".nosis/law.toml" => {
+                    Guard::Block("protected path (.nosis/**)".into())
+                }
+                _ => Guard::Allow,
+            }),
+        );
+
+        let result = EditFile
+            .execute(
+                json!({"path": ".nosis/law.toml", "old_string": "before", "new_string": "after"}),
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result, "blocked by law: protected path (.nosis/**)");
+        assert_eq!(std::fs::read_to_string(protected).unwrap(), "before");
+    }
+
+    #[test]
+    fn protected_missing_edit_is_blocked_before_file_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolCtx::new(dir.path().to_path_buf(), Box::new(|_| true)).with_guard(
+            Box::new(|access| match access {
+                Access::Write(".nosis/new.toml") => Guard::Block("protected path".into()),
+                _ => Guard::Allow,
+            }),
+        );
+
+        let result = EditFile
+            .execute(
+                json!({"path": ".nosis/new.toml", "old_string": "before", "new_string": "after"}),
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result, "blocked by law: protected path");
+    }
+
+    #[test]
+    fn edit_ask_uses_normalized_relative_path_and_denial_is_ok_shaped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("nested")).unwrap();
+        std::fs::write(dir.path().join("note.txt"), "before").unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let approvals = Arc::clone(&seen);
+        let ctx = ToolCtx::new(
+            dir.path().to_path_buf(),
+            Box::new(move |action| {
+                approvals.lock().unwrap().push(action.to_string());
+                false
+            }),
+        )
+        .with_guard(Box::new(|access| match access {
+            Access::Write("note.txt") => Guard::Ask,
+            _ => Guard::Allow,
+        }));
+
+        let result = EditFile
+            .execute(
+                json!({"path": "nested/../note.txt", "old_string": "before", "new_string": "after"}),
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result, "user denied: edit note.txt");
+        assert_eq!(*seen.lock().unwrap(), ["edit note.txt"]);
+        assert_eq!(std::fs::read_to_string(dir.path().join("note.txt")).unwrap(), "before");
+    }
+
+    #[test]
+    fn default_context_allows_edit_and_routes_exec_through_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("note.txt"), "before").unwrap();
+        let approvals = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&approvals);
+        let ctx = ToolCtx::new(
+            dir.path().to_path_buf(),
+            Box::new(move |_| {
+                seen.fetch_add(1, Ordering::SeqCst);
+                false
+            }),
+        );
+
+        let edited = EditFile
+            .execute(
+                json!({"path": "note.txt", "old_string": "before", "new_string": "after"}),
+                &ctx,
+            )
+            .unwrap();
+        let denied = ExecShell
+            .execute(json!({"command": "echo should-not-run"}), &ctx)
+            .unwrap();
+
+        assert_eq!(edited, "edited note.txt");
+        assert_eq!(denied, "user denied: echo should-not-run");
+        assert_eq!(approvals.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn blocked_exec_never_runs_or_asks() {
+        let dir = tempfile::tempdir().unwrap();
+        let approvals = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&approvals);
+        let ctx = ToolCtx::new(
+            dir.path().to_path_buf(),
+            Box::new(move |_| {
+                seen.fetch_add(1, Ordering::SeqCst);
+                true
+            }),
+        )
+        .with_guard(Box::new(|_| Guard::Block("blocked command".into())));
+
+        let result = ExecShell
+            .execute(json!({"command": "echo pwned > marker.txt"}), &ctx)
+            .unwrap();
+
+        assert_eq!(result, "blocked by law: blocked command");
+        assert_eq!(approvals.load(Ordering::SeqCst), 0);
+        assert!(!dir.path().join("marker.txt").exists());
     }
 }
