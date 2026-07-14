@@ -2,11 +2,28 @@
 
 ## Immediate Goal
 
-Drive the **M3 (TUI) build loop**. M0/M1/M2 DONE + committed (HEAD `3155949`). **M3 Slice A
-(nh-tui render core + `nh tui`) is DONE**: implemented by Sol, orchestrator-verified (217 pass / 1
-ignored / 0 fail, clippy clean), one hardening pass (display-safety `safe_line` lifted into
-nh-vault), **committed**. Next = **Slice B** (trust-dial view + `?` palette), then **Slice C**
-(timeline view + notify).
+**M0–M3 DONE + committed. HEAD `21b92e4`. Tree clean. Workspace green: 239 pass / 1 ignored / 0
+fail, clippy `-D warnings` clean.** M3 (TUI) is CONTENT-COMPLETE — all three slices (A `f45fb02`,
+B `13c36c9`, C `21b92e4`) + the DeepSeek wire live-fix (`40f4180`) + M6 roadmap add (`6f9524e`).
+
+### ON RESUME ("continue") — do this:
+1. Re-verify: `git log --oneline -1` (expect `21b92e4` or later), `git status --short` (clean),
+   `cargo test --workspace` + `cargo clippy --workspace --all-targets -- -D warnings` (green).
+   If Kaspersky blocks the `wire_clients` exe (os error 5 / LNK1104), pause AV or exclude
+   `...\nosis-Harness\target`; the code is frozen nh-core and green — [[build-loop-resume]].
+2. Ask Carlos the ONE open question: **did the `nh tui` render smoke look clean** on Windows
+   Terminal / VS Code terminal / ConHost?
+   - Clean → proceed to **M4** (write `CONTRACTS_M4.md`, brief Sol, run the loop).
+   - Artifacts/issues → one bounded M3 hardening pass to Sol FIRST, then M4.
+3. Low-regret prep either way: draft `CONTRACTS_M4.md` (M4 = fleet + swarm + scheduler + nh-mcp;
+   exit criteria in `MILESTONES.md`) so M4 is ready to launch the moment the smoke greenlights.
+
+### Two M3 exit items still open (need Carlos, NOT code):
+- **Render smoke** on the Predator (the M3 exit criterion; can't be unit-tested).
+- **Live Telegram** send — `nh key add telegram` + KORVIN `chat_id` in `.nosis/notify.toml`.
+
+### Try it now: `cd` to repo root, `.\target\debug\nh.exe tui` (DeepSeek key works; catalog at root).
+Keys: type+Enter dispatch · `t` trust dial · `?` palette · `l` timeline · `y/N` approve · `q`/Ctrl-C quit.
 
 ## Roles (fixed)
 
