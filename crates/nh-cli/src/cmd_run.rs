@@ -162,34 +162,10 @@ pub(crate) fn find_catalog(start: &Path) -> anyhow::Result<(PathBuf, String)> {
     anyhow::bail!("no catalog.toml found — run `nh init` to create one")
 }
 
-/// Max chars of untrusted text shown on one terminal line before a visible marker.
-const MAX_DISPLAY_CHARS: usize = 500;
-
 /// Scrub secrets, then escape for display. Every stderr line built from
 /// model-controlled text goes through this — one choke point.
 pub(crate) fn safe_line(scrubber: &Scrubber, text: &str) -> String {
-    sanitize_line(&scrubber.scrub(text))
-}
-
-/// Render untrusted text as one safe terminal line: control characters (\n, \r,
-/// ESC/ANSI, …) become visible escapes so model output cannot spoof the display,
-/// and very long text truncates with an explicit marker.
-fn sanitize_line(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for c in text.chars() {
-        if c.is_control() {
-            escaped.extend(c.escape_debug());
-        } else {
-            escaped.push(c);
-        }
-    }
-    let len = escaped.chars().count();
-    if len > MAX_DISPLAY_CHARS {
-        let head: String = escaped.chars().take(MAX_DISPLAY_CHARS).collect();
-        format!("{head}… (+{} more chars)", len - MAX_DISPLAY_CHARS)
-    } else {
-        escaped
-    }
+    nh_vault::safe_line(scrubber, text)
 }
 
 /// Approval gate: one line on stderr, default deny. `display` is the command
@@ -240,26 +216,6 @@ mod tests {
         assert!(!is_yes("\n"));
         assert!(!is_yes("n\n"));
         assert!(!is_yes("whatever\n"));
-    }
-
-    #[test]
-    fn sanitize_line_escapes_control_chars_visibly() {
-        // A spoof attempt: CR + ANSI erase-line to hide the real command.
-        let spoofed = "echo safe\r\x1b[2K && rm -rf /";
-        let display = sanitize_line(spoofed);
-        assert!(!display.chars().any(|c| c.is_control()), "got: {display}");
-        assert!(display.contains("\\r"), "CR must be visible: {display}");
-        assert!(display.contains("\\u{1b}"), "ESC must be visible: {display}");
-        assert!(display.contains("rm -rf /"), "payload must stay visible: {display}");
-    }
-
-    #[test]
-    fn sanitize_line_truncates_with_visible_marker() {
-        let display = sanitize_line(&"x".repeat(600));
-        assert!(display.chars().count() < 600, "got len {}", display.chars().count());
-        assert!(display.contains("(+100 more chars)"), "got: {display}");
-        // Short text passes through untouched.
-        assert_eq!(sanitize_line("cargo test"), "cargo test");
     }
 
     #[test]

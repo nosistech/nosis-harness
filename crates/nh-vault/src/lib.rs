@@ -77,6 +77,9 @@ fn env_var_name(entry: &str) -> String {
 
 const REDACTED: &str = "[REDACTED]";
 
+/// Max chars of untrusted text shown on one terminal line before a visible marker.
+const MAX_DISPLAY_CHARS: usize = 500;
+
 /// Known key shapes, one alternation compiled once. `csk-` must precede `sk-`
 /// so a `csk-` token is never matched from its second character onward.
 const KEY_SHAPES: &str = concat!(
@@ -110,6 +113,32 @@ impl Scrubber {
         }
         self.shapes.replace_all(&out, REDACTED).into_owned()
     }
+}
+
+/// Render untrusted text as one safe terminal line: control characters (\n, \r,
+/// ESC/ANSI, …) become visible escapes so model output cannot spoof the display,
+/// and very long text truncates with an explicit marker.
+pub fn sanitize_line(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() {
+            escaped.extend(c.escape_debug());
+        } else {
+            escaped.push(c);
+        }
+    }
+    let len = escaped.chars().count();
+    if len > MAX_DISPLAY_CHARS {
+        let head: String = escaped.chars().take(MAX_DISPLAY_CHARS).collect();
+        format!("{head}… (+{} more chars)", len - MAX_DISPLAY_CHARS)
+    } else {
+        escaped
+    }
+}
+
+/// Scrub secrets, then escape and truncate untrusted text for terminal display.
+pub fn safe_line(scrubber: &Scrubber, text: &str) -> String {
+    sanitize_line(&scrubber.scrub(text))
 }
 
 #[cfg(test)]
@@ -177,6 +206,26 @@ mod tests {
     fn scrub_ignores_empty_literal() {
         let s = Scrubber::new(vec![String::new()]);
         assert_eq!(s.scrub("plain text"), "plain text");
+    }
+
+    #[test]
+    fn sanitize_line_escapes_control_chars_visibly() {
+        // A spoof attempt: CR + ANSI erase-line to hide the real command.
+        let spoofed = "echo safe\r\x1b[2K && rm -rf /";
+        let display = sanitize_line(spoofed);
+        assert!(!display.chars().any(|c| c.is_control()), "got: {display}");
+        assert!(display.contains("\\r"), "CR must be visible: {display}");
+        assert!(display.contains("\\u{1b}"), "ESC must be visible: {display}");
+        assert!(display.contains("rm -rf /"), "payload must stay visible: {display}");
+    }
+
+    #[test]
+    fn sanitize_line_truncates_with_visible_marker() {
+        let display = sanitize_line(&"x".repeat(600));
+        assert!(display.chars().count() < 600, "got len {}", display.chars().count());
+        assert!(display.contains("(+100 more chars)"), "got: {display}");
+        // Short text passes through untouched.
+        assert_eq!(sanitize_line("cargo test"), "cargo test");
     }
 
     #[test]

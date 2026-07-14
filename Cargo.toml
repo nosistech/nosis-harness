@@ -6,6 +6,7 @@ members = [
     "crates/nh-tools",
     "crates/nh-vault",
     "crates/nh-law",
+    "crates/nh-tui",
     "crates/nh-cli",
 ]
 
@@ -26,3 +27,5 @@ keyring = { version = "3", features = ["windows-native", "apple-native", "sync-s
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"], default-features = false }
 tempfile = "3"
+ratatui = "0.30.2"
+crossterm = "0.29"

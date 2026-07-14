@@ -188,9 +188,56 @@ impl ResolvedRoute {
         })
     }
 
+    /// Short clock-pricing chip for terminal cost HUDs. Peak boundaries are
+    /// evaluated in the route timezone and displayed in the user's UTC offset.
+    pub fn peak_status(&self, at: DateTime<Utc>, local: FixedOffset) -> String {
+        let Some(quote) = self.price_at(at) else {
+            return "no price data".into();
+        };
+        if !quote.peak {
+            return "off-peak".into();
+        }
+        let Some(peak) = self.price.as_ref().and_then(|price| price.peak.as_ref()) else {
+            return "peak".into();
+        };
+        let Some(route_offset) = FixedOffset::east_opt(peak.utc_offset_secs) else {
+            return "peak".into();
+        };
+        let route_local = at.with_timezone(&route_offset);
+        let time = route_local.time();
+        let Some((_, end)) = peak
+            .windows
+            .iter()
+            .find(|(start, end)| time >= *start && time < *end)
+        else {
+            return "peak".into();
+        };
+        let end = match route_local
+            .date_naive()
+            .and_time(*end)
+            .and_local_timezone(route_offset)
+        {
+            chrono::LocalResult::Single(end) => end,
+            _ => return "peak".into(),
+        };
+        format!(
+            "peak {}x until {}",
+            trim_multiplier(peak.multiplier),
+            end.with_timezone(&local).format("%H:%M")
+        )
+    }
+
     /// True when catalog.toml lists `name` in this route's quirks array.
     pub fn has_quirk(&self, name: &str) -> bool {
         self.quirks.iter().any(|q| q == name)
+    }
+}
+
+fn trim_multiplier(multiplier: f64) -> String {
+    if (multiplier - multiplier.round()).abs() < 1e-9 {
+        format!("{multiplier:.0}")
+    } else {
+        format!("{multiplier}")
     }
 }
 
@@ -749,6 +796,25 @@ mod tests {
         assert!(close(quote.cache_hit, 0.025));
         assert!(close(quote.cache_miss, 3.00));
         assert!(close(quote.output, 6.00));
+    }
+
+    #[test]
+    fn peak_status_is_short_local_and_boundary_exact() {
+        let route = resolver().resolve("deepseek-v4-pro").unwrap();
+        let beijing_offset = FixedOffset::east_opt(8 * 3600).unwrap();
+        assert_eq!(
+            route.peak_status(beijing(15, 0), beijing_offset),
+            "peak 2x until 18:00"
+        );
+        assert_eq!(
+            route.peak_status(beijing(18, 0), beijing_offset),
+            "off-peak"
+        );
+        let user_offset = FixedOffset::west_opt(6 * 3600).unwrap();
+        assert_eq!(
+            route.peak_status(beijing(10, 30), user_offset),
+            "peak 2x until 22:00"
+        );
     }
 
     #[test]
