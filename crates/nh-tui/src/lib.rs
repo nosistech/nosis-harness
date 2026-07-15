@@ -1209,7 +1209,7 @@ fn effort_name(effort: ThinkingEffort) -> &'static str {
 }
 
 fn parse_effort(value: &str) -> Option<ThinkingEffort> {
-    match value {
+    match value.trim().to_ascii_lowercase().as_str() {
         "none" => Some(ThinkingEffort::None),
         "low" => Some(ThinkingEffort::Low),
         "high" => Some(ThinkingEffort::High),
@@ -3110,7 +3110,7 @@ mod tests {
     #[test]
     fn effort_command_sets_header_and_invalid_value_shows_usage() {
         let mut app = test_app(None);
-        type_text(&mut app, "/effort high");
+        type_text(&mut app, "/effort High");
         assert_eq!(
             reduce_key(&mut app, code_key(KeyCode::Enter)),
             UiAction::SetEffort(ThinkingEffort::High)
@@ -3118,6 +3118,13 @@ mod tests {
         app.set_effort(ThinkingEffort::High);
         let rendered = buffer_text(&render_buffer(&app, 90, 20));
         assert!(rendered.contains("effort: high"), "got: {rendered}");
+
+        type_text(&mut app, "/effort MAX");
+        assert_eq!(
+            reduce_key(&mut app, code_key(KeyCode::Enter)),
+            UiAction::SetEffort(ThinkingEffort::Max)
+        );
+        app.set_effort(ThinkingEffort::Max);
 
         let before = app.transcript.len();
         type_text(&mut app, "/effort extreme");
@@ -3130,7 +3137,7 @@ mod tests {
             app.transcript.last().map(|line| line.text.as_str()),
             Some("usage: /effort <none|low|high|max>")
         );
-        assert_eq!(app.effort, ThinkingEffort::High);
+        assert_eq!(app.effort, ThinkingEffort::Max);
     }
 
     #[test]
