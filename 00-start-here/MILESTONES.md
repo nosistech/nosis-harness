@@ -44,6 +44,21 @@ The project has:
 
 Exit: full session on the Predator natively (Windows Terminal, VS Code terminal, ConHost), zero renderer artifacts.
 
+Status (2026-07-15): **exit criteria met (UX-approved).** Slices A–C shipped the surfaces (semáforo,
+cost HUD, timeline, trust dial, `?` palette, Telegram hook). Carlos then rejected the
+content-complete-but-flat TUI on UX grounds, so M3 was reopened and re-skinned + interaction-fixed
+across **Slices D+E+F**: framed chat transcript with `❯ you`/`◆ nosis` roles + turn separation;
+type-freely **slash-command** input (`/` live menu; removed the bare-letter shortcuts that collided
+with typing); live `/model`/`/provider` switch preserving history + `/effort none|low|high|max`;
+keyboard scroll + `↑/↓ more` overflow hints; honest identity system prompt (`nosis on <route>`, never
+Claude — fixes DeepSeek V4 Flash training contamination); **native mouse click-drag copy restored**
+(mouse capture removed) + **bracketed paste fixed** (multi-line → one line, never auto-dispatches).
+Carlos ran the interactive re-smoke in Windows Terminal (his standardized default) and approved the
+FEEL — the binding gate. Orchestrator adversarially stress-tested the reducers/renderer (tiny terminals
+1×1, 200k/emoji/CJK/control paste, boundary nav, 20k-event fuzz) — zero panics. 261 pass / 1 ignored,
+clippy `-D warnings` clean. Committed on main. Optional follow-ups (not blocking): separate re-smoke in
+VS Code terminal + ConHost; case-insensitive `/effort`.
+
 ## Milestone 4: Fleet + swarm + scheduler + nh-mcp server (weeks 7–9)
 
 The project has:

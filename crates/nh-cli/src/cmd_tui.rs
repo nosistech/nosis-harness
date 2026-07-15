@@ -18,7 +18,7 @@ pub fn run(model: &str, budget: Option<u64>) -> anyhow::Result<()> {
     for warning in &law.warnings {
         eprintln!(
             "warning: {}",
-            cmd_run::safe_line(&warning_scrubber, warning)
+            pre_screen_line(&warning_scrubber, warning)
         );
     }
     let mut mcp_warnings = Vec::new();
@@ -26,7 +26,7 @@ pub fn run(model: &str, budget: Option<u64>) -> anyhow::Result<()> {
     for warning in &mcp_warnings {
         eprintln!(
             "warning: {}",
-            cmd_run::safe_line(&warning_scrubber, warning)
+            pre_screen_line(&warning_scrubber, warning)
         );
     }
     let mut notify_warnings = Vec::new();
@@ -34,7 +34,7 @@ pub fn run(model: &str, budget: Option<u64>) -> anyhow::Result<()> {
     for warning in &notify_warnings {
         eprintln!(
             "warning: {}",
-            cmd_run::safe_line(&warning_scrubber, warning)
+            pre_screen_line(&warning_scrubber, warning)
         );
     }
     let resolver = RouteResolver::from_toml(&catalog)?;
@@ -50,6 +50,10 @@ pub fn run(model: &str, budget: Option<u64>) -> anyhow::Result<()> {
     })
 }
 
+fn pre_screen_line(scrubber: &Scrubber, line: &str) -> String {
+    cmd_run::safe_line(scrubber, line).replace('—', "-")
+}
+
 /// Load and discover MCP once, before nh-tui takes terminal ownership.
 fn load_mcp_palette(root: &Path, warnings: &mut Vec<String>) -> Vec<PaletteEntry> {
     let path = root.join(".nosis").join("mcp.toml");
@@ -60,7 +64,7 @@ fn load_mcp_palette(root: &Path, warnings: &mut Vec<String>) -> Vec<PaletteEntry
         Ok(text) => text,
         Err(error) => {
             let warning =
-                format!("could not read .nosis/mcp.toml ({error}) — palette marks MCP stale");
+                format!("could not read .nosis/mcp.toml ({error}) - palette marks MCP stale");
             warnings.push(warning.clone());
             return mcp_palette_entries(
                 &[],
@@ -79,7 +83,7 @@ fn load_mcp_palette(root: &Path, warnings: &mut Vec<String>) -> Vec<PaletteEntry
             entries
         }
         Err(error) => {
-            let warning = format!(".nosis/mcp.toml: {error} — palette marks MCP stale");
+            let warning = format!(".nosis/mcp.toml: {error} - palette marks MCP stale");
             warnings.push(warning.clone());
             mcp_palette_entries(
                 &[],
@@ -96,14 +100,14 @@ fn load_mcp_palette(root: &Path, warnings: &mut Vec<String>) -> Vec<PaletteEntry
 fn load_notify_config(root: &Path, warnings: &mut Vec<String>) -> NotifyConfig {
     let path = root.join(".nosis").join("notify.toml");
     if !path.is_file() {
-        warnings.push(".nosis/notify.toml not found — using bell only".into());
+        warnings.push(".nosis/notify.toml not found - using bell only".into());
         return NotifyConfig::default();
     }
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) => {
             warnings.push(format!(
-                "could not read .nosis/notify.toml ({error}) — using bell only"
+                "could not read .nosis/notify.toml ({error}) - using bell only"
             ));
             return NotifyConfig::default();
         }
@@ -111,7 +115,7 @@ fn load_notify_config(root: &Path, warnings: &mut Vec<String>) -> NotifyConfig {
     match parse_notify_config(&text) {
         Ok(config) => config,
         Err(error) => {
-            warnings.push(format!(".nosis/notify.toml: {error} — using bell only"));
+            warnings.push(format!(".nosis/notify.toml: {error} - using bell only"));
             NotifyConfig::default()
         }
     }
@@ -190,5 +194,11 @@ mod tests {
                 chat_id: "123456789".into(),
             })
         );
+    }
+
+    #[test]
+    fn pre_screen_lines_use_an_ascii_dash() {
+        let line = pre_screen_line(&Scrubber::new(Vec::new()), "warning — before alt screen");
+        assert_eq!(line, "warning - before alt screen");
     }
 }

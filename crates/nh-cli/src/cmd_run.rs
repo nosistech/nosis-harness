@@ -159,7 +159,7 @@ pub(crate) fn find_catalog(start: &Path) -> anyhow::Result<(PathBuf, String)> {
             return Ok((dir.to_path_buf(), text));
         }
     }
-    anyhow::bail!("no catalog.toml found — run `nh init` to create one")
+    anyhow::bail!("no catalog.toml found - run `nh init` to create one")
 }
 
 /// Scrub secrets, then escape for display. Every stderr line built from
