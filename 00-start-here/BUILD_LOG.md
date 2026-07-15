@@ -2,6 +2,56 @@
 
 Record every meaningful session here.
 
+## 2026-07-15: M3 TUI UX overhaul (Slices D+E+F) — stress-test + FEEL-approved commit gate (M3 CLOSED)
+
+Builder:
+
+- Claude (Opus 4.8, Claude Code) — M3 orchestrator: verify, adversarial stress-test, gate, commit
+- Codex (GPT-5.6 Sol) — Slices D/E/F implementer (from earlier sessions; committed here after FEEL approval)
+
+What changed:
+
+- Carlos rejected the content-complete-but-flat TUI on UX grounds (couldn't type tasks starting with
+  t/l — bare-letter shortcuts collided; overlays bled into the transcript; no scroll; model/effort
+  hidden; native mouse-copy broken; paste eaten). M3 was reopened and re-skinned + interaction-fixed
+  across three slices (all had been sitting uncommitted on top of `28e8cf6`):
+  - **Slice D** — bordered outer frame + chat transcript (`❯ you` / `◆ nosis` roles, turn separation,
+    visual gaps) + framed centered modals with Clear-before-draw (anti-bleed) + welcome empty-state +
+    key-hint strip. (Spec: CONTRACTS_M3 §8.)
+  - **Slice E** — type-freely slash-command input: `/` opens a live command menu; the colliding
+    bare-letter t/l/? shortcuts are gone. Live `/model`/`/provider` route switch preserves history
+    (only cache warmth resets, full resolver path) + `/effort none|low|high|max`. Keyboard scroll
+    (`↑↓`/PageUp/PageDown/End) with `↑/↓ more` overflow hints. Honest identity system prompt
+    (`nosis on <route>`, never Claude — fixes DeepSeek V4 Flash training contamination; routing
+    verified via receipts, not misrouting). Mojibake fix. (Spec: CONTRACTS_M3 §9.)
+  - **Slice F** — removed mouse capture (no `EnableMouseCapture`) so native click-drag copy works
+    again with NO Shift; fixed paste via bracketed paste (`Event::Paste` → `reduce_paste`, multi-line
+    collapses to one line, never auto-dispatches; `DisableBracketedPaste` added to the panic-safe
+    restore sequence).
+- Orchestrator adversarial stress-test (throwaway `#[cfg(test)] mod stress_probe` driving the private
+  `reduce_key`/`reduce_paste`/`reduce_input_event`/`render` via ratatui `TestBackend` — ran, then
+  DELETED; the tree stayed pristine D/E/F, never `git checkout`ed). 8 families all green: tiny
+  terminals 1×1→80×1 across every overlay + full transcript/timeline (no split/clamp/cursor panic);
+  200k-char + emoji/CJK + `\n\r\t` + pure-control paste (stays one line, never leaks a newline);
+  backspace-underflow + 10k-char + wide-char cursor; no-match `/zzzzz`+Enter (friendly, never a task);
+  100–200× arrow-spam nav stays in bounds; scroll saturates both ends; 20,000-event deterministic fuzz
+  (keys+pastes+resizes) — zero panics, input never held a raw `\n`/`\r`. One FEEL nit surfaced (not a
+  bug, fails safe): `/effort HIGH` uppercase is rejected because `parse_effort` is lowercase-only —
+  left as-is (Carlos said commit; optional one-line follow-up).
+
+Tests/checks run (orchestrator, independent):
+
+- `cargo test --workspace`: **261 passed, 0 failed, 1 ignored** (+22 over Slice C's 239). With the
+  temporary stress probe compiled in: 269 passed. Back to 46 nh-tui tests after the probe's removal.
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+- **Carlos approved the interactive FEEL re-smoke in Windows Terminal** (native mouse copy, real
+  clipboard paste, WT glyph/frame render, `/quit` clean restore) — the binding UX gate.
+
+Next step:
+
+- **M3 CLOSED (UX-approved).** Proceed to M4: fleet + append-only ledger + off-peak scheduler +
+  escalation ladder + nh-mcp server. Draft `CONTRACTS_M4.md`, brief Sol (GPT-5.6 xhigh), run the loop.
+
 ## 2026-07-14: M3 Slice C — orchestrator review + commit gate (M3 CONTENT-COMPLETE)
 
 Builder:

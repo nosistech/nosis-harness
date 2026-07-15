@@ -315,3 +315,135 @@ nh tui [--model <id>] [--budget <tokens>]
 - **2026-07-14 — trust-dial policy view:** added additive `nh_law::PolicyView` and
   `Policy::view()`, returning owned copies of autonomy and the four compiled rule classes for the
   read-only Slice B trust-dial. Policy fields and verdict behavior remain unchanged, per §2.1.
+- **2026-07-14 — Slice D (UX overhaul) authorized:** the artifact-free M3 TUI was rejected by the
+  owner on UX grounds (flat/unfinished look; overlays bled the transcript around a margin). Slice D
+  (§8) re-skins nh-tui ONLY into framed panels + chat-style transcript + framed centered modals +
+  self-teaching affordances. No behavior/keys/deps change; nh-tui public API stays source-compatible.
+  The plan's deliberately-minimal renderer (§1.3 "artifact budget") is relaxed now that the renderer
+  is proven artifact-free — plain single-line borders + 16-color only stay the safety envelope.
+
+---
+
+## 8. nh-tui — Slice D: UX overhaul (framed panels + chat transcript + framed modals)
+
+**Carlos's binding UX directive (2026-07-14):** without best-in-class UX/UI the product goes unused
+no matter how good the engine — so this slice is graded by FEEL, not just "renders." It must be
+self-teaching (zero handholding), delightful enough to use for small things, and match the
+CodeWhale bar the owner referenced. Direction chosen: **framed panels + chat-style transcript.**
+
+### 8.0 Scope + frozen
+- Touch **crates/nh-tui ONLY.** All other crates unchanged (source-compatible). nh-tui public API
+  (`run`, `App`, `Status`, `AgentEvent`, `ApprovalRequest`, `TuiConfig`, `apply_event`) keeps its
+  signatures — internal rendering refactor. No new deps (ratatui + crossterm only). No async.
+- All §0 hard invariants still hold: every rendered string via `nh_vault::safe_line`; RAII terminal
+  restore + panic hook intact on every exit path; exec still approval-gated; keys unchanged.
+
+### 8.1 Render safety envelope (the artifact budget, tightened for borders)
+- Borders: **plain single-line only** (ratatui `BorderType::Plain` / `Borders::ALL`). No rounded,
+  double, thick, block, or shade glyphs. Named **16-color ANSI only** — no 24-bit truecolor.
+- Safe status glyphs only (`●`/`○`, `◆`, `❯`, `↑`/`↓` render on all three Windows terminals);
+  **no emoji** (e.g. no `⚡`) — use a plain-word `cached` label. If unsure a glyph renders on
+  ConHost legacy, fall back to ASCII.
+
+### 8.2 Main screen (one outer frame)
+- Outer bordered `Block`; top-border titles L→R: ` nosis ` (bold), **status chip** `● WORD`
+  colored by state (IDLE dim `○`, WORKING green, WAITING amber, BLOCKED red), route id (cyan,
+  right). Inside, top→bottom: transcript (fills) → separator → input line → footer HUD.
+- **Chat-style transcript:** each turn shows a role label then indented content —
+  user (`TranscriptKind::Task`) → `❯ you` (cyan bold); assistant (`Answer`) → `◆ nosis` (bold);
+  `Progress` → dim `· …`; `Approval` → highlighted `approve? <cmd>  [y/N]` (amber); `Error` →
+  friendly `! <what> — <do this>` (red, never a trace). Thin dim rule or blank line between turns,
+  newest at bottom. Roles derive from the existing `TranscriptKind` — no new public plumbing.
+- **Input:** `❯ ` (cyan) + text + visible cursor; empty → dim placeholder (`type a task and press
+  Enter…`).
+- **Footer HUD:** existing hud data/helpers (`hud_line`/`peak_status`), grouped + readable:
+  `in N · out N · cached N · cache NN% · <peak/off-peak chip> · [###----] NN%` (budget bar only
+  when `--budget` set; cache omitted before any usage, as today). Do NOT reimplement pricing.
+
+### 8.3 Self-teaching + delight (graded)
+- **Always-visible key-hint strip** (one dim line, footer/above-input): `? commands   t trust
+  l timeline   q quit`. This is the anti-handholding affordance.
+- **Friendly empty state** (fresh launch, empty transcript): warm centered welcome inside the
+  frame — greeting + `Type a task and press Enter.` + one example + `Press ? to see everything
+  nosis can do.` Replaced by the conversation once a task runs.
+
+### 8.4 Framed modals (fixes the bleed — the #1 defect)
+- Each overlay (Trust Dial, Commands+Tools, Timeline) = a **centered** `Block` + `Borders::ALL` +
+  title (` Trust Dial · read-only `, ` Commands + Tools `, ` Timeline `) + a one-line
+  what-this-is/keys row + 1-col-padded body. `Clear` the ENTIRE block area so nothing from the
+  transcript shows inside or around it. Size ≈ min(width−4, 76) × clamped height, centered.
+  Replaces the current `inset()`-margin approach that leaks the transcript around the edges.
+  Timeline's rail/detail two-column layout lives INSIDE this frame.
+
+### 8.5 Tests (headless TestBackend; keep all 239 green, weaken nothing)
+- **Anti-bleed regression (key):** with a non-empty transcript, open each overlay; assert its
+  bordered interior holds only overlay content + an intact border ring, no residual transcript char.
+- Outer frame + status chip word render for each `Status`; chat role labels (`you`/`nosis`) +
+  turn separation; empty-state welcome present on a fresh App, gone after a task; key-hint strip
+  present; scrub holds on every new surface (fake key literal → redacted, no control chars).
+
+### 8.6 Gate
+- `cargo test --workspace` (≥239 pass, 0 fail) + `cargo clippy --workspace --all-targets -- -D
+  warnings` clean before handoff. (Kaspersky blocking the `wire_clients` exe = AV/env, not code.)
+
+---
+
+## 9. nh-tui — Slice E: interaction model (slash commands) + live controls + scroll + identity
+
+**Owner smoke of Slice D (2026-07-14) surfaced two blocking bugs + missing controls.** Bare
+single-letter shortcuts (`t`/`l`/`q`/`?`/`R` on empty input) collide with typing any task that
+starts with those letters; the transcript won't scroll with arrows/wheel (only PageUp/Down/End);
+and the model/effort controls + model switching are hidden. Also: DeepSeek self-identifies as
+"Claude" (training contamination — verified routing via receipts = `deepseek-v4-flash`), which
+erodes trust. Carlos's decision (2026-07-14): move to a **type-freely + slash-command** model
+(CodeWhale/Claude-Code feel). UX + security are the product's differentiators.
+
+### 9.0 Scope + frozen
+- Touch **crates/nh-tui + crates/nh-cli/src/cmd_tui.rs (+ helpers) ONLY.** Frozen: nh-core,
+  nh-tools, nh-law, nh-routes, nh-vault. nh-tui public API changes are ADDITIVE only (TuiConfig may
+  gain fields; `run`/`apply_event` stay source-compatible). If a frozen-crate edit seems required,
+  STOP and request an amendment. `TuiConfig.resolver` (already present) enables live route switching.
+- All §0 + §8.1 invariants hold: `safe_line` on every rendered string; RAII restore + panic hook on
+  every exit path; exec approval-gated; plain single-line borders, 16-color, ConHost-safe glyphs,
+  no emoji.
+
+### 9.1 Type-freely + slash commands (the core fix)
+- REMOVE every bare-letter-on-empty shortcut. All printable keys type into the input.
+- When input starts with `/`, show a live command menu (reuse/extend the palette) filtered by the
+  text after `/`; Enter runs it; Esc/clearing closes. Commands: `/help` (=`/?`) opens the full
+  palette; `/trust`; `/timeline`; `/model <id>`; `/provider <name>`; `/effort <none|low|high|max>`;
+  `/quit`. Unknown → one friendly line. Non-slash Enter dispatches a task (unchanged). Keep Ctrl-C
+  quit, Esc close-overlay.
+
+### 9.2 Scroll (fix "stuck")
+- Transcript scrolls via Up/Down (line), PageUp/PageDown (page), End (newest), and MOUSE WHEEL.
+  Overlays keep Up/Down for their own navigation. Enable mouse capture on startup; DisableMouse
+  capture on EVERY teardown (guard + panic hook) — no residue. Show a dim honest overflow hint
+  (`↑ more` / `↓ more`); a full Scrollbar is drop-if-hard.
+
+### 9.3 Live model/provider switch (mirror cmd_chat's proven `switch_to`)
+- `/model`/`/provider` re-resolve via `TuiConfig.resolver` and rebuild the worker's client for the
+  new route while KEEPING history + transcript + session usage; header updates; a transcript line
+  notes "context kept · cache resets". Keyless target behaves like launch (friendly key line, no
+  crash). HIGHEST RISK — if a clean live rebuild is genuinely hard, DROP-IF-HARD: recognize
+  `/model` with an honest "restart with --model <id> (live switch coming)" line; never ship a
+  half-broken switch. Report which path was taken.
+
+### 9.4 Live effort switch
+- `/effort <none|low|high|max>` sets `AgentLoop.thinking` for subsequent turns; header shows current
+  effort. Default stays the route dialect default.
+
+### 9.5 Honest identity (trust/security)
+- Compose (in the cmd_tui/nh-tui config layer — NOT nh-core) a system-prompt preface: "You are
+  nosis, an autonomous coding harness running on route '<route_id>' via <provider>. If asked what
+  model/assistant you are, answer 'nosis on <route_id>'; never claim to be Claude, GPT, or any other
+  assistant." Fold into the constitution string passed to the loop; keep it byte-stable per route
+  (cache discipline). Updates on `/model` switch. Test: composed prompt contains the route id + the
+  "never claim" instruction.
+
+### 9.6 Also
+- Header shows route + current effort; key-hint strip → `/ commands   ↑↓ scroll   Enter send
+  Ctrl+C quit`. Fix pre-alt-screen stderr mojibake (em-dash → ASCII `-`, or set console UTF-8) in
+  cmd_tui/cmd_run warnings.
+
+### 9.7 Gate — same as §8.6; keep all Slice D visuals + tests green, weaken nothing.
