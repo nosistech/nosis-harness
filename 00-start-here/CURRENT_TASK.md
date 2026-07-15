@@ -1,118 +1,95 @@
 # Current Task
 
-## Immediate Goal
+## Immediate Goal — M4: Fleet + swarm + scheduler + nh-mcp server (M3 CLOSED)
 
-**M0–M3 DONE + committed. HEAD `21b92e4`. Tree clean. Workspace green: 239 pass / 1 ignored / 0
-fail, clippy `-D warnings` clean.** M3 (TUI) is CONTENT-COMPLETE — all three slices (A `f45fb02`,
-B `13c36c9`, C `21b92e4`) + the DeepSeek wire live-fix (`40f4180`) + M6 roadmap add (`6f9524e`).
+**HEAD `3fcd00e` — M3 TUI UX overhaul (Slices D+E+F) is COMMITTED and M3 is CLOSED (UX-approved).**
+Carlos ran the interactive re-smoke in Windows Terminal and said "it feels right, commit it." The
+overhaul (framed chat transcript + roles, type-freely slash commands, live `/model`/`/provider`/
+`/effort` with history preserved, keyboard scroll + overflow hints, honest identity, native mouse-copy
+restored, bracketed-paste fixed) + BUILD_LOG + MILESTONES landed in `3fcd00e`. Verified 261 pass /
+1 ignored, clippy `-D warnings` clean; orchestrator stress-tested the reducers/renderer (tiny
+terminals, 200k/unicode paste, boundary nav, 20k-event fuzz) with zero panics.
+**One optional follow-up (NOT blocking, Carlos's call):** `/effort HIGH` uppercase is rejected
+(`parse_effort` is lowercase-only) — one-line Sol fix to case-fold the arg if he wants `/effort High`.
 
-### ON RESUME ("continue") — do this:
-1. Re-verify: `git log --oneline -1` (expect `21b92e4` or later), `git status --short` (clean),
-   `cargo test --workspace` + `cargo clippy --workspace --all-targets -- -D warnings` (green).
-   If Kaspersky blocks the `wire_clients` exe (os error 5 / LNK1104), pause AV or exclude
-   `...\nosis-Harness\target`; the code is frozen nh-core and green — [[build-loop-resume]].
-2. Ask Carlos the ONE open question: **did the `nh tui` render smoke look clean** on Windows
-   Terminal / VS Code terminal / ConHost?
-   - Clean → proceed to **M4** (write `CONTRACTS_M4.md`, brief Sol, run the loop).
-   - Artifacts/issues → one bounded M3 hardening pass to Sol FIRST, then M4.
-3. Low-regret prep either way: draft `CONTRACTS_M4.md` (M4 = fleet + swarm + scheduler + nh-mcp;
-   exit criteria in `MILESTONES.md`) so M4 is ready to launch the moment the smoke greenlights.
+### ON RESUME ("continue") — start M4:
+1. **Quick sanity:** `git log --oneline -1` = `3fcd00e`; clean tree; optional `cargo test --workspace`
+   (261 pass / 1 ignored) + `cargo clippy --workspace --all-targets -- -D warnings` clean.
+2. **Draft `CONTRACTS_M4.md`** (Claude plans + gates; Sol implements — [[m2-m5-codex-sol-directive]]).
+   M4 scope + exit criteria are in `MILESTONES.md §Milestone 4`: append-only ledger, workers, typed
+   receipts, **idempotent resume that survives `kill -9`**, off-peak scheduler, Kimi Swarm passthrough,
+   escalation ladder (Flash → K2.7 → V4 Pro High → V4 Pro Max → Opus 4.8 gate), and an **nh-mcp
+   server** exposing route-resolver + fleet-runner. Exit: 10-task fleet run survives `kill -9` and
+   resumes idempotently; a deferred job runs off-peak; KORVIN connects to nh-mcp and triggers a fleet
+   run; OAuth refresh survives forced expiry. **Do NOT ship nh-mcp publicly** until the MCP final spec
+   lands (2026-07-28) — see M5 note.
+3. **Brief Sol, run the loop, gate empirically** (numstat = truth; EOL/CRLF flags = noise). Slice the
+   work; verify each slice green + adversarially review before the next. UX-first still governs any
+   surface M4 adds (see below). Commit per-slice on `main` (repo convention).
 
-### Two M3 exit items still open (need Carlos, NOT code):
-- **Render smoke** on the Predator (the M3 exit criterion; can't be unit-tested).
-- **Live Telegram** send — `nh key add telegram` + KORVIN `chat_id` in `.nosis/notify.toml`.
+### UX is THE priority — still governs M4/M5/M6 (see [[ux-first-and-the-law]])
+"Pretty but frustrating" = failure. Judge by FEEL first, tests second. Reference bar = CodeWhale.
+Self-teaching, no handholding, delightful for small tasks.
 
-### Try it now: `cd` to repo root, `.\target\debug\nh.exe tui` (DeepSeek key works; catalog at root).
-Keys: type+Enter dispatch · `t` trust dial · `?` palette · `l` timeline · `y/N` approve · `q`/Ctrl-C quit.
+### Carlos's binding UX decisions (2026-07-14/15)
+- **Framed + chat transcript** (Slice D): bordered outer frame, `❯ you` / `◆ nosis` roles, turn
+  separation, framed centered modals (no bleed), welcome, key-hint strip.
+- **Slash commands** (Slice E): type freely; `/` opens a live command menu. `/help /trust /timeline
+  /model /provider /effort /quit`. NO bare-letter shortcuts (they collided with typing).
+- **Copy over scroll** (Slice F): remove mouse capture so native select/copy works; scroll is
+  keyboard-only (`↑↓`/PageUp/PageDown/End) + `↑ more`/`↓ more` hints. **Fix paste** (bracketed paste).
+- **Live controls surfaced**: `/model`/`/provider` switch preserves history (only cache warmth
+  resets); `/effort none|low|high|max` sets DeepSeek thinking; header shows route + effort.
+- **Honest identity**: system prompt says "You are nosis … running on <route> … never claim to be
+  Claude" — because DeepSeek V4 Flash self-IDs as Claude (training contamination; routing verified
+  = deepseek-v4-flash via receipts, NOT misrouting).
+
+### Environment gotchas (bit us this session)
+- A running `nh.exe` LOCKS `target\debug\nh.exe` → `cargo build/test` link fails. Kill it first.
+- Bash tool `cd` PERSISTS across calls → always `cd /c/Users/capv2/Desktop/nosis-Harness` or use
+  absolute paths (a stray `cd crates/...` caused a false "nh.exe missing").
+- PowerShell reads UTF-8 files as the OEM codepage → box-drawing/`—` look like mojibake in probes;
+  check raw BYTES (UTF-8 seq) not the decoded string before believing a glyph is "missing."
+- TUI window launch that WORKS: `Start-Process -FilePath <root>\target\debug\nh.exe -ArgumentList
+  tui -WorkingDirectory <root>` (the `wt.exe … cmd /k` wrapper silently failed to run nh).
+- Kaspersky can block the `wire_clients` test exe (os error 5 / LNK1104) — AV/env, not code.
+
+### Claude Code side (NOT nosis — why Carlos restarted)
+Carlos ran Claude Code in a **classic PowerShell console** in fullscreen (`"tui": "fullscreen"`):
+Backspace deleted whole words (legacy-console key encoding) and mouse select needed Shift (fullscreen
+TUI captures the mouse). Neither is live-fixable in a running process. I set **Windows Terminal as
+default terminal** (`HKCU:\Console\%%Startup` DelegationConsole `{2EACA947-7F5F-4CFA-BA87-8F7FBEEFBE69}`
+/ DelegationTerminal `{E12CFF52-A866-4C77-9A90-F570A7AA2C6B}`) so relaunching (`claude --continue`)
+opens in WT with correct Backspace + copy. Carlos was annoyed it didn't fix the LIVE window — **he
+may ask to revert that reg change** (reversible in Settings → Default terminal). He restarted to get
+into WT.
 
 ## Roles (fixed)
+- **Orchestrator = Opus 4.8** (this session): plans, writes contracts/briefs, runs gates,
+  adversarially reviews, commits, docs. Does NOT hand-write milestone code. [[m2-m5-codex-sol-directive]]
+- **Executor = GPT-5.6 Sol xhigh** via `codex exec` — writes all milestone implementation.
 
-- **Orchestrator = Opus 4.8, high effort** (this session): plans, writes contracts/briefs, runs
-  gates, adversarially reviews, commits, docs. Does NOT hand-write milestone code.
-- **Executor = GPT-5.6 Sol xhigh** via `codex exec` — writes all M3 implementation. Memory
-  [[m2-m5-codex-sol-directive]], [[ux-first-and-the-law]], [[build-loop-resume]].
-
-## Executor invocation (proven working)
-
+## Executor invocation (proven)
 ```
 codex exec --skip-git-repo-check -s workspace-write -m gpt-5.6-sol \
   -c model_reasoning_effort=xhigh "$(cat /c/Users/capv2/AppData/Local/Temp/<brief>.txt)" < /dev/null
 ```
-Run in background (harness-tracked); verify empirically after (git diff --numstat HEAD is truth,
-git status EOL flags are noise). Do NOT start a second nosis codex while one writes nosis.
+Run in background (harness-tracked); verify empirically after (numstat = truth; EOL flags = noise).
+Do NOT start a second codex on nosis while one writes nosis. STOP (don't fall back to Terra) if
+gpt-5.6-sol stops resolving or Sol fails the same gate twice.
 
-## Slice C — DONE (committed 2026-07-14) — M3 CONTENT-COMPLETE
-
-Timeline VIEW (`l`): left-rail turn list from in-memory receipts+answers (turn/outcome/tokens +
-compaction marker), Up/Down scrub, Enter inspects the receipt+answer, `R` shows the deferral note
-only (no restore, no snapshot store). Added to the `?` palette. Notifications: `.nosis/notify.toml`
-([telegram] enabled + chat_id; token via vault entry `telegram`), loaded once in cmd_tui; on
-entering Waiting/Blocked a short scrubbed body POSTs to Telegram on a short-lived side thread
-(redirects off, 3s/5s timeouts, every error → fixed "telegram notify failed" so the token never
-leaks), fires once per transition, failure = one dim line. Additive `AgentEvent::TaskReceipt`;
-nh-core/nh-tools untouched; no new dep (existing reqwest). Gate: 239 pass / 1 ignored, clippy clean.
-
-Remaining M3 exit items (both need Carlos, not code): (1) three-terminal render smoke on the
-Predator; (2) live Telegram send with the KORVIN bot token.
-
-## Slice B — DONE (committed 2026-07-14)
-
-Trust-dial VIEW (`t`) + `?` discoverability palette. Additive `nh_law::PolicyView` + `Policy::view()`
-(owned, read-only; fields still private; §7 amendment). nh-tui overlay reducer (`reduce_key ->
-UiAction`), case-insensitive in-memory palette filter, MCP server/tool rows with
-enabled/auth-ok/stale/discover-only startup state (derived from `McpToolset.warnings` +
-trust/auth), built-in commands + tools, visible deferred `R` note. MCP loaded ONCE in cmd_tui before
-alt-screen (no render-thread network). Every overlay line via `nh_vault::safe_line` (TestBackend
-render test proves scrub + control-char safety). nh-core/nh-tools untouched. Gate: 227 pass / 1
-ignored, clippy clean.
-
-## Slice A — DONE (committed 2026-07-14)
-
-`crates/nh-tui` (ratatui + crossterm) + `nh tui [--model][--budget]` in nh-cli. Channel-backed
-single worker; Mutex-backed default-deny approval (Send+Sync, no new dep); exec still policy-gated;
-RAII terminal guard + panic hook restore on every exit path; every rendered string via
-`nh_vault::safe_line` (scrub + control-char escape); single-state semáforo pure reducer; cost HUD +
-hard `--budget` stop; bell on entering Waiting. `peak_status` and the `safe_line`/`sanitize_line`
-display-safety primitive both lifted to shared crates (nh-routes, nh-vault) — §7 amendments logged.
-Reserved no-ops for Slice B/C: `?`, `t`, `R`. nh-core/nh-tools untouched.
-
-Verify-live still open: three-terminal render-artifact smoke (Windows Terminal + VS Code terminal +
-ConHost) on the Predator — the M3 exit criterion, human-checked (not unit-testable).
-
-## Next Action — Slice C (CONTRACTS_M3 §3), the last M3 slice
-
-1. Write `%TEMP%\brief_m3_sliceC.txt` from CONTRACTS_M3 §3: timeline VIEW ONLY (left-rail turn list
-   from in-memory session history/receipts + compaction markers; arrow-scrub; Enter inspects a
-   turn's receipt/answer; `R` stays a disabled seam with the "restore arrives later" note — NO
-   snapshot store) + notifications (terminal bell baseline already in Slice A; add the Telegram hook
-   + `.nosis/notify.toml`, token via nh-vault, scrubbed body, POST on entering Waiting/Blocked on a
-   side thread — never block the render loop; failure = one dim line). No new deps (reqwest blocking
-   exists). Telegram send is verify-live (Carlos's KORVIN bot token) — build + mock-test now.
-2. Drive Sol (background codex exec), let it finish, verify empirically (numstat: nh-core/nh-tools
-   still frozen; timeline is a projection over existing history/receipts, not a new persistence layer).
-3. Verify: message builder produces a short scrubbed body per state; disabled/absent notify.toml =
-   no HTTP; a failing POST (mock) degrades to one warning, session continues; timeline scrub/inspect
-   is pure + headless-tested; `R` shows the deferral note, never restores.
-4. Gate: `cargo test --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`.
-   (If Kaspersky is ON it blocks the 8 MB `wire_clients` test exe — pause AV or exclude
-   `...\nosis-Harness\target`; wire_clients is frozen nh-core, green.)
-5. Adversarial + UX review vs THE LAW + SECURITY_MODEL. Bounded hardening pass if warranted; re-verify.
-6. Update BUILD_LOG + this file; commit Slice C. **Then M3 is content-complete** — hand Carlos a
-   runnable `nh tui` for the three-terminal render smoke (the M3 exit criterion). Report at the M3
-   boundary; only stop for guardrail conditions.
+## M3 slices (COMMITTED in `3fcd00e`, 2026-07-15 — full detail in BUILD_LOG)
+- **Slice D** — framed panels + chat transcript + anti-bleed modals + welcome + key-hint strip (CONTRACTS_M3 §8).
+- **Slice E** — slash commands + live `/model`/`/provider` (history preserved) + `/effort` + keyboard
+  scroll + overflow hints + honest identity + mojibake fix (§9).
+- **Slice F** — mouse capture removed (native click-drag copy, no Shift) + bracketed-paste fix
+  (multi-line → one line, never auto-dispatches; `DisableBracketedPaste` in the panic-safe restore).
+- All verified 261 pass / 1 ignored, clippy clean; orchestrator-stress-tested; FEEL-approved by Carlos.
 
 ## Do Not Do
-
-- Do NOT hand-write milestone implementation code — Sol implements; Claude plans + gates only.
-- Do NOT start a second codex ON NOSIS while one is writing nosis (Carlos's other codex sessions are
-  fine — verify a process is actually writing nosis via `git status`, not by name).
-- Do NOT commit a slice until it is verified AND its hardening pass is done.
-- If `gpt-5.6-sol` stops resolving, or Sol fails the same gate twice → STOP and tell Carlos
-  (don't silently fall back to Terra).
-
-## Definition Of Done (M3)
-
-- Full session renders artifact-free on Windows Terminal + VS Code terminal + ConHost (manual smoke).
-- Semáforo, cost HUD, trust-dial view, timeline view + diff-inspect, `?` palette w/ live MCP state,
-  notify hook (bell + Telegram) — all present, each a short/scannable surface.
-- `cargo test --workspace` + `cargo clippy … -D warnings` green; BUILD_LOG updated; committed.
+- Do NOT commit milestone work until Carlos approves the FEEL (UX is the gate, not "tests pass").
+- Do NOT hand-write milestone code — Sol implements; Claude plans + gates.
+- Do NOT touch frozen crates (nh-core/nh-tools/nh-law/nh-routes/nh-vault) without a logged,
+  pre-authorized CONTRACTS amendment.
+- Do NOT change Carlos's Claude Code settings without asking (he was burned once already).
+- Do NOT ship the nh-mcp server publicly before the MCP final spec lands (2026-07-28).
