@@ -1,31 +1,40 @@
 # Current Task
 
-## Immediate Goal — M4: Fleet + swarm + scheduler + nh-mcp server (M3 CLOSED)
+## Immediate Goal — M4 Slice B (off-peak scheduler + escalation ladder). Slice A DONE + committed.
 
-**HEAD `3fcd00e` — M3 TUI UX overhaul (Slices D+E+F) is COMMITTED and M3 is CLOSED (UX-approved).**
-Carlos ran the interactive re-smoke in Windows Terminal and said "it feels right, commit it." The
-overhaul (framed chat transcript + roles, type-freely slash commands, live `/model`/`/provider`/
-`/effort` with history preserved, keyboard scroll + overflow hints, honest identity, native mouse-copy
-restored, bracketed-paste fixed) + BUILD_LOG + MILESTONES landed in `3fcd00e`. Verified 261 pass /
-1 ignored, clippy `-D warnings` clean; orchestrator stress-tested the reducers/renderer (tiny
-terminals, 200k/unicode paste, boundary nav, 20k-event fuzz) with zero panics.
-**One optional follow-up (NOT blocking, Carlos's call):** `/effort HIGH` uppercase is rejected
-(`parse_effort` is lowercase-only) — one-line Sol fix to case-fold the arg if he wants `/effort High`.
+**M4 IN PROGRESS. HEAD `347bce6` = M4 Slice A (nh-fleet) committed.** Warmup `/effort` case-fold
+committed `9b0a8ad`. `CONTRACTS_M4.md` is **LOCKED** (owner scope-approved 2026-07-15). Tree clean,
+273 pass / 1 ignored `--release`, clippy `--release -D warnings` clean, frozen crates untouched.
 
-### ON RESUME ("continue") — start M4:
-1. **Quick sanity:** `git log --oneline -1` = `3fcd00e`; clean tree; optional `cargo test --workspace`
-   (261 pass / 1 ignored) + `cargo clippy --workspace --all-targets -- -D warnings` clean.
-2. **Draft `CONTRACTS_M4.md`** (Claude plans + gates; Sol implements — [[m2-m5-codex-sol-directive]]).
-   M4 scope + exit criteria are in `MILESTONES.md §Milestone 4`: append-only ledger, workers, typed
-   receipts, **idempotent resume that survives `kill -9`**, off-peak scheduler, Kimi Swarm passthrough,
-   escalation ladder (Flash → K2.7 → V4 Pro High → V4 Pro Max → Opus 4.8 gate), and an **nh-mcp
-   server** exposing route-resolver + fleet-runner. Exit: 10-task fleet run survives `kill -9` and
-   resumes idempotently; a deferred job runs off-peak; KORVIN connects to nh-mcp and triggers a fleet
-   run; OAuth refresh survives forced expiry. **Do NOT ship nh-mcp publicly** until the MCP final spec
-   lands (2026-07-28) — see M5 note.
-3. **Brief Sol, run the loop, gate empirically** (numstat = truth; EOL/CRLF flags = noise). Slice the
-   work; verify each slice green + adversarially review before the next. UX-first still governs any
-   surface M4 adds (see below). Commit per-slice on `main` (repo convention).
+### Owner scope rulings (baked into CONTRACTS_M4.md — do not relitigate):
+1. **OAuth2 in FROZEN nh-tools authorized** — amendment **A-M4-1** (+ nh-vault keyring setter
+   **A-M4-2**). The ONLY frozen-crate writes in M4; every other frozen need STOPS for an amendment.
+2. **Opus 4.8 gate = review-pause** (no live delegate / no `claude -p`).
+3. **nh-mcp HTTP server = `tiny_http`** (blocking, no tokio).
+4. **Kimi swarm = MINIMAL seam + verify-live** (Carlos: "don't overdo it, budget").
+
+### M4 slice status (spec = `CONTRACTS_M4.md`):
+- **Slice A ✅ DONE + committed `347bce6`** — crate `crates/nh-fleet`: fsync-durable append-only
+  ledger + std-thread workers + idempotent resume + budget stop; `nh fleet run/resume`. **E1 (kill-9
+  idempotent resume) GATED** via a real-binary `Child::kill` integration test. Frozen crates untouched.
+- **Slice B — NEXT** — off-peak scheduler (reuse `nh_routes` `peak_status`/`price_at` + an injected
+  `Clock`; pure `ready_to_dispatch` seam; **E2**) + escalation ladder (Flash→K2.7→V4 Pro High→V4 Pro
+  Max→**Opus review-pause gate**; ≤2 tries/tier, failure `Receipt` attached on escalate; pure
+  `next_step` seam) + **MINIMAL** Kimi swarm seam (`Backend{Native,KimiSwarm}`; Native done, KimiSwarm
+  one mock test + live-pending; NO frozen wire touch). Spec: `CONTRACTS_M4.md §"Slice B"`.
+- **Slice C** — nh-mcp server (`tiny_http`, stateless 2026-07-28 wire mirroring `nh_tools::mcp`; tools
+  `route_resolve`/`fleet_run`/`fleet_status`; **E3** test drives it with `nh_tools::mcp::McpClient` as
+  the KORVIN stand-in; `run_id` = stateless passthrough handle). Do NOT ship publicly pre-2026-07-28.
+- **Slice D** — OAuth2 MCP client (amendment **A-M4-1/2**; refresh on expiry/401 + retry once; keyring
+  token store; **E4** — force expiry, assert refresh succeeds). Replaces the `oauth2_is_deferred_to_m4` test.
+
+### ON RESUME ("continue"):
+1. **Sanity:** `git log --oneline -1` = `347bce6`; clean tree; kill any `nh.exe` (locks the debug exe);
+   `cargo test --workspace --release` (273 pass / 1 ignored) + `cargo clippy --workspace --all-targets
+   --release -- -D warnings` clean. Use `--release` — Kaspersky blocks the debug test exe (os error 5).
+2. **Brief Sol on Slice B** per `CONTRACTS_M4.md §"Slice B"` (executor invocation below). Gate
+   empirically (numstat = truth; EOL/CRLF flags = noise), adversarial review, show Carlos the FEEL of
+   `nh fleet` deferred/escalation output, then commit per-slice on `main` **after Carlos approves**.
 
 ### UX is THE priority — still governs M4/M5/M6 (see [[ux-first-and-the-law]])
 "Pretty but frustrating" = failure. Judge by FEEL first, tests second. Reference bar = CodeWhale.
