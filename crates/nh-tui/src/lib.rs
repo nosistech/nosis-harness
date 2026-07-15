@@ -1,5 +1,6 @@
 //! M3 TUI: one status, one worker, and small Windows-safe views.
 
+use std::cell::Cell;
 use std::io::{self, Write};
 use std::panic;
 use std::path::PathBuf;
@@ -14,7 +15,10 @@ use anyhow::Context as _;
 use chrono::{DateTime, FixedOffset, Utc};
 use crossterm::{
     cursor::{Hide, Show},
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -32,7 +36,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Clear, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap},
     Frame, Terminal,
 };
 
@@ -42,7 +46,6 @@ type ConnectFn =
 
 const EVENT_POLL: Duration = Duration::from_millis(50);
 const BUDGET_REASON: &str = "budget reached";
-const RESTORE_DEFERRED: &str = "restore arrives in a later slice";
 const MAX_NOTIFY_CHARS: usize = 160;
 const TELEGRAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const TELEGRAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -195,16 +198,16 @@ enum PaletteAction {
     TrustDial,
     Timeline,
     Palette,
-    ScrollUp,
-    ScrollDown,
-    ScrollEnd,
-    Reserved,
+    Prefill(&'static str),
     Describe,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Overlay {
     None,
+    CommandMenu {
+        selected: usize,
+    },
     TrustDial,
     Timeline {
         selected: usize,
@@ -246,7 +249,7 @@ pub struct TuiConfig {
     pub notify: NotifyConfig,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum TranscriptKind {
     Task,
     Answer,
@@ -263,13 +266,16 @@ struct TranscriptLine {
 /// Unit-testable state for the renderer.
 pub struct App {
     status: Status,
+    resolver: RouteResolver,
     route: ResolvedRoute,
+    effort: ThinkingEffort,
     transcript: Vec<TranscriptLine>,
     pending_approval: Option<ApprovalRequest>,
     usage: Usage,
     input: String,
     budget: Option<u64>,
     scroll_back: u16,
+    max_scroll: Cell<u16>,
     scrubber: SharedScrubber,
     local_offset: FixedOffset,
     policy_view: PolicyView,
@@ -281,6 +287,7 @@ pub struct App {
 
 impl App {
     fn new(
+        resolver: RouteResolver,
         route: ResolvedRoute,
         budget: Option<u64>,
         scrubber: SharedScrubber,
@@ -295,6 +302,8 @@ impl App {
             } else {
                 Status::Idle
             },
+            effort: effort_for(route.thinking_dialect),
+            resolver,
             route,
             transcript: Vec::new(),
             pending_approval: None,
@@ -302,6 +311,7 @@ impl App {
             input: String::new(),
             budget,
             scroll_back: 0,
+            max_scroll: Cell::new(0),
             scrubber,
             local_offset: *chrono::Local::now().offset(),
             policy_view,
@@ -351,9 +361,26 @@ impl App {
         }
         self.input.clear();
         self.current_task_compacted = false;
-        self.push_line(&format!("> {task}"), TranscriptKind::Task);
+        self.push_line(&task, TranscriptKind::Task);
         self.status = Status::Working;
         Some(task)
+    }
+
+    fn switch_route(&mut self, route: ResolvedRoute) {
+        self.effort = effort_for(route.thinking_dialect);
+        self.route = route;
+        self.push_line(
+            &format!("switched to {} - context kept, cache resets", self.route.id),
+            TranscriptKind::Progress,
+        );
+    }
+
+    fn set_effort(&mut self, effort: ThinkingEffort) {
+        self.effort = effort;
+        self.push_line(
+            &format!("reasoning effort set to {}", effort_name(effort)),
+            TranscriptKind::Progress,
+        );
     }
 
     fn answer_approval(&mut self, approved: bool) {
@@ -374,22 +401,27 @@ impl App {
     fn hud_line(&self, now: DateTime<Utc>) -> String {
         let cached = self.usage.cached_tokens.unwrap_or(0);
         let mut line = format!(
-            "{} | {} | tokens {} in / {} out / {} cached",
-            self.route.id,
-            self.route.peak_status(now, self.local_offset),
-            self.usage.prompt_tokens,
-            self.usage.completion_tokens,
-            cached
+            "in {} · out {} · cached {}",
+            self.usage.prompt_tokens, self.usage.completion_tokens, cached
         );
         if let Some(pct) = cache_hit_pct(self.usage.prompt_tokens, cached) {
-            line.push_str(&format!(" | cache {pct:.0}%"));
+            line.push_str(&format!(" · cache {pct:.0}%"));
         }
+        line.push_str(&format!(
+            " · {}",
+            self.route.peak_status(now, self.local_offset)
+        ));
         if let Some(limit) = self.budget {
+            let used = self.used_tokens();
+            let pct = if limit == 0 {
+                100
+            } else {
+                used.saturating_mul(100).checked_div(limit).unwrap_or(100)
+            }
+            .min(100);
             line.push_str(&format!(
-                " | budget {} {}/{}",
-                budget_bar(self.used_tokens(), limit),
-                self.used_tokens(),
-                limit
+                " · {} {pct}% {used}/{limit}",
+                budget_bar(used, limit)
             ));
         }
         safe_line(&self.scrubber, &line)
@@ -475,42 +507,38 @@ fn mcp_state(config: &McpServerConfig, warnings: &[String]) -> McpState {
 
 fn builtin_palette_entries() -> Vec<PaletteEntry> {
     let commands = [
-        ("quit (q)", "quit Nosis Harness", PaletteAction::Quit),
         (
-            "trust-dial (t)",
+            "/help",
+            "show commands, tools, and MCP state",
+            PaletteAction::Palette,
+        ),
+        ("/?", "alias for /help", PaletteAction::Palette),
+        (
+            "/trust",
             "view session autonomy and policy rules",
             PaletteAction::TrustDial,
         ),
         (
-            "timeline (l)",
+            "/timeline",
             "view session receipts and answers",
             PaletteAction::Timeline,
         ),
         (
-            "palette (?)",
-            "find commands and tools",
-            PaletteAction::Palette,
+            "/model <id>",
+            "switch model route and keep context",
+            PaletteAction::Prefill("/model "),
         ),
         (
-            "scroll up (PageUp)",
-            "scroll the transcript up",
-            PaletteAction::ScrollUp,
+            "/provider <name>",
+            "switch to a provider's default route",
+            PaletteAction::Prefill("/provider "),
         ),
         (
-            "scroll down (PageDown)",
-            "scroll the transcript down",
-            PaletteAction::ScrollDown,
+            "/effort <none|low|high|max>",
+            "set reasoning effort for subsequent turns",
+            PaletteAction::Prefill("/effort "),
         ),
-        (
-            "scroll latest (End)",
-            "return to the newest transcript line",
-            PaletteAction::ScrollEnd,
-        ),
-        (
-            "timeline restore (R)",
-            RESTORE_DEFERRED,
-            PaletteAction::Reserved,
-        ),
+        ("/quit", "quit Nosis Harness", PaletteAction::Quit),
     ];
     let mut entries: Vec<PaletteEntry> = commands
         .into_iter()
@@ -644,7 +672,7 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
             if is_compaction_progress(&line) {
                 app.current_task_compacted = true;
             }
-            app.push_line(&format!("  {line}"), TranscriptKind::Progress);
+            app.push_line(&line, TranscriptKind::Progress);
         }
         AgentEvent::Approval(request) => {
             let line = format!("approve? {}  [y/N]", request.prompt);
@@ -669,7 +697,7 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
             ));
         }
         AgentEvent::Answer(answer) => {
-            app.push_text("  ", &answer, TranscriptKind::Answer);
+            app.push_text("", &answer, TranscriptKind::Answer);
             app.status = if app.budget_reached() {
                 Status::Blocked(BUDGET_REASON.into())
             } else {
@@ -677,9 +705,18 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
             };
         }
         AgentEvent::Failed(reason) => {
-            let reason = safe_line(&app.scrubber, &reason);
-            app.push_line(&format!("error: {reason}"), TranscriptKind::Error);
-            app.status = Status::Blocked(reason);
+            let status_reason = safe_line(&app.scrubber, &reason);
+            let what = reason
+                .lines()
+                .next()
+                .filter(|line| !line.trim().is_empty())
+                .unwrap_or("the task could not finish");
+            let what = safe_line(&app.scrubber, what);
+            app.push_line(
+                &format!("! {what} - retry the task or type /help"),
+                TranscriptKind::Error,
+            );
+            app.status = Status::Blocked(status_reason);
         }
     }
     &app.status
@@ -812,25 +849,36 @@ fn run_with_connect(
     route: ResolvedRoute,
     connect: ConnectFn,
 ) -> anyhow::Result<()> {
+    let TuiConfig {
+        resolver,
+        model_id: _,
+        law,
+        budget,
+        repo_root,
+        workdir,
+        palette_entries,
+        notify,
+    } = config;
     let scrubber = Arc::new(RwLock::new(Scrubber::new(Vec::new())));
     let initial = connect(&route);
     if let Ok((_, literal)) = &initial {
         install_literal(&scrubber, &mut Vec::new(), literal.clone());
     }
-    let policy_view = config.law.policy.view();
+    let policy_view = law.policy.view();
     let mut app = App::new(
+        resolver,
         route.clone(),
-        config.budget,
+        budget,
         Arc::clone(&scrubber),
         policy_view,
-        config.palette_entries,
+        palette_entries,
     );
-    let notifier = Notifier::new(config.notify, Arc::new(TelegramSender));
+    let notifier = Notifier::new(notify, Arc::new(TelegramSender));
     let mut worker = spawn_worker(WorkerConfig {
         route,
-        law: config.law,
-        repo_root: config.repo_root,
-        workdir: config.workdir,
+        law,
+        repo_root,
+        workdir,
         scrubber,
         connect,
         initial: Some(initial),
@@ -848,6 +896,8 @@ fn run_with_connect(
 
 enum WorkerCommand {
     Task(String),
+    SwitchRoute(Box<ResolvedRoute>),
+    SetEffort(ThinkingEffort),
     Stop,
 }
 
@@ -904,7 +954,7 @@ fn worker_loop(
     events: Sender<AgentEvent>,
 ) {
     let WorkerConfig {
-        route,
+        mut route,
         law,
         repo_root,
         workdir,
@@ -963,6 +1013,7 @@ fn worker_loop(
         Access::Write(path) => verdict_to_guard(policy.write_verdict(path)),
         Access::Exec(command) => verdict_to_guard(policy.exec_verdict(command)),
     }));
+    let law_constitution = law.constitution;
     let mut agent = AgentLoop {
         client,
         tools: builtin_tools(),
@@ -974,7 +1025,7 @@ fn worker_loop(
         model_id: route.model_id.clone(),
         max_turns: 20,
         thinking: effort_for(route.thinking_dialect),
-        constitution: Some(law.constitution),
+        constitution: Some(identity_constitution(&law_constitution, &route)),
         context_limit: route.context,
         on_event: Some(Box::new(move |line| {
             let _ = progress_events.send(AgentEvent::Progress(safe_line(&event_scrubber, line)));
@@ -984,8 +1035,38 @@ fn worker_loop(
     let mut history: Vec<ChatMessage> = Vec::new();
     let mut session_usage = Usage::default();
     while let Ok(command) = commands.recv() {
-        let WorkerCommand::Task(task) = command else {
-            break;
+        let task = match command {
+            WorkerCommand::Task(task) => task,
+            WorkerCommand::SwitchRoute(next_route) => {
+                let connection = connect(&next_route);
+                match connection {
+                    Ok((client, literal)) => {
+                        install_literal(&scrubber, &mut key_literals, literal);
+                        agent.receipts.scrubber = Scrubber::new(key_literals.clone());
+                        agent.client = client;
+                        connected = true;
+                    }
+                    Err(error) => {
+                        agent.client = Box::new(NotConnected {
+                            message: error.to_string(),
+                        });
+                        connected = false;
+                    }
+                }
+                agent.model_id = next_route.model_id.clone();
+                agent.thinking = effort_for(next_route.thinking_dialect);
+                let constitution = identity_constitution(&law_constitution, &next_route);
+                agent.constitution = Some(constitution.clone());
+                replace_system_message(&mut history, constitution);
+                agent.context_limit = next_route.context;
+                route = *next_route;
+                continue;
+            }
+            WorkerCommand::SetEffort(effort) => {
+                agent.thinking = effort;
+                continue;
+            }
+            WorkerCommand::Stop => break,
         };
         if !connected {
             match connect(&route) {
@@ -1027,6 +1108,25 @@ fn worker_loop(
             }
         }
     }
+}
+
+fn replace_system_message(history: &mut [ChatMessage], constitution: String) {
+    if let Some(system) = history
+        .first_mut()
+        .filter(|message| message.role == "system")
+    {
+        system.content = Some(constitution);
+        system.tool_calls = None;
+        system.tool_call_id = None;
+        system.reasoning_content = None;
+    }
+}
+
+fn identity_constitution(law_constitution: &str, route: &ResolvedRoute) -> String {
+    format!(
+        "You are nosis, an autonomous coding harness. You are running on the model route '{}' via {}. If asked what model or assistant you are, answer 'nosis on {}'; never claim to be Claude, GPT, or any other assistant.\n\n{}",
+        route.id, route.provider, route.id, law_constitution
+    )
 }
 
 fn new_approval_pair() -> (Option<Sender<bool>>, Receiver<bool>) {
@@ -1099,6 +1199,25 @@ fn effort_for(dialect: ThinkingDialect) -> ThinkingEffort {
     }
 }
 
+fn effort_name(effort: ThinkingEffort) -> &'static str {
+    match effort {
+        ThinkingEffort::None => "none",
+        ThinkingEffort::Low => "low",
+        ThinkingEffort::High => "high",
+        ThinkingEffort::Max => "max",
+    }
+}
+
+fn parse_effort(value: &str) -> Option<ThinkingEffort> {
+    match value {
+        "none" => Some(ThinkingEffort::None),
+        "low" => Some(ThinkingEffort::Low),
+        "high" => Some(ThinkingEffort::High),
+        "max" => Some(ThinkingEffort::Max),
+        _ => None,
+    }
+}
+
 fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -1134,12 +1253,10 @@ fn ui_loop(
         if !event::poll(EVENT_POLL).context("could not read terminal input")? {
             continue;
         }
-        match event::read().context("could not read terminal input")? {
-            Event::Key(key) if key.kind == KeyEventKind::Press && handle_key(app, worker, key) => {
-                worker.stop();
-                return Ok(());
-            }
-            _ => {}
+        let input = event::read().context("could not read terminal input")?;
+        if handle_input_event(app, worker, input) {
+            worker.stop();
+            return Ok(());
         }
     }
 }
@@ -1148,11 +1265,18 @@ fn ui_loop(
 enum UiAction {
     None,
     Dispatch(String),
+    SwitchRoute(String),
+    SetEffort(ThinkingEffort),
     Quit,
 }
 
-fn handle_key(app: &mut App, worker: &mut Worker, key: KeyEvent) -> bool {
-    match reduce_key(app, key) {
+fn handle_input_event(app: &mut App, worker: &mut Worker, input: Event) -> bool {
+    let action = reduce_input_event(app, input);
+    handle_action(app, worker, action)
+}
+
+fn handle_action(app: &mut App, worker: &mut Worker, action: UiAction) -> bool {
+    match action {
         UiAction::None => false,
         UiAction::Quit => true,
         UiAction::Dispatch(task) => {
@@ -1164,6 +1288,54 @@ fn handle_key(app: &mut App, worker: &mut Worker, key: KeyEvent) -> bool {
             }
             false
         }
+        UiAction::SwitchRoute(route_id) => {
+            let route = app
+                .resolver
+                .resolve(&route_id)
+                .expect("a command action only carries a resolved route");
+            if worker
+                .commands
+                .send(WorkerCommand::SwitchRoute(Box::new(route.clone())))
+                .is_err()
+            {
+                apply_event(
+                    app,
+                    AgentEvent::Failed("agent stopped - retry the task".into()),
+                );
+            } else {
+                app.switch_route(route);
+            }
+            false
+        }
+        UiAction::SetEffort(effort) => {
+            if worker
+                .commands
+                .send(WorkerCommand::SetEffort(effort))
+                .is_err()
+            {
+                apply_event(
+                    app,
+                    AgentEvent::Failed("agent stopped - retry the task".into()),
+                );
+            } else {
+                app.set_effort(effort);
+            }
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+fn handle_key(app: &mut App, worker: &mut Worker, key: KeyEvent) -> bool {
+    let action = reduce_key(app, key);
+    handle_action(app, worker, action)
+}
+
+fn reduce_input_event(app: &mut App, input: Event) -> UiAction {
+    match input {
+        Event::Key(key) if key.kind == KeyEventKind::Press => reduce_key(app, key),
+        Event::Paste(text) => reduce_paste(app, &text),
+        _ => UiAction::None,
     }
 }
 
@@ -1185,23 +1357,6 @@ fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
         return UiAction::None;
     }
     match key.code {
-        KeyCode::Char('q') if app.input.is_empty() => return UiAction::Quit,
-        KeyCode::Char('t') if app.input.is_empty() => app.overlay = Overlay::TrustDial,
-        KeyCode::Char('l') if app.input.is_empty() => {
-            app.overlay = Overlay::Timeline {
-                selected: app.timeline.len().saturating_sub(1),
-                inspecting: false,
-                note: None,
-            };
-        }
-        KeyCode::Char('?') if app.input.is_empty() => {
-            app.overlay = Overlay::Palette {
-                filter: String::new(),
-                selected: 0,
-                detail: None,
-            };
-        }
-        KeyCode::Char('R') if app.input.is_empty() => {}
         KeyCode::Enter => {
             if let Some(task) = app.dispatch() {
                 return UiAction::Dispatch(task);
@@ -1210,8 +1365,10 @@ fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
         KeyCode::Backspace => {
             app.input.pop();
         }
-        KeyCode::PageUp => app.scroll_back = app.scroll_back.saturating_add(5),
-        KeyCode::PageDown => app.scroll_back = app.scroll_back.saturating_sub(5),
+        KeyCode::Up => scroll_transcript(app, 1, true),
+        KeyCode::Down => scroll_transcript(app, 1, false),
+        KeyCode::PageUp => scroll_transcript(app, 5, true),
+        KeyCode::PageDown => scroll_transcript(app, 5, false),
         KeyCode::End => app.scroll_back = 0,
         KeyCode::Char(character)
             if !character.is_control()
@@ -1220,21 +1377,61 @@ fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
             app.input.push(character);
+            if app.input.starts_with('/') {
+                app.overlay = Overlay::CommandMenu { selected: 0 };
+            }
         }
         _ => {}
     }
     UiAction::None
 }
 
+fn reduce_paste(app: &mut App, text: &str) -> UiAction {
+    if matches!(app.status, Status::Working | Status::Waiting)
+        || !matches!(app.overlay, Overlay::None | Overlay::CommandMenu { .. })
+    {
+        return UiAction::None;
+    }
+
+    app.input
+        .extend(text.chars().filter_map(|character| match character {
+            '\n' | '\r' | '\t' => Some(' '),
+            character if character.is_control() => None,
+            character => Some(character),
+        }));
+
+    if app.input.starts_with('/') {
+        if let Overlay::CommandMenu { selected } = &mut app.overlay {
+            *selected = 0;
+        } else {
+            app.overlay = Overlay::CommandMenu { selected: 0 };
+        }
+    } else if matches!(app.overlay, Overlay::CommandMenu { .. }) {
+        app.overlay = Overlay::None;
+    }
+
+    UiAction::None
+}
+
+fn scroll_transcript(app: &mut App, amount: u16, toward_older: bool) {
+    let max_scroll = app.max_scroll.get();
+    let current = app.scroll_back.min(max_scroll);
+    app.scroll_back = if toward_older {
+        current.saturating_add(amount).min(max_scroll)
+    } else {
+        current.saturating_sub(amount)
+    };
+}
+
 fn reduce_overlay_key(app: &mut App, key: KeyEvent) -> UiAction {
+    if matches!(app.overlay, Overlay::CommandMenu { .. }) {
+        return reduce_command_menu_key(app, key);
+    }
     if key.code == KeyCode::Esc {
         app.overlay = Overlay::None;
         return UiAction::None;
     }
     if matches!(app.overlay, Overlay::TrustDial) {
-        if key.code == KeyCode::Char('t') {
-            app.overlay = Overlay::None;
-        }
         return UiAction::None;
     }
 
@@ -1255,12 +1452,156 @@ fn reduce_overlay_key(app: &mut App, key: KeyEvent) -> UiAction {
             selected,
             detail,
         } => palette_key(&app.palette_entries, filter, selected, detail, key),
-        Overlay::None | Overlay::TrustDial | Overlay::Timeline { .. } => None,
+        Overlay::None
+        | Overlay::CommandMenu { .. }
+        | Overlay::TrustDial
+        | Overlay::Timeline { .. } => None,
     };
     let Some(entry) = activated else {
         return UiAction::None;
     };
     activate_palette_entry(app, entry)
+}
+
+fn reduce_command_menu_key(app: &mut App, key: KeyEvent) -> UiAction {
+    match key.code {
+        KeyCode::Esc => {
+            app.input.clear();
+            app.overlay = Overlay::None;
+        }
+        KeyCode::Backspace => {
+            app.input.pop();
+            if app.input.is_empty() {
+                app.overlay = Overlay::None;
+            } else if let Overlay::CommandMenu { selected } = &mut app.overlay {
+                *selected = 0;
+            }
+        }
+        KeyCode::Up => {
+            if let Overlay::CommandMenu { selected } = &mut app.overlay {
+                *selected = selected.saturating_sub(1);
+            }
+        }
+        KeyCode::Down => {
+            let count = command_matches(app).len();
+            if let Overlay::CommandMenu { selected } = &mut app.overlay {
+                if count > 0 {
+                    *selected = selected.saturating_add(1).min(count - 1);
+                }
+            }
+        }
+        KeyCode::Enter => return execute_command_menu(app),
+        KeyCode::Char(character)
+            if !character.is_control()
+                && !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            app.input.push(character);
+            if let Overlay::CommandMenu { selected } = &mut app.overlay {
+                *selected = 0;
+            }
+        }
+        _ => {}
+    }
+    UiAction::None
+}
+
+fn execute_command_menu(app: &mut App) -> UiAction {
+    let command_text = app.input.strip_prefix('/').unwrap_or("");
+    let typed = command_text.split_whitespace().next().unwrap_or("");
+    let expected = format!("/{typed}");
+    let exact = app.palette_entries.iter().any(|entry| {
+        entry.kind == "command" && entry.name.split_whitespace().next().unwrap_or("") == expected
+    });
+    if !command_text.chars().any(char::is_whitespace) && (typed.is_empty() || !exact) {
+        let selected = match app.overlay {
+            Overlay::CommandMenu { selected } => selected,
+            _ => 0,
+        };
+        if let Some(entry) = command_matches(app).get(selected).copied().cloned() {
+            return activate_palette_entry(app, entry);
+        }
+    }
+    execute_command(app)
+}
+
+fn command_matches(app: &App) -> Vec<&PaletteEntry> {
+    let query = app
+        .input
+        .strip_prefix('/')
+        .unwrap_or("")
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    app.palette_entries
+        .iter()
+        .filter(|entry| {
+            entry.kind == "command"
+                && (query.is_empty()
+                    || entry.name.to_lowercase().contains(&query)
+                    || entry.description.to_lowercase().contains(&query))
+        })
+        .collect()
+}
+
+fn execute_command(app: &mut App) -> UiAction {
+    let input = std::mem::take(&mut app.input);
+    app.overlay = Overlay::None;
+    let mut parts = input.strip_prefix('/').unwrap_or("").split_whitespace();
+    let name = parts.next().unwrap_or("");
+    let arg = parts.next();
+    match (name, arg) {
+        ("help" | "?", _) => {
+            app.overlay = Overlay::Palette {
+                filter: String::new(),
+                selected: 0,
+                detail: None,
+            };
+            UiAction::None
+        }
+        ("trust", _) => {
+            app.overlay = Overlay::TrustDial;
+            UiAction::None
+        }
+        ("timeline", _) => {
+            app.overlay = Overlay::Timeline {
+                selected: app.timeline.len().saturating_sub(1),
+                inspecting: false,
+                note: None,
+            };
+            UiAction::None
+        }
+        ("model", Some(id)) => resolved_route_action(app, app.resolver.resolve(id)),
+        ("model", None) => command_error(app, "usage: /model <id>"),
+        ("provider", Some(provider)) => {
+            resolved_route_action(app, app.resolver.provider_default(provider))
+        }
+        ("provider", None) => command_error(app, "usage: /provider <name>"),
+        ("effort", Some(value)) => match parse_effort(value) {
+            Some(effort) => UiAction::SetEffort(effort),
+            None => command_error(app, "usage: /effort <none|low|high|max>"),
+        },
+        ("effort", None) => command_error(app, "usage: /effort <none|low|high|max>"),
+        ("quit", _) => UiAction::Quit,
+        _ => command_error(app, "unknown command - type / to see all"),
+    }
+}
+
+fn resolved_route_action(app: &mut App, resolved: anyhow::Result<ResolvedRoute>) -> UiAction {
+    match resolved {
+        Ok(route) if route.class == RouteClass::Delegate => {
+            command_error(app, "delegate routes arrive in M4 - pick an api route")
+        }
+        Ok(route) => UiAction::SwitchRoute(route.id),
+        Err(error) => command_error(app, &error.to_string()),
+    }
+}
+
+fn command_error(app: &mut App, message: &str) -> UiAction {
+    app.push_line(message, TranscriptKind::Error);
+    UiAction::None
 }
 
 fn timeline_key(
@@ -1287,9 +1628,6 @@ fn timeline_key(
             *selected = (*selected).min(entry_count - 1);
             *inspecting = true;
             *note = None;
-        }
-        KeyCode::Char('R') => {
-            *note = Some(RESTORE_DEFERRED.into());
         }
         _ => {}
     }
@@ -1362,22 +1700,12 @@ fn activate_palette_entry(app: &mut App, entry: PaletteEntry) -> UiAction {
             };
             UiAction::None
         }
-        PaletteAction::ScrollUp => {
-            app.scroll_back = app.scroll_back.saturating_add(5);
-            app.overlay = Overlay::None;
+        PaletteAction::Prefill(command) => {
+            app.input = command.into();
+            app.overlay = Overlay::CommandMenu { selected: 0 };
             UiAction::None
         }
-        PaletteAction::ScrollDown => {
-            app.scroll_back = app.scroll_back.saturating_sub(5);
-            app.overlay = Overlay::None;
-            UiAction::None
-        }
-        PaletteAction::ScrollEnd => {
-            app.scroll_back = 0;
-            app.overlay = Overlay::None;
-            UiAction::None
-        }
-        PaletteAction::Reserved | PaletteAction::Describe => {
+        PaletteAction::Describe => {
             if let Overlay::Palette { detail, .. } = &mut app.overlay {
                 *detail = Some(entry.description);
             }
@@ -1387,59 +1715,187 @@ fn activate_palette_entry(app: &mut App, entry: PaletteEntry) -> UiAction {
 }
 
 fn render(frame: &mut Frame<'_>, app: &App) {
+    let area = frame.area();
+    let outer = main_block(app);
+    let inner = outer.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(outer, area);
     let regions = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(1),
             Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
         ])
-        .split(frame.area());
-    render_header(frame, app, regions[0]);
-    render_transcript(frame, app, regions[1]);
-    frame.render_widget(Paragraph::new(app.hud_line(Utc::now())), regions[2]);
-    let input = safe_line(&app.scrubber, &format!("> {}", app.input));
-    frame.render_widget(
-        Paragraph::new(input).style(Style::default().fg(Color::Cyan)),
-        regions[3],
-    );
+        .split(inner);
+    render_transcript(frame, app, regions[0]);
+    render_key_hints(frame, app, regions[1]);
+    render_separator(frame, app, regions[2]);
+    render_input(frame, app, regions[3]);
+    render_hud(frame, app, regions[4]);
     render_overlay(frame, app);
 }
 
+fn main_block(app: &App) -> Block<'static> {
+    let (status, status_style) = status_chip(&app.status);
+    let left_title = Line::from(vec![
+        Span::styled(
+            safe_line(&app.scrubber, " nosis "),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            safe_line(&app.scrubber, "· "),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(safe_line(&app.scrubber, &status), status_style),
+        Span::raw(safe_line(&app.scrubber, " ")),
+    ]);
+    let route_title = Line::from(Span::styled(
+        safe_line(
+            &app.scrubber,
+            &format!(" {} · effort: {} ", app.route.id, effort_name(app.effort)),
+        ),
+        Style::default().fg(Color::Cyan),
+    ))
+    .right_aligned();
+
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().bg(Color::Black))
+        .title_top(left_title)
+        .title_top(route_title)
+}
+
+fn render_key_hints(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let hints = safe_line(
+        &app.scrubber,
+        "/ commands   ↑↓ scroll   Enter send   Ctrl+C quit",
+    );
+    frame.render_widget(
+        Paragraph::new(hints).style(
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+        area,
+    );
+}
+
+fn render_separator(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let rule = safe_line(&app.scrubber, &"─".repeat(usize::from(area.width)));
+    frame.render_widget(
+        Paragraph::new(rule).style(
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+        area,
+    );
+}
+
+fn render_input(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let prompt = safe_line(&app.scrubber, "❯ ");
+    let input = safe_line(&app.scrubber, &app.input);
+    let mut spans = vec![Span::styled(
+        prompt.clone(),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if app.input.is_empty() {
+        spans.push(Span::styled(
+            safe_line(&app.scrubber, "type a task and press Enter…"),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ));
+    } else {
+        spans.push(Span::styled(
+            input.clone(),
+            Style::default().fg(Color::White),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+
+    if app.overlay == Overlay::None && area.width > 0 && area.height > 0 {
+        let cursor_width = Line::from(format!("{prompt}{input}")).width();
+        let cursor_x = area.x.saturating_add(
+            u16::try_from(cursor_width)
+                .unwrap_or(u16::MAX)
+                .min(area.width.saturating_sub(1)),
+        );
+        frame.set_cursor_position((cursor_x, area.y));
+    }
+}
+
+fn render_hud(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    frame.render_widget(
+        Paragraph::new(app.hud_line(Utc::now())).style(Style::default().fg(Color::Gray)),
+        area,
+    );
+}
+
 fn render_overlay(frame: &mut Frame<'_>, app: &App) {
-    let area = inset(frame.area());
     match &app.overlay {
         Overlay::None => {}
-        Overlay::TrustDial => render_trust_dial(frame, app, area),
+        Overlay::CommandMenu { selected } => {
+            render_command_menu(frame, app, modal_area(frame.area(), 14), *selected)
+        }
+        Overlay::TrustDial => {
+            let desired = u16::try_from(trust_dial_lines(&app.policy_view).len())
+                .unwrap_or(u16::MAX)
+                .saturating_add(3)
+                .max(8);
+            render_trust_dial(frame, app, modal_area(frame.area(), desired));
+        }
         Overlay::Timeline {
             selected,
             inspecting,
             note,
-        } => render_timeline(frame, app, area, *selected, *inspecting, note.as_deref()),
+        } => render_timeline(
+            frame,
+            app,
+            modal_area(frame.area(), 20),
+            *selected,
+            *inspecting,
+            note.as_deref(),
+        ),
         Overlay::Palette {
             filter,
             selected,
             detail,
-        } => render_palette(frame, app, area, filter, *selected, detail.as_deref()),
+        } => render_palette(
+            frame,
+            app,
+            modal_area(frame.area(), 18),
+            filter,
+            *selected,
+            detail.as_deref(),
+        ),
     }
 }
 
 fn render_trust_dial(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let mut raw = vec![
-        "TRUST DIAL - read-only".to_owned(),
-        "t or Esc: close".to_owned(),
-        String::new(),
-    ];
-    raw.extend(trust_dial_lines(&app.policy_view));
-    let lines: Vec<Line<'static>> = raw
+    let body = render_modal_shell(
+        frame,
+        app,
+        area,
+        " Trust Dial · read-only ",
+        "Read-only policy view · Esc close",
+    );
+    let lines: Vec<Line<'static>> = trust_dial_lines(&app.policy_view)
         .into_iter()
         .map(|line| Line::from(safe_line(&app.scrubber, &line)))
         .collect();
-    frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().fg(Color::White).bg(Color::Black)),
-        area,
+        body,
     );
 }
 
@@ -1451,21 +1907,20 @@ fn render_timeline(
     inspecting: bool,
     note: Option<&str>,
 ) {
-    frame.render_widget(Clear, area);
+    let body = render_modal_shell(
+        frame,
+        app,
+        area,
+        " Timeline ",
+        "↑/↓ move · Enter inspect · Esc close",
+    );
     let columns = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
-        .split(area);
-    let visible_rows = usize::from(columns[0].height.saturating_sub(3).max(1));
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(body);
+    let visible_rows = usize::from(columns[0].height.max(1));
     let start = selected.saturating_add(1).saturating_sub(visible_rows);
-    let mut rail = vec![
-        Line::from(safe_line(&app.scrubber, "TIMELINE - newest at bottom")),
-        Line::from(safe_line(
-            &app.scrubber,
-            "Up/Down: move | Enter: inspect | R: restore | Esc: close",
-        )),
-        Line::from(safe_line(&app.scrubber, "")),
-    ];
+    let mut rail = Vec::new();
     if app.timeline.is_empty() {
         rail.push(Line::from(safe_line(&app.scrubber, "no completed turns")));
     } else {
@@ -1476,7 +1931,7 @@ fn render_timeline(
                 .skip(start)
                 .take(visible_rows)
                 .map(|(index, entry)| {
-                    let marker = if index == selected { "> " } else { "  " };
+                    let marker = if index == selected { "❯ " } else { "  " };
                     let line =
                         safe_line(&app.scrubber, &format!("{marker}{}", timeline_row(entry)));
                     let style = if index == selected {
@@ -1520,24 +1975,21 @@ fn render_timeline(
     frame.render_widget(Paragraph::new(detail).style(panel_style), columns[1]);
 }
 
-fn render_palette(
-    frame: &mut Frame<'_>,
-    app: &App,
-    area: Rect,
-    filter: &str,
-    selected: usize,
-    detail: Option<&str>,
-) {
-    let filtered = filter_palette(&app.palette_entries, filter);
-    let visible_rows = usize::from(area.height.saturating_sub(5).max(1));
+fn render_command_menu(frame: &mut Frame<'_>, app: &App, area: Rect, selected: usize) {
+    let body = render_modal_shell(
+        frame,
+        app,
+        area,
+        " Commands ",
+        "Type a command · ↑/↓ browse · Enter run · Esc close",
+    );
+    let filtered = command_matches(app);
+    let visible_rows = usize::from(body.height.saturating_sub(2).max(1));
+    let selected = selected.min(filtered.len().saturating_sub(1));
     let start = selected.saturating_add(1).saturating_sub(visible_rows);
+    let query = app.input.strip_prefix('/').unwrap_or("");
     let mut lines = vec![
-        Line::from(safe_line(&app.scrubber, "COMMANDS + TOOLS")),
-        Line::from(safe_line(&app.scrubber, &format!("filter: {filter}"))),
-        Line::from(safe_line(
-            &app.scrubber,
-            "Up/Down: move | Enter: select | Esc: close",
-        )),
+        Line::from(safe_line(&app.scrubber, &format!("command: /{query}"))),
         Line::from(safe_line(&app.scrubber, "")),
     ];
     if filtered.is_empty() {
@@ -1550,7 +2002,58 @@ fn render_palette(
                 .skip(start)
                 .take(visible_rows)
                 .map(|(index, entry)| {
-                    let marker = if index == selected { "> " } else { "  " };
+                    let marker = if index == selected { "❯ " } else { "  " };
+                    let line = safe_line(&app.scrubber, &format!("{marker}{}", entry.line()));
+                    let style = if index == selected {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+                    Line::from(Span::styled(line, style))
+                }),
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(Color::White).bg(Color::Black)),
+        body,
+    );
+}
+
+fn render_palette(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    filter: &str,
+    selected: usize,
+    detail: Option<&str>,
+) {
+    let body = render_modal_shell(
+        frame,
+        app,
+        area,
+        " Commands + Tools ",
+        "Type to filter · ↑/↓ move · Enter select · Esc close",
+    );
+    let filtered = filter_palette(&app.palette_entries, filter);
+    let visible_rows = usize::from(body.height.saturating_sub(2).max(1));
+    let start = selected.saturating_add(1).saturating_sub(visible_rows);
+    let mut lines = vec![
+        Line::from(safe_line(&app.scrubber, &format!("filter: {filter}"))),
+        Line::from(safe_line(&app.scrubber, "")),
+    ];
+    if filtered.is_empty() {
+        lines.push(Line::from(safe_line(&app.scrubber, "no matches")));
+    } else {
+        lines.extend(
+            filtered
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(visible_rows)
+                .map(|(index, entry)| {
+                    let marker = if index == selected { "❯ " } else { "  " };
                     let line = safe_line(&app.scrubber, &format!("{marker}{}", entry.line()));
                     let style = if index == selected {
                         Style::default()
@@ -1569,62 +2072,246 @@ fn render_palette(
             &format!("selected: {detail}"),
         )));
     }
-    frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().fg(Color::White).bg(Color::Black)),
-        area,
+        body,
     );
 }
 
-fn inset(area: Rect) -> Rect {
-    let horizontal = u16::from(area.width > 4) * 2;
-    let vertical = u16::from(area.height > 2);
+fn modal_area(area: Rect, desired_height: u16) -> Rect {
+    let width = if area.width > 4 {
+        area.width.saturating_sub(4).min(76)
+    } else {
+        area.width
+    };
+    let max_height = if area.height > 2 {
+        area.height.saturating_sub(2)
+    } else {
+        area.height
+    };
+    let height = desired_height.clamp(6, 20).min(max_height);
     Rect::new(
-        area.x.saturating_add(horizontal),
-        area.y.saturating_add(vertical),
-        area.width.saturating_sub(horizontal.saturating_mul(2)),
-        area.height.saturating_sub(vertical.saturating_mul(2)),
+        area.x.saturating_add(area.width.saturating_sub(width) / 2),
+        area.y
+            .saturating_add(area.height.saturating_sub(height) / 2),
+        width,
+        height,
     )
 }
 
-fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-        .split(area);
-    let (status, style) = status_chip(&app.status);
+fn render_modal_shell(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    title: &str,
+    help: &str,
+) -> Rect {
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().fg(Color::White).bg(Color::Black))
+        .padding(Padding::horizontal(1))
+        .title_top(Line::from(Span::styled(
+            safe_line(&app.scrubber, title),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
     frame.render_widget(
-        Paragraph::new(safe_line(&app.scrubber, &status)).style(style),
-        columns[0],
+        Paragraph::new(safe_line(&app.scrubber, help)).style(
+            Style::default()
+                .fg(Color::DarkGray)
+                .bg(Color::Black)
+                .add_modifier(Modifier::DIM),
+        ),
+        rows[0],
     );
-    frame.render_widget(
-        Paragraph::new(safe_line(&app.scrubber, &app.route.id))
-            .alignment(Alignment::Right)
-            .style(Style::default().fg(Color::Cyan)),
-        columns[1],
-    );
+    rows[1]
 }
 
 fn render_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let lines: Vec<Line<'static>> = app
-        .transcript
-        .iter()
-        .map(|line| Line::from(Span::styled(line.text.clone(), transcript_style(line.kind))))
-        .collect();
-    let rows = wrapped_rows(&app.transcript, area.width.max(1));
-    let max_scroll = rows.saturating_sub(area.height);
-    let scroll = max_scroll.saturating_sub(app.scroll_back.min(max_scroll));
+    if app.transcript.is_empty() {
+        render_empty_state(frame, app, area);
+        return;
+    }
+    let lines = chat_lines(app);
+    let (scroll, max_scroll, overflow) = transcript_scroll_state(&lines, area, app.scroll_back);
+    app.max_scroll.set(max_scroll);
     let transcript = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
     frame.render_widget(transcript, area);
+    render_overflow_markers(frame, app, area, overflow);
 }
 
-fn wrapped_rows(lines: &[TranscriptLine], width: u16) -> u16 {
+fn render_empty_state(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let height = area.height.min(4);
+    let welcome_area = Rect::new(
+        area.x,
+        area.y
+            .saturating_add(area.height.saturating_sub(height) / 2),
+        area.width,
+        height,
+    );
+    let lines = vec![
+        Line::from(Span::styled(
+            safe_line(&app.scrubber, "Welcome to nosis."),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            safe_line(&app.scrubber, "Type a task and press Enter."),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            safe_line(&app.scrubber, "e.g. \"fix the failing test in this repo\""),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        )),
+        Line::from(Span::styled(
+            safe_line(&app.scrubber, "Type / to see everything nosis can do."),
+            Style::default().fg(Color::Gray),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).alignment(Alignment::Center),
+        welcome_area,
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TranscriptOverflow {
+    above: bool,
+    below: bool,
+}
+
+fn transcript_scroll_state(
+    lines: &[Line<'_>],
+    area: Rect,
+    scroll_back: u16,
+) -> (u16, u16, TranscriptOverflow) {
+    let rows = wrapped_rows(lines, area.width.max(1));
+    let max_scroll = rows.saturating_sub(area.height);
+    let scroll = max_scroll.saturating_sub(scroll_back.min(max_scroll));
+    (
+        scroll,
+        max_scroll,
+        TranscriptOverflow {
+            above: scroll > 0,
+            below: scroll < max_scroll,
+        },
+    )
+}
+
+fn render_overflow_markers(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    overflow: TranscriptOverflow,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let marker_width = area.width.min(6);
+    let marker_x = area.right().saturating_sub(marker_width);
+    let style = Style::default()
+        .fg(Color::DarkGray)
+        .bg(Color::Black)
+        .add_modifier(Modifier::DIM);
+    if overflow.above {
+        let marker = safe_line(&app.scrubber, "↑ more");
+        frame.render_widget(
+            Paragraph::new(marker)
+                .style(style)
+                .alignment(Alignment::Right),
+            Rect::new(marker_x, area.y, marker_width, 1),
+        );
+    }
+    if overflow.below {
+        let marker = safe_line(&app.scrubber, "↓ more");
+        frame.render_widget(
+            Paragraph::new(marker)
+                .style(style)
+                .alignment(Alignment::Right),
+            Rect::new(marker_x, area.bottom().saturating_sub(1), marker_width, 1),
+        );
+    }
+}
+
+fn chat_lines(app: &App) -> Vec<Line<'static>> {
+    let mut rendered = Vec::new();
+    let mut previous = None;
+    for item in &app.transcript {
+        let starts_group = previous != Some(item.kind);
+        if starts_group && !rendered.is_empty() {
+            rendered.push(Line::from(safe_line(&app.scrubber, "")));
+        }
+        match item.kind {
+            TranscriptKind::Task => {
+                if starts_group {
+                    rendered.push(Line::from(Span::styled(
+                        safe_line(&app.scrubber, "❯ you"),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                }
+                rendered.push(Line::from(Span::styled(
+                    safe_line(&app.scrubber, &format!("   {}", item.text)),
+                    Style::default().fg(Color::White),
+                )));
+            }
+            TranscriptKind::Answer => {
+                if starts_group {
+                    rendered.push(Line::from(Span::styled(
+                        safe_line(&app.scrubber, "◆ nosis"),
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                }
+                rendered.push(Line::from(Span::styled(
+                    safe_line(&app.scrubber, &format!("   {}", item.text)),
+                    Style::default().fg(Color::White),
+                )));
+            }
+            TranscriptKind::Progress => rendered.push(Line::from(Span::styled(
+                safe_line(&app.scrubber, &format!("· {}", item.text)),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
+            ))),
+            TranscriptKind::Approval => rendered.push(Line::from(Span::styled(
+                safe_line(&app.scrubber, &format!(" {} ", item.text)),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+            ))),
+            TranscriptKind::Error => rendered.push(Line::from(Span::styled(
+                safe_line(&app.scrubber, &item.text),
+                Style::default().fg(Color::Red),
+            ))),
+        }
+        previous = Some(item.kind);
+    }
+    rendered
+}
+
+fn wrapped_rows(lines: &[Line<'_>], width: u16) -> u16 {
     let width = usize::from(width.max(1));
     lines.iter().fold(0_u16, |rows, line| {
-        let chars = line.text.chars().count().max(1);
-        let line_rows = chars.div_ceil(width).min(usize::from(u16::MAX)) as u16;
+        let cells = line.width().max(1);
+        let line_rows = cells.div_ceil(width).min(usize::from(u16::MAX)) as u16;
         rows.saturating_add(line_rows)
     })
 }
@@ -1632,42 +2319,32 @@ fn wrapped_rows(lines: &[TranscriptLine], width: u16) -> u16 {
 fn status_chip(status: &Status) -> (String, Style) {
     match status {
         Status::Idle => (
-            ". IDLE".into(),
-            Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
+            "○ IDLE".into(),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
         ),
         Status::Working => (
-            "> WORKING".into(),
+            "● WORKING".into(),
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
         Status::Waiting => (
-            "! WAITING ON YOU".into(),
+            "● WAITING ON YOU".into(),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        Status::Blocked(reason) => (
-            format!("x BLOCKED: {reason}"),
+        Status::Blocked(_) => (
+            "● BLOCKED".into(),
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
     }
 }
 
-fn transcript_style(kind: TranscriptKind) -> Style {
-    match kind {
-        TranscriptKind::Task => Style::default().fg(Color::Cyan),
-        TranscriptKind::Answer => Style::default().fg(Color::White),
-        TranscriptKind::Progress => Style::default().fg(Color::DarkGray),
-        TranscriptKind::Approval => Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-        TranscriptKind::Error => Style::default().fg(Color::Red),
-    }
-}
-
 fn budget_bar(used: u64, limit: u64) -> String {
-    const WIDTH: u64 = 10;
+    const WIDTH: u64 = 7;
     let filled = used
         .saturating_mul(WIDTH)
         .saturating_add(limit.saturating_sub(1))
@@ -1708,7 +2385,7 @@ impl TerminalGuard {
             return Err(error).context("could not enable terminal raw mode");
         }
         let mut stdout = io::stdout();
-        if let Err(error) = execute!(stdout, EnterAlternateScreen, Hide) {
+        if let Err(error) = write_setup_commands(&mut stdout) {
             restore_terminal();
             return Err(error).context("could not enter the alternate screen");
         }
@@ -1733,12 +2410,63 @@ impl Drop for TerminalGuard {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SetupCommand {
+    EnterScreen,
+    EnablePaste,
+    HideCursor,
+}
+
+fn run_setup_sequence(mut run: impl FnMut(SetupCommand) -> io::Result<()>) -> io::Result<()> {
+    for command in [
+        SetupCommand::EnterScreen,
+        SetupCommand::EnablePaste,
+        SetupCommand::HideCursor,
+    ] {
+        run(command)?;
+    }
+    Ok(())
+}
+
+fn write_setup_commands(writer: &mut impl Write) -> io::Result<()> {
+    run_setup_sequence(|command| match command {
+        SetupCommand::EnterScreen => execute!(writer, EnterAlternateScreen),
+        SetupCommand::EnablePaste => execute!(writer, EnableBracketedPaste),
+        SetupCommand::HideCursor => execute!(writer, Hide),
+    })
+}
+
 fn restore_terminal() {
     let _ = disable_raw_mode();
     let mut stdout = io::stdout();
-    let _ = execute!(stdout, Show);
-    let _ = execute!(stdout, LeaveAlternateScreen);
+    let _ = write_restore_commands(&mut stdout);
     let _ = stdout.flush();
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreCommand {
+    DisablePaste,
+    ShowCursor,
+    LeaveScreen,
+}
+
+fn run_restore_sequence(mut run: impl FnMut(RestoreCommand) -> io::Result<()>) -> io::Result<()> {
+    for command in [
+        RestoreCommand::DisablePaste,
+        RestoreCommand::ShowCursor,
+        RestoreCommand::LeaveScreen,
+    ] {
+        run(command)?;
+    }
+    Ok(())
+}
+
+fn write_restore_commands(writer: &mut impl Write) -> io::Result<()> {
+    run_restore_sequence(|command| match command {
+        RestoreCommand::DisablePaste => execute!(writer, DisableBracketedPaste),
+        RestoreCommand::ShowCursor => execute!(writer, Show),
+        RestoreCommand::LeaveScreen => execute!(writer, LeaveAlternateScreen),
+    })
 }
 
 type PanicHook = Box<dyn Fn(&panic::PanicHookInfo<'_>) + Send + Sync + 'static>;
@@ -1798,17 +2526,27 @@ mod tests {
         wire = "openai"
         vault_entry = "test"
         context = 1000
+
+        [routes.other-route]
+        provider = "other"
+        model_id = "other-route"
+        base_url = "https://example.invalid"
+        wire = "openai"
+        vault_entry = "other"
+        context = 2000
     "#;
 
+    fn test_resolver() -> RouteResolver {
+        RouteResolver::from_toml(TEST_CATALOG).expect("test catalog parses")
+    }
+
     fn test_route() -> ResolvedRoute {
-        RouteResolver::from_toml(TEST_CATALOG)
-            .unwrap()
-            .resolve("test-route")
-            .unwrap()
+        test_resolver().resolve("test-route").unwrap()
     }
 
     fn test_app(budget: Option<u64>) -> App {
         App::new(
+            test_resolver(),
             test_route(),
             budget,
             Arc::new(RwLock::new(Scrubber::new(Vec::new()))),
@@ -1821,6 +2559,62 @@ mod tests {
             },
             Vec::new(),
         )
+    }
+
+    fn render_buffer(app: &App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_rows(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
+        let width = usize::from(buffer.area.width);
+        buffer
+            .content
+            .chunks(width)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+            .collect()
+    }
+
+    fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+        buffer_rows(buffer).join("\n")
+    }
+
+    fn find_ascii_text(buffer: &ratatui::buffer::Buffer, needle: &str) -> (u16, u16) {
+        for (y, row) in buffer_rows(buffer).iter().enumerate() {
+            if let Some(x) = row.find(needle) {
+                return (u16::try_from(x).unwrap(), u16::try_from(y).unwrap());
+            }
+        }
+        panic!("could not find {needle:?} in {}", buffer_text(buffer));
+    }
+
+    fn assert_plain_modal_ring(buffer: &ratatui::buffer::Buffer, area: Rect) {
+        let right = area.right().saturating_sub(1);
+        let bottom = area.bottom().saturating_sub(1);
+        assert_eq!(buffer[(area.x, area.y)].symbol(), "┌");
+        assert_eq!(buffer[(right, area.y)].symbol(), "┐");
+        assert_eq!(buffer[(area.x, bottom)].symbol(), "└");
+        assert_eq!(buffer[(right, bottom)].symbol(), "┘");
+        for y in area.y.saturating_add(1)..bottom {
+            assert_eq!(buffer[(area.x, y)].symbol(), "│", "left edge at y={y}");
+            assert_eq!(buffer[(right, y)].symbol(), "│", "right edge at y={y}");
+        }
+        for x in area.x.saturating_add(1)..right {
+            assert_eq!(buffer[(x, bottom)].symbol(), "─", "bottom edge at x={x}");
+        }
+    }
+
+    fn modal_text(buffer: &ratatui::buffer::Buffer, area: Rect) -> String {
+        let mut text = String::new();
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        text
     }
 
     fn approval(prompt: &str) -> (AgentEvent, Receiver<bool>) {
@@ -1860,6 +2654,192 @@ mod tests {
             ),
             answer: answer.into(),
         })
+    }
+
+    #[test]
+    fn outer_frame_and_each_status_word_render() {
+        let cases = [
+            (Status::Idle, "○ IDLE"),
+            (Status::Working, "● WORKING"),
+            (Status::Waiting, "● WAITING ON YOU"),
+            (Status::Blocked("offline".into()), "● BLOCKED"),
+        ];
+        for (status, label) in cases {
+            let mut app = test_app(None);
+            app.status = status;
+            let buffer = render_buffer(&app, 90, 20);
+            let text = buffer_text(&buffer);
+
+            assert_eq!(buffer[(0, 0)].symbol(), "┌");
+            assert_eq!(buffer[(89, 0)].symbol(), "┐");
+            assert_eq!(buffer[(0, 19)].symbol(), "└");
+            assert_eq!(buffer[(89, 19)].symbol(), "┘");
+            assert!(text.contains("nosis"), "got: {text}");
+            assert!(text.contains("test-route"), "got: {text}");
+            assert!(text.contains(label), "got: {text}");
+        }
+    }
+
+    #[test]
+    fn chat_roles_label_indented_turns_and_leave_a_visual_gap() {
+        let mut app = test_app(None);
+        app.input = "fix this test".into();
+        assert_eq!(app.dispatch().as_deref(), Some("fix this test"));
+        apply_event(&mut app, AgentEvent::Answer("done cleanly".into()));
+
+        let rows = buffer_rows(&render_buffer(&app, 90, 20));
+        let user_row = rows.iter().position(|row| row.contains("❯ you")).unwrap();
+        let task_row = rows
+            .iter()
+            .position(|row| row.contains("   fix this test"))
+            .unwrap();
+        let nosis_row = rows.iter().position(|row| row.contains("◆ nosis")).unwrap();
+        let answer_row = rows
+            .iter()
+            .position(|row| row.contains("   done cleanly"))
+            .unwrap();
+
+        assert_eq!(task_row, user_row + 1);
+        assert_eq!(answer_row, nosis_row + 1);
+        assert!(nosis_row > task_row + 1);
+        assert!(rows[task_row + 1].trim_matches(['│', ' ']).is_empty());
+    }
+
+    #[test]
+    fn empty_state_and_key_strip_are_self_teaching_then_conversation_replaces_welcome() {
+        let mut app = test_app(None);
+        let fresh = buffer_text(&render_buffer(&app, 90, 20));
+        assert!(fresh.contains("Welcome to nosis."), "got: {fresh}");
+        assert!(
+            fresh.contains("Type a task and press Enter."),
+            "got: {fresh}"
+        );
+        assert!(
+            fresh.contains("e.g. \"fix the failing test in this repo\""),
+            "got: {fresh}"
+        );
+        assert!(
+            fresh.contains("Type / to see everything nosis can do."),
+            "got: {fresh}"
+        );
+        assert!(
+            fresh.contains("/ commands   ↑↓ scroll   Enter send   Ctrl+C quit"),
+            "got: {fresh}"
+        );
+
+        app.input = "start".into();
+        app.dispatch().unwrap();
+        let active = buffer_text(&render_buffer(&app, 90, 20));
+        assert!(!active.contains("Welcome to nosis."), "got: {active}");
+        assert!(active.contains("❯ you"), "got: {active}");
+        assert!(active.contains("   start"), "got: {active}");
+        assert!(
+            active.contains("/ commands   ↑↓ scroll   Enter send   Ctrl+C quit"),
+            "got: {active}"
+        );
+    }
+
+    #[test]
+    fn centered_modal_frames_clear_transcript_for_every_overlay() {
+        let terminal = Rect::new(0, 0, 100, 30);
+        let cases = [
+            (
+                Overlay::CommandMenu { selected: 0 },
+                modal_area(terminal, 14),
+                "Commands",
+            ),
+            (
+                Overlay::TrustDial,
+                modal_area(terminal, 8),
+                "Trust Dial · read-only",
+            ),
+            (
+                Overlay::Palette {
+                    filter: String::new(),
+                    selected: 0,
+                    detail: None,
+                },
+                modal_area(terminal, 18),
+                "Commands + Tools",
+            ),
+            (
+                Overlay::Timeline {
+                    selected: 0,
+                    inspecting: false,
+                    note: None,
+                },
+                modal_area(terminal, 20),
+                "Timeline",
+            ),
+        ];
+
+        for (overlay, area, title) in cases {
+            let mut app = test_app(None);
+            for _ in 0..40 {
+                app.push_line(
+                    "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+                    TranscriptKind::Progress,
+                );
+            }
+            apply_event(&mut app, timeline_event("safe task", "safe answer"));
+            app.overlay = overlay;
+
+            let buffer = render_buffer(&app, terminal.width, terminal.height);
+            let modal = modal_text(&buffer, area);
+            assert_plain_modal_ring(&buffer, area);
+            assert!(modal.contains(title), "got: {modal}");
+            assert!(!modal.contains('Z'), "transcript bled into modal: {modal}");
+        }
+    }
+
+    #[test]
+    fn every_new_surface_scrubs_literals_and_control_characters() {
+        let transcript_secret = "fake-key-transcript";
+        let modal_secret = "fake-key-modal";
+        let empty_literal = "Type a task and press Enter.";
+        let hud_literal = "no price data";
+        let scrubber = Arc::new(RwLock::new(Scrubber::new(vec![
+            transcript_secret.into(),
+            modal_secret.into(),
+            empty_literal.into(),
+            hud_literal.into(),
+        ])));
+        let mut app = App::new(
+            test_resolver(),
+            test_route(),
+            None,
+            scrubber,
+            PolicyView {
+                autonomy: Autonomy::Ask,
+                auto_paths: Vec::new(),
+                ask_paths: Vec::new(),
+                block_paths: vec![format!("{modal_secret}\r\x1b[2K")],
+                block_commands: Vec::new(),
+            },
+            Vec::new(),
+        );
+
+        let empty = buffer_text(&render_buffer(&app, 100, 24));
+        assert!(empty.matches("[REDACTED]").count() >= 2, "got: {empty}");
+        assert!(!empty.contains(empty_literal), "got: {empty}");
+        assert!(!empty.contains(hud_literal), "got: {empty}");
+
+        apply_event(
+            &mut app,
+            AgentEvent::Progress(format!("value={transcript_secret}\r\x1b[2K")),
+        );
+        let transcript = buffer_text(&render_buffer(&app, 100, 24));
+        assert!(transcript.contains("[REDACTED]"), "got: {transcript}");
+        assert!(!transcript.contains(transcript_secret), "got: {transcript}");
+        assert!(!transcript.contains('\r'), "got: {transcript}");
+        assert!(!transcript.contains('\x1b'), "got: {transcript}");
+
+        app.overlay = Overlay::TrustDial;
+        let modal = buffer_text(&render_buffer(&app, 100, 24));
+        assert!(modal.contains("[REDACTED]"), "got: {modal}");
+        assert!(!modal.contains(modal_secret), "got: {modal}");
+        assert!(!modal.contains('\r'), "got: {modal}");
+        assert!(!modal.contains('\x1b'), "got: {modal}");
     }
 
     #[test]
@@ -1903,6 +2883,50 @@ mod tests {
             assert_eq!(answer.recv().unwrap(), approved);
             assert_eq!(app.status, Status::Working);
         }
+    }
+
+    #[test]
+    fn approval_row_names_the_command_and_is_amber_reversed() {
+        let mut app = test_app(None);
+        app.status = Status::Working;
+        let (event, _answer) = approval("cargo test --workspace");
+        apply_event(&mut app, event);
+
+        let buffer = render_buffer(&app, 100, 20);
+        let text = buffer_text(&buffer);
+        let (x, y) = find_ascii_text(&buffer, "approve?");
+        let cell = &buffer[(x, y)];
+        assert!(
+            text.contains("approve? cargo test --workspace  [y/N]"),
+            "got: {text}"
+        );
+        assert_eq!(cell.fg, Color::Yellow);
+        assert!(cell.modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn failed_event_renders_one_friendly_line_without_a_trace() {
+        let mut app = test_app(None);
+        app.status = Status::Working;
+        apply_event(
+            &mut app,
+            AgentEvent::Failed("network unavailable\nstack backtrace:\n0: internal frame".into()),
+        );
+
+        assert!(matches!(
+            &app.status,
+            Status::Blocked(reason)
+                if reason.starts_with("network unavailable") && reason.contains("backtrace")
+        ));
+        assert_eq!(app.transcript.len(), 1);
+        assert_eq!(
+            app.transcript[0].text,
+            "! network unavailable - retry the task or type /help"
+        );
+        let text = buffer_text(&render_buffer(&app, 100, 20));
+        assert!(text.contains("! network unavailable - retry the task"));
+        assert!(!text.contains("backtrace"), "got: {text}");
+        assert!(!text.contains("internal frame"), "got: {text}");
     }
 
     #[test]
@@ -1955,7 +2979,11 @@ mod tests {
         apply_event(&mut app, timeline_event("first", "answer one"));
         apply_event(&mut app, timeline_event("second", "answer two"));
 
-        assert_eq!(reduce_key(&mut app, char_key('l')), UiAction::None);
+        type_text(&mut app, "/timeline");
+        assert_eq!(
+            reduce_key(&mut app, code_key(KeyCode::Enter)),
+            UiAction::None
+        );
         match &app.overlay {
             Overlay::Timeline { selected, .. } => assert_eq!(*selected, 1),
             _ => panic!("timeline must open"),
@@ -1979,23 +3007,201 @@ mod tests {
     }
 
     #[test]
-    fn timeline_restore_key_only_shows_the_deferral_note() {
-        let mut app = test_app(None);
-        apply_event(&mut app, timeline_event("first", "answer"));
-        reduce_key(&mut app, char_key('l'));
-        let before_task = app.timeline[0].task.clone();
+    fn printable_words_type_freely_without_opening_overlays() {
+        for word in ["list", "trust", "quit", "?", "R"] {
+            let mut app = test_app(None);
+            type_text(&mut app, word);
 
-        assert_eq!(reduce_key(&mut app, char_key('R')), UiAction::None);
-
-        match &app.overlay {
-            Overlay::Timeline { note, .. } => {
-                assert_eq!(note.as_deref(), Some(RESTORE_DEFERRED));
-            }
-            _ => panic!("timeline must stay open"),
+            assert_eq!(app.input, word);
+            assert_eq!(app.overlay, Overlay::None);
+            assert!(app.transcript.is_empty());
         }
-        assert_eq!(app.timeline.len(), 1);
-        assert_eq!(app.timeline[0].task, before_task);
+    }
+
+    #[test]
+    fn slash_opens_live_command_menu_and_mod_filter_surfaces_model() {
+        let mut app = test_app(None);
+        type_text(&mut app, "/mod");
+
+        assert!(matches!(app.overlay, Overlay::CommandMenu { .. }));
+        let matches = command_matches(&app);
+        assert!(matches.iter().any(|entry| entry.name == "/model <id>"));
+        let rendered = buffer_text(&render_buffer(&app, 90, 22));
+        assert!(rendered.contains("Commands"), "got: {rendered}");
+        assert!(rendered.contains("/model <id>"), "got: {rendered}");
+
+        assert_eq!(
+            reduce_key(&mut app, code_key(KeyCode::Enter)),
+            UiAction::None
+        );
+        assert_eq!(app.input, "/model ");
+        assert!(matches!(app.overlay, Overlay::CommandMenu { .. }));
+
+        assert_eq!(reduce_key(&mut app, code_key(KeyCode::Esc)), UiAction::None);
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn paste_appends_to_input_without_dispatching() {
+        let mut app = test_app(None);
+
+        let action = reduce_input_event(&mut app, Event::Paste("foo bar".into()));
+
+        assert_eq!(action, UiAction::None);
+        assert_eq!(app.input, "foo bar");
         assert!(app.transcript.is_empty());
+        assert_eq!(app.status, Status::Idle);
+    }
+
+    #[test]
+    fn multiline_paste_becomes_one_input_line_without_dispatching() {
+        let mut app = test_app(None);
+
+        let action = reduce_input_event(&mut app, Event::Paste("line1\nline2".into()));
+
+        assert_eq!(action, UiAction::None);
+        assert_eq!(app.input, "line1 line2");
+        assert!(app.transcript.is_empty());
+        assert_eq!(app.status, Status::Idle);
+    }
+
+    #[test]
+    fn paste_updates_the_open_slash_menu_without_dispatching() {
+        let mut app = test_app(None);
+        type_text(&mut app, "/");
+        assert!(matches!(app.overlay, Overlay::CommandMenu { .. }));
+
+        let action = reduce_input_event(&mut app, Event::Paste("mod".into()));
+
+        assert_eq!(action, UiAction::None);
+        assert_eq!(app.input, "/mod");
+        assert!(matches!(app.overlay, Overlay::CommandMenu { selected: 0 }));
+        assert!(command_matches(&app)
+            .iter()
+            .any(|entry| entry.name == "/model <id>"));
+        assert!(app.transcript.is_empty());
+    }
+
+    #[test]
+    fn bad_model_command_is_one_friendly_line_and_keeps_route() {
+        let mut app = test_app(None);
+        let original = app.route.id.clone();
+        type_text(&mut app, "/model missing-route");
+
+        assert_eq!(
+            reduce_key(&mut app, code_key(KeyCode::Enter)),
+            UiAction::None
+        );
+
+        assert_eq!(app.route.id, original);
+        assert_eq!(app.transcript.len(), 1);
+        assert!(
+            app.transcript[0]
+                .text
+                .contains("unknown model id 'missing-route'"),
+            "got: {}",
+            app.transcript[0].text
+        );
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn effort_command_sets_header_and_invalid_value_shows_usage() {
+        let mut app = test_app(None);
+        type_text(&mut app, "/effort high");
+        assert_eq!(
+            reduce_key(&mut app, code_key(KeyCode::Enter)),
+            UiAction::SetEffort(ThinkingEffort::High)
+        );
+        app.set_effort(ThinkingEffort::High);
+        let rendered = buffer_text(&render_buffer(&app, 90, 20));
+        assert!(rendered.contains("effort: high"), "got: {rendered}");
+
+        let before = app.transcript.len();
+        type_text(&mut app, "/effort extreme");
+        assert_eq!(
+            reduce_key(&mut app, code_key(KeyCode::Enter)),
+            UiAction::None
+        );
+        assert_eq!(app.transcript.len(), before + 1);
+        assert_eq!(
+            app.transcript.last().map(|line| line.text.as_str()),
+            Some("usage: /effort <none|low|high|max>")
+        );
+        assert_eq!(app.effort, ThinkingEffort::High);
+    }
+
+    #[test]
+    fn slash_lines_are_commands_never_dispatched_as_tasks() {
+        let mut app = test_app(None);
+        type_text(&mut app, "/typo");
+
+        assert_eq!(
+            reduce_key(&mut app, code_key(KeyCode::Enter)),
+            UiAction::None
+        );
+        assert_eq!(app.transcript.len(), 1);
+        assert_eq!(
+            app.transcript[0].text,
+            "unknown command - type / to see all"
+        );
+        assert!(app
+            .transcript
+            .iter()
+            .all(|line| line.kind != TranscriptKind::Task));
+    }
+
+    #[test]
+    fn keyboard_arrows_pages_and_end_control_transcript_scroll() {
+        let mut app = test_app(None);
+        for index in 0..20 {
+            app.push_line(&format!("line {index}"), TranscriptKind::Progress);
+        }
+        let _ = render_buffer(&app, 80, 16);
+        assert!(app.max_scroll.get() > 0);
+        assert_eq!(app.scroll_back, 0);
+
+        reduce_key(&mut app, code_key(KeyCode::Up));
+        assert_eq!(app.scroll_back, 1);
+        reduce_key(&mut app, code_key(KeyCode::Down));
+        assert_eq!(app.scroll_back, 0);
+
+        reduce_key(&mut app, code_key(KeyCode::PageUp));
+        assert_eq!(app.scroll_back, 5);
+        reduce_key(&mut app, code_key(KeyCode::PageDown));
+        assert_eq!(app.scroll_back, 0);
+
+        app.scroll_back = 9;
+        reduce_key(&mut app, code_key(KeyCode::End));
+        assert_eq!(app.scroll_back, 0);
+    }
+
+    #[test]
+    fn more_markers_render_only_for_overflow_and_track_both_directions() {
+        let mut app = test_app(None);
+        app.push_line("short", TranscriptKind::Progress);
+        let short = buffer_text(&render_buffer(&app, 80, 16));
+        assert!(!short.contains("↑ more"), "got: {short}");
+        assert!(!short.contains("↓ more"), "got: {short}");
+
+        for index in 0..30 {
+            app.push_line(&format!("output line {index}"), TranscriptKind::Progress);
+        }
+        let newest = buffer_text(&render_buffer(&app, 80, 16));
+        assert!(newest.contains("↑ more"), "got: {newest}");
+        assert!(!newest.contains("↓ more"), "got: {newest}");
+
+        app.scroll_back = 3;
+        let middle = buffer_text(&render_buffer(&app, 80, 16));
+        assert!(middle.contains("↑ more"), "got: {middle}");
+        assert!(middle.contains("↓ more"), "got: {middle}");
+
+        app.scroll_back = u16::MAX;
+        let oldest = buffer_text(&render_buffer(&app, 80, 16));
+        assert!(!oldest.contains("↑ more"), "got: {oldest}");
+        assert!(oldest.contains("↓ more"), "got: {oldest}");
     }
 
     #[test]
@@ -2015,7 +3221,7 @@ mod tests {
         assert_eq!(entries, before);
         assert!(filter_palette(&entries, "timeline")
             .iter()
-            .any(|entry| entry.name == "timeline (l)"));
+            .any(|entry| entry.name == "/timeline"));
     }
 
     #[test]
@@ -2092,9 +3298,13 @@ mod tests {
 
     #[test]
     fn overlays_suppress_task_dispatch_and_escape_restores_base_view() {
-        for opener in ['t', '?', 'l'] {
+        for command in ["/trust", "/help", "/timeline"] {
             let mut app = test_app(None);
-            assert_eq!(reduce_key(&mut app, char_key(opener)), UiAction::None);
+            type_text(&mut app, command);
+            assert_eq!(
+                reduce_key(&mut app, code_key(KeyCode::Enter)),
+                UiAction::None
+            );
             assert_ne!(app.overlay, Overlay::None);
 
             for character in "work".chars() {
@@ -2116,10 +3326,9 @@ mod tests {
     #[test]
     fn palette_enter_runs_commands_and_describes_tools() {
         let mut app = test_app(None);
-        reduce_key(&mut app, char_key('?'));
-        for character in "trust-dial".chars() {
-            reduce_key(&mut app, char_key(character));
-        }
+        type_text(&mut app, "/help");
+        reduce_key(&mut app, code_key(KeyCode::Enter));
+        type_text(&mut app, "trust");
         assert_eq!(
             reduce_key(&mut app, code_key(KeyCode::Enter)),
             UiAction::None
@@ -2127,20 +3336,18 @@ mod tests {
         assert_eq!(app.overlay, Overlay::TrustDial);
 
         let mut app = test_app(None);
-        reduce_key(&mut app, char_key('?'));
-        for character in "quit".chars() {
-            reduce_key(&mut app, char_key(character));
-        }
+        type_text(&mut app, "/help");
+        reduce_key(&mut app, code_key(KeyCode::Enter));
+        type_text(&mut app, "quit");
         assert_eq!(
             reduce_key(&mut app, code_key(KeyCode::Enter)),
             UiAction::Quit
         );
 
         let mut app = test_app(None);
-        reduce_key(&mut app, char_key('?'));
-        for character in "exec_shell".chars() {
-            reduce_key(&mut app, char_key(character));
-        }
+        type_text(&mut app, "/help");
+        reduce_key(&mut app, code_key(KeyCode::Enter));
+        type_text(&mut app, "exec_shell");
         assert_eq!(
             reduce_key(&mut app, code_key(KeyCode::Enter)),
             UiAction::None
@@ -2169,6 +3376,12 @@ mod tests {
         KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)
     }
 
+    fn type_text(app: &mut App, text: &str) {
+        for character in text.chars() {
+            assert_eq!(reduce_key(app, char_key(character)), UiAction::None);
+        }
+    }
+
     fn code_key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -2177,7 +3390,10 @@ mod tests {
     fn cost_hud_omits_cache_before_usage_and_shows_it_after() {
         let mut app = test_app(None);
         let before = app.hud_line(Utc::now());
+        assert!(before.contains("in 0 · out 0 · cached 0"), "got: {before}");
+        assert!(before.contains("no price data"), "got: {before}");
         assert!(!before.contains("| cache "), "got: {before}");
+        assert!(!before.contains("· cache "), "got: {before}");
         apply_event(
             &mut app,
             AgentEvent::Usage(Usage {
@@ -2187,6 +3403,10 @@ mod tests {
             }),
         );
         let after = app.hud_line(Utc::now());
+        assert!(
+            after.contains("in 100 · out 20 · cached 25"),
+            "got: {after}"
+        );
         assert!(after.contains("cache 25%"), "got: {after}");
     }
 
@@ -2207,7 +3427,9 @@ mod tests {
         );
         app.input = "must not run".into();
         assert!(app.dispatch().is_none());
-        assert!(app.hud_line(Utc::now()).contains("100/100"));
+        let hud = app.hud_line(Utc::now());
+        assert!(hud.contains("[#######] 100%"), "got: {hud}");
+        assert!(hud.contains("100/100"), "got: {hud}");
         apply_event(&mut app, AgentEvent::Answer("finished".into()));
         assert_eq!(app.status, Status::Blocked(BUDGET_REASON.into()));
     }
@@ -2353,6 +3575,7 @@ mod tests {
         let secret = "hunter2-fake-tui-secret";
         let scrubber = Arc::new(RwLock::new(Scrubber::new(vec![secret.into()])));
         let mut app = App::new(
+            test_resolver(),
             test_route(),
             None,
             scrubber,
@@ -2380,6 +3603,7 @@ mod tests {
         let secret = "hunter2-fake-overlay-secret";
         let scrubber = Arc::new(RwLock::new(Scrubber::new(vec![secret.into()])));
         let mut app = App::new(
+            test_resolver(),
             test_route(),
             None,
             scrubber,
@@ -2472,8 +3696,104 @@ mod tests {
         assert!(restored.load(Ordering::SeqCst));
     }
 
+    #[test]
+    fn terminal_setup_enables_bracketed_paste_and_native_selection() {
+        let mut commands = Vec::new();
+
+        run_setup_sequence(|command| {
+            commands.push(command);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            commands,
+            [
+                SetupCommand::EnterScreen,
+                SetupCommand::EnablePaste,
+                SetupCommand::HideCursor,
+            ],
+            "setup must enable bracketed paste while preserving native terminal selection"
+        );
+    }
+
+    #[test]
+    fn terminal_guard_teardown_disables_bracketed_paste() {
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        {
+            let commands_for_guard = Arc::clone(&commands);
+            let _guard = TerminalGuard::with_restore(move || {
+                run_restore_sequence(|command| {
+                    commands_for_guard.lock().unwrap().push(command);
+                    Ok(())
+                })
+                .unwrap();
+            });
+        }
+        assert_eq!(
+            *commands.lock().unwrap(),
+            [
+                RestoreCommand::DisablePaste,
+                RestoreCommand::ShowCursor,
+                RestoreCommand::LeaveScreen,
+            ],
+            "bracketed paste must be disabled before cursor/screen restoration"
+        );
+    }
+
+    #[test]
+    fn identity_constitution_is_stable_and_names_the_route_honestly() {
+        let route = test_route();
+        let first = identity_constitution("law bytes", &route);
+        let second = identity_constitution("law bytes", &route);
+
+        assert_eq!(first, second);
+        assert!(first.contains("test-route"), "got: {first}");
+        assert!(first.contains("via test"), "got: {first}");
+        assert!(first.contains("never claim to be Claude"), "got: {first}");
+        assert!(first.ends_with("law bytes"), "got: {first}");
+    }
+
     struct MockClient {
         request_lengths: Arc<Mutex<Vec<usize>>>,
+    }
+
+    #[derive(Debug)]
+    struct RecordedRequest {
+        model: String,
+        message_count: usize,
+        system: String,
+        effort: ThinkingEffort,
+    }
+
+    struct RecordingClient {
+        requests: Arc<Mutex<Vec<RecordedRequest>>>,
+    }
+
+    impl ChatClient for RecordingClient {
+        fn complete(&self, request: &ChatRequest) -> anyhow::Result<ChatResponse> {
+            self.requests.lock().unwrap().push(RecordedRequest {
+                model: request.model.clone(),
+                message_count: request.messages.len(),
+                system: request.messages[0].content.clone().unwrap_or_default(),
+                effort: request.thinking,
+            });
+            let mut message = request.messages.last().cloned().expect("user message");
+            message.role = "assistant".into();
+            message.content = Some("ok".into());
+            message.tool_calls = None;
+            message.tool_call_id = None;
+            message.reasoning_content = None;
+            Ok(ChatResponse {
+                message,
+                finish_reason: "stop".into(),
+                usage: Some(Usage {
+                    prompt_tokens: 10,
+                    completion_tokens: 2,
+                    cached_tokens: Some(4),
+                }),
+            })
+        }
     }
 
     impl ChatClient for MockClient {
@@ -2513,6 +3833,165 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    fn receive_completed_task(worker: &Worker, app: &mut App) {
+        let mut saw_answer = false;
+        let mut saw_receipt = false;
+        while !saw_answer || !saw_receipt {
+            let event = worker
+                .events
+                .recv_timeout(Duration::from_secs(2))
+                .expect("worker completes the task");
+            saw_answer |= matches!(&event, AgentEvent::Answer(_));
+            saw_receipt |= matches!(&event, AgentEvent::TaskReceipt(_));
+            match event {
+                AgentEvent::Approval(_) => panic!("mock never asks for approval"),
+                AgentEvent::Failed(reason) => panic!("worker failed: {reason}"),
+                event => {
+                    apply_event(app, event);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn model_switch_keeps_worker_history_transcript_and_updates_route_identity() {
+        let root = temp_dir();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests_for_connect = Arc::clone(&requests);
+        let connect: ConnectFn = Box::new(move |route| {
+            Ok((
+                Box::new(RecordingClient {
+                    requests: Arc::clone(&requests_for_connect),
+                }),
+                format!("fake-key-{}", route.vault_entry),
+            ))
+        });
+        let law = nh_law::load(&root, &nh_law::LoadOptions { cli_autonomy: None });
+        let mut worker = spawn_worker(WorkerConfig {
+            route: test_route(),
+            law,
+            repo_root: root.clone(),
+            workdir: root.clone(),
+            scrubber: Arc::new(RwLock::new(Scrubber::new(Vec::new()))),
+            connect,
+            initial: None,
+        })
+        .unwrap();
+        let mut app = test_app(None);
+
+        app.input = "first task".into();
+        assert!(!handle_key(&mut app, &mut worker, code_key(KeyCode::Enter)));
+        receive_completed_task(&worker, &mut app);
+        let retained: Vec<_> = app
+            .transcript
+            .iter()
+            .map(|line| line.text.clone())
+            .collect();
+
+        type_text(&mut app, "/model other-route");
+        assert!(!handle_key(&mut app, &mut worker, code_key(KeyCode::Enter)));
+        assert_eq!(app.route.id, "other-route");
+        assert_eq!(app.timeline.len(), 1);
+        assert_eq!(
+            app.transcript
+                .iter()
+                .take(retained.len())
+                .map(|line| line.text.clone())
+                .collect::<Vec<_>>(),
+            retained
+        );
+        assert_eq!(
+            app.transcript.last().map(|line| line.text.as_str()),
+            Some("switched to other-route - context kept, cache resets")
+        );
+
+        type_text(&mut app, "/effort high");
+        assert!(!handle_key(&mut app, &mut worker, code_key(KeyCode::Enter)));
+        assert_eq!(app.effort, ThinkingEffort::High);
+
+        app.input = "second task".into();
+        assert!(!handle_key(&mut app, &mut worker, code_key(KeyCode::Enter)));
+        receive_completed_task(&worker, &mut app);
+        assert_eq!(app.timeline.len(), 2);
+
+        worker.stop();
+        if let Some(join) = worker.join.take() {
+            join.join().unwrap();
+        }
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "requests: {requests:#?}");
+        assert_eq!(requests[0].model, "test-route");
+        assert_eq!(requests[0].message_count, 2);
+        assert!(requests[0].system.contains("nosis on test-route"));
+        assert_eq!(requests[0].effort, ThinkingEffort::None);
+        assert_eq!(requests[1].model, "other-route");
+        assert_eq!(requests[1].message_count, 4, "history was not kept");
+        assert!(requests[1].system.contains("nosis on other-route"));
+        assert!(requests[1].system.contains("never claim to be Claude"));
+        assert_eq!(requests[1].effort, ThinkingEffort::High);
+        drop(requests);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn keyless_switch_accepts_route_then_next_task_surfaces_add_key_line() {
+        let root = temp_dir();
+        let request_lengths = Arc::new(Mutex::new(Vec::new()));
+        let lengths_for_connect = Arc::clone(&request_lengths);
+        let connect: ConnectFn = Box::new(move |route| {
+            if route.id == "other-route" {
+                anyhow::bail!("no key found for \"other\" - run `nh key add other`");
+            }
+            Ok((
+                Box::new(MockClient {
+                    request_lengths: Arc::clone(&lengths_for_connect),
+                }),
+                "fake-worker-secret".into(),
+            ))
+        });
+        let law = nh_law::load(&root, &nh_law::LoadOptions { cli_autonomy: None });
+        let mut worker = spawn_worker(WorkerConfig {
+            route: test_route(),
+            law,
+            repo_root: root.clone(),
+            workdir: root.clone(),
+            scrubber: Arc::new(RwLock::new(Scrubber::new(Vec::new()))),
+            connect,
+            initial: None,
+        })
+        .unwrap();
+        worker
+            .commands
+            .send(WorkerCommand::SwitchRoute(Box::new(
+                test_resolver().resolve("other-route").unwrap(),
+            )))
+            .unwrap();
+        worker
+            .commands
+            .send(WorkerCommand::Task("hello".into()))
+            .unwrap();
+
+        match worker.events.recv_timeout(Duration::from_secs(2)).unwrap() {
+            AgentEvent::Failed(reason) => {
+                assert!(reason.contains("nh key add other"), "got: {reason}");
+            }
+            _ => panic!("keyless switched task must fail with one friendly line"),
+        }
+        match worker.events.recv_timeout(Duration::from_secs(2)).unwrap() {
+            AgentEvent::TaskReceipt(summary) => {
+                assert_eq!(summary.receipt.model_id, "other-route");
+                assert_eq!(summary.receipt.task, "hello");
+            }
+            _ => panic!("failed switched task must produce a timeline receipt"),
+        }
+        assert!(request_lengths.lock().unwrap().is_empty());
+        worker.stop();
+        if let Some(join) = worker.join.take() {
+            join.join().unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
