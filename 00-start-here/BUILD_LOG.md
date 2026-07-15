@@ -2,6 +2,66 @@
 
 Record every meaningful session here.
 
+## 2026-07-15: M4 Slice A — nh-fleet (ledger + workers + idempotent resume) + /effort warmup (E1 gated)
+
+Builder:
+
+- Claude (Opus 4.8, Claude Code) — M4 orchestrator: drafted CONTRACTS_M4, briefed Sol, verified,
+  adversarial review, gate, commit.
+- Codex (GPT-5.6 Sol xhigh) — implementer (warmup + Slice A), via `codex exec` background runs.
+
+What changed:
+
+- **CONTRACTS_M4.md drafted + owner-scope-approved (LOCKED).** Carlos ruled the four open scope
+  decisions: (1) OAuth2 in FROZEN nh-tools authorized — amendment **A-M4-1** (+ nh-vault keyring setter
+  **A-M4-2**), the ONLY frozen-crate writes in M4; every other frozen need STOPS for an amendment.
+  (2) Opus 4.8 gate = **review-pause** (no live delegate). (3) nh-mcp server = **tiny_http** (no tokio).
+  (4) Kimi swarm = **minimal seam + verify-live** ("don't overdo it, budget"). Sliced A(fleet) /
+  D(OAuth) / B(scheduler+ladder) / C(nh-mcp).
+- **Warmup `9b0a8ad`** — `/effort` arg case-folded (`parse_effort` trims + ASCII-lowercases), so
+  `/effort High|MAX|None` are accepted. nh-tui only. Also re-validated the `codex`/`gpt-5.6-sol`
+  executor path before the big M4 briefs.
+- **M4 Slice A — new crate `crates/nh-fleet`** (std threads + channels, no async, NO new external dep):
+  - Append-only, **fsync-durable** ledger (`LedgerEvent` enum; ONE mutex-guarded writer does
+    write→flush→`sync_all` per event; every line scrubbed like `ReceiptWriter`). Data under
+    `.nosis/fleet/<run_id>/ledger.jsonl` + `.nosis/fleet/index.jsonl`.
+  - Bounded worker pool reuses the `nh run` construction recipe (resolve route → `make_client` →
+    `AgentLoop.run_with_history` over fresh per-task history); one scannable progress line per state
+    change. **Durability ordering:** `TaskStarted` is fsync-committed BEFORE the task runs (worker
+    blocks on a coordinator ack), so any observable side-effect implies a durable start record.
+  - Stable task ids (caller `id` or `t{index:03}-{fnv8}`); id collisions rejected pre-run.
+  - **Idempotent resume** — pure `plan_from_ledger` fold (done/failed/gated = terminal → never re-run;
+    started-without-terminal → re-run at attempt+1; queued → run); `repair_uncommitted_tail` trims ONLY
+    a torn non-newline tail; `ensure_single_terminal` guards exactly-one-terminal-per-task. Budget
+    hard-stop carries across resume (sums prior receipts).
+  - CLI (nh-cli, additive): `nh fleet run <tasks.json> [--max-workers N] [--budget T]` +
+    `nh fleet resume [<run_id>] [--max-workers N]`; `defer_offpeak` politely rejected as Slice B.
+  - Frozen crates (nh-core/nh-tools/nh-law/nh-routes/nh-vault) UNTOUCHED this slice.
+
+Tests/checks (orchestrator, independent; `--release` to dodge the Kaspersky debug-exe block):
+
+- `cargo test --workspace --release`: **273 passed / 0 failed / 1 ignored** (+12 over 261 baseline:
+  7 nh-fleet unit + 2 cmd_fleet + the E1 kill-9 integration test + …).
+- `cargo clippy --workspace --all-targets --release -- -D warnings`: clean.
+- **E1 (kill-9 idempotent resume) GATED** — integration test spawns the real `nh` binary against a
+  test-only echo provider (`NH_FLEET_TEST_PROVIDER=echo`, inert otherwise, cannot bypass the law gate),
+  `Child::kill`s it mid-run after ≥3 durable `TaskDone`, runs `nh fleet resume`, asserts: all 10 reach
+  exactly one `TaskDone`; no committed task re-`Started`; execution-log proves committed tasks ran
+  exactly once. PASSES.
+- Smoke: real `nh fleet run` (4 tasks, 2 workers) — clean scannable one-line-per-event output,
+  parallelism visible, ledger append-only with typed nh-core receipts.
+
+Two minor non-blocking notes: the echo test seam ships in the binary (inert without the exact env
+opt-in; can't bypass the law gate — could later hide behind a cargo feature); a keyless fleet run exits
+with an actionable `nh key add <entry>` rather than opening like `nh chat` (arguably better for batch).
+
+Next step:
+
+- **Slice B** — off-peak scheduler (reuse `nh_routes` peak_status/price_at + injected Clock; E2) +
+  escalation ladder (Flash→K2.7→V4 Pro High→V4 Pro Max→Opus review-pause gate; 2 tries/tier, failure
+  Receipt attached; pure `next_step` seam) + MINIMAL Kimi swarm seam. Then Slice C (nh-mcp, tiny_http,
+  E3) + Slice D (OAuth2, E4, amendment A-M4-1/2). Spec: `CONTRACTS_M4.md`.
+
 ## 2026-07-15: M3 TUI UX overhaul (Slices D+E+F) — stress-test + FEEL-approved commit gate (M3 CLOSED)
 
 Builder:
