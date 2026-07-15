@@ -7,6 +7,7 @@ members = [
     "crates/nh-vault",
     "crates/nh-law",
     "crates/nh-tui",
+    "crates/nh-fleet",
     "crates/nh-cli",
 ]
 

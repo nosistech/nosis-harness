@@ -6,6 +6,7 @@
 use clap::{Parser, Subcommand};
 
 mod cmd_chat;
+mod cmd_fleet;
 mod cmd_init;
 mod cmd_key;
 mod cmd_run;
@@ -67,6 +68,29 @@ enum Cmd {
         #[arg(long)]
         budget: Option<u64>,
     },
+    /// Run independent tasks in a durable worker fleet
+    Fleet {
+        #[command(subcommand)]
+        action: FleetAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum FleetAction {
+    /// Start a new fleet from a JSON task file
+    Run {
+        tasks: std::path::PathBuf,
+        #[arg(long)]
+        max_workers: Option<usize>,
+        #[arg(long)]
+        budget: Option<u64>,
+    },
+    /// Resume the latest incomplete run, or a specific run id
+    Resume {
+        run_id: Option<String>,
+        #[arg(long)]
+        max_workers: Option<usize>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -85,6 +109,12 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Chat { model } => cmd_chat::run(&model),
         Cmd::Tui { model, budget } => cmd_tui::run(&model, budget),
+        Cmd::Fleet { action: FleetAction::Run { tasks, max_workers, budget } } => {
+            cmd_fleet::run_tasks(&tasks, max_workers, budget)
+        }
+        Cmd::Fleet { action: FleetAction::Resume { run_id, max_workers } } => {
+            cmd_fleet::resume_run(run_id.as_deref(), max_workers)
+        }
     };
     // UX: one friendly line, what to do next, exit 1. Never a debug dump.
     // Every output path passes the Scrubber - this final line included (key
@@ -248,6 +278,42 @@ mod tests {
                 assert_eq!(budget, Some(12000));
             }
             _ => panic!("expected tui"),
+        }
+    }
+
+    #[test]
+    fn parses_fleet_run_overrides() {
+        let cli = Cli::try_parse_from([
+            "nh", "fleet", "run", "tasks.json", "--max-workers", "3", "--budget", "900",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Cmd::Fleet { action: FleetAction::Run { tasks, max_workers, budget } } => {
+                assert_eq!(tasks, std::path::PathBuf::from("tasks.json"));
+                assert_eq!(max_workers, Some(3));
+                assert_eq!(budget, Some(900));
+            }
+            _ => panic!("expected fleet run"),
+        }
+    }
+
+    #[test]
+    fn parses_fleet_resume_with_optional_id() {
+        let latest = Cli::try_parse_from(["nh", "fleet", "resume"]).unwrap();
+        assert!(matches!(
+            latest.cmd,
+            Cmd::Fleet { action: FleetAction::Resume { run_id: None, .. } }
+        ));
+        let named = Cli::try_parse_from([
+            "nh", "fleet", "resume", "run-123", "--max-workers", "2",
+        ])
+        .unwrap();
+        match named.cmd {
+            Cmd::Fleet { action: FleetAction::Resume { run_id, max_workers } } => {
+                assert_eq!(run_id.as_deref(), Some("run-123"));
+                assert_eq!(max_workers, Some(2));
+            }
+            _ => panic!("expected fleet resume"),
         }
     }
 }

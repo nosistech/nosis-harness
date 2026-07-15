@@ -1,26 +1,17 @@
 [package]
-name = "nh-cli"
+name = "nh-fleet"
 version.workspace = true
 edition.workspace = true
-
-[[bin]]
-name = "nh"
-path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
-clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-zeroize.workspace = true
-rpassword = "7"
 nh-core = { path = "../nh-core" }
-nh-fleet = { path = "../nh-fleet" }
 nh-law = { path = "../nh-law" }
 nh-routes = { path = "../nh-routes" }
 nh-tools = { path = "../nh-tools" }
-nh-tui = { path = "../nh-tui" }
 nh-vault = { path = "../nh-vault" }
 
 [dev-dependencies]
