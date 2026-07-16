@@ -1122,7 +1122,10 @@ fn replace_system_message(history: &mut [ChatMessage], constitution: String) {
     }
 }
 
-fn identity_constitution(law_constitution: &str, route: &ResolvedRoute) -> String {
+/// The honest-identity system prompt: names the real route + provider and forbids
+/// claiming to be Claude/GPT, then appends the law constitution. Shared with the CLI
+/// `run`/`chat` paths so every agent surface - not just the TUI - is honest.
+pub fn identity_constitution(law_constitution: &str, route: &ResolvedRoute) -> String {
     format!(
         "You are nosis, an autonomous coding harness. You are running on the model route '{}' via {}. If asked what model or assistant you are, answer 'nosis on {}'; never claim to be Claude, GPT, or any other assistant.\n\n{}",
         route.id, route.provider, route.id, law_constitution

@@ -115,7 +115,8 @@ pub fn run(model: &str) -> anyhow::Result<()> {
         model_id: route.model_id.clone(),
         max_turns: 20,
         thinking: effort_for(None, route.thinking_dialect),
-        constitution: Some(law_constitution.clone()),
+        // Honest identity: name the real route + forbid claiming to be Claude/GPT.
+        constitution: Some(nh_tui::identity_constitution(&law_constitution, &route)),
         context_limit: route.context,
         on_event: Some(Box::new(move |line| {
             eprintln!("  {}", scrub_line(&event_scrubber, line));
@@ -281,7 +282,16 @@ fn switch_to(s: &mut ChatSession, route: ResolvedRoute, out: &mut dyn Write, err
             install_client(s, client, literal);
             s.agent.model_id = route.model_id.clone();
             s.agent.thinking = effort_for(None, route.thinking_dialect);
-            s.agent.constitution = Some(s.law_constitution.clone());
+            // Refresh the identity prompt for the NEW route - both the agent's stored
+            // constitution and the live system message already in history (which
+            // run_with_history seeds only once, on the first turn).
+            let constitution = nh_tui::identity_constitution(&s.law_constitution, &route);
+            if let Some(system) = s.history.first_mut() {
+                if system.role == "system" {
+                    system.content = Some(constitution.clone());
+                }
+            }
+            s.agent.constitution = Some(constitution);
             s.agent.context_limit = route.context;
             s.route = route;
             let _ = writeln!(out, "switched to {}", s.route.id);
@@ -605,7 +615,19 @@ mod tests {
         assert_eq!(s.route.id, "kimi-k2.6");
         assert_eq!(s.agent.model_id, "kimi-k2.6");
         assert_eq!(s.agent.context_limit, Some(2000));
-        assert_eq!(s.agent.constitution.as_deref(), Some("test constitution\n"));
+        // Identity prompt refreshes to the new route, still appends the law text, and
+        // the live system message in history is rewritten to match.
+        let constitution = s.agent.constitution.clone().unwrap();
+        assert!(
+            constitution.contains("nosis on kimi-k2.6")
+                && constitution.contains("never claim to be Claude"),
+            "identity prompt for new route: {constitution}"
+        );
+        assert!(
+            constitution.ends_with("test constitution\n"),
+            "law text preserved: {constitution}"
+        );
+        assert_eq!(s.history[0].content.as_ref(), Some(&constitution));
     }
 
     #[test]
