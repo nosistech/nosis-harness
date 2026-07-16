@@ -116,7 +116,8 @@ pub fn run(
         model_id: route.model_id.clone(),
         max_turns,
         thinking: effort_for(think, route.thinking_dialect),
-        constitution: Some(law.constitution),
+        // Honest identity: name the real route + forbid claiming to be Claude/GPT.
+        constitution: Some(nh_tui::identity_constitution(&law.constitution, &route)),
         context_limit: route.context,
         on_event: Some(Box::new(move |line| eprintln!("  {}", safe_line(&event_scrubber, line)))),
     };
