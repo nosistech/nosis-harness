@@ -2,12 +2,19 @@
 
 ## Immediate Goal — M4 Slice D (OAuth2 for the MCP client, E4). Slices A + B + C DONE + committed.
 
-**M4 IN PROGRESS. HEAD `26c6a22` = M4 Slice C committed** (Slice A `347bce6`, Slice B `ecadc0a`).
-`CONTRACTS_M4.md` is **LOCKED** (owner scope-approved 2026-07-15). Tree clean, **292 pass / 1 ignored**
-`--release`, clippy `--release -D warnings` clean, frozen crates + catalog.toml untouched. Slice C FEEL
-(nh-mcp scannable one-liners: route_resolve/fleet_run/fleet_status + `-32601`/`-32700`/`../escape` paths,
-no session header) owner-approved through the real `nh mcp serve` binary over live HTTP.
-**Slice D is the M4 FINALE.**
+**M4 IN PROGRESS. HEAD `7faf44b`** = identity bugfix (non-milestone) on top of `7680bca` (Slice C anchor)
+/ `26c6a22` (Slice C feat). Slice A `347bce6`, Slice B `ecadc0a`. `CONTRACTS_M4.md` is **LOCKED**
+(owner scope-approved 2026-07-15). Tree clean, **292 pass / 1 ignored** `--release`, clippy `--release
+-D warnings` clean, frozen crates + catalog.toml untouched. Slice C FEEL (nh-mcp scannable one-liners:
+route_resolve/fleet_run/fleet_status + `-32601`/`-32700`/`../escape` paths, no session header)
+owner-approved through the real `nh mcp serve` binary over live HTTP. **Slice D is the M4 FINALE.**
+
+**Identity bugfix `7faf44b` (2026-07-16, Carlos-directed, Claude-authored — NOT a milestone/Sol slice):**
+battery-testing found `nh run` + `nh chat` sent the RAW law constitution, so DeepSeek + MiMo (both
+Claude-contaminated) leaked "I am Claude"; the honest-identity wrapper was TUI-only. Fixed by making
+`nh_tui::identity_constitution` pub and applying it in `cmd_run` + `cmd_chat` (chat also rewrites
+history[0] on `/model` switch, like the TUI). Verified live: deepseek/mimo now say "nosis on <route>…
+not Claude". Kimi was already honest. See memory [[identity-guard-tui-only]].
 
 ### Owner scope rulings (baked into CONTRACTS_M4.md — do not relitigate):
 1. **OAuth2 in FROZEN nh-tools authorized** — amendment **A-M4-1** (+ nh-vault keyring setter
@@ -45,7 +52,7 @@ no session header) owner-approved through the real `nh mcp serve` binary over li
   force expiry → assert refresh + retry succeeds. REPLACES `oauth2_is_deferred_to_m4_with_one_message`.
 
 ### ON RESUME ("continue"):
-1. **Sanity:** `git log --oneline -1` = `26c6a22`; clean tree; kill any `nh.exe` (locks the debug exe);
+1. **Sanity:** `git log --oneline -1` = `7faf44b`; clean tree; kill any `nh.exe` (locks the debug exe);
    `cargo test --workspace --release` (**292 pass / 1 ignored**) + `cargo clippy --workspace --all-targets
    --release -- -D warnings` clean. Use `--release` — Kaspersky blocks the debug test exe (os error 5).
    `CONTRACTS_M4.md` lives at the repo ROOT, not 00-start-here/.
