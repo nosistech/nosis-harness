@@ -2,6 +2,39 @@
 
 Record every meaningful session here.
 
+## 2026-07-16: M4 Slice C — nh-mcp stateless server + fleet handle seams (E3 gated)
+
+Builder:
+
+- Codex (GPT-5.6 Sol xhigh) — sole Slice C implementer from the locked brief.
+
+What changed:
+
+- Added the blocking, loopback-only `nh-mcp` library with the stateless 2026-07-28 JSON-RPC wire,
+  optional bearer auth, well-known business card, scrubbed responses, and no session header or
+  initialize handshake. The only tools are `route_resolve`, `fleet_run`, and `fleet_status`.
+- Added the four locked nh-fleet seams: caller-provided run IDs, public ID minting, run-ledger reads,
+  and a pure status fold. Existing `run` validation and behavior remain intact through delegation.
+- Added `nh mcp serve` with the two-line local-preview banner, vault-backed optional token, default
+  loopback address, and focused Clap parsing coverage.
+- Added E3: the existing `nh_tools::mcp::McpClient` acts as KORVIN, starts a two-task echo fleet,
+  polls it to `finished` with `2 done`, and proves the raw response has no session ID header.
+- Frozen crates and repo-root `catalog.toml` are untouched.
+
+Tests/checks:
+
+- `cargo test --workspace --release`: **292 passed / 0 failed / 1 ignored** (+8 over Slice B).
+- `cargo clippy --workspace --all-targets --release -- -D warnings`: clean.
+- Sol's sandbox lacked network/TLS for the new crate; the orchestrator (Opus 4.8) re-ran both gates on a
+  clean crates.io registry — `tiny_http 0.12.0` compiled against the Cargo.lock checksum (`389915df…`),
+  292 pass / 1 ignored, clippy clean. No vendored source retained.
+- FEEL driven through the real `nh mcp serve` binary over live HTTP: two-line banner; `tools/list` shows
+  the 3 tools with readOnlyHint + ttlMs; `route_resolve` → one scannable line (`route <id> · <provider> ·
+  <dialect> thinking · <peak line>`, `+ would park until off-peak` when preferred); `fleet_run` →
+  `run_id=…`; `fleet_status` polled to `finished · 2 done`; `-32601`/`-32700` + `../escape` → `invalid
+  fleet run id` + empty-tasks all one honest line; response headers carry no `Mcp-Session-Id`. Bind is
+  127.0.0.1-only (non-loopback `--addr` hard-rejected).
+
 ## 2026-07-16: M4 Slice B — off-peak scheduler + escalation ladder + Kimi swarm seam (E2 gated), commit `ecadc0a`
 
 Builder:

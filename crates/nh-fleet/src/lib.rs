@@ -172,6 +172,15 @@ pub struct RunReport {
     pub gated: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FleetStatus {
+    pub done: usize,
+    pub failed: usize,
+    pub gated: usize,
+    pub pending: usize,
+    pub finished: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum LedgerEvent {
@@ -276,6 +285,28 @@ pub fn plan_from_ledger(events: &[LedgerEvent]) -> ResumePlan {
     ResumePlan { done, todo }
 }
 
+/// Fold committed ledger events into run status. Pure: no I/O.
+pub fn status_from_ledger(events: &[LedgerEvent]) -> FleetStatus {
+    FleetStatus {
+        done: events
+            .iter()
+            .filter(|event| matches!(event, LedgerEvent::TaskDone { .. }))
+            .count(),
+        failed: events
+            .iter()
+            .filter(|event| matches!(event, LedgerEvent::TaskFailed { .. }))
+            .count(),
+        gated: events
+            .iter()
+            .filter(|event| matches!(event, LedgerEvent::TaskGate { .. }))
+            .count(),
+        pending: plan_from_ledger(events).todo.len(),
+        finished: events
+            .iter()
+            .any(|event| matches!(event, LedgerEvent::RunFinished { .. })),
+    }
+}
+
 /// Reconstruct the next ladder tier and attempt for an interrupted task. Pure: no I/O.
 pub fn ladder_position(events: &[LedgerEvent], task_id: &str) -> (usize, u32) {
     let mut tier_idx = 0usize;
@@ -309,6 +340,18 @@ pub fn run(config: FleetConfig) -> anyhow::Result<RunReport> {
     if config.max_workers == 0 {
         bail!("max_workers must be at least 1");
     }
+    run_with_id(new_run_id(), config)
+}
+
+/// Start a new fleet run with a caller-provided durable ledger handle.
+pub fn run_with_id(run_id: String, config: FleetConfig) -> anyhow::Result<RunReport> {
+    validate_run_id(&run_id)?;
+    if config.tasks.is_empty() {
+        bail!("tasks.json has no tasks — add at least one task");
+    }
+    if config.max_workers == 0 {
+        bail!("max_workers must be at least 1");
+    }
     let max_workers = config.max_workers;
     let workdir = std::env::current_dir().context("could not read the current directory")?;
     let test_provider = test_provider_from_env()?;
@@ -328,7 +371,6 @@ pub fn run(config: FleetConfig) -> anyhow::Result<RunReport> {
     )?;
     scrub_prepared_tasks(&mut tasks, &Scrubber::new(key_literals.clone()))?;
 
-    let run_id = new_run_id();
     let created_utc = now_utc();
     let fleet_root = fleet_root(&config.run_root);
     let ledger_path = fleet_root.join(&run_id).join("ledger.jsonl");
@@ -1471,7 +1513,7 @@ fn now_utc() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-fn new_run_id() -> String {
+pub fn new_run_id() -> String {
     let sequence = RUN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     format!(
         "{}-{}-{sequence}",
@@ -1493,6 +1535,17 @@ fn validate_run_id(run_id: &str) -> anyhow::Result<()> {
         bail!("invalid fleet run id");
     }
     Ok(())
+}
+
+/// Read one run's committed ledger, returning empty while its file is not created yet.
+pub fn read_run_ledger(run_root: &Path, run_id: &str) -> anyhow::Result<Vec<LedgerEvent>> {
+    validate_run_id(run_id)?;
+    let path = fleet_root(run_root).join(run_id).join("ledger.jsonl");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    repair_uncommitted_tail(&path)?;
+    read_ledger(&path)
 }
 
 fn append_index(path: &Path, record: &IndexRecord, literals: &[String]) -> anyhow::Result<()> {
@@ -1876,6 +1929,96 @@ mod tests {
         let specs = vec![task("same", "one"), task("same", "two")];
         let error = prepare_new_tasks(&resolver, "echo", &specs, false, None).unwrap_err();
         assert!(error.to_string().contains("collision"));
+    }
+
+    #[test]
+    fn run_with_id_honours_the_provided_ledger_handle() {
+        let _env = TestEnv::echo();
+        let tmp = tempfile::tempdir().unwrap();
+        let run_id = "provided-run-id".to_string();
+        let report = run_with_id(
+            run_id.clone(),
+            config(tmp.path(), vec![task("one", "first")]),
+        )
+        .unwrap();
+        assert_eq!(report.run_id, run_id);
+
+        let ledger_path = fleet_root(tmp.path())
+            .join(&run_id)
+            .join("ledger.jsonl");
+        assert!(ledger_path.is_file());
+        let events = read_ledger(&ledger_path).unwrap();
+        assert!(matches!(
+            events.last(),
+            Some(LedgerEvent::RunFinished { run_id: finished, .. }) if finished == &run_id
+        ));
+    }
+
+    #[test]
+    fn status_fold_counts_mixed_tasks_and_finished_flag() {
+        let mut events = vec![
+            queued("done"),
+            LedgerEvent::TaskDone {
+                task_id: "done".into(),
+                outcome: Outcome::Pass,
+            },
+            queued("failed"),
+            LedgerEvent::TaskFailed {
+                task_id: "failed".into(),
+                reason: "failed".into(),
+            },
+            queued("gated"),
+            LedgerEvent::TaskGate {
+                task_id: "gated".into(),
+                reason: "review".into(),
+            },
+            queued("pending"),
+        ];
+        assert_eq!(
+            status_from_ledger(&events),
+            FleetStatus {
+                done: 1,
+                failed: 1,
+                gated: 1,
+                pending: 1,
+                finished: false,
+            }
+        );
+
+        events.push(LedgerEvent::RunFinished {
+            run_id: "fold-run".into(),
+            done: 1,
+            failed: 1,
+            gated: 1,
+        });
+        assert_eq!(
+            status_from_ledger(&events),
+            FleetStatus {
+                done: 1,
+                failed: 1,
+                gated: 1,
+                pending: 1,
+                finished: true,
+            }
+        );
+    }
+
+    #[test]
+    fn read_run_ledger_missing_file_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            read_run_ledger(tmp.path(), "not-started-yet")
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn read_run_ledger_rejects_bad_run_id_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let error = read_run_ledger(tmp.path(), "../escape").unwrap_err();
+        assert_eq!(error.to_string(), "invalid fleet run id");
     }
 
     #[test]
