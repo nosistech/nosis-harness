@@ -13,9 +13,9 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{bail, Context as _};
-use chrono::{SecondsFormat, Utc};
+use chrono::{DateTime, FixedOffset, Local, SecondsFormat, Utc};
 use nh_core::agent::AgentLoop;
-use nh_core::receipt::{Outcome, Receipt, ReceiptWriter};
+use nh_core::receipt::{FailureClass, Outcome, Receipt, ReceiptWriter};
 use nh_core::wire::{
     make_client, ChatClient, ChatMessage, ChatRequest, ChatResponse, ThinkingEffort, Usage,
 };
@@ -31,6 +31,8 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const TEST_PROVIDER_ENV: &str = "NH_FLEET_TEST_PROVIDER";
 const TEST_EXECUTION_LOG_ENV: &str = "NH_FLEET_TEST_EXECUTION_LOG";
 const TEST_SLEEP_MS_ENV: &str = "NH_FLEET_TEST_SLEEP_MS";
+const TEST_OUTCOME_ENV: &str = "NH_FLEET_TEST_OUTCOME";
+const SCHEDULER_WAKE_INTERVAL: Duration = Duration::from_millis(100);
 
 static RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static TEST_LOG_LOCK: Mutex<()> = Mutex::new(());
@@ -42,6 +44,105 @@ pub struct TaskSpec {
     pub task: String,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub defer_offpeak: Option<bool>,
+    #[serde(default)]
+    pub backend: Option<Backend>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Backend {
+    Native,
+    #[serde(rename = "kimi-swarm")]
+    KimiSwarm,
+}
+
+pub trait Clock: Send + Sync {
+    fn now(&self) -> DateTime<Utc>;
+}
+
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+}
+
+/// Off-peak and routes without price data dispatch immediately; peak routes park.
+#[allow(clippy::unnecessary_map_or)]
+pub fn ready_to_dispatch(route: &nh_routes::ResolvedRoute, now: DateTime<Utc>) -> bool {
+    route.price_at(now).map_or(true, |quote| !quote.peak)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tier {
+    pub route_id: String,
+    pub effort: ThinkingEffort,
+}
+
+#[derive(Debug, Clone)]
+pub struct Ladder {
+    tiers: Vec<Tier>,
+}
+
+impl Ladder {
+    pub fn default_ladder() -> Self {
+        Self {
+            tiers: vec![
+                Tier {
+                    route_id: "deepseek-v4-flash".into(),
+                    effort: ThinkingEffort::None,
+                },
+                Tier {
+                    route_id: "kimi-k2.7-code".into(),
+                    effort: ThinkingEffort::High,
+                },
+                Tier {
+                    route_id: "deepseek-v4-pro".into(),
+                    effort: ThinkingEffort::High,
+                },
+                Tier {
+                    route_id: "deepseek-v4-pro".into(),
+                    effort: ThinkingEffort::Max,
+                },
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    Retry,
+    Escalate(usize),
+    Gate,
+    Done,
+}
+
+/// Decide the next ladder action from the attempt that just completed.
+pub fn next_step(ladder: &Ladder, tier_idx: usize, attempt: u32, outcome: Outcome) -> Step {
+    match outcome {
+        Outcome::Pass | Outcome::Partial | Outcome::Skip => Step::Done,
+        Outcome::Fail | Outcome::Timeout if attempt < 2 => Step::Retry,
+        Outcome::Fail | Outcome::Timeout if tier_idx.saturating_add(1) < ladder.tiers.len() => {
+            Step::Escalate(tier_idx + 1)
+        }
+        Outcome::Fail | Outcome::Timeout => Step::Gate,
+    }
+}
+
+pub trait SwarmClient: Send + Sync {
+    /// Submit one brief and collect one typed receipt; transport details arrive in M6.
+    fn submit_and_collect(&self, task_id: &str, brief: &str) -> anyhow::Result<Receipt>;
+}
+
+pub struct PendingSwarmClient;
+
+impl SwarmClient for PendingSwarmClient {
+    fn submit_and_collect(&self, _task_id: &str, _brief: &str) -> anyhow::Result<Receipt> {
+        bail!("kimi swarm arrives live in M6 - provide a SwarmClient or use backend=native")
+    }
 }
 
 pub struct FleetConfig {
@@ -52,6 +153,11 @@ pub struct FleetConfig {
     /// Must be at least one for `run`; `0` on `resume` reuses the original value.
     pub max_workers: usize,
     pub budget_tokens: Option<u64>,
+    pub clock: Option<Arc<dyn Clock>>,
+    pub defer_offpeak: bool,
+    pub ladder: Option<Ladder>,
+    pub escalate_on_partial: bool,
+    pub swarm: Option<Arc<dyn SwarmClient>>,
     /// Repository root; fleet data is stored below `.nosis/fleet`.
     pub run_root: PathBuf,
     #[allow(clippy::type_complexity)]
@@ -75,6 +181,8 @@ pub enum LedgerEvent {
         task_count: usize,
         max_workers: usize,
         budget_tokens: Option<u64>,
+        #[serde(default)]
+        escalate: bool,
     },
     TaskQueued {
         task_id: String,
@@ -168,6 +276,32 @@ pub fn plan_from_ledger(events: &[LedgerEvent]) -> ResumePlan {
     ResumePlan { done, todo }
 }
 
+/// Reconstruct the next ladder tier and attempt for an interrupted task. Pure: no I/O.
+pub fn ladder_position(events: &[LedgerEvent], task_id: &str) -> (usize, u32) {
+    let mut tier_idx = 0usize;
+    let mut max_attempt = 0u32;
+    for event in events {
+        match event {
+            LedgerEvent::TaskEscalated {
+                task_id: event_task,
+                ..
+            } if event_task == task_id => {
+                tier_idx = tier_idx.saturating_add(1);
+                max_attempt = 0;
+            }
+            LedgerEvent::TaskStarted {
+                task_id: event_task,
+                attempt,
+                ..
+            } if event_task == task_id => {
+                max_attempt = max_attempt.max(*attempt);
+            }
+            _ => {}
+        }
+    }
+    (tier_idx, max_attempt.saturating_add(1).max(1))
+}
+
 pub fn run(config: FleetConfig) -> anyhow::Result<RunReport> {
     if config.tasks.is_empty() {
         bail!("tasks.json has no tasks - add at least one task");
@@ -178,8 +312,20 @@ pub fn run(config: FleetConfig) -> anyhow::Result<RunReport> {
     let max_workers = config.max_workers;
     let workdir = std::env::current_dir().context("could not read the current directory")?;
     let test_provider = test_provider_from_env()?;
-    let mut tasks = prepare_new_tasks(&config.resolver, &config.default_route, &config.tasks)?;
-    let key_literals = preflight_keys(&config.resolver, &tasks, test_provider.is_some())?;
+    let ladder = config.ladder.clone();
+    let mut tasks = prepare_new_tasks(
+        &config.resolver,
+        &config.default_route,
+        &config.tasks,
+        config.defer_offpeak,
+        ladder.as_ref(),
+    )?;
+    let key_literals = preflight_keys(
+        &config.resolver,
+        &tasks,
+        ladder.as_ref(),
+        test_provider.is_some(),
+    )?;
     scrub_prepared_tasks(&mut tasks, &Scrubber::new(key_literals.clone()))?;
 
     let run_id = new_run_id();
@@ -193,6 +339,7 @@ pub fn run(config: FleetConfig) -> anyhow::Result<RunReport> {
         task_count: tasks.len(),
         max_workers,
         budget_tokens: config.budget_tokens,
+        escalate: ladder.is_some(),
     })?;
     for task in &tasks {
         ledger.append(&LedgerEvent::TaskQueued {
@@ -232,6 +379,12 @@ pub fn run(config: FleetConfig) -> anyhow::Result<RunReport> {
         workdir,
         key_literals: Arc::new(key_literals.clone()),
         test_provider,
+        clock: config
+            .clock
+            .unwrap_or_else(|| Arc::new(SystemClock) as Arc<dyn Clock>),
+        swarm: config
+            .swarm
+            .unwrap_or_else(|| Arc::new(PendingSwarmClient) as Arc<dyn SwarmClient>),
     });
     let report = execute_tasks(
         &run_id,
@@ -243,6 +396,9 @@ pub fn run(config: FleetConfig) -> anyhow::Result<RunReport> {
         runtime,
         &ledger,
         &config.on_event,
+        ladder.as_ref(),
+        config.escalate_on_partial,
+        HashMap::new(),
     )?;
     finish_index(
         &fleet_root,
@@ -275,27 +431,57 @@ pub fn resume(
     let plan = plan_from_ledger(&events);
     let queued = queued_tasks(&events)?;
     let attempts = attempts_by_task(&events);
+    let effective_ladder = config
+        .ladder
+        .clone()
+        .or_else(|| meta.escalate.then(Ladder::default_ladder));
     let mut tasks = Vec::with_capacity(plan.todo.len());
     for task_id in &plan.todo {
         let (task, route_id) = queued.get(task_id).ok_or_else(|| {
             anyhow::anyhow!("ledger cannot resume task '{task_id}' - its queued event is missing")
         })?;
+        let (route_id, tier_idx, effort, attempt) = match effective_ladder.as_ref() {
+            Some(ladder) => {
+                let (tier_idx, attempt) = ladder_position(&events, task_id);
+                let tier = ladder.tiers.get(tier_idx).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "ledger ladder position for '{task_id}' is past the final worker tier"
+                    )
+                })?;
+                (tier.route_id.clone(), tier_idx, Some(tier.effort), attempt)
+            }
+            None => (
+                route_id.clone(),
+                0,
+                None,
+                attempts
+                    .get(task_id)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(1),
+            ),
+        };
         tasks.push(PreparedTask {
             task_id: task_id.clone(),
             task: task.clone(),
-            route_id: route_id.clone(),
-            attempt: attempts
-                .get(task_id)
-                .copied()
-                .unwrap_or(0)
-                .saturating_add(1),
+            route_id,
+            attempt,
+            tier_idx,
+            effort,
+            defer_offpeak: config.defer_offpeak,
+            backend: Backend::Native,
         });
     }
 
     let max_workers = effective_workers(config.max_workers, Some(meta.max_workers))?;
     let budget_tokens = config.budget_tokens.or(meta.budget_tokens);
     let test_provider = test_provider_from_env()?;
-    let key_literals = preflight_keys(&config.resolver, &tasks, test_provider.is_some())?;
+    let key_literals = preflight_keys(
+        &config.resolver,
+        &tasks,
+        effective_ladder.as_ref(),
+        test_provider.is_some(),
+    )?;
     let ledger = DurableWriter::open(&ledger_path, Scrubber::new(key_literals.clone()))?;
     let counts = terminal_counts(&events);
 
@@ -324,8 +510,15 @@ pub fn resume(
         workdir,
         key_literals: Arc::new(key_literals.clone()),
         test_provider,
+        clock: config
+            .clock
+            .unwrap_or_else(|| Arc::new(SystemClock) as Arc<dyn Clock>),
+        swarm: config
+            .swarm
+            .unwrap_or_else(|| Arc::new(PendingSwarmClient) as Arc<dyn SwarmClient>),
     });
     let used_tokens = receipt_tokens(&events);
+    let failed_attempts = failure_receipts_by_task(&events, config.escalate_on_partial);
     let report = execute_tasks(
         &run_id,
         tasks,
@@ -336,6 +529,9 @@ pub fn resume(
         runtime,
         &ledger,
         &config.on_event,
+        effective_ladder.as_ref(),
+        config.escalate_on_partial,
+        failed_attempts,
     )?;
     finish_index(
         &fleet_root,
@@ -353,6 +549,10 @@ struct PreparedTask {
     task: String,
     route_id: String,
     attempt: u32,
+    tier_idx: usize,
+    effort: Option<ThinkingEffort>,
+    defer_offpeak: bool,
+    backend: Backend,
 }
 
 struct Runtime {
@@ -362,12 +562,15 @@ struct Runtime {
     workdir: PathBuf,
     key_literals: Arc<Vec<String>>,
     test_provider: Option<TestProvider>,
+    clock: Arc<dyn Clock>,
+    swarm: Arc<dyn SwarmClient>,
 }
 
 #[derive(Clone)]
 struct TestProvider {
     execution_log: Option<PathBuf>,
     sleep: Duration,
+    outcome: Outcome,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -393,6 +596,7 @@ struct RunMeta {
     task_count: usize,
     max_workers: usize,
     budget_tokens: Option<u64>,
+    escalate: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -459,8 +663,7 @@ enum WorkerEvent {
     },
     Progress(String),
     Finished {
-        task_id: String,
-        attempt: u32,
+        job: PreparedTask,
         result: Result<Receipt, String>,
     },
 }
@@ -477,15 +680,24 @@ fn execute_tasks(
     runtime: Arc<Runtime>,
     ledger: &DurableWriter,
     on_event: &Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    ladder: Option<&Ladder>,
+    escalate_on_partial: bool,
+    mut failed_attempts: HashMap<String, u32>,
 ) -> anyhow::Result<RunReport> {
     let display_scrubber = Scrubber::new(runtime.key_literals.as_ref().clone());
     let mut remaining: VecDeque<PreparedTask> = tasks.into();
+    let mut deferred_announced = HashSet::new();
     let worker_count = max_workers.min(remaining.len().max(1));
     let (job_tx, job_rx) = mpsc::channel::<PreparedTask>();
     let job_rx = Arc::new(Mutex::new(job_rx));
     let event_capacity = worker_count.saturating_mul(4).max(16);
     let (event_tx, event_rx) = mpsc::sync_channel::<WorkerEvent>(event_capacity);
-    let workers = spawn_workers(worker_count, Arc::clone(&job_rx), event_tx, runtime)?;
+    let workers = spawn_workers(
+        worker_count,
+        Arc::clone(&job_rx),
+        event_tx,
+        Arc::clone(&runtime),
+    )?;
 
     let mut active = 0usize;
     let mut budget_halted = budget_tokens.is_some_and(|limit| used_tokens >= limit);
@@ -498,29 +710,27 @@ fn execute_tasks(
             &mut counts,
         )?;
     } else {
-        while active < worker_count {
-            let Some(task) = remaining.pop_front() else {
-                break;
-            };
-            job_tx
-                .send(task)
-                .context("fleet worker pool stopped before dispatch")?;
-            active += 1;
-        }
+        dispatch_ready_tasks(
+            &mut remaining,
+            &job_tx,
+            &mut active,
+            worker_count,
+            &runtime,
+            on_event,
+            &display_scrubber,
+            &mut deferred_announced,
+        )?;
     }
 
-    while active > 0 {
-        match event_rx
-            .recv()
-            .context("fleet worker pool stopped unexpectedly")?
-        {
-            WorkerEvent::Started {
+    while active > 0 || !remaining.is_empty() {
+        match event_rx.recv_timeout(SCHEDULER_WAKE_INTERVAL) {
+            Ok(WorkerEvent::Started {
                 task_id,
                 route_id,
                 effort,
                 attempt,
                 ack,
-            } => {
+            }) => {
                 let result = ledger
                     .append(&LedgerEvent::TaskStarted {
                         task_id: task_id.clone(),
@@ -542,46 +752,136 @@ fn execute_tasks(
                     bail!("{error}");
                 }
             }
-            WorkerEvent::Heartbeat { task_id, ts } => {
+            Ok(WorkerEvent::Heartbeat { task_id, ts }) => {
                 ledger.append(&LedgerEvent::TaskHeartbeat { task_id, ts })?;
             }
-            WorkerEvent::Progress(line) => emit(on_event, &display_scrubber, &line),
-            WorkerEvent::Finished {
-                task_id,
-                attempt,
-                result,
-            } => {
+            Ok(WorkerEvent::Progress(line)) => emit(on_event, &display_scrubber, &line),
+            Ok(WorkerEvent::Finished { mut job, result }) => {
                 active = active.saturating_sub(1);
                 match result {
                     Ok(receipt) => {
                         used_tokens = used_tokens.saturating_add(tokens_in(&receipt));
                         let outcome = receipt.outcome;
+                        let reason = typed_receipt_reason(&receipt, job.attempt);
                         ledger.append(&LedgerEvent::TaskReceipt {
-                            task_id: task_id.clone(),
-                            attempt,
+                            task_id: job.task_id.clone(),
+                            attempt: job.attempt,
                             receipt,
                         })?;
-                        ledger.append(&LedgerEvent::TaskDone {
-                            task_id: task_id.clone(),
-                            outcome,
-                        })?;
-                        counts.done += 1;
-                        emit(
-                            on_event,
-                            &display_scrubber,
-                            &format!("done {task_id} - {outcome:?}"),
-                        );
+                        let policy_outcome = escalation_outcome(outcome, escalate_on_partial);
+                        if matches!(policy_outcome, Outcome::Fail | Outcome::Timeout) {
+                            failed_attempts
+                                .entry(job.task_id.clone())
+                                .and_modify(|count| *count = count.saturating_add(1))
+                                .or_insert(1);
+                        }
+                        let step = ladder
+                            .map(|ladder| {
+                                next_step(ladder, job.tier_idx, job.attempt, policy_outcome)
+                            })
+                            .or(match policy_outcome {
+                                Outcome::Pass | Outcome::Partial | Outcome::Skip => {
+                                    Some(Step::Done)
+                                }
+                                Outcome::Fail | Outcome::Timeout => None,
+                            });
+                        match step {
+                            Some(Step::Done) => {
+                                ledger.append(&LedgerEvent::TaskDone {
+                                    task_id: job.task_id.clone(),
+                                    outcome,
+                                })?;
+                                counts.done += 1;
+                                emit(
+                                    on_event,
+                                    &display_scrubber,
+                                    &format!("done {} - {outcome:?}", job.task_id),
+                                );
+                            }
+                            Some(Step::Retry) => {
+                                job.attempt = job.attempt.saturating_add(1);
+                                remaining.push_back(job);
+                            }
+                            Some(Step::Escalate(next_tier_idx)) => {
+                                let ladder = ladder.expect("escalation steps require a ladder");
+                                let tier = ladder.tiers.get(next_tier_idx).ok_or_else(|| {
+                                    anyhow::anyhow!("escalation ladder selected a missing tier")
+                                })?;
+                                ledger.append(&LedgerEvent::TaskEscalated {
+                                    task_id: job.task_id.clone(),
+                                    from_route: job.route_id.clone(),
+                                    to_route: tier.route_id.clone(),
+                                    reason: reason.clone(),
+                                })?;
+                                let from_route = runtime.resolver.resolve(&job.route_id)?;
+                                let from_effort =
+                                    effort_name(job.effort.unwrap_or_else(|| {
+                                        effort_for(from_route.thinking_dialect)
+                                    }));
+                                emit(
+                                    on_event,
+                                    &display_scrubber,
+                                    &format!(
+                                        "escalated {} - {}/{} → {}/{} ({reason})",
+                                        job.task_id,
+                                        job.route_id,
+                                        from_effort,
+                                        tier.route_id,
+                                        effort_name(tier.effort)
+                                    ),
+                                );
+                                job.route_id = tier.route_id.clone();
+                                job.tier_idx = next_tier_idx;
+                                job.effort = Some(tier.effort);
+                                job.attempt = 1;
+                                remaining.push_back(job);
+                            }
+                            Some(Step::Gate) => {
+                                let failed_attempts = failed_attempts
+                                    .get(&job.task_id)
+                                    .copied()
+                                    .unwrap_or(0);
+                                ledger.append(&LedgerEvent::TaskGate {
+                                    task_id: job.task_id.clone(),
+                                    reason: format!(
+                                        "ladder exhausted - paused for human review after {failed_attempts} failed attempts"
+                                    ),
+                                })?;
+                                counts.gated += 1;
+                                emit(
+                                    on_event,
+                                    &display_scrubber,
+                                    &format!(
+                                        "gated {} - ladder exhausted, needs human review ({failed_attempts} failed attempts)",
+                                        job.task_id
+                                    ),
+                                );
+                            }
+                            None => {
+                                ledger.append(&LedgerEvent::TaskFailed {
+                                    task_id: job.task_id.clone(),
+                                    reason: reason.clone(),
+                                })?;
+                                counts.failed += 1;
+                                emit(
+                                    on_event,
+                                    &display_scrubber,
+                                    &format!("failed {} - {reason}", job.task_id),
+                                );
+                            }
+                        }
                     }
                     Err(reason) => {
+                        // Infrastructure faults terminate immediately; the ladder only climbs on receipts.
                         ledger.append(&LedgerEvent::TaskFailed {
-                            task_id: task_id.clone(),
+                            task_id: job.task_id.clone(),
                             reason: reason.clone(),
                         })?;
                         counts.failed += 1;
                         emit(
                             on_event,
                             &display_scrubber,
-                            &format!("failed {task_id} - {reason}"),
+                            &format!("failed {} - {reason}", job.task_id),
                         );
                     }
                 }
@@ -601,15 +901,23 @@ fn execute_tasks(
                         &mut counts,
                     )?;
                 }
-                if !budget_halted {
-                    if let Some(task) = remaining.pop_front() {
-                        job_tx
-                            .send(task)
-                            .context("fleet worker pool stopped before dispatch")?;
-                        active += 1;
-                    }
-                }
             }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                bail!("fleet worker pool stopped unexpectedly")
+            }
+        }
+        if !budget_halted {
+            dispatch_ready_tasks(
+                &mut remaining,
+                &job_tx,
+                &mut active,
+                worker_count,
+                &runtime,
+                on_event,
+                &display_scrubber,
+                &mut deferred_announced,
+            )?;
         }
     }
 
@@ -631,6 +939,83 @@ fn execute_tasks(
         ),
     );
     Ok(report)
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+fn dispatch_ready_tasks(
+    remaining: &mut VecDeque<PreparedTask>,
+    jobs: &mpsc::Sender<PreparedTask>,
+    active: &mut usize,
+    worker_count: usize,
+    runtime: &Runtime,
+    on_event: &Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    scrubber: &Scrubber,
+    deferred_announced: &mut HashSet<String>,
+) -> anyhow::Result<()> {
+    let candidates = remaining.len();
+    for _ in 0..candidates {
+        if *active >= worker_count {
+            break;
+        }
+        let Some(task) = remaining.pop_front() else {
+            break;
+        };
+        if task.defer_offpeak {
+            let now = runtime.clock.now();
+            if let Ok(route) = runtime.resolver.resolve(&task.route_id) {
+                if !ready_to_dispatch(&route, now) {
+                    if deferred_announced.insert(task.task_id.clone()) {
+                        let local: FixedOffset = *Local::now().offset();
+                        emit(
+                            on_event,
+                            scrubber,
+                            &format!(
+                                "deferred {} - {}, parked",
+                                task.task_id,
+                                route.peak_status(now, local)
+                            ),
+                        );
+                    }
+                    remaining.push_back(task);
+                    continue;
+                }
+            }
+        }
+        jobs.send(task)
+            .context("fleet worker pool stopped before dispatch")?;
+        *active = active.saturating_add(1);
+    }
+    Ok(())
+}
+
+fn escalation_outcome(outcome: Outcome, escalate_on_partial: bool) -> Outcome {
+    if escalate_on_partial && outcome == Outcome::Partial {
+        Outcome::Fail
+    } else {
+        outcome
+    }
+}
+
+fn typed_receipt_reason(receipt: &Receipt, attempt: u32) -> String {
+    let outcome = match receipt.outcome {
+        Outcome::Pass => "pass",
+        Outcome::Fail => "fail",
+        Outcome::Partial => "partial",
+        Outcome::Skip => "skip",
+        Outcome::Timeout => "timeout",
+    };
+    let class = receipt.failure_class.map(|class| match class {
+        FailureClass::Context => "context",
+        FailureClass::Constraint => "constraint",
+        FailureClass::Verification => "verification",
+        FailureClass::Planning => "planning",
+    });
+    let tries = if attempt == 1 { "try" } else { "tries" };
+    match class {
+        Some(class) => format!("{outcome} ({class}) after {attempt} {tries}"),
+        None => format!("{outcome} after {attempt} {tries}"),
+    }
 }
 
 #[allow(clippy::type_complexity)]
@@ -700,19 +1085,21 @@ fn worker_loop(
             Ok(route) => route,
             Err(error) => {
                 let _ = events.send(WorkerEvent::Finished {
-                    task_id: job.task_id,
-                    attempt: job.attempt,
+                    job,
                     result: Err(error.to_string()),
                 });
                 continue;
             }
         };
+        let actual_effort = job
+            .effort
+            .unwrap_or_else(|| effort_for(route.thinking_dialect));
         let (ack_tx, ack_rx) = mpsc::sync_channel(0);
         if events
             .send(WorkerEvent::Started {
                 task_id: job.task_id.clone(),
                 route_id: job.route_id.clone(),
-                effort: effort_name(effort_for(route.thinking_dialect)).into(),
+                effort: effort_name(actual_effort).into(),
                 attempt: job.attempt,
                 ack: ack_tx,
             })
@@ -741,14 +1128,7 @@ fn worker_loop(
         let result = run_one_task(&runtime, &job, route, &events);
         let _ = stop_tx.send(());
         let _ = heartbeat.join();
-        if events
-            .send(WorkerEvent::Finished {
-                task_id: job.task_id,
-                attempt: job.attempt,
-                result,
-            })
-            .is_err()
-        {
+        if events.send(WorkerEvent::Finished { job, result }).is_err() {
             return;
         }
     }
@@ -760,6 +1140,12 @@ fn run_one_task(
     route: nh_routes::ResolvedRoute,
     events: &mpsc::SyncSender<WorkerEvent>,
 ) -> Result<Receipt, String> {
+    if job.backend == Backend::KimiSwarm {
+        return runtime
+            .swarm
+            .submit_and_collect(&job.task_id, &job.task)
+            .map_err(|error| error.to_string());
+    }
     let client: Box<dyn ChatClient> = match &runtime.test_provider {
         Some(provider) => Box::new(EchoClient {
             task_id: job.task_id.clone(),
@@ -804,7 +1190,9 @@ fn run_one_task(
         },
         model_id: route.model_id,
         max_turns: MAX_TURNS,
-        thinking: effort_for(route.thinking_dialect),
+        thinking: job
+            .effort
+            .unwrap_or_else(|| effort_for(route.thinking_dialect)),
         constitution: Some(runtime.law.constitution.clone()),
         context_limit: route.context,
         on_event: Some(Box::new(move |line| {
@@ -814,10 +1202,20 @@ fn run_one_task(
         })),
     };
     let mut history: Vec<ChatMessage> = Vec::new();
-    agent
+    let mut receipt = agent
         .run_with_history(&mut history, &job.task)
         .map(|(_, receipt)| receipt)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    if let Some(provider) = &runtime.test_provider {
+        // The echo seam is inert outside its explicit opt-in and only controls test receipts.
+        receipt.outcome = provider.outcome;
+        receipt.failure_class = match provider.outcome {
+            Outcome::Fail => Some(FailureClass::Verification),
+            Outcome::Timeout => Some(FailureClass::Constraint),
+            Outcome::Pass | Outcome::Partial | Outcome::Skip => None,
+        };
+    }
+    Ok(receipt)
 }
 
 fn verdict_to_guard(verdict: nh_law::Verdict) -> Guard {
@@ -832,7 +1230,25 @@ fn prepare_new_tasks(
     resolver: &RouteResolver,
     default_route: &str,
     specs: &[TaskSpec],
+    defer_offpeak: bool,
+    ladder: Option<&Ladder>,
 ) -> anyhow::Result<Vec<PreparedTask>> {
+    if let Some(ladder) = ladder {
+        if specs.iter().any(|spec| spec.model.is_some()) {
+            bail!(
+                "escalation ladder owns route selection - remove per-task model, or drop --escalate"
+            );
+        }
+        if ladder.tiers.is_empty() {
+            bail!("escalation ladder has no worker tiers");
+        }
+        for tier in &ladder.tiers {
+            let route = resolver.resolve(&tier.route_id)?;
+            if route.class == RouteClass::Delegate {
+                bail!("escalation ladder worker tiers must use api routes");
+            }
+        }
+    }
     let mut ids = HashSet::new();
     let mut tasks = Vec::with_capacity(specs.len());
     for (index, spec) in specs.iter().enumerate() {
@@ -848,16 +1264,26 @@ fn prepare_new_tasks(
         if !ids.insert(task_id.clone()) {
             bail!("task id collision - choose unique ids");
         }
-        let route_id = spec.model.as_deref().unwrap_or(default_route);
+        let (route_id, effort) = match ladder {
+            Some(ladder) => {
+                let tier = &ladder.tiers[0];
+                (tier.route_id.as_str(), Some(tier.effort))
+            }
+            None => (spec.model.as_deref().unwrap_or(default_route), None),
+        };
         let route = resolver.resolve(route_id)?;
         if route.class == RouteClass::Delegate {
-            bail!("delegate routes are not available to Slice A fleet workers - pick an api route");
+            bail!("delegate routes are not available to fleet workers - pick an api route");
         }
         tasks.push(PreparedTask {
             task_id,
             task: task.to_string(),
             route_id: route.id,
             attempt: 1,
+            tier_idx: 0,
+            effort,
+            defer_offpeak: spec.defer_offpeak.unwrap_or(defer_offpeak),
+            backend: spec.backend.unwrap_or(Backend::Native),
         });
     }
     Ok(tasks)
@@ -879,6 +1305,7 @@ fn scrub_prepared_tasks(tasks: &mut [PreparedTask], scrubber: &Scrubber) -> anyh
 fn preflight_keys(
     resolver: &RouteResolver,
     tasks: &[PreparedTask],
+    ladder: Option<&Ladder>,
     using_test_provider: bool,
 ) -> anyhow::Result<Vec<String>> {
     if using_test_provider {
@@ -887,10 +1314,22 @@ fn preflight_keys(
     let vault = EnvFallbackVault {
         inner: KeyringVault,
     };
+    let mut route_ids = BTreeSet::new();
+    let has_native = tasks.iter().any(|task| task.backend == Backend::Native);
+    for task in tasks {
+        if task.backend == Backend::Native {
+            route_ids.insert(task.route_id.clone());
+        }
+    }
+    if has_native {
+        if let Some(ladder) = ladder {
+            route_ids.extend(ladder.tiers.iter().map(|tier| tier.route_id.clone()));
+        }
+    }
     let mut entries = BTreeSet::new();
     let mut literals = Vec::new();
-    for task in tasks {
-        let route = resolver.resolve(&task.route_id)?;
+    for route_id in route_ids {
+        let route = resolver.resolve(&route_id)?;
         if entries.insert(route.vault_entry.clone()) {
             let key = vault.get(&route.vault_entry)?;
             literals.push(key.as_str().to_owned());
@@ -915,9 +1354,26 @@ fn test_provider_from_env() -> anyhow::Result<Option<TestProvider>> {
                 .transpose()
                 .context("NH_FLEET_TEST_SLEEP_MS must be a whole number")?
                 .unwrap_or(150);
+            let outcome = match std::env::var(TEST_OUTCOME_ENV) {
+                Err(std::env::VarError::NotPresent) => Outcome::Pass,
+                Ok(value) if value == "pass" => Outcome::Pass,
+                Ok(value) if value == "fail" => Outcome::Fail,
+                Ok(value) if value == "partial" => Outcome::Partial,
+                Ok(value) if value == "skip" => Outcome::Skip,
+                Ok(value) if value == "timeout" => Outcome::Timeout,
+                Err(error) => {
+                    return Err(anyhow::anyhow!(
+                        "could not read {TEST_OUTCOME_ENV}: {error}"
+                    ))
+                }
+                Ok(_) => {
+                    bail!("NH_FLEET_TEST_OUTCOME accepts pass, fail, partial, skip, or timeout")
+                }
+            };
             Ok(Some(TestProvider {
                 execution_log: std::env::var_os(TEST_EXECUTION_LOG_ENV).map(PathBuf::from),
                 sleep: Duration::from_millis(sleep_ms),
+                outcome,
             }))
         }
         Ok(_) => bail!("NH_FLEET_TEST_PROVIDER only accepts the test value 'echo'"),
@@ -1150,11 +1606,13 @@ fn run_meta(events: &[LedgerEvent], expected_run_id: &str) -> anyhow::Result<Run
                 task_count,
                 max_workers,
                 budget_tokens,
+                escalate,
             } if run_id == expected_run_id => Some(RunMeta {
                 created_utc: created_utc.clone(),
                 task_count: *task_count,
                 max_workers: *max_workers,
                 budget_tokens: *budget_tokens,
+                escalate: *escalate,
             }),
             _ => None,
         })
@@ -1242,6 +1700,28 @@ fn receipt_tokens(events: &[LedgerEvent]) -> u64 {
         .fold(0u64, u64::saturating_add)
 }
 
+fn failure_receipts_by_task(
+    events: &[LedgerEvent],
+    escalate_on_partial: bool,
+) -> HashMap<String, u32> {
+    let mut failures = HashMap::new();
+    for event in events {
+        if let LedgerEvent::TaskReceipt {
+            task_id, receipt, ..
+        } = event
+        {
+            let outcome = escalation_outcome(receipt.outcome, escalate_on_partial);
+            if matches!(outcome, Outcome::Fail | Outcome::Timeout) {
+                failures
+                    .entry(task_id.clone())
+                    .and_modify(|count: &mut u32| *count = count.saturating_add(1))
+                    .or_insert(1);
+            }
+        }
+    }
+    failures
+}
+
 fn tokens_in(receipt: &Receipt) -> u64 {
     receipt.usage.as_ref().map_or(0, |usage| {
         usage.prompt_tokens.saturating_add(usage.completion_tokens)
@@ -1269,6 +1749,7 @@ mod tests {
         _guard: MutexGuard<'static, ()>,
         old_provider: Option<std::ffi::OsString>,
         old_sleep: Option<std::ffi::OsString>,
+        old_outcome: Option<std::ffi::OsString>,
     }
 
     impl TestEnv {
@@ -1276,12 +1757,15 @@ mod tests {
             let guard = ENV_LOCK.lock().unwrap();
             let old_provider = std::env::var_os(TEST_PROVIDER_ENV);
             let old_sleep = std::env::var_os(TEST_SLEEP_MS_ENV);
+            let old_outcome = std::env::var_os(TEST_OUTCOME_ENV);
             std::env::set_var(TEST_PROVIDER_ENV, "echo");
             std::env::set_var(TEST_SLEEP_MS_ENV, "0");
+            std::env::remove_var(TEST_OUTCOME_ENV);
             Self {
                 _guard: guard,
                 old_provider,
                 old_sleep,
+                old_outcome,
             }
         }
     }
@@ -1296,6 +1780,10 @@ mod tests {
                 Some(value) => std::env::set_var(TEST_SLEEP_MS_ENV, value),
                 None => std::env::remove_var(TEST_SLEEP_MS_ENV),
             }
+            match self.old_outcome.take() {
+                Some(value) => std::env::set_var(TEST_OUTCOME_ENV, value),
+                None => std::env::remove_var(TEST_OUTCOME_ENV),
+            }
         }
     }
 
@@ -1307,6 +1795,11 @@ mod tests {
             tasks,
             max_workers: 2,
             budget_tokens: None,
+            clock: None,
+            defer_offpeak: false,
+            ladder: None,
+            escalate_on_partial: false,
+            swarm: None,
             run_root: root.to_path_buf(),
             on_event: None,
         }
@@ -1317,6 +1810,8 @@ mod tests {
             id: Some(id.into()),
             task: text.into(),
             model: None,
+            defer_offpeak: None,
+            backend: None,
         }
     }
 
@@ -1356,15 +1851,19 @@ mod tests {
                 id: None,
                 task: "  same task  ".into(),
                 model: None,
+                defer_offpeak: None,
+                backend: None,
             },
             TaskSpec {
                 id: None,
                 task: "same task".into(),
                 model: None,
+                defer_offpeak: None,
+                backend: None,
             },
         ];
-        let first = prepare_new_tasks(&resolver, "echo", &specs).unwrap();
-        let second = prepare_new_tasks(&resolver, "echo", &specs).unwrap();
+        let first = prepare_new_tasks(&resolver, "echo", &specs, false, None).unwrap();
+        let second = prepare_new_tasks(&resolver, "echo", &specs, false, None).unwrap();
         assert_eq!(first[0].task_id, second[0].task_id);
         assert!(first[0].task_id.starts_with("t000-"));
         assert!(first[1].task_id.starts_with("t001-"));
@@ -1375,7 +1874,7 @@ mod tests {
     fn explicit_id_collisions_fail_before_run() {
         let resolver = RouteResolver::from_toml(CATALOG).unwrap();
         let specs = vec![task("same", "one"), task("same", "two")];
-        let error = prepare_new_tasks(&resolver, "echo", &specs).unwrap_err();
+        let error = prepare_new_tasks(&resolver, "echo", &specs, false, None).unwrap_err();
         assert!(error.to_string().contains("collision"));
     }
 
@@ -1482,5 +1981,120 @@ mod tests {
             effort: "none".into(),
             attempt,
         }
+    }
+
+    #[test]
+    fn ready_to_dispatch_uses_route_price_windows() {
+        use chrono::TimeZone as _;
+
+        let resolver = RouteResolver::from_toml(include_str!("../../../catalog.toml")).unwrap();
+        let peak = Utc.with_ymd_and_hms(2026, 7, 15, 2, 0, 0).unwrap();
+        let off_peak = Utc.with_ymd_and_hms(2026, 7, 15, 10, 30, 0).unwrap();
+        let flash = resolver.resolve("deepseek-v4-flash").unwrap();
+        assert!(!ready_to_dispatch(&flash, peak));
+        assert!(ready_to_dispatch(&flash, off_peak));
+
+        let glm = resolver.resolve("glm-4.7-flash").unwrap();
+        assert!(ready_to_dispatch(&glm, peak));
+        assert!(ready_to_dispatch(&glm, off_peak));
+
+        let no_price = RouteResolver::from_toml(CATALOG)
+            .unwrap()
+            .resolve("echo")
+            .unwrap();
+        assert!(ready_to_dispatch(&no_price, peak));
+    }
+
+    #[test]
+    fn next_step_walks_every_default_ladder_tier() {
+        let ladder = Ladder::default_ladder();
+        for tier_idx in 0..ladder.tiers.len() {
+            assert_eq!(next_step(&ladder, tier_idx, 1, Outcome::Pass), Step::Done);
+            assert_eq!(next_step(&ladder, tier_idx, 1, Outcome::Skip), Step::Done);
+            assert_eq!(
+                next_step(&ladder, tier_idx, 1, Outcome::Partial),
+                Step::Done
+            );
+            for outcome in [Outcome::Fail, Outcome::Timeout] {
+                assert_eq!(next_step(&ladder, tier_idx, 1, outcome), Step::Retry);
+                let expected = if tier_idx + 1 < ladder.tiers.len() {
+                    Step::Escalate(tier_idx + 1)
+                } else {
+                    Step::Gate
+                };
+                assert_eq!(next_step(&ladder, tier_idx, 2, outcome), expected);
+            }
+            assert_eq!(
+                next_step(
+                    &ladder,
+                    tier_idx,
+                    1,
+                    escalation_outcome(Outcome::Partial, true)
+                ),
+                Step::Retry
+            );
+            let partial_second = next_step(
+                &ladder,
+                tier_idx,
+                2,
+                escalation_outcome(Outcome::Partial, true),
+            );
+            let fail_second = next_step(&ladder, tier_idx, 2, Outcome::Fail);
+            assert_eq!(partial_second, fail_second);
+        }
+    }
+
+    #[test]
+    fn ladder_rejects_per_task_model_with_one_actionable_line() {
+        let resolver = RouteResolver::from_toml(include_str!("../../../catalog.toml")).unwrap();
+        let mut explicit = task("owned", "work");
+        explicit.model = Some("glm-4.7-flash".into());
+        let ladder = Ladder::default_ladder();
+        let error = prepare_new_tasks(&resolver, "glm-4.7-flash", &[explicit], false, Some(&ladder))
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "escalation ladder owns route selection - remove per-task model, or drop --escalate"
+        );
+    }
+
+    #[test]
+    fn kimi_swarm_backend_uses_the_locked_serde_name() {
+        let spec: TaskSpec =
+            serde_json::from_str(r#"{"task":"work","backend":"kimi-swarm"}"#).unwrap();
+        assert_eq!(spec.backend, Some(Backend::KimiSwarm));
+        assert!(serde_json::from_str::<TaskSpec>(r#"{"task":"work","backend":"kimi_swarm"}"#)
+            .is_err());
+    }
+
+    #[test]
+    fn ladder_position_resumes_current_tier_at_next_attempt() {
+        let events = vec![
+            queued("climb"),
+            started("climb", 1),
+            started("climb", 2),
+            LedgerEvent::TaskEscalated {
+                task_id: "climb".into(),
+                from_route: "tier-zero".into(),
+                to_route: "tier-one".into(),
+                reason: "fail after 2 tries".into(),
+            },
+            started("climb", 1),
+            started("climb", 2),
+            LedgerEvent::TaskEscalated {
+                task_id: "climb".into(),
+                from_route: "tier-one".into(),
+                to_route: "tier-two".into(),
+                reason: "fail after 2 tries".into(),
+            },
+            LedgerEvent::TaskStarted {
+                task_id: "climb".into(),
+                route_id: "tier-two".into(),
+                effort: "high".into(),
+                attempt: 1,
+            },
+        ];
+        assert_eq!(ladder_position(&events, "climb"), (2, 2));
+        assert_eq!(plan_from_ledger(&events).todo, vec!["climb"]);
     }
 }

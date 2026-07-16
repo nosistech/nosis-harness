@@ -84,6 +84,10 @@ enum FleetAction {
         max_workers: Option<usize>,
         #[arg(long)]
         budget: Option<u64>,
+        #[arg(long)]
+        escalate: bool,
+        #[arg(long)]
+        defer_offpeak: bool,
     },
     /// Resume the latest incomplete run, or a specific run id
     Resume {
@@ -109,8 +113,17 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Chat { model } => cmd_chat::run(&model),
         Cmd::Tui { model, budget } => cmd_tui::run(&model, budget),
-        Cmd::Fleet { action: FleetAction::Run { tasks, max_workers, budget } } => {
-            cmd_fleet::run_tasks(&tasks, max_workers, budget)
+        Cmd::Fleet {
+            action:
+                FleetAction::Run {
+                    tasks,
+                    max_workers,
+                    budget,
+                    escalate,
+                    defer_offpeak,
+                },
+        } => {
+            cmd_fleet::run_tasks(&tasks, max_workers, budget, escalate, defer_offpeak)
         }
         Cmd::Fleet { action: FleetAction::Resume { run_id, max_workers } } => {
             cmd_fleet::resume_run(run_id.as_deref(), max_workers)
@@ -284,14 +297,34 @@ mod tests {
     #[test]
     fn parses_fleet_run_overrides() {
         let cli = Cli::try_parse_from([
-            "nh", "fleet", "run", "tasks.json", "--max-workers", "3", "--budget", "900",
+            "nh",
+            "fleet",
+            "run",
+            "tasks.json",
+            "--max-workers",
+            "3",
+            "--budget",
+            "900",
+            "--escalate",
+            "--defer-offpeak",
         ])
         .unwrap();
         match cli.cmd {
-            Cmd::Fleet { action: FleetAction::Run { tasks, max_workers, budget } } => {
+            Cmd::Fleet {
+                action:
+                    FleetAction::Run {
+                        tasks,
+                        max_workers,
+                        budget,
+                        escalate,
+                        defer_offpeak,
+                    },
+            } => {
                 assert_eq!(tasks, std::path::PathBuf::from("tasks.json"));
                 assert_eq!(max_workers, Some(3));
                 assert_eq!(budget, Some(900));
+                assert!(escalate);
+                assert!(defer_offpeak);
             }
             _ => panic!("expected fleet run"),
         }
