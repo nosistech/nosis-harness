@@ -2,6 +2,49 @@
 
 Record every meaningful session here.
 
+## 2026-07-16: M4 Slice B — off-peak scheduler + escalation ladder + Kimi swarm seam (E2 gated), commit `ecadc0a`
+
+Builder:
+
+- Claude (Opus 4.8, Claude Code) — M4 orchestrator: briefed Sol from CONTRACTS_M4 §"Slice B",
+  verified empirically (numstat = truth), adversarial review, FEEL demo through the real `nh` binary,
+  gate, commit. Also authored the one-round follow-up brief (resume-continues-ladder + effort-in-line).
+- Codex (GPT-5.6 Sol xhigh) — implementer, two `codex exec` background runs (main pass + follow-up).
+
+What changed (all in `crates/nh-fleet` + additive `nh-cli`; **frozen crates + catalog.toml untouched**):
+
+- **Off-peak scheduler (E2).** Injected `Clock` trait (`SystemClock` default) + pure
+  `ready_to_dispatch(route, now)` reusing frozen `nh_routes::ResolvedRoute::price_at` (off-peak and
+  no-price routes dispatch; peak routes park). Coordinator re-checks parked tasks on a 100 ms
+  `recv_timeout` tick (no busy-spin). `--defer-offpeak` (run) + per-task `defer_offpeak`. One-line
+  FEEL: `deferred <id> — peak 2x until <HH:MM local>, parked` (reuses the M3 `peak_status` chip).
+  **E2 test:** injected `MockClock` parks at peak → advance to off-peak → dispatches → `TaskDone`.
+- **Escalation ladder.** Pure `next_step(ladder, tier, attempt, outcome) → Retry/Escalate/Gate/Done`,
+  ≤2 tries/tier; default ladder `flash/none → k2.7/high → v4-pro/high → v4-pro/max → Opus review-pause
+  GATE`. Live-wired into `execute_tasks`: `Fail|Timeout` receipts climb (each `TaskEscalated` carries a
+  typed reason; the failure `Receipt` is already durable as the preceding `TaskReceipt` — never a raw
+  transcript); terminal `TaskGate` populates `RunReport.gated`. **Infra `Err` terminates immediately**
+  (the ladder climbs model failures, not faults). `--escalate` opts in; per-task `model` rejected with
+  one friendly line. Escalation line shows effort both sides (`…-pro/high → …-pro/max`).
+- **Resume continues the climb.** `RunStarted` carries an additive `#[serde(default)] escalate` flag;
+  `resume()` self-derives the effective ladder from the ledger (config wins) and reconstructs each
+  interrupted task's tier via pure `ladder_position` — a killed escalation run resumes mid-ladder to
+  exactly one terminal, gate count folding prior failures. Exactly-one-terminal + at-least-once hold.
+- **Kimi swarm — MINIMAL seam** (owner: budget). `Backend{Native,KimiSwarm}` + `SwarmClient` trait;
+  Native done; `KimiSwarm` one mock-receipt test + honest `PendingSwarmClient` `bail!("arrives live in
+  M6")` stub. No polling/streaming, **no frozen wire touch**.
+
+Tests/checks (orchestrator, independent; `--release`):
+
+- `cargo test --workspace --release`: **284 passed / 0 failed / 1 ignored** (+11 over Slice A's 273:
+  6 nh-fleet integration in `tests/slice_b.rs` — E2 park/dispatch, non-deferred control, live 8-attempt
+  ladder→gate, no-ladder single-fail, kimi mock+stub, resume-continues-ladder — plus new lib units:
+  `ready_to_dispatch`, exhaustive `next_step`, ladder-rejects-model, kimi serde, `ladder_position`).
+- `cargo clippy --workspace --all-targets --release -- -D warnings`: clean.
+- **E1 kill-9 resume integration test unmodified and green** (Slice A invariants intact).
+- **FEEL owner-approved** — escalation ladder climb + off-peak parking driven through the real `nh`
+  binary (deferred parking captured live during the actual Beijing peak window).
+
 ## 2026-07-15: M4 Slice A — nh-fleet (ledger + workers + idempotent resume) + /effort warmup (E1 gated)
 
 Builder:

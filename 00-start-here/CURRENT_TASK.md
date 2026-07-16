@@ -1,10 +1,11 @@
 # Current Task
 
-## Immediate Goal — M4 Slice B (off-peak scheduler + escalation ladder). Slice A DONE + committed.
+## Immediate Goal — M4 Slice C (nh-mcp server, E3). Slices A + B DONE + committed.
 
-**M4 IN PROGRESS. HEAD `347bce6` = M4 Slice A (nh-fleet) committed.** Warmup `/effort` case-fold
-committed `9b0a8ad`. `CONTRACTS_M4.md` is **LOCKED** (owner scope-approved 2026-07-15). Tree clean,
-273 pass / 1 ignored `--release`, clippy `--release -D warnings` clean, frozen crates untouched.
+**M4 IN PROGRESS. HEAD `ecadc0a` = M4 Slice B committed** (Slice A `347bce6`, docs `5889fb7`).
+`CONTRACTS_M4.md` is **LOCKED** (owner scope-approved 2026-07-15). Tree clean, **284 pass / 1 ignored**
+`--release`, clippy `--release -D warnings` clean, frozen crates + catalog.toml untouched. Slice B FEEL
+(escalation ladder climb + off-peak parking) owner-approved through the real `nh` binary.
 
 ### Owner scope rulings (baked into CONTRACTS_M4.md — do not relitigate):
 1. **OAuth2 in FROZEN nh-tools authorized** — amendment **A-M4-1** (+ nh-vault keyring setter
@@ -17,24 +18,31 @@ committed `9b0a8ad`. `CONTRACTS_M4.md` is **LOCKED** (owner scope-approved 2026-
 - **Slice A ✅ DONE + committed `347bce6`** — crate `crates/nh-fleet`: fsync-durable append-only
   ledger + std-thread workers + idempotent resume + budget stop; `nh fleet run/resume`. **E1 (kill-9
   idempotent resume) GATED** via a real-binary `Child::kill` integration test. Frozen crates untouched.
-- **Slice B — NEXT** — off-peak scheduler (reuse `nh_routes` `peak_status`/`price_at` + an injected
-  `Clock`; pure `ready_to_dispatch` seam; **E2**) + escalation ladder (Flash→K2.7→V4 Pro High→V4 Pro
-  Max→**Opus review-pause gate**; ≤2 tries/tier, failure `Receipt` attached on escalate; pure
-  `next_step` seam) + **MINIMAL** Kimi swarm seam (`Backend{Native,KimiSwarm}`; Native done, KimiSwarm
-  one mock test + live-pending; NO frozen wire touch). Spec: `CONTRACTS_M4.md §"Slice B"`.
-- **Slice C** — nh-mcp server (`tiny_http`, stateless 2026-07-28 wire mirroring `nh_tools::mcp`; tools
+- **Slice B ✅ DONE + committed `ecadc0a`** — off-peak scheduler (injected `Clock` + pure
+  `ready_to_dispatch` reusing frozen `price_at`; peak tasks park, 100ms coordinator tick; **E2 gated**
+  via injected `MockClock`) + escalation ladder (pure `next_step`; live-wired Flash→K2.7→V4-Pro/High→
+  V4-Pro/Max→**Opus review-pause GATE**, ≤2 tries/tier, typed `TaskEscalated` + preceding `TaskReceipt`;
+  **resume self-derives the ladder from a `RunStarted.escalate` flag + `ladder_position` and continues
+  the climb**) + **MINIMAL** Kimi swarm seam (`Backend{Native,KimiSwarm}` + `SwarmClient`; Native done,
+  KimiSwarm mock test + honest `PendingSwarmClient` "arrives live in M6" stub). Frozen crates untouched.
+- **Slice C — NEXT** — nh-mcp server (`tiny_http`, stateless 2026-07-28 wire mirroring `nh_tools::mcp`; tools
   `route_resolve`/`fleet_run`/`fleet_status`; **E3** test drives it with `nh_tools::mcp::McpClient` as
   the KORVIN stand-in; `run_id` = stateless passthrough handle). Do NOT ship publicly pre-2026-07-28.
 - **Slice D** — OAuth2 MCP client (amendment **A-M4-1/2**; refresh on expiry/401 + retry once; keyring
   token store; **E4** — force expiry, assert refresh succeeds). Replaces the `oauth2_is_deferred_to_m4` test.
 
 ### ON RESUME ("continue"):
-1. **Sanity:** `git log --oneline -1` = `347bce6`; clean tree; kill any `nh.exe` (locks the debug exe);
-   `cargo test --workspace --release` (273 pass / 1 ignored) + `cargo clippy --workspace --all-targets
+1. **Sanity:** `git log --oneline -1` = `ecadc0a`; clean tree; kill any `nh.exe` (locks the debug exe);
+   `cargo test --workspace --release` (**284 pass / 1 ignored**) + `cargo clippy --workspace --all-targets
    --release -- -D warnings` clean. Use `--release` — Kaspersky blocks the debug test exe (os error 5).
-2. **Brief Sol on Slice B** per `CONTRACTS_M4.md §"Slice B"` (executor invocation below). Gate
-   empirically (numstat = truth; EOL/CRLF flags = noise), adversarial review, show Carlos the FEEL of
-   `nh fleet` deferred/escalation output, then commit per-slice on `main` **after Carlos approves**.
+2. **Brief Sol on Slice C** per `CONTRACTS_M4.md §"Slice C"` (executor invocation below). nh-mcp =
+   `tiny_http` (blocking, no tokio); stateless wire mirroring `nh_tools::mcp` (NEVER an `Mcp-Session-Id`
+   header); tools `route_resolve`/`fleet_run`/`fleet_status`; bind `127.0.0.1` + preview banner; **do NOT
+   ship publicly pre-2026-07-28**. E3 test uses the EXISTING `nh_tools::mcp::McpClient` as the KORVIN
+   stand-in. `fleet_run` reuses the Slice-A/B `nh_fleet::run` on a background thread; `run_id` = stateless
+   ledger handle; `fleet_status` reads the ledger. Gate empirically (numstat = truth; EOL/CRLF = noise),
+   adversarial review, show Carlos the FEEL of the nh-mcp responses, then commit on `main` **after Carlos
+   approves**. After Slice C: Slice D (OAuth2, A-M4-1/2, E4).
 
 ### UX is THE priority — still governs M4/M5/M6 (see [[ux-first-and-the-law]])
 "Pretty but frustrating" = failure. Judge by FEEL first, tests second. Reference bar = CodeWhale.
