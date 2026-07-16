@@ -108,7 +108,7 @@ fn progress_printer() -> Arc<dyn Fn(&str) + Send + Sync> {
     Arc::new(|line| eprintln!("  {line}"))
 }
 
-fn print_law_warnings(warnings: &[String]) {
+pub(crate) fn print_law_warnings(warnings: &[String]) {
     let scrubber = Scrubber::new(Vec::new());
     for warning in warnings {
         eprintln!("warning: {}", cmd_run::safe_line(&scrubber, warning));
