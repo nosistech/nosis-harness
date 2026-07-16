@@ -9,6 +9,7 @@ mod cmd_chat;
 mod cmd_fleet;
 mod cmd_init;
 mod cmd_key;
+mod cmd_mcp;
 mod cmd_run;
 mod cmd_tui;
 
@@ -73,6 +74,11 @@ enum Cmd {
         #[command(subcommand)]
         action: FleetAction,
     },
+    /// Serve the local MCP endpoint (preview; 127.0.0.1 only)
+    Mcp {
+        #[command(subcommand)]
+        action: McpAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -94,6 +100,17 @@ enum FleetAction {
         run_id: Option<String>,
         #[arg(long)]
         max_workers: Option<usize>,
+    },
+}
+
+#[derive(Subcommand)]
+enum McpAction {
+    /// Start the local MCP server (route_resolve, fleet_run, fleet_status)
+    Serve {
+        #[arg(long, default_value = "127.0.0.1:8765")]
+        addr: String,
+        #[arg(long)]
+        token_entry: Option<String>,
     },
 }
 
@@ -128,6 +145,9 @@ fn main() -> anyhow::Result<()> {
         Cmd::Fleet { action: FleetAction::Resume { run_id, max_workers } } => {
             cmd_fleet::resume_run(run_id.as_deref(), max_workers)
         }
+        Cmd::Mcp {
+            action: McpAction::Serve { addr, token_entry },
+        } => cmd_mcp::serve(&addr, token_entry.as_deref()),
     };
     // UX: one friendly line, what to do next, exit 1. Never a debug dump.
     // Every output path passes the Scrubber — this final line included (key
@@ -347,6 +367,62 @@ mod tests {
                 assert_eq!(max_workers, Some(2));
             }
             _ => panic!("expected fleet resume"),
+        }
+    }
+
+    #[test]
+    fn parses_mcp_serve_with_default_addr() {
+        let cli = Cli::try_parse_from(["nh", "mcp", "serve"]).unwrap();
+        match cli.cmd {
+            Cmd::Mcp {
+                action: McpAction::Serve { addr, token_entry },
+            } => {
+                assert_eq!(addr, "127.0.0.1:8765");
+                assert_eq!(token_entry, None);
+            }
+            _ => panic!("expected mcp serve"),
+        }
+    }
+
+    #[test]
+    fn parses_mcp_serve_addr_override() {
+        let cli = Cli::try_parse_from([
+            "nh",
+            "mcp",
+            "serve",
+            "--addr",
+            "127.0.0.1:9000",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Cmd::Mcp {
+                action: McpAction::Serve { addr, token_entry },
+            } => {
+                assert_eq!(addr, "127.0.0.1:9000");
+                assert_eq!(token_entry, None);
+            }
+            _ => panic!("expected mcp serve"),
+        }
+    }
+
+    #[test]
+    fn parses_mcp_serve_token_entry() {
+        let cli = Cli::try_parse_from([
+            "nh",
+            "mcp",
+            "serve",
+            "--token-entry",
+            "korvin-mcp",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Cmd::Mcp {
+                action: McpAction::Serve { addr, token_entry },
+            } => {
+                assert_eq!(addr, "127.0.0.1:8765");
+                assert_eq!(token_entry.as_deref(), Some("korvin-mcp"));
+            }
+            _ => panic!("expected mcp serve"),
         }
     }
 }
