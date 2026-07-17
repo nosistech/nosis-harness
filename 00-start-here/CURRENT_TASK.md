@@ -90,19 +90,27 @@ review on every Slice-B item.
   Gemini CLI died as open delegate). Reposition: **"open-weight-first harness with a frontier review
   gate."** Keep the commented catalog delegate schema; don't build the full adapter class in v1.
 
-### ON RESUME ("continue") — the task is to PLAN M5, not implement:
-1. **Read the research report** `00-start-here/RESEARCH_2026-07_harness.md` (esp. §1 top-15, §3 live
-   issues, §7 master backlog, §10 sequencing). Confirm M4 clean: `git log --oneline -3` = `d3cac39`
-   / `aa751f4` / `bd35b4d`; `git status` clean.
-2. **Get owner ratification** of the M5 "Honest Meter" scope above (slice set + order + the CUT). The
-   owner wants a *cohesive, logical, congruent, harmonic* project — pressure-test each slice against
-   the meter identity and drop anything that doesn't serve it. UX/FEEL is still THE gate.
-3. **Write `CONTRACTS_M5.md`** (mirror the M4 contract shape): ground rules, the per-milestone
-   mutable-crate surface + amendment list, per-slice specs with exit criteria mapped to real tests,
-   a verify-live ledger (carry the report §8 items — DeepSeek peak windows @ `valid_until 2026-07-24`,
-   thinking defaults, kimi reasoning replay, cache fields). LOCK it.
-4. **Brief Sol for Slice A** (see Executor invocation). Then the loop: Sol implements → Claude re-gates
-   (`cargo test --workspace --release` + clippy) + adversarial review → owner FEEL-approve → commit.
+### ON RESUME ("continue") — PLANNING IS DONE. Next = brief Sol for Slice A.
+**State (2026-07-17):** M5 scope RATIFIED + `CONTRACTS_M5.md` LOCKED + committed. HEAD `e2b2f02`
+(docs: lock CONTRACTS_M5 + positioning) on `6de331a`. `git status` clean. Baseline 292 pass `--release`,
+clippy clean. Read `CONTRACTS_M5.md` (esp. §0.1 mutable surface + Slice A) + this file's top block first.
+
+1. **Confirm clean:** `git log --oneline -3` = `e2b2f02` / `6de331a` / `d3cac39`; `git status` clean.
+   Kill any `nh.exe` before builds (locks `target\debug\nh.exe`).
+2. **ONE open owner decision before briefing Sol** (raise it first): brief Slice A as a SINGLE handoff
+   (contract allows Sol to self-split into ≤3), or as THREE smaller handoffs from the start
+   (thinking/reasoning → cache/context → resolver)? Cleaner gate vs. two extra handoffs. Default =
+   single handoff, Sol splits if the first gate is rough.
+3. **Write the Slice A Sol brief** (nh-core truth-math L1/L2/L7/L8/L9/L12/clamp/cache + nh-routes thin
+   resolver `resolve_capable` + `RejectionTrace`) from `CONTRACTS_M5.md` Slice A. Use the Executor
+   invocation below; consider `--output-schema` for a machine-readable self-report. Run in background;
+   NEVER two nosis codexes at once.
+4. **The loop per slice (A→E, order in §6):** Sol implements → Claude re-gates (`cargo test --workspace
+   --release` ≥292 pass + clippy `-D warnings`) + adversarial review (esp. every Slice-B item) → owner
+   **FEEL-approve** any human-facing surface → commit (`wip/slice-<x>` → `main`).
+
+**When M5 is "done" (shipped + FEEL-approved):** write the ≥5 launch posts from
+`01-product/WHY_BEST_IN_CATEGORY_2026.md` (append new article seeds there as they surface). [[why-best-in-category-2026]]
 
 ## Roles (fixed) — [[m2-m5-codex-sol-directive]]
 - **Orchestrator = Opus 4.8** (this session): plans, writes contracts/briefs, runs gates, adversarially
