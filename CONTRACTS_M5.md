@@ -1,0 +1,358 @@
+# CONTRACTS_M5.md — Locked surface for Milestone M5 ("The Honest Meter")
+
+**Status: LOCKED (orchestrator Opus 4.8; owner scope-ratified 2026-07-17).** Builder = GPT-5.6 Sol
+xhigh via `codex exec`. Claude plans + gates + adversarially reviews; Sol implements EXACTLY the
+enumerated seams below. Amendments go through the orchestrator only, logged §8.
+
+**Spec source:** `00-start-here/RESEARCH_2026-07_harness.md` (§1 top-15, §3 live-issues L1–L12, §7
+master backlog, §10 sequencing), `00-start-here/CURRENT_TASK.md` (owner direction 2026-07-17),
+`02-architecture/SECURITY_MODEL.md`. Both research engines (Fable 5 high, Sol xhigh) independently
+converged on the identity and the priority below — that convergence is the spine.
+
+**The identity M5 serves (every seam must be congruent to it):**
+> nosis is the agent harness with a meter: it routes every task to the cheapest CAPABLE model — by
+> clock, cache, modality, thinking budget — and hands you the receipt.
+
+**M5 thesis:** make the meter **TRUE, SAFE, and VISIBLE** (and its routing choice HONEST) before
+adding any autonomy, learning, or providers. **One verb — *meter*. No second verb.** M5 wins the
+beachhead (honesty + visibility + safety); M6 wins the moat (intelligence + reliability + resume).
+
+**Owner scope rulings (2026-07-17) — the four ratified decisions:**
+1. **Five slices A–E** (TRUTH / FLOOR / VISIBLE / LEVER / LOOP), re-slotted by *seam* for congruence.
+2. **Thin honest-routing IS in** (Slice A) — makes "cheapest capable" true, not aspirational; powers
+   `/why`. **One addition, not two:** the pre-run forecast / `cost_estimate` are OUT (M6-adjacent).
+3. **Two DEFERS held out of M5:** (a) MCP TOFU/hash-pinning → M7 (`extensions.lock` does it
+   provenance-wide; M5 keeps only ANSI/invisible **sanitize**); (b) jurisdiction routing + `governance`
+   catalog metadata + privacy-router filter → M6 (M5 ships only the `[read]`/`[send]` law **class**).
+4. **Behavior-corrections authorized, enumerated (§0.1).** M5 canNOT stay "additive only" like M4 —
+   fixing the meter bugs *changes what the wire sends*. Public **type** signatures stay
+   source-compatible; **wire behavior** changes only at the enumerated seams, each pinned by a new test.
+
+---
+
+## 0. Ground rules (bind every builder)
+
+### 0.1 The M5 mutable surface + amendment list (UP FRONT — the A-M4-1 lesson)
+
+M4 froze five crates whole. **M5 REOPENS them — but each crate is open ONLY for the enumerated seams
+below; every other line in them stays frozen.** This list IS the pre-authorization: Sol implements
+these seams without stopping. Any need to touch a seam NOT on this list → **STOP, amend §8 first.**
+Each seam is tagged **[+]** additive (source-compatible) or **[Δ]** behavior-correcting (bug fix; the
+wire changes; a new test pins the corrected behavior).
+
+**`nh-core`** (Slice A truth-math; D policy application):
+| Seam | Ref | Tag | Change |
+|---|---|:--:|---|
+| `apply_thinking` | lib.rs ~301-326 | Δ | emit `thinking:{type:disabled}` for None/Low on disable-capable dialects; always send explicit effort where required; add `kimi-toggle` dialect handling. |
+| `reasoning_to_send` + `OpenAiPolicy` | ~283-298, ~130 | Δ | reasoning replay conditional on **effective** thinking state (`preserve_when_thinking`), not a static flag. |
+| `compact_history` | ~1332-1368 | Δ | insert elision note as a **NEW appended message**; never mutate `history[1]`/the prefix; cache-aware trigger (only when recache cost < projected savings). |
+| `estimate_tokens` | ~1316-1328 | Δ | count `reasoning_content` (when the route preserves it) + serialized tool-spec bytes. |
+| Anthropic `max_tokens` + OpenAI `build_body` | ~138-143, ~505, ~225-274 | Δ | budget-aware output cap (not hard 8192); **send `max_tokens` on the OpenAI wire** (currently none); map effort→`output_config` where supported. |
+| `PrefixSeal` / `debug_assert` sites | ~1151-1239 | Δ | promote prefix byte-stability to an **all-builds** `PrefixSeal` check + a cache-break detector. |
+| `effective_context` clamp | new | + | per-route context clamp guarding the compaction trigger (context-rot guard). |
+| native cache-field parse | usage extraction | + | parse `prompt_cache_hit_tokens`/`prompt_cache_miss_tokens` as a fallback. |
+| `EffectiveExecutionPolicy` application | request build | + | apply the clamped policy (output cap, thinking tier) at build time (Slice D consumer). |
+
+**`nh-routes`** (Slice A resolver; C cost helpers; D profiles):
+| Seam | Ref | Tag | Change |
+|---|---|:--:|---|
+| `resolve_capable` (new) + `RejectionTrace` | alongside `resolve`/`provider_default` ~529-560 | + | capability(**context-fit**)-filtered, expected-cost-ordered resolver returning the chosen route **+ an auditable rejection trace** ("skipped X: ctx 32K<45K; skipped Y: 4× price"). Existing entry points UNCHANGED. **No jurisdiction, no learning** (M6). |
+| `naive_cost` / cost helper (new) | near `price_at` ~173 | + | pure `cost(price, tokens)` + `naive_cost` (peak × cache-miss × top-tier over same tokens) — the counterfactual line's math. Takes primitives (no nh-core dep). |
+| `Profiles` + `EffectiveExecutionPolicy` (new) | new module | + | parse `profiles.toml` layered like law; produce the policy that **clamps profile wishes to route caps** (repo may only *tighten*). |
+
+**`nh-tools`** (Slice B floor):
+| Seam | Ref | Tag | Change |
+|---|---|:--:|---|
+| `Access` enum | lib.rs 16-19 | + | add `Read(&str)` and `Send(&str)` variants (currently Write/Exec only). |
+| `ReadFile::execute` | lib.rs 154-181 | Δ | consult `ctx.guard` with `Access::Read` before reading; return a bounded `ToolResultEnvelope`. |
+| exec tool result + spawn | exec path | Δ | bounded envelope on output; **min-env allowlist** on the spawned process (not full env). |
+| `ToolResultEnvelope` (new) | new | + | `{ excerpt, handle, digest }` — bounds every tool result (DoW / injection / token surface). |
+| `parse_tool` | mcp.rs ~493-517 | + | `sanitize_untrusted_text()` on descriptions/schemas (strip ANSI / invisible chars). **No TOFU pin** (M7). |
+| OAuth token request | M4 Slice D code | + | add `resource` param (RFC 8707) to the refresh/token grant. |
+
+**`nh-law`** (Slice B floor):
+| Seam | Ref | Tag | Change |
+|---|---|:--:|---|
+| `read_verdict` + `send_verdict` (new) | mirror `write_verdict` 88-104 | + | pattern-match `[read] block` / `[send] block` lists; reuse existing `Verdict::{Allow,Ask,Block}` (no new variant). |
+| `law.toml` `[read]`/`[send]` sections | data | + | data-only additive sections. |
+
+**`nh-vault`** (Slice B floor):
+| Seam | Ref | Tag | Change |
+|---|---|:--:|---|
+| `Scrubber` `KEY_SHAPES` | lib.rs 85-89 | Δ | widen shapes (add `ghp_`/`AKIA`/`AIza`/`xox…`). Deterministic → cache-safe. |
+| `Scrubber` constructor / registry | ~94-100 | + | seed literals from a shared registry of **all** vault entries. |
+| credential audience broker (new) | new | + | `get_scoped(entry, audience)` validates host **before** the secret materializes (closes repo-config credential redirect). |
+
+**`nh-mcp`** (Slice B floor — new in M4, reopened):
+| Seam | Ref | Tag | Change |
+|---|---|:--:|---|
+| `authorized()` | lib.rs 189-198 | Δ | default-mint a token when none set (no silent open door); validate Host/Origin (DNS-rebind guard). |
+
+**`nh-tui`** (Slice C visible; D lever — NOT frozen, fully open for these seams):
+| Seam | Ref | Tag | Change |
+|---|---|:--:|---|
+| `hud_line` / `render_hud` | ~401-428, ~1840 | Δ | add **currency cost** (cached/miss/output split), session total, budget hard-stop, the **counterfactual savings line**, a profile chip. |
+| `reduce_key` + approval row | ~1355 | Δ | explicit `y`/`n`/`Esc` only + a visible legend (fix L6); prefix-rule approvals (y / always-this-session / no); Esc-to-interrupt. |
+| working heartbeat | new | + | `WORKING · 34s · Esc to stop` live suffix. |
+| OSC 9;4 taskbar semáforo | new | + | yellow taskbar = "waiting on you" (Windows-first, zero deps). |
+| `/why`, `/profile` commands | command dispatch | + | route-explain (uses the `RejectionTrace`) + profile toggle. |
+| "errors that teach" helper | new | + | tested invariant (the Slice-D OAuth line is the template). |
+
+**`nh-cli`** (Slice C, D — open):
+| Seam | Tag | Change |
+|---|:--:|---|
+| cost display in `nh run`/`nh chat`; `nh why` | + | print the savings line + `/why` on the CLI path (not just TUI). |
+| `--profile` / `nh profile` | + | select/show the active profile. |
+
+**Data (always allowed — data, not frozen code):** `catalog.toml` (kimi-toggle dialect flag,
+`preserve_when_thinking`, cache-field map, output caps), `law.toml` (`[read]`/`[send]`),
+`profiles.toml` (NEW: frugal / balanced / max-quality).
+
+**Repo tooling (Slice E — no runtime crate):** `gate.ps1`, `.github/workflows/*`, `deny.toml`,
+`rust-toolchain.toml`, `[workspace.lints]`, nextest config.
+
+**Explicitly STILL FROZEN (M5 does NOT open):** **`nh-fleet`** (the escalation ladder stays as-is —
+M5's resolver is *initial* cheapest-capable selection, a different concern from fleet fallback); and
+every seam in any crate NOT enumerated above. Touching either → STOP, amend §8.
+
+### 0.2 THE LAW + UX-first
+- THE LAW (top authority): small, simple, secure, safe, lightweight, readable, auditable, modular,
+  congruent, harmonic. **Reuse over duplication** — the resolver reuses `price_at`/`peak_status`; the
+  cost line reuses catalog price data; `read_verdict` mirrors `write_verdict`; the outbound scrubber
+  reuses the existing `Scrubber`.
+- **UX-first STILL governs — and Slice C is where the milestone is won or lost.** The single
+  determinant of best-in-category is that the money HUD + savings line + `/why` + approvals **FEEL
+  effortless**. "Pretty but frustrating" = failure. `drop-if-hard` on any C sub-item that can't be
+  made calm. See [[ux-first-and-the-law]]. Owner FEEL-approves every human-facing surface before commit.
+
+### 0.3 Security invariants (carry from M0–M4; M5 raises the floor)
+- **Every rendered/logged/persisted/EGRESSED string passes `nh_vault::Scrubber` first** — HUD, savings
+  line, `/why`, receipts, envelopes, rejection traces, OAuth lines. M5 ADDS the egress path (`[send]`)
+  to this rule.
+- **exec_shell stays approval-gated; `read_file` now guarded too** (`Access::Read`). No tool returns
+  unbounded output (envelope). Approvals show the **full** action (never approve a truncated action).
+- **nh-mcp does NOT ship publicly before the MCP final spec (2026-07-28)** — binds `127.0.0.1`, carries
+  the preview banner; M5 only *closes the auth hole*, it does not expose the server.
+- **The meter must not lie about safety:** a leaked key in any surface, an unguarded read, an
+  unbounded tool result, or an unauthenticated money-spend is an M5 exit-blocking defect.
+
+### 0.4 Dependency additions (orchestrator-authorized here)
+- **No new runtime crates.** M5 adds NO external dependencies to the runtime workspace — every seam is
+  std + the already-vendored `serde`/`regex`/`chrono`/`anyhow`. (The savings math, envelope, resolver,
+  profiles, and law classes are all pure Rust over existing types.)
+- **Slice E tooling only:** `cargo-nextest` + `cargo-deny`/`cargo-audit` are dev/CI tools (not workspace
+  deps); `deny.toml` + `rust-toolchain.toml` + `[workspace.lints]` are config. No runtime impact.
+
+### 0.5 M5 exit criteria (each maps to one slice + a real headless test)
+- **E1 — TRUTH (Slice A).** On a mock provider: a None/Low-effort turn's built body has thinking
+  disabled + an explicit output cap **on both wires**; a compaction event leaves the prefix bytes
+  **byte-identical** (PrefixSeal holds in release) and APPENDS the elision note; `estimate_tokens`
+  counts reasoning + tool specs; `resolve_capable` returns the cheapest **context-fitting** route plus
+  a `RejectionTrace` naming why each costlier/incapable route was skipped. Kimi-k2.6 thinking+tools
+  round-trips reasoning_content conditionally **without erroring**.
+- **E2 — FLOOR (Slice B).** A `read_file` of `.env`/`*.pem` is **blocked** by the guard (`[read]`
+  verdict); an over-cap tool result returns a bounded envelope; nh-mcp **rejects** an
+  unauthenticated / cross-Origin `fleet_run`; a fake key literal in any tool output / egress is
+  `[REDACTED]`.
+- **E3 — VISIBLE (Slice C).** After a mock turn the HUD shows **currency** cost (cached/miss/output) +
+  session total; the **counterfactual savings line** prints from catalog price × JSONL tokens; `/why`
+  explains the route using Slice A's `RejectionTrace`; the approval row accepts **only** y/n/Esc with a
+  visible legend. (Graded by FEEL, then the test.)
+- **E4 — LEVER (Slice D).** Switching profile (frugal ↔ max-quality) changes the
+  `EffectiveExecutionPolicy` → a different output cap / route ceiling on the next turn's **built body** +
+  HUD chip + receipt field; a **repo** profile can only *tighten*, never loosen, the user/law caps.
+- **E5 — LOOP (Slice E).** `gate.ps1` **fails** a simulated out-of-surface edit and **passes** a
+  within-surface one; CI runs the full mock test suite keyless on windows-latest + ubuntu;
+  nextest + the AV canary classify an AV-blocked exe as `EnvironmentBlocked`, not `FAIL`.
+
+---
+
+## Slice A — TRUTH: every number AND the routing choice is honest and provable (E1)
+
+**Crates:** `nh-core` (the meter-math) + `nh-routes` (the honest resolver). One theme, two crates. The
+heaviest slice — Sol MAY split it into up to 3 sequential handoffs (thinking/reasoning → cache/context →
+resolver), each gated, but it is ONE contract section.
+
+### A.1 Thinking + reasoning truth (L1, L2)
+- **L1:** the governor tier maps HONESTLY to the wire. None/Low on a disable-capable dialect (deepseek-nhm)
+  sends `thinking:{type:disabled}` — it must not silently buy full high thinking. A new `kimi-toggle`
+  dialect (catalog data) handles K2.6's toggle. Always send an **explicit** effort where the dialect
+  requires one (DeepSeek normalizes `low`→`high` and auto-escalates recognized harnesses to `max` — so
+  omission is a cost bug). `[VERIFY-LIVE §7]`.
+- **L2:** `reasoning_content` replay is conditional on the **effective** thinking state
+  (`preserve_when_thinking`). K2.6 thinking+tools ERRORS today when prior reasoning isn't replayed;
+  DeepSeek's contract requires it. The static `preserve_reasoning` flag becomes state-aware.
+
+### A.2 Cache + context + token truth (L7, L8, L9, L12, clamp, cache-fields)
+- **L7 (cost bug):** `compact_history` inserts the elision note as a **new appended message** —
+  `history[1]` and the whole prefix stay byte-identical, so the next turn is a cache HIT, not a ~120×
+  MISS. Compaction only fires when recache cost < projected savings.
+- **L12:** prefix byte-stability is enforced in **all** builds (`PrefixSeal`, not `debug_assert`), with a
+  cache-break detector that surfaces drift instead of silently eating a cache miss.
+- **L8:** `estimate_tokens` counts `reasoning_content` (when preserved) + serialized tool specs — so
+  compaction fires on time and the provider never overflows.
+- **`effective_context` clamp:** compaction arms at a per-route *effective* context (context-rot guard),
+  not the raw window (arming at 700K on a 1M route is self-defeating).
+- **L9:** output is capped on **both** wires — the OpenAI wire (currently no `max_tokens`) and a
+  budget-aware Anthropic cap (not the hard 8192); effort maps to `output_config` where supported.
+- **Cache fields:** parse `prompt_cache_hit_tokens`/`prompt_cache_miss_tokens` natively as a fallback
+  (ecosystem tools get this wrong) — the honest denominator for the savings line.
+
+### A.3 Honest routing — the thin resolver (the ratified addition)
+- `resolve_capable(task_estimate, allowed_set) -> (ResolvedRoute, RejectionTrace)`: filter routes by
+  **context-fit** (route window ≥ estimated prompt+output), order the survivors by **expected cost**
+  (honest `price_at` × L8 token estimate), pick the cheapest, and record a `RejectionTrace` — a
+  structured, scrubbed list of every rejected route + the reason ("ctx 32K < 45K", "4.0× price").
+- **No jurisdiction** (needs M6 governance metadata) and **no learning** (needs M6 receipts fold). "Cheapest
+  capable" becomes TRUE for the dimensions that exist in M5's world (clock, cache, price, context-fit).
+- Existing `resolve`/`provider_default` are UNCHANGED (source-compatible); this is a NEW entry point.
+
+### A.4 Tests (headless, mock provider — E1)
+- Built-body assertions: None/Low → thinking disabled on deepseek-nhm; explicit effort present; output
+  cap on BOTH wires. Kimi-toggle turn round-trips reasoning conditionally without a provider error.
+- Compaction: after a compaction, `message_bytes(history[0])` and the retained prefix are byte-identical;
+  the elision note is a NEW message; PrefixSeal passes in a `--release` test build.
+- `estimate_tokens`: a message with `reasoning_content` + tool specs estimates strictly higher than the
+  old byte/4 count; the delta ≈ the counted bytes.
+- `resolve_capable`: a task whose estimate exceeds a cheap route's window selects the next-cheapest
+  fitting route and the trace names the skip reason; ties break to lowest expected cost.
+
+---
+
+## Slice B — FLOOR: the meter is safe/auditable (E2)
+
+**Crates:** `nh-tools`, `nh-law`, `nh-vault`, `nh-mcp`. **Adversarial security review on EVERY item.**
+
+- **L3 — read guard + `[read]`/`[send]` law CLASS.** `Access::Read`/`Access::Send` added; `ReadFile`
+  consults the guard (closes the Lethal-Trifecta read leg — secrets can't be read into a CN-bound
+  prompt); `read_verdict`/`send_verdict` mirror `write_verdict`; the outbound (`[send]`) path is
+  Scrubber-checked. **Mechanism only** — the privacy-*routing* filter is M6.
+- **Tool-result envelope.** `read_file`/`exec` return `{ excerpt, handle, digest }`, bounded — closes a
+  denial-of-wallet + prompt-injection + token surface. The full content stays retrievable by handle.
+- **L11 — sanitize (only).** `sanitize_untrusted_text()` strips ANSI + invisible Unicode from MCP
+  tool descriptions/schemas before the model sees them. **TOFU/hash pinning is M7** (`extensions.lock`).
+- **L4 — credential audience binding.** `get_scoped(entry, audience)` validates the host against the
+  entry's approved audience BEFORE the secret materializes — a repo checkout can no longer redirect a
+  real vault credential to an attacker origin.
+- **L5 — nh-mcp inbound auth.** `authorized()` default-mints a token (no silent open door) and validates
+  Host/Origin (DNS-rebind). An unauthenticated / cross-Origin `fleet_run` is refused (it spends money).
+- **Scrubber widen + registry.** Add `ghp_`/`AKIA`/`AIza`/`xox…` shapes; seed literals from all vault
+  entries. Deterministic (cache-safe).
+- **Min-env exec allowlist.** The spawned exec process gets an allowlisted env, not the full parent env.
+- **OAuth `resource` (RFC 8707).** Add the resource indicator to the M4 OAuth grant.
+
+### B tests (E2)
+- Guard: `read_file(".env")` / `*.pem` → `Block`; a normal source read → `Allow`. Egress of a secret →
+  `[send]` block. Envelope: an over-cap `exec` output returns a bounded excerpt + a resolvable handle.
+- nh-mcp: `fleet_run` with no token → 401/refused; with a mismatched Origin/Host → refused; with the
+  minted token + loopback → runs. Scrubber: `ghp_…`/`AKIA…` literals `[REDACTED]` in every surface.
+- Audience: a `get_scoped(entry, "https://evil.example")` where the entry's audience is the real API →
+  refused before materialization.
+
+---
+
+## Slice C — VISIBLE: the meter felt (E3) — THE UX GATE
+
+**Crates:** `nh-tui`, `nh-cli` + the `nh-routes` cost helpers (A). **This is where best-in-category is
+won.** Graded by FEEL first, tests second. `drop-if-hard` per sub-item.
+
+- **Money cost HUD.** Currency cost per turn split over cached / miss / output tokens, a running session
+  total, and a budget hard-stop — replacing the token-only HUD. Honest-stale flag on any `verify_live`
+  price.
+- **The counterfactual savings line (THE aha — the launch screenshot).** After a turn:
+  `cost ¥0.11 — saved 93% vs naive (peak ¥0.44 · cache-miss ¥1.62 · pro-tier ¥3.90)`. Pure function over
+  catalog price + JSONL tokens (via `naive_cost`). No incumbent CAN print it (their router can't see
+  their cache).
+- **`/why` route-explain (CLI + TUI chip + receipt).** Explains the chosen route using Slice A's
+  `RejectionTrace` — the last clause of the identity ("you can see why") made real.
+- **Approval cluster (fixes L6 + fatigue).** Explicit `y`/`n`/`Esc` + a visible legend; prefix-rule
+  approvals (y / **always-this-session** / no); Esc-to-interrupt; a live working heartbeat.
+- **OSC 9;4 Windows taskbar semáforo.** Yellow taskbar icon = "waiting on you" — visceral, Windows-first,
+  zero deps.
+- **"Errors that teach" — a tested invariant.** Every human-facing error names the cause + the next
+  action (the Slice-D OAuth line is the template).
+
+### C tests (E3)
+- HUD/savings snapshot from a mock turn matches the expected currency line (deterministic price × tokens).
+- `/why` prints the chosen route + at least one rejection reason from the trace.
+- Approval reducer: `y`→approve, `n`/`Esc`→deny, any OTHER key → **no-op** (not a silent deny); the legend
+  string is present. Heartbeat updates on a tick.
+
+---
+
+## Slice D — LEVER: savings selectable (E4) — the owner's ask
+
+**Crates:** `nh-routes` (profiles + policy), `nh-core` (policy application), `nh-tui` (`/profile` + chip).
+
+- **`profiles.toml`** (frugal / balanced / max-quality) layered like `law.toml`: bundled → user → repo.
+  A **repo** profile may only *tighten* spend, never loosen (like law).
+- **One `EffectiveExecutionPolicy`** clamps every profile wish to route capability: route ceiling, output
+  cap (sets Slice A's mechanism), thinking tier, off-peak preference, compaction aggressiveness. Route-
+  **required** behavior (e.g. Kimi reasoning replay) and law stay immutable — a profile can never weaken them.
+- **`/profile` toggle + HUD chip + receipt field.** The active profile is visible and recorded.
+- **The single owner of every user-selectable cost lever** — no cost knob lives anywhere else.
+
+### D tests (E4)
+- `frugal` vs `max-quality` produce different built-body output caps / route selections on the same task.
+- A repo `profiles.toml` attempting to RAISE a cap above the user/law ceiling is clamped down (tighten-only).
+- The receipt carries the effective profile; the HUD chip reflects it.
+
+---
+
+## Slice E — LOOP HARDENING: the build loop is durable + gated (E5)
+
+**No runtime crate.** Repo tooling only — congruent with the meta-process (the M4 finale nearly lived
+only in Temp).
+
+- **`wip/<slice>` commit rule.** Gated-but-unapproved slice work is committed to a `wip/<slice>` branch
+  before the owner FEEL-review — durability, no more one-AV-quarantine-from-loss.
+- **`gate.ps1`** — mechanizes the §0.1 frozen-surface / allowed-files check (a diff touching a
+  non-enumerated seam FAILS the gate); runs `cargo test --workspace --release` + clippy `-D warnings` +
+  (optional) `cargo public-api` additive proof.
+- **Minimal keyless CI** — one GitHub Actions workflow on windows-latest + ubuntu running the full mock
+  suite (no keys, no network). Green = mergeable.
+- **`codex exec --output-schema`** — Sol handoffs return a machine-readable self-report (files touched,
+  tests added, gate result) for a deterministic post-run check.
+- **`cargo-nextest` + AV canary preflight** — classifies a Kaspersky-blocked `nh.exe` as
+  `EnvironmentBlocked`/`FLAKY`, not `FAIL` (turns env noise into a signal, not a red gate).
+- **`[workspace.lints]` + pinned `rust-toolchain.toml`** — reproducible builds, lint policy as data.
+- **Supply-chain gate** — `deny.toml` + `cargo-audit`/`cargo-deny` (crates.io is under active attack,
+  RUSTSEC-2026-0155).
+
+### E tests (E5)
+- `gate.ps1` unit: a simulated diff touching `nh-fleet` (frozen) → non-zero exit; a diff touching only
+  `nh-core::apply_thinking` (enumerated) → zero exit.
+- CI dry-run green on both OSes with the mock suite; nextest AV-canary classifies a forced os-error-5 as
+  `EnvironmentBlocked`.
+
+---
+
+## 6. Slice order + gating
+1. **Slice A** (E1 — truth-math + resolver) — the foundation; every other slice reads its honest numbers
+   / trace. Gate on the built-body + PrefixSeal + `resolve_capable` tests. **Sol may split A into ≤3
+   handoffs.**
+2. **Slice B** (E2 — floor) — independent of A; adversarial review per item. Can follow A directly.
+3. **Slice C** (E3 — visible) — needs A (cost helper + `RejectionTrace`). **The FEEL gate; owner approves
+   before commit.**
+4. **Slice D** (E4 — lever) — needs A (output-cap mechanism) + C (HUD chip surface).
+5. **Slice E** (E5 — loop) — can land anytime; ideally *before* A so the gate mechanizes the rest.
+- Gate EACH slice: `cargo test --workspace --release` (≥292 pass, 0 fail) + `cargo clippy --workspace
+  --all-targets -- -D warnings` clean; adversarial review; **owner FEEL-approve** any human-facing
+  surface; then commit per-slice (via `wip/<slice>` → `main`). Kill any `nh.exe` before builds (it locks
+  `target\debug\nh.exe`).
+
+## 7. Verify-live ledger (M5) — confirm before building on (carried from report §8)
+- **DeepSeek peak/off-peak windows** — still not first-party as of 2026-07-16; re-check at catalog
+  `valid_until=2026-07-24`; the catalog peak block is `verify_live`, not `confirmed`, until then.
+- **DeepSeek thinking** — confirm omission = thinking-on; `low`→`high` normalization; Anthropic-wire
+  `output_config.effort` + thinking-block replay. (Gates A.1/A.2 wire assertions vs a real key later.)
+- **Kimi** — K2.6 thinking-toggle + mandatory `reasoning_content` in tools; `kimi-toggle` dialect shape.
+  (A.1/A.2 are mock-tested; real Kimi key is live-pending.)
+- **Cache accounting** — assert `cached_tokens>0` on a repeated-prefix second call, per provider; exact
+  fields for the savings-line denominator. (A.2 mock-tested; live-pending.)
+- **MCP 2026-07-28 final** — reconcile the assumed wire; nh-mcp stays local-only until then regardless.
+- **GLM / jurisdiction / learning** — OUT of M5 (M6/M7). No key acquired this milestone.
+
+## 8. Integration amendments (append here, dated, orchestrator authority)
+*(none yet — the §0.1 mutable surface is the standing pre-authorization. Anything beyond it lands here,
+dated, before Sol proceeds.)*
