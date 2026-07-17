@@ -1,8 +1,21 @@
 # Current Task
 
-## Immediate Goal — RATIFY M5 "The Honest Meter" scope, write `CONTRACTS_M5.md`, brief Sol for Slice A.
+## Immediate Goal — M5 scope RATIFIED + `CONTRACTS_M5.md` LOCKED (2026-07-17). NEXT = brief Sol for Slice A.
 
-**M4 is CLOSED.** HEAD `d3cac39` (research) on `aa751f4` (Slice D feat, the M4 finale) on `bd35b4d`.
+**M5 "The Honest Meter" — scope ratified & contract locked (2026-07-17, this session):**
+- **Five slices A–E**, re-slotted by *seam* (not theme) for congruence: A TRUTH (nh-core meter-math
+  + nh-routes thin honest-routing) / B FLOOR (nh-tools/law/vault/mcp) / C VISIBLE (nh-tui/cli — THE
+  FEEL gate) / D LEVER (profiles) / E LOOP (build hardening). See `CONTRACTS_M5.md` (LOCKED).
+- **Ratified calls:** thin honest-routing IN (Slice A; context-fit + expected-cost + rejection trace;
+  NO jurisdiction/learning); forecast/`cost_estimate` OUT (one addition, not two); TWO defers held out
+  (MCP TOFU-pin → M7 keep only sanitize; jurisdiction/governance/privacy-router → M6 keep only the
+  `[read]`/`[send]` law class); behavior-corrections authorized enumerated (§0.1 mutable surface).
+- **Positioning captured:** `01-product/WHY_BEST_IN_CATEGORY_2026.md` — the best-in-category thesis +
+  seeds for ≥5 launch posts; append new article ideas there as found (write posts when M5 is "done").
+- **NEXT:** write the Slice A Sol brief → `codex exec` (background) → gate (`cargo test --workspace
+  --release` + clippy) + adversarial review → owner FEEL-approve → commit (`wip/slice-a` → main).
+
+**M4 is CLOSED.** HEAD `6de331a` (docs: close M4) on `d3cac39` (research) on `aa751f4` (Slice D feat).
 All four M4 slices committed: A `347bce6` (fleet), B `ecadc0a` (scheduler/ladder/swarm-seam),
 C `26c6a22` (nh-mcp), D `aa751f4` (OAuth2, E4). `CONTRACTS_M4.md` LOCKED; §8 has the as-implemented
 A-M4-1 clarification. Working tree clean after this session's 3 commits.
