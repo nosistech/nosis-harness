@@ -2,6 +2,34 @@
 
 Record every meaningful session here.
 
+## 2026-07-17: M4 CLOSED (Slice D committed `aa751f4`) + M5 direction research
+
+**M4 is complete.** Slice D (OAuth2 MCP client, E4) committed `aa751f4` after a clean re-gate
+(nh-tools 56/0 incl. the E4 crux, nh-tui 46/0, clippy clean; the only red is the 2 pre-existing
+Kaspersky-AV-blocked spawn tests, os error 5, byte-identical nh-cli). CONTRACTS_M4 §8 gained the
+as-implemented A-M4-1 clarification (OAuth2 is a struct variant; forced the authorized 2-line
+`nh_tui::mcp_state` adaptation; A-M4-2 was a no-op — `Vault::set` existed since M0). All four M4
+slices (A fleet, B scheduler/ladder/swarm-seam, C nh-mcp, D OAuth2) now committed.
+
+**Deep improvement research (committed `d3cac39`).** Owner-commissioned "deepest + richest" pass on
+how to improve the harness (product + process), run on TWO models: **Fable 5 (high)** web-cited
+July-2026 across 13 lenses (A-M), and **GPT-5.6 Sol (xhigh)** design pass over the crate code
+(60-item backlog). 265 unique sources; exact line-number grounding. Report:
+`00-start-here/RESEARCH_2026-07_harness.md`; raw files: `04-research/_harness-research-2026-07/`.
+Both models independently converged on the product identity (**"the metered harness"**) and the top
+priority (**make the meter true + visible + safe before adding autonomy or providers**). The pass
+surfaced ~12 live code issues (thinking-defaults cost bug; kimi-k2.6 thinking+tools error path;
+`read_file` has no law guard; credential-audience exfil; nh-mcp inbound no-auth; any-key-denies
+approval bug; compaction mutates prefix → 120× cache miss; sessions RAM-only), a new differentiator
+(**privacy-aware routing** — all keyed providers are Chinese/train-on-API; GLM=SG doesn't), the moat
+(**learning router** off receipts already written), and one worthwhile new key (**GLM/Z.ai**, free).
+
+**M5 direction chosen: "The Honest Meter"** (see CURRENT_TASK). Five congruent slices: A Truth
+(fix the cost/correctness bugs), B Floor (security), C Visible (money HUD + savings line + /why),
+D Lever (profiles + output caps + cache-aware compaction), E Loop-hardening (CI + gate.ps1 + wip
+rule + nextest). Awaiting owner ratification, then CONTRACTS_M5 + Sol briefs. Build loop unchanged:
+Claude plans + gates, Sol (gpt-5.6 xhigh) implements.
+
 ## 2026-07-16: M4 Slice C — nh-mcp stateless server + fleet handle seams (E3 gated)
 
 Builder:
