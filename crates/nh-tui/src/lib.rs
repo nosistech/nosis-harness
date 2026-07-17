@@ -488,7 +488,7 @@ pub fn filter_palette<'a>(entries: &'a [PaletteEntry], query: &str) -> Vec<&'a P
 }
 
 fn mcp_state(config: &McpServerConfig, warnings: &[String]) -> McpState {
-    if config.trust == McpTrust::Block || config.auth == McpAuth::OAuth2 {
+    if config.trust == McpTrust::Block || matches!(config.auth, McpAuth::OAuth2 { .. }) {
         return McpState::DiscoverOnly;
     }
     let warning_prefix = format!("mcp server \"{}\"", config.name);
@@ -501,7 +501,7 @@ fn mcp_state(config: &McpServerConfig, warnings: &[String]) -> McpState {
     match config.auth {
         McpAuth::ApiKey { .. } => McpState::AuthOk,
         McpAuth::None => McpState::Enabled,
-        McpAuth::OAuth2 => McpState::DiscoverOnly,
+        McpAuth::OAuth2 { .. } => McpState::DiscoverOnly,
     }
 }
 
