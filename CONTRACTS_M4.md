@@ -321,3 +321,13 @@ It touches `nh_tools::mcp` because that is where `McpAuth::OAuth2` currently `ba
 - **A-M4-2 (AUTHORIZED 2026-07-15) — nh-vault token setter:** additive `store`/`set` on the vault
   for refresh/access tokens; existing `get` unchanged. (Keyring is the secure default; the `.nosis/`
   cache fallback in D.1 is NOT used unless keyring is unavailable at runtime.)
+- **A-M4-1 clarification (2026-07-16, as-implemented, Slice D committed):** the OAuth2 config carrier
+  landed as a **struct variant** `McpAuth::OAuth2 { token_url, client_id, vault_entry }` (secrets read
+  from the vault as `<vault_entry>-refresh` / `<vault_entry>-secret`, never from TOML). Because the
+  enum shape changed, a **mechanical, behavior-identical 2-line adaptation** of the NON-frozen
+  `nh_tui::mcp_state` was required (`== McpAuth::OAuth2` → `matches!(auth, McpAuth::OAuth2 { .. })`,
+  both arms; OAuth2 still maps to `DiscoverOnly`) — owner-authorized 2026-07-16. Tokens are held as
+  `String` in an in-memory `Mutex<OAuthState>` (nh-tools has no `zeroize` dep; vault copies still
+  zeroize) — authorized to avoid a Cargo edit. **A-M4-2 turned out to be a NO-OP:** `Vault::set` has
+  existed since M0, so Slice D touched **no** nh-vault code. E4 (`oauth2_refreshes_on_absence_expiry_
+  and_one_401_retry`) replaces the deferral test; gated GREEN (nh-tools 56/0, clippy clean).

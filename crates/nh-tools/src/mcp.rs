@@ -23,6 +23,8 @@ const DEFAULT_TTL_MS: u64 = 60_000;
 /// a dead server still fails fast on connect.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const OAUTH_EXPIRY_SKEW: Duration = Duration::from_secs(30);
+const OAUTH_DEFAULT_EXPIRES_IN: u64 = 3_600;
 /// Approval prompts show args on one line, truncated to stay scannable.
 const ARGS_SUMMARY_MAX: usize = 120;
 
@@ -34,7 +36,11 @@ const ARGS_SUMMARY_MAX: usize = 120;
 pub enum McpAuth {
     None,
     ApiKey { vault_entry: String },
-    OAuth2,
+    OAuth2 {
+        token_url: String,
+        client_id: String,
+        vault_entry: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +74,8 @@ struct RawServer {
     spec: Option<String>,
     auth: Option<String>,
     vault_entry: Option<String>,
+    token_url: Option<String>,
+    client_id: Option<String>,
     scopes: Option<Vec<String>>,
     default_mode: Option<String>,
     trust: Option<String>,
@@ -109,7 +117,19 @@ fn server_config(name: String, raw: RawServer) -> anyhow::Result<McpServerConfig
                 )
             })?,
         },
-        "oauth2" => McpAuth::OAuth2,
+        "oauth2" => match (raw.token_url, raw.client_id, raw.vault_entry) {
+            (Some(token_url), Some(client_id), Some(vault_entry)) => McpAuth::OAuth2 {
+                token_url,
+                client_id,
+                vault_entry,
+            },
+            (_, _, vault_entry) => {
+                let entry = vault_entry.as_deref().unwrap_or(&name);
+                bail!(
+                    "mcp server \"{name}\": auth = \"oauth2\" needs token_url, client_id, and vault_entry — add them to .nosis/mcp.toml and run `nh key add {entry}-refresh` and `nh key add {entry}-secret`"
+                )
+            }
+        },
         other => bail!(
             "mcp server \"{name}\": unknown auth \"{other}\" — use \"none\", \"apikey\", or \"oauth2\""
         ),
@@ -156,6 +176,21 @@ struct ToolCache {
     entries: Vec<ToolEntry>,
 }
 
+#[derive(Default)]
+struct OAuthState {
+    // nh-tools does not directly depend on zeroize; keep these values private and never render them.
+    access: Option<String>,
+    expires_at: Option<Instant>,
+    refresh: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct OAuthTokenResponse {
+    access_token: Option<String>,
+    expires_in: Option<u64>,
+    refresh_token: Option<String>,
+}
+
 /// Blocking JSON-RPC 2.0 over Streamable HTTP POST. Stateless per the 2026-07-28
 /// core: every request is self-contained (`_meta` carries protocol version,
 /// client info, capabilities). Cache is interior so `&self` works and the type
@@ -165,6 +200,7 @@ pub struct McpClient {
     http: reqwest::blocking::Client,
     next_id: AtomicU64,
     cache: Mutex<Option<ToolCache>>,
+    oauth: Mutex<OAuthState>,
 }
 
 impl McpClient {
@@ -180,6 +216,7 @@ impl McpClient {
                 .expect("HTTP client"),
             next_id: AtomicU64::new(1),
             cache: Mutex::new(None),
+            oauth: Mutex::new(OAuthState::default()),
         }
     }
 
@@ -285,35 +322,46 @@ impl McpClient {
             "method": method,
             "params": params
         });
-        let headers = self.request_headers()?;
         let url = &self.config.url;
-        let mut request = self.http.post(url).json(&body);
-        for (name, value) in &headers {
-            request = request.header(name.as_str(), value.as_str());
+        let mut retried_oauth = false;
+        loop {
+            let headers = self.request_headers()?;
+            let mut request = self.http.post(url).json(&body);
+            for (name, value) in &headers {
+                request = request.header(name.as_str(), value.as_str());
+            }
+            let response = request
+                .send()
+                .map_err(|e| anyhow::anyhow!("could not reach {url}: {e}"))?;
+            let status = response.status();
+            if status.as_u16() == 401
+                && matches!(self.config.auth, McpAuth::OAuth2 { .. })
+                && !retried_oauth
+            {
+                self.refresh_oauth()?;
+                retried_oauth = true;
+                continue;
+            }
+            if !status.is_success() {
+                let hint = match status.as_u16() {
+                    401 | 403 => " — key rejected; check vault_entry in .nosis/mcp.toml",
+                    429 => " — rate limited; retry later",
+                    _ => "",
+                };
+                bail!("{url} returned HTTP {}{hint}", status.as_u16());
+            }
+            let text = response.text().unwrap_or_default();
+            let reply: Value = serde_json::from_str(&text)
+                .map_err(|_| anyhow::anyhow!("{url} sent invalid JSON — is it an MCP endpoint?"))?;
+            if let Some(error) = reply.get("error") {
+                let message = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown error");
+                bail!("server error: {message}");
+            }
+            return Ok(reply.get("result").cloned().unwrap_or(Value::Null));
         }
-        let response = request
-            .send()
-            .map_err(|e| anyhow::anyhow!("could not reach {url}: {e}"))?;
-        let status = response.status();
-        if !status.is_success() {
-            let hint = match status.as_u16() {
-                401 | 403 => " — key rejected; check vault_entry in .nosis/mcp.toml",
-                429 => " — rate limited; retry later",
-                _ => "",
-            };
-            bail!("{url} returned HTTP {}{hint}", status.as_u16());
-        }
-        let text = response.text().unwrap_or_default();
-        let reply: Value = serde_json::from_str(&text)
-            .map_err(|_| anyhow::anyhow!("{url} sent invalid JSON — is it an MCP endpoint?"))?;
-        if let Some(error) = reply.get("error") {
-            let message = error
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown error");
-            bail!("server error: {message}");
-        }
-        Ok(reply.get("result").cloned().unwrap_or(Value::Null))
     }
 
     /// Auth (§3.4) + outbound header lint (§3.5) — the single choke point every
@@ -322,7 +370,10 @@ impl McpClient {
         let mut headers = Vec::new();
         match &self.config.auth {
             McpAuth::None => {}
-            McpAuth::OAuth2 => bail!("oauth2 arrives in M4 — use apikey or none for now"),
+            McpAuth::OAuth2 { .. } => {
+                let access = self.oauth_access_token()?;
+                headers.push(("authorization".to_string(), format!("Bearer {access}")));
+            }
             McpAuth::ApiKey { vault_entry } => {
                 let vault = EnvFallbackVault {
                     inner: KeyringVault,
@@ -336,6 +387,106 @@ impl McpClient {
         }
         lint_headers(&headers)?;
         Ok(headers)
+    }
+
+    fn oauth_access_token(&self) -> anyhow::Result<String> {
+        let valid = {
+            let state = self.oauth.lock().expect("mcp oauth lock");
+            state.access.is_some()
+                && state
+                    .expires_at
+                    .and_then(|expires_at| expires_at.checked_duration_since(Instant::now()))
+                    .is_some_and(|remaining| remaining > OAUTH_EXPIRY_SKEW)
+        };
+        if !valid {
+            self.refresh_oauth()?;
+        }
+        self.oauth
+            .lock()
+            .expect("mcp oauth lock")
+            .access
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("mcp oauth refresh completed without an access token"))
+    }
+
+    fn refresh_oauth(&self) -> anyhow::Result<()> {
+        let McpAuth::OAuth2 {
+            token_url,
+            client_id,
+            vault_entry,
+        } = &self.config.auth
+        else {
+            return Ok(());
+        };
+        let failure = || {
+            anyhow::anyhow!(
+                "mcp server \"{}\": oauth refresh failed — re-authorize with `nh key add {}-refresh` and `nh key add {}-secret` (or check token_url in .nosis/mcp.toml)",
+                self.config.name,
+                vault_entry,
+                vault_entry
+            )
+        };
+        let vault = EnvFallbackVault {
+            inner: KeyringVault,
+        };
+        let cached_refresh = self.oauth.lock().expect("mcp oauth lock").refresh.clone();
+        let refresh_entry = format!("{vault_entry}-refresh");
+        let refresh_from_vault = if cached_refresh.is_none() {
+            Some(vault.get(&refresh_entry).map_err(|_| failure())?)
+        } else {
+            None
+        };
+        let refresh_token = cached_refresh
+            .as_deref()
+            .or_else(|| refresh_from_vault.as_ref().map(|value| value.as_str()))
+            .ok_or_else(failure)?;
+        let secret_entry = format!("{vault_entry}-secret");
+        let client_secret = vault.get(&secret_entry).map_err(|_| failure())?;
+        let scope = self.config.scopes.join(" ");
+        let mut form = vec![
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", client_id.as_str()),
+            ("client_secret", client_secret.as_str()),
+        ];
+        if !scope.is_empty() {
+            form.push(("scope", scope.as_str()));
+        }
+
+        let response = self
+            .http
+            .post(token_url)
+            .form(&form)
+            .send()
+            .map_err(|_| failure())?;
+        if !response.status().is_success() {
+            return Err(failure());
+        }
+        let token: OAuthTokenResponse = response.json().map_err(|_| failure())?;
+        let access = token
+            .access_token
+            .filter(|value| !value.is_empty())
+            .ok_or_else(failure)?;
+        let now = Instant::now();
+        let expires_at = now
+            .checked_add(Duration::from_secs(
+                token.expires_in.unwrap_or(OAUTH_DEFAULT_EXPIRES_IN),
+            ))
+            .unwrap_or(now + Duration::from_secs(OAUTH_DEFAULT_EXPIRES_IN));
+
+        let mut state = self.oauth.lock().expect("mcp oauth lock");
+        state.access = Some(access);
+        state.expires_at = Some(expires_at);
+        if let Some(refresh) = token.refresh_token.filter(|value| !value.is_empty()) {
+            let _ = vault.set(&refresh_entry, &refresh);
+            state.refresh = Some(refresh);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn expire_oauth_for_test(&self) {
+        self.oauth.lock().expect("mcp oauth lock").expires_at = Some(Instant::now());
     }
 }
 
@@ -520,6 +671,7 @@ mod tests {
         path: String,
         head: String,
         body: Value,
+        raw: String,
     }
 
     struct MockServer {
@@ -592,11 +744,13 @@ mod tests {
         let mut parts = head.split_whitespace();
         let method = parts.next()?.to_string();
         let path = parts.next()?.to_string();
+        let raw = String::from_utf8_lossy(&body).to_string();
         Some(Recorded {
             method,
             path,
             head,
             body: serde_json::from_slice(&body).unwrap_or(Value::Null),
+            raw,
         })
     }
 
@@ -718,6 +872,17 @@ mod tests {
             .count()
     }
 
+    fn authorization_bearer(request: &Recorded) -> Option<&str> {
+        request.head.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.trim().eq_ignore_ascii_case("authorization") {
+                value.trim().strip_prefix("Bearer ")
+            } else {
+                None
+            }
+        })
+    }
+
     // ---- §3.1 config parsing ----
 
     #[test]
@@ -778,9 +943,19 @@ future_knob = "whatever"
 url = "http://localhost:2/mcp"
 spec = "2025-11-25"
 auth = "oauth2"
+token_url = "https://auth.example.test/token"
+client_id = "korvin-client"
+vault_entry = "korvin-oauth"
 "#;
         let configs = load_mcp_config(toml_str).unwrap();
-        assert_eq!(configs[0].auth, McpAuth::OAuth2);
+        assert_eq!(
+            configs[0].auth,
+            McpAuth::OAuth2 {
+                token_url: "https://auth.example.test/token".into(),
+                client_id: "korvin-client".into(),
+                vault_entry: "korvin-oauth".into(),
+            }
+        );
         assert_eq!(configs[0].spec, SPEC_FALLBACK);
     }
 
@@ -823,6 +998,19 @@ auth = "oauth2"
             .to_string();
         assert!(err.contains("needs vault_entry"), "got: {err}");
         assert!(err.contains("nh key add gh"), "got: {err}");
+    }
+
+    #[test]
+    fn config_oauth2_without_required_fields_is_actionable() {
+        let err = load_mcp_config("[servers.korvin]\nurl = \"http://x/mcp\"\nauth = \"oauth2\"")
+            .unwrap_err()
+            .to_string();
+        for required in ["token_url", "client_id", "vault_entry"] {
+            assert!(err.contains(required), "missing {required} in: {err}");
+        }
+        assert!(err.contains("nh key add korvin-refresh"), "got: {err}");
+        assert!(err.contains("nh key add korvin-secret"), "got: {err}");
+        assert!(!err.contains('\n'), "must be one line, got: {err}");
     }
 
     #[test]
@@ -1098,17 +1286,157 @@ auth = "oauth2"
     }
 
     #[test]
-    fn oauth2_is_deferred_to_m4_with_one_message() {
-        let mut cfg = config("http://127.0.0.1:1/mcp", McpTrust::Ask);
-        cfg.auth = McpAuth::OAuth2;
+    fn oauth2_refreshes_on_absence_expiry_and_one_401_retry() {
+        const REFRESH_ENV: &str = "NH_MOCK_OAUTH_REFRESH_KEY";
+        const SECRET_ENV: &str = "NH_MOCK_OAUTH_SECRET_KEY";
+        std::env::set_var(REFRESH_ENV, "refresh-token-fake");
+        std::env::set_var(SECRET_ENV, "csk-secret-fake");
+
+        let mint_count = Arc::new(AtomicU64::new(0));
+        let valid_token = Arc::new(Mutex::new(String::new()));
+        let token_count = Arc::clone(&mint_count);
+        let token_valid = Arc::clone(&valid_token);
+        let token_server = start_mock(move |_| {
+            let number = token_count.fetch_add(1, Ordering::SeqCst) + 1;
+            let access = format!("fresh-access-{number}");
+            *token_valid.lock().unwrap() = access.clone();
+            (
+                200,
+                json!({
+                    "access_token": access,
+                    "expires_in": 3_600,
+                    "token_type": "Bearer"
+                })
+                .to_string(),
+            )
+        });
+
+        let mcp_valid = Arc::clone(&valid_token);
+        let mcp_server = start_mock(move |request| {
+            let expected = mcp_valid.lock().unwrap();
+            if authorization_bearer(request) == Some(expected.as_str()) {
+                rpc_result(
+                    request,
+                    json!({ "content": [{ "type": "text", "text": "ok" }] }),
+                )
+            } else {
+                (401, "{}".to_string())
+            }
+        });
+
+        let mut cfg = config(&mcp_server.url, McpTrust::Ask);
+        cfg.auth = McpAuth::OAuth2 {
+            token_url: token_server.url.clone(),
+            client_id: "cid-test".into(),
+            vault_entry: "mock-oauth".into(),
+        };
+        cfg.scopes = vec!["mcp".into()];
         let client = McpClient::new(cfg);
-        let expected = "oauth2 arrives in M4 — use apikey or none for now";
-        assert_eq!(client.list_tools().unwrap_err().to_string(), expected);
+
+        assert_eq!(client.call_tool("peek", json!({})).unwrap(), "ok");
+        assert_eq!(mint_count.load(Ordering::SeqCst), 1);
+
+        client.expire_oauth_for_test();
+        assert_eq!(client.call_tool("peek", json!({})).unwrap(), "ok");
+        assert_eq!(mint_count.load(Ordering::SeqCst), 2);
+
+        *valid_token.lock().unwrap() = "server-invalidated".into();
+        assert_eq!(client.call_tool("peek", json!({})).unwrap(), "ok");
         assert_eq!(
-            client.call_tool("x", json!({})).unwrap_err().to_string(),
-            expected
+            mint_count.load(Ordering::SeqCst),
+            3,
+            "a rejected cached token must refresh exactly once"
         );
-        assert_eq!(client.discover().unwrap_err().to_string(), expected);
+
+        std::env::remove_var(REFRESH_ENV);
+        std::env::remove_var(SECRET_ENV);
+
+        let mcp_recorded = mcp_server.recorded.lock().unwrap();
+        let bearers: Vec<_> = mcp_recorded
+            .iter()
+            .map(|request| authorization_bearer(request).unwrap_or("").to_string())
+            .collect();
+        assert_eq!(
+            bearers,
+            [
+                "fresh-access-1",
+                "fresh-access-2",
+                "fresh-access-2",
+                "fresh-access-3"
+            ],
+            "the 401 path must send stale once, refresh, then retry once with fresh"
+        );
+        for request in mcp_recorded.iter() {
+            for line in request.head.lines() {
+                if line.contains("fresh-access-") {
+                    assert!(
+                        line.to_ascii_lowercase().starts_with("authorization:"),
+                        "access token escaped Authorization: {line}"
+                    );
+                }
+                let lower = line.to_ascii_lowercase();
+                if lower.starts_with("mcp-") || lower.starts_with("x-mcp-") {
+                    assert!(!line.contains("fresh-access-"), "token leaked into {line}");
+                }
+            }
+        }
+        drop(mcp_recorded);
+
+        let token_recorded = token_server.recorded.lock().unwrap();
+        assert_eq!(token_recorded.len(), 3);
+        for request in token_recorded.iter() {
+            assert_eq!(request.method, "POST");
+            assert!(request.raw.contains("grant_type=refresh_token"));
+            assert!(request.raw.contains("refresh_token=refresh-token-fake"));
+            assert!(request.raw.contains("client_id=cid-test"));
+            assert!(request.raw.contains("client_secret=csk-secret-fake"));
+            assert!(request.raw.contains("scope=mcp"));
+            assert!(authorization_bearer(request).is_none());
+            assert!(!request.raw.contains("fresh-access-"));
+        }
+    }
+
+    #[test]
+    fn oauth2_refresh_failure_is_one_secret_free_actionable_line() {
+        const REFRESH_ENV: &str = "NH_MOCK_OAUTH_FAIL_REFRESH_KEY";
+        const SECRET_ENV: &str = "NH_MOCK_OAUTH_FAIL_SECRET_KEY";
+        const REFRESH: &str = "refresh-token-failure-fake";
+        const SECRET: &str = "csk-secret-failure-fake";
+        std::env::set_var(REFRESH_ENV, REFRESH);
+        std::env::set_var(SECRET_ENV, SECRET);
+
+        let token_server = start_mock(|_| {
+            (
+                500,
+                json!({ "error": "invalid", "detail": REFRESH, "secret": SECRET }).to_string(),
+            )
+        });
+        let mcp_server = start_mock(|request| rpc_result(request, Value::Null));
+        let mut cfg = config(&mcp_server.url, McpTrust::Ask);
+        cfg.auth = McpAuth::OAuth2 {
+            token_url: token_server.url.clone(),
+            client_id: "cid-failure-test".into(),
+            vault_entry: "mock-oauth-fail".into(),
+        };
+
+        let err = McpClient::new(cfg)
+            .call_tool("peek", json!({}))
+            .unwrap_err()
+            .to_string();
+        std::env::remove_var(REFRESH_ENV);
+        std::env::remove_var(SECRET_ENV);
+
+        assert_eq!(
+            err,
+            "mcp server \"mock\": oauth refresh failed — re-authorize with `nh key add mock-oauth-fail-refresh` and `nh key add mock-oauth-fail-secret` (or check token_url in .nosis/mcp.toml)"
+        );
+        assert!(!err.contains('\n'));
+        assert!(!err.contains(REFRESH));
+        assert!(!err.contains(SECRET));
+        assert!(mcp_server.recorded.lock().unwrap().is_empty());
+        let token_recorded = token_server.recorded.lock().unwrap();
+        assert_eq!(token_recorded.len(), 1);
+        assert!(authorization_bearer(&token_recorded[0]).is_none());
     }
 
     // ---- §3.5 outbound header lint ----
