@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use nh_core::agent::AgentLoop;
-use nh_core::receipt::{FailureClass, Outcome, ReceiptWriter};
+use nh_core::receipt::{FailureClass, Outcome, Receipt, ReceiptWriter};
 use nh_core::wire::{ChatClient, ChatMessage, ChatRequest, ChatResponse, ToolCallReq, Usage};
 use nh_tools::{Tool, ToolCtx, ToolSpec};
 
@@ -30,7 +30,12 @@ struct AlwaysToolCallClient;
 
 impl ChatClient for AlwaysToolCallClient {
     fn complete(&self, _req: &ChatRequest) -> anyhow::Result<ChatResponse> {
-        Ok(tool_call_resp("mystery_tool", r#"{"path":"x"}"#, "call_loop", None))
+        Ok(tool_call_resp(
+            "mystery_tool",
+            r#"{"path":"x"}"#,
+            "call_loop",
+            None,
+        ))
     }
 }
 
@@ -57,7 +62,10 @@ impl Tool for TestEditFile {
     fn execute(&self, args: serde_json::Value, ctx: &ToolCtx) -> anyhow::Result<String> {
         let path = ctx.workdir.join(args["path"].as_str().unwrap());
         let text = std::fs::read_to_string(&path)?;
-        let new = text.replace(args["old_string"].as_str().unwrap(), args["new_string"].as_str().unwrap());
+        let new = text.replace(
+            args["old_string"].as_str().unwrap(),
+            args["new_string"].as_str().unwrap(),
+        );
         std::fs::write(&path, new)?;
         Ok("edited".into())
     }
@@ -95,7 +103,12 @@ fn text_resp(text: &str, usage: Option<Usage>) -> ChatResponse {
     }
 }
 
-fn agent_in(dir: &std::path::Path, client: Box<dyn ChatClient>, tools: Vec<Box<dyn Tool>>, max_turns: u32) -> AgentLoop {
+fn agent_in(
+    dir: &std::path::Path,
+    client: Box<dyn ChatClient>,
+    tools: Vec<Box<dyn Tool>>,
+    max_turns: u32,
+) -> AgentLoop {
     AgentLoop {
         client,
         tools,
@@ -107,6 +120,7 @@ fn agent_in(dir: &std::path::Path, client: Box<dyn ChatClient>, tools: Vec<Box<d
         model_id: "mock-model".into(),
         max_turns,
         thinking: nh_core::wire::ThinkingEffort::None,
+        profile: None,
         constitution: None,
         context_limit: None,
         on_event: None,
@@ -122,6 +136,48 @@ fn receipt_lines(dir: &std::path::Path) -> Vec<String> {
 }
 
 #[test]
+fn receipt_records_effective_profile_and_omits_none() {
+    let profiled_dir = tempfile::tempdir().unwrap();
+    let mut profiled = agent_in(
+        profiled_dir.path(),
+        Box::new(ScriptedClient {
+            responses: Mutex::new(vec![text_resp("done", None)]),
+        }),
+        vec![],
+        1,
+    );
+    profiled.profile = Some("frugal".into());
+    let (_, receipt) = profiled.run("profiled").unwrap();
+    assert_eq!(receipt.effective_profile.as_deref(), Some("frugal"));
+    assert!(receipt_lines(profiled_dir.path())[0].contains(r#""effective_profile":"frugal""#));
+
+    let default_dir = tempfile::tempdir().unwrap();
+    let mut default = agent_in(
+        default_dir.path(),
+        Box::new(ScriptedClient {
+            responses: Mutex::new(vec![text_resp("done", None)]),
+        }),
+        vec![],
+        1,
+    );
+    let (_, receipt) = default.run("default").unwrap();
+    assert_eq!(receipt.effective_profile, None);
+    assert!(
+        !receipt_lines(default_dir.path())[0].contains("effective_profile"),
+        "None preserves the pre-profile JSON shape"
+    );
+}
+
+#[test]
+fn pre_profile_receipt_json_still_parses() {
+    let receipt: Receipt = serde_json::from_str(
+        r#"{"ts_utc":"2026-07-18T12:00:00Z","model_id":"mock","task":"old","turns":1,"tool_calls":0,"outcome":"pass"}"#,
+    )
+    .unwrap();
+    assert_eq!(receipt.effective_profile, None);
+}
+
+#[test]
 fn edits_file_passes_and_scrubs_receipt() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("main.py"), "def f():\n    return 1\n").unwrap();
@@ -131,19 +187,34 @@ fn edits_file_passes_and_scrubs_receipt() {
             "edit_file",
             r#"{"path":"main.py","old_string":"return 1","new_string":"return 2"}"#,
             "call_1",
-            Some(Usage { prompt_tokens: 10, completion_tokens: 5, cached_tokens: Some(2) }),
+            Some(Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                cached_tokens: Some(2),
+            }),
         ),
-        text_resp("done", Some(Usage { prompt_tokens: 20, completion_tokens: 3, cached_tokens: None })),
+        text_resp(
+            "done",
+            Some(Usage {
+                prompt_tokens: 20,
+                completion_tokens: 3,
+                cached_tokens: None,
+            }),
+        ),
     ];
     let mut agent = agent_in(
         dir.path(),
-        Box::new(ScriptedClient { responses: Mutex::new(script) }),
+        Box::new(ScriptedClient {
+            responses: Mutex::new(script),
+        }),
         vec![Box::new(TestEditFile)],
         8,
     );
     let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();
-    agent.on_event = Some(Box::new(move |line| sink.lock().unwrap().push(line.to_string())));
+    agent.on_event = Some(Box::new(move |line| {
+        sink.lock().unwrap().push(line.to_string())
+    }));
 
     let task = format!("fix main.py; stray key in task: {FAKE_SECRET}");
     let (text, receipt) = agent.run(&task).unwrap();
@@ -165,9 +236,15 @@ fn edits_file_passes_and_scrubs_receipt() {
     assert_eq!(lines.len(), 1, "exactly one receipt per run");
     assert!(lines[0].contains(r#""outcome":"pass""#));
     assert!(lines[0].contains("[REDACTED]"), "secret must be redacted");
-    assert!(!lines[0].contains(FAKE_SECRET), "secret must not leak into receipts");
+    assert!(
+        !lines[0].contains(FAKE_SECRET),
+        "secret must not leak into receipts"
+    );
 
-    assert_eq!(events.lock().unwrap().as_slice(), ["turn 1: edit_file main.py"]);
+    assert_eq!(
+        events.lock().unwrap().as_slice(),
+        ["turn 1: edit_file main.py"]
+    );
 }
 
 #[test]
@@ -196,13 +273,17 @@ fn run_with_history_carries_context_and_writes_one_receipt_per_task() {
     let script = vec![text_resp("four", None), text_resp("five", None)];
     let mut agent = agent_in(
         dir.path(),
-        Box::new(ScriptedClient { responses: Mutex::new(script) }),
+        Box::new(ScriptedClient {
+            responses: Mutex::new(script),
+        }),
         vec![],
         8,
     );
 
     let mut history: Vec<ChatMessage> = Vec::new();
-    let (text, receipt) = agent.run_with_history(&mut history, "what is 2+2?").unwrap();
+    let (text, receipt) = agent
+        .run_with_history(&mut history, "what is 2+2?")
+        .unwrap();
     assert_eq!(text, "four");
     assert_eq!(receipt.outcome, Outcome::Pass);
     // system + user + assistant
@@ -228,7 +309,9 @@ fn run_with_history_keeps_tool_turns_even_on_timeout() {
     let mut agent = agent_in(dir.path(), Box::new(AlwaysToolCallClient), vec![], 2);
 
     let mut history: Vec<ChatMessage> = Vec::new();
-    let (_, receipt) = agent.run_with_history(&mut history, "never finishes").unwrap();
+    let (_, receipt) = agent
+        .run_with_history(&mut history, "never finishes")
+        .unwrap();
 
     assert_eq!(receipt.outcome, Outcome::Timeout);
     // system, user, then (assistant tool-call + tool result) per turn.

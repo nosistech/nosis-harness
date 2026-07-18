@@ -10,6 +10,7 @@ mod cmd_fleet;
 mod cmd_init;
 mod cmd_key;
 mod cmd_mcp;
+mod cmd_profile;
 mod cmd_run;
 mod cmd_tui;
 mod cmd_why;
@@ -23,7 +24,11 @@ fn guard_from(verdict: nh_law::Verdict) -> nh_tools::Guard {
 }
 
 #[derive(Parser)]
-#[command(name = "nh", about = "Nosis Harness - multi-model terminal agent", version)]
+#[command(
+    name = "nh",
+    about = "Nosis Harness - multi-model terminal agent",
+    version
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -54,12 +59,18 @@ enum Cmd {
         /// Session autonomy override (default comes from law files)
         #[arg(long, value_enum)]
         autonomy: Option<cmd_run::AutonomyArg>,
+        /// Execution profile: frugal, balanced, or max-quality
+        #[arg(long, default_value = "balanced")]
+        profile: String,
     },
     /// Chat with a model - /model and /provider switch routes mid-session
     Chat {
         /// Model id from catalog.toml
         #[arg(long, default_value = "deepseek-v4-flash")]
         model: String,
+        /// Execution profile: frugal, balanced, or max-quality
+        #[arg(long, default_value = "balanced")]
+        profile: String,
     },
     /// Explain the cheapest capable route for a task estimate
     Why {
@@ -69,6 +80,12 @@ enum Cmd {
         #[arg(long)]
         model: Option<String>,
     },
+    /// List execution profiles and their caps for a model
+    Profile {
+        /// Model id whose route capability is used for effective caps
+        #[arg(long, default_value = "deepseek-v4-flash")]
+        model: String,
+    },
     /// Open the full-screen terminal UI
     Tui {
         /// Model id from catalog.toml
@@ -77,6 +94,9 @@ enum Cmd {
         /// Hard session token budget
         #[arg(long)]
         budget: Option<u64>,
+        /// Execution profile: frugal, balanced, or max-quality
+        #[arg(long, default_value = "balanced")]
+        profile: String,
     },
     /// Run independent tasks in a durable worker fleet
     Fleet {
@@ -133,13 +153,25 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let result = match cli.cmd {
         Cmd::Init => cmd_init::run(),
-        Cmd::Key { action: KeyAction::Add { entry } } => cmd_key::add(&entry),
-        Cmd::Run { task, model, max_turns, think, autonomy } => {
-            cmd_run::run(&task, &model, max_turns, think, autonomy)
-        }
-        Cmd::Chat { model } => cmd_chat::run(&model),
+        Cmd::Key {
+            action: KeyAction::Add { entry },
+        } => cmd_key::add(&entry),
+        Cmd::Run {
+            task,
+            model,
+            max_turns,
+            think,
+            autonomy,
+            profile,
+        } => cmd_run::run(&task, &model, max_turns, think, autonomy, &profile),
+        Cmd::Chat { model, profile } => cmd_chat::run(&model, &profile),
         Cmd::Why { task, model } => cmd_why::run(task.as_deref(), model.as_deref()),
-        Cmd::Tui { model, budget } => cmd_tui::run(&model, budget),
+        Cmd::Profile { model } => cmd_profile::run(&model),
+        Cmd::Tui {
+            model,
+            budget,
+            profile,
+        } => cmd_tui::run(&model, budget, &profile),
         Cmd::Fleet {
             action:
                 FleetAction::Run {
@@ -149,12 +181,14 @@ fn main() -> anyhow::Result<()> {
                     escalate,
                     defer_offpeak,
                 },
-        } => {
-            cmd_fleet::run_tasks(&tasks, max_workers, budget, escalate, defer_offpeak)
-        }
-        Cmd::Fleet { action: FleetAction::Resume { run_id, max_workers } } => {
-            cmd_fleet::resume_run(run_id.as_deref(), max_workers)
-        }
+        } => cmd_fleet::run_tasks(&tasks, max_workers, budget, escalate, defer_offpeak),
+        Cmd::Fleet {
+            action:
+                FleetAction::Resume {
+                    run_id,
+                    max_workers,
+                },
+        } => cmd_fleet::resume_run(run_id.as_deref(), max_workers),
         Cmd::Mcp {
             action: McpAction::Serve { addr, token_entry },
         } => cmd_mcp::serve(&addr, token_entry.as_deref()),
@@ -184,7 +218,9 @@ mod tests {
     fn parses_key_add_with_entry() {
         let cli = Cli::try_parse_from(["nh", "key", "add", "deepseek"]).unwrap();
         match cli.cmd {
-            Cmd::Key { action: KeyAction::Add { entry } } => assert_eq!(entry, "deepseek"),
+            Cmd::Key {
+                action: KeyAction::Add { entry },
+            } => assert_eq!(entry, "deepseek"),
             _ => panic!("expected key add"),
         }
     }
@@ -198,12 +234,20 @@ mod tests {
     fn parses_run_with_defaults() {
         let cli = Cli::try_parse_from(["nh", "run", "fix the failing test"]).unwrap();
         match cli.cmd {
-            Cmd::Run { task, model, max_turns, think, autonomy } => {
+            Cmd::Run {
+                task,
+                model,
+                max_turns,
+                think,
+                autonomy,
+                profile,
+            } => {
                 assert_eq!(task, "fix the failing test");
                 assert_eq!(model, "deepseek-v4-flash");
                 assert_eq!(max_turns, 20);
                 assert_eq!(think, None, "no --think = per-dialect default");
                 assert_eq!(autonomy, None, "no --autonomy = law-file default");
+                assert_eq!(profile, "balanced");
             }
             _ => panic!("expected run"),
         }
@@ -222,12 +266,20 @@ mod tests {
         ])
         .unwrap();
         match cli.cmd {
-            Cmd::Run { task, model, max_turns, think, autonomy } => {
+            Cmd::Run {
+                task,
+                model,
+                max_turns,
+                think,
+                autonomy,
+                profile,
+            } => {
                 assert_eq!(task, "review the diff");
                 assert_eq!(model, "deepseek-v4-pro");
                 assert_eq!(max_turns, 5);
                 assert_eq!(think, None);
                 assert_eq!(autonomy, None);
+                assert_eq!(profile, "balanced");
             }
             _ => panic!("expected run"),
         }
@@ -241,8 +293,12 @@ mod tests {
     #[test]
     fn parses_run_think_levels() {
         use cmd_run::ThinkArg;
-        let cases =
-            [("none", ThinkArg::None), ("low", ThinkArg::Low), ("high", ThinkArg::High), ("max", ThinkArg::Max)];
+        let cases = [
+            ("none", ThinkArg::None),
+            ("low", ThinkArg::Low),
+            ("high", ThinkArg::High),
+            ("max", ThinkArg::Max),
+        ];
         for (value, want) in cases {
             let cli = Cli::try_parse_from(["nh", "run", "task", "--think", value]).unwrap();
             match cli.cmd {
@@ -275,10 +331,32 @@ mod tests {
     }
 
     #[test]
+    fn parses_profile_overrides_on_live_commands() {
+        let run = Cli::try_parse_from(["nh", "run", "task", "--profile", "frugal"]).unwrap();
+        assert!(matches!(
+            run.cmd,
+            Cmd::Run { profile, .. } if profile == "frugal"
+        ));
+        let chat = Cli::try_parse_from(["nh", "chat", "--profile", "max-quality"]).unwrap();
+        assert!(matches!(
+            chat.cmd,
+            Cmd::Chat { profile, .. } if profile == "max-quality"
+        ));
+        let tui = Cli::try_parse_from(["nh", "tui", "--profile", "frugal"]).unwrap();
+        assert!(matches!(
+            tui.cmd,
+            Cmd::Tui { profile, .. } if profile == "frugal"
+        ));
+    }
+
+    #[test]
     fn parses_chat_with_default_model() {
         let cli = Cli::try_parse_from(["nh", "chat"]).unwrap();
         match cli.cmd {
-            Cmd::Chat { model } => assert_eq!(model, "deepseek-v4-flash"),
+            Cmd::Chat { model, profile } => {
+                assert_eq!(model, "deepseek-v4-flash");
+                assert_eq!(profile, "balanced");
+            }
             _ => panic!("expected chat"),
         }
     }
@@ -287,7 +365,10 @@ mod tests {
     fn parses_chat_with_model_override() {
         let cli = Cli::try_parse_from(["nh", "chat", "--model", "kimi-k2.6"]).unwrap();
         match cli.cmd {
-            Cmd::Chat { model } => assert_eq!(model, "kimi-k2.6"),
+            Cmd::Chat { model, profile } => {
+                assert_eq!(model, "kimi-k2.6");
+                assert_eq!(profile, "balanced");
+            }
             _ => panic!("expected chat"),
         }
     }
@@ -316,12 +397,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_profile_listing_with_default_and_model_override() {
+        let default = Cli::try_parse_from(["nh", "profile"]).unwrap();
+        assert!(matches!(
+            default.cmd,
+            Cmd::Profile { model } if model == "deepseek-v4-flash"
+        ));
+        let selected = Cli::try_parse_from(["nh", "profile", "--model", "kimi-k2.6"]).unwrap();
+        assert!(matches!(
+            selected.cmd,
+            Cmd::Profile { model } if model == "kimi-k2.6"
+        ));
+    }
+
+    #[test]
     fn parses_tui_with_defaults() {
         let cli = Cli::try_parse_from(["nh", "tui"]).unwrap();
         match cli.cmd {
-            Cmd::Tui { model, budget } => {
+            Cmd::Tui {
+                model,
+                budget,
+                profile,
+            } => {
                 assert_eq!(model, "deepseek-v4-flash");
                 assert_eq!(budget, None);
+                assert_eq!(profile, "balanced");
             }
             _ => panic!("expected tui"),
         }
@@ -329,19 +429,17 @@ mod tests {
 
     #[test]
     fn parses_tui_with_model_and_budget() {
-        let cli = Cli::try_parse_from([
-            "nh",
-            "tui",
-            "--model",
-            "kimi-k2.6",
-            "--budget",
-            "12000",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["nh", "tui", "--model", "kimi-k2.6", "--budget", "12000"])
+            .unwrap();
         match cli.cmd {
-            Cmd::Tui { model, budget } => {
+            Cmd::Tui {
+                model,
+                budget,
+                profile,
+            } => {
                 assert_eq!(model, "kimi-k2.6");
                 assert_eq!(budget, Some(12000));
+                assert_eq!(profile, "balanced");
             }
             _ => panic!("expected tui"),
         }
@@ -388,14 +486,20 @@ mod tests {
         let latest = Cli::try_parse_from(["nh", "fleet", "resume"]).unwrap();
         assert!(matches!(
             latest.cmd,
-            Cmd::Fleet { action: FleetAction::Resume { run_id: None, .. } }
+            Cmd::Fleet {
+                action: FleetAction::Resume { run_id: None, .. }
+            }
         ));
-        let named = Cli::try_parse_from([
-            "nh", "fleet", "resume", "run-123", "--max-workers", "2",
-        ])
-        .unwrap();
+        let named = Cli::try_parse_from(["nh", "fleet", "resume", "run-123", "--max-workers", "2"])
+            .unwrap();
         match named.cmd {
-            Cmd::Fleet { action: FleetAction::Resume { run_id, max_workers } } => {
+            Cmd::Fleet {
+                action:
+                    FleetAction::Resume {
+                        run_id,
+                        max_workers,
+                    },
+            } => {
                 assert_eq!(run_id.as_deref(), Some("run-123"));
                 assert_eq!(max_workers, Some(2));
             }
@@ -419,14 +523,7 @@ mod tests {
 
     #[test]
     fn parses_mcp_serve_addr_override() {
-        let cli = Cli::try_parse_from([
-            "nh",
-            "mcp",
-            "serve",
-            "--addr",
-            "127.0.0.1:9000",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["nh", "mcp", "serve", "--addr", "127.0.0.1:9000"]).unwrap();
         match cli.cmd {
             Cmd::Mcp {
                 action: McpAction::Serve { addr, token_entry },
@@ -440,14 +537,8 @@ mod tests {
 
     #[test]
     fn parses_mcp_serve_token_entry() {
-        let cli = Cli::try_parse_from([
-            "nh",
-            "mcp",
-            "serve",
-            "--token-entry",
-            "korvin-mcp",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["nh", "mcp", "serve", "--token-entry", "korvin-mcp"]).unwrap();
         match cli.cmd {
             Cmd::Mcp {
                 action: McpAction::Serve { addr, token_entry },

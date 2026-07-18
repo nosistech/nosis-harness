@@ -126,6 +126,7 @@ fn agent(
         model_id: "mock-model".into(),
         max_turns: 2,
         thinking: ThinkingEffort::None,
+        profile: None,
         constitution,
         context_limit,
         on_event: None,

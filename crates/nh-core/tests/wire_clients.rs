@@ -8,7 +8,7 @@ use std::net::TcpListener;
 use std::sync::mpsc;
 
 use nh_core::wire::{make_client, ChatMessage, ChatRequest, ThinkingEffort, ToolCallReq};
-use nh_routes::{ResolvedRoute, RouteClass, ThinkingDialect, Wire};
+use nh_routes::{Profiles, ResolvedRoute, RouteClass, ThinkingDialect, Wire};
 use zeroize::Zeroizing;
 
 /// Obviously fake test secret (never a real key shape in use).
@@ -322,6 +322,51 @@ fn anthropic_route_cap_is_not_artificially_clamped() {
         .complete(&req(vec![msg("user", Some("hi"))], ThinkingEffort::None))
         .unwrap();
     assert_eq!(rx.recv().unwrap().body["max_tokens"], 384_000);
+}
+
+#[test]
+fn profile_clamp_changes_max_tokens_on_both_wires() {
+    let profiles = Profiles::bundled();
+    for wire in [Wire::OpenAi, Wire::AnthropicMessages] {
+        let response = match wire {
+            Wire::OpenAi => OPENAI_OK,
+            Wire::AnthropicMessages => ANTHROPIC_OK,
+        };
+
+        let (quality_url, quality_rx) = one_shot_server(200, response.into());
+        let quality_route = route(
+            &quality_url,
+            wire.clone(),
+            ThinkingDialect::None,
+            false,
+            &[],
+            Some(64_000),
+        );
+        let quality_route = profiles
+            .effective("max-quality", &quality_route)
+            .clamp_route(&quality_route);
+        make_client(&quality_route, Zeroizing::new(FAKE_SECRET.into()))
+            .complete(&req(vec![msg("user", Some("hi"))], ThinkingEffort::None))
+            .unwrap();
+        assert_eq!(quality_rx.recv().unwrap().body["max_tokens"], 64_000);
+
+        let (frugal_url, frugal_rx) = one_shot_server(200, response.into());
+        let route_for_frugal = route(
+            &frugal_url,
+            wire,
+            ThinkingDialect::None,
+            false,
+            &[],
+            Some(64_000),
+        );
+        let clamped = profiles
+            .effective("frugal", &route_for_frugal)
+            .clamp_route(&route_for_frugal);
+        make_client(&clamped, Zeroizing::new(FAKE_SECRET.into()))
+            .complete(&req(vec![msg("user", Some("hi"))], ThinkingEffort::None))
+            .unwrap();
+        assert_eq!(frugal_rx.recv().unwrap().body["max_tokens"], 16_384);
+    }
 }
 
 #[test]

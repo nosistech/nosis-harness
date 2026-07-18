@@ -14,14 +14,14 @@ use nh_core::receipt::ReceiptWriter;
 use nh_core::wire::{cache_hit_pct, make_client, ChatClient, ChatMessage};
 use nh_law::LoadOptions;
 use nh_routes::{
-    cost_of, money, money_with_gloss, Currency, PriceConfidence, ResolvedRoute, RouteClass,
-    RouteResolver,
+    cost_of, money, money_with_gloss, Currency, PriceConfidence, Profiles, ResolvedRoute,
+    RouteClass, RouteResolver,
 };
 use nh_tools::{builtin_tools, Access, Tool, ToolCtx};
 use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber};
 
-use crate::guard_from;
 use crate::cmd_run::{self, effort_for, DELEGATE_MSG};
+use crate::guard_from;
 
 /// Builds a wire client + its key literal (for the Scrubber) from a route.
 /// Injected so tests drive the REPL with a mock client - no vault, no network.
@@ -40,6 +40,8 @@ struct SessionCost {
 struct ChatSession {
     resolver: RouteResolver,
     route: ResolvedRoute,
+    profiles: Profiles,
+    active_profile: String,
     agent: AgentLoop,
     law_constitution: String,
     history: Vec<ChatMessage>,
@@ -62,23 +64,42 @@ struct ChatSession {
     mcp_warnings: Vec<String>,
 }
 
-pub fn run(model: &str) -> anyhow::Result<()> {
+pub fn run(model: &str, profile: &str) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let (root, catalog) = cmd_run::find_catalog(&cwd)?;
     let law = nh_law::load(&root, &LoadOptions { cli_autonomy: None });
     let warning_scrubber = Scrubber::new(Vec::new());
     for warning in &law.warnings {
-        eprintln!("warning: {}", cmd_run::safe_line(&warning_scrubber, warning));
+        eprintln!(
+            "warning: {}",
+            cmd_run::safe_line(&warning_scrubber, warning)
+        );
     }
     let resolver = RouteResolver::from_toml(&catalog)?;
     let route = resolver.resolve(model)?;
+    let (profiles, profile_warnings) = Profiles::load(&root);
+    for warning in &profile_warnings {
+        eprintln!(
+            "warning: {}",
+            cmd_run::safe_line(&warning_scrubber, warning)
+        );
+    }
+    let execution_policy = profiles.effective(profile, &route);
+    if let Some(warning) = cmd_run::profile_fallback_warning(profile, &execution_policy.profile) {
+        eprintln!(
+            "warning: {}",
+            cmd_run::safe_line(&warning_scrubber, &warning)
+        );
+    }
     if route.class == RouteClass::Delegate {
         anyhow::bail!("{DELEGATE_MSG}");
     }
 
     let connect_policy = law.policy.clone();
     let connect: ConnectFn = Box::new(move |route| {
-        let vault = EnvFallbackVault { inner: KeyringVault };
+        let vault = EnvFallbackVault {
+            inner: KeyringVault,
+        };
         let key = nh_vault::get_scoped(
             &vault,
             &route.vault_entry,
@@ -91,16 +112,22 @@ pub fn run(model: &str) -> anyhow::Result<()> {
     // No key yet? Chat still starts (§4: EOF or /quit → exit 0): warn once and
     // install a stand-in client that re-surfaces this error only when a task runs.
     // Commands (/model, /provider, /price, /tools, /quit) all work keyless.
-    let (client, key_literals, connected) = match connect(&route) {
+    let (client, key_literals, connected) = match connect(&execution_policy.clamp_route(&route)) {
         Ok((client, literal)) => (client, vec![literal], true),
         Err(e) if e.to_string().starts_with("refused:") => return Err(e),
         Err(e) => {
             eprintln!("warning: {e}");
-            (Box::new(NotConnected { msg: e.to_string() }) as Box<dyn ChatClient>, Vec::new(), false)
+            (
+                Box::new(NotConnected { msg: e.to_string() }) as Box<dyn ChatClient>,
+                Vec::new(),
+                false,
+            )
         }
     };
     let vault_entries = cmd_run::catalog_vault_entries(&resolver);
-    let vault = EnvFallbackVault { inner: KeyringVault };
+    let vault = EnvFallbackVault {
+        inner: KeyringVault,
+    };
     let registry_scrubber = nh_vault::from_vault(&vault, &vault_entries);
     let scrubber: SharedScrubber = Arc::new(RwLock::new(registry_scrubber.clone()));
 
@@ -138,7 +165,8 @@ pub fn run(model: &str) -> anyhow::Result<()> {
         },
         model_id: route.model_id.clone(),
         max_turns: 20,
-        thinking: effort_for(None, route.thinking_dialect),
+        thinking: effort_for(None, execution_policy.posture, route.thinking_dialect),
+        profile: Some(execution_policy.profile.clone()),
         // Honest identity: name the real route + forbid claiming to be Claude/GPT.
         constitution: Some(nh_tui::identity_constitution(&law_constitution, &route)),
         context_limit: route.context,
@@ -149,6 +177,8 @@ pub fn run(model: &str) -> anyhow::Result<()> {
     let mut session = ChatSession {
         resolver,
         route,
+        profiles,
+        active_profile: execution_policy.profile,
         agent,
         law_constitution,
         history: Vec::new(),
@@ -177,7 +207,12 @@ pub fn run(model: &str) -> anyhow::Result<()> {
             Ok(_) => Some(buf),
         }
     };
-    chat_loop(&mut session, &mut next_line, &mut std::io::stdout(), &mut std::io::stderr())
+    chat_loop(
+        &mut session,
+        &mut next_line,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    )
 }
 
 /// Stand-in client for a keyless start: every task fails with the stored
@@ -187,7 +222,10 @@ struct NotConnected {
 }
 
 impl ChatClient for NotConnected {
-    fn complete(&self, _req: &nh_core::wire::ChatRequest) -> anyhow::Result<nh_core::wire::ChatResponse> {
+    fn complete(
+        &self,
+        _req: &nh_core::wire::ChatRequest,
+    ) -> anyhow::Result<nh_core::wire::ChatResponse> {
         anyhow::bail!("{}", self.msg)
     }
 }
@@ -209,7 +247,9 @@ fn chat_loop(
     loop {
         let _ = write!(err, "nh> ");
         let _ = err.flush();
-        let Some(raw) = next_line() else { return Ok(()) };
+        let Some(raw) = next_line() else {
+            return Ok(());
+        };
         // Windows shells prefix piped input with a UTF-8 BOM; strip it so
         // `echo "/price" | nh chat` sees the command, not a strange task.
         let line = raw.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
@@ -227,7 +267,12 @@ fn chat_loop(
     }
 }
 
-fn handle_command(s: &mut ChatSession, cmd: &str, out: &mut dyn Write, err: &mut dyn Write) -> Flow {
+fn handle_command(
+    s: &mut ChatSession,
+    cmd: &str,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Flow {
     let mut parts = cmd.split_whitespace();
     let name = parts.next().unwrap_or("");
     let arg = parts.next();
@@ -260,7 +305,8 @@ fn run_task(s: &mut ChatSession, task: &str, out: &mut dyn Write, err: &mut dyn 
     // Keyless start? Retry the real connection now - a key added mid-session
     // (`nh key add <provider>` in another terminal) works without restarting.
     if !s.connected {
-        match (s.connect)(&s.route) {
+        let policy = s.profiles.effective(&s.active_profile, &s.route);
+        match (s.connect)(&policy.clamp_route(&s.route)) {
             Ok((client, literal)) => install_client(s, client, literal),
             Err(e) => {
                 print_err(s, err, &e.to_string());
@@ -296,7 +342,9 @@ fn install_client(s: &mut ChatSession, client: Box<dyn ChatClient>, literal: Str
     let registry = if s.vault_entries.is_empty() {
         Scrubber::new(s.key_literals.clone())
     } else {
-        let vault = EnvFallbackVault { inner: KeyringVault };
+        let vault = EnvFallbackVault {
+            inner: KeyringVault,
+        };
         nh_vault::from_vault(&vault, &s.vault_entries)
     };
     match s.scrubber.write() {
@@ -314,11 +362,14 @@ fn switch_to(s: &mut ChatSession, route: ResolvedRoute, out: &mut dyn Write, err
         print_err(s, err, DELEGATE_MSG);
         return;
     }
-    match (s.connect)(&route) {
+    let execution_policy = s.profiles.effective(&s.active_profile, &route);
+    match (s.connect)(&execution_policy.clamp_route(&route)) {
         Ok((client, literal)) => {
             install_client(s, client, literal);
             s.agent.model_id = route.model_id.clone();
-            s.agent.thinking = effort_for(None, route.thinking_dialect);
+            s.agent.thinking = effort_for(None, execution_policy.posture, route.thinking_dialect);
+            s.agent.profile = Some(execution_policy.profile.clone());
+            s.active_profile = execution_policy.profile;
             // Refresh the identity prompt for the NEW route - both the agent's stored
             // constitution and the live system message already in history (which
             // run_with_history seeds only once, on the first turn).
@@ -374,7 +425,11 @@ fn print_tools(s: &ChatSession, out: &mut dyn Write, err: &mut dyn Write) {
     for tool in &s.agent.tools {
         let spec = tool.spec();
         let first = spec.description.lines().next().unwrap_or("");
-        let _ = writeln!(out, "{}", scrub_line(&s.scrubber, &format!("{} - {first}", spec.name)));
+        let _ = writeln!(
+            out,
+            "{}",
+            scrub_line(&s.scrubber, &format!("{} - {first}", spec.name))
+        );
     }
     for w in &s.mcp_warnings {
         let _ = writeln!(err, "warning: {}", scrub_line(&s.scrubber, w));
@@ -477,7 +532,9 @@ fn load_mcp(
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(e) => {
-            warnings.push(format!("could not read .nosis/mcp.toml ({e}) - continuing without MCP"));
+            warnings.push(format!(
+                "could not read .nosis/mcp.toml ({e}) - continuing without MCP"
+            ));
             return Vec::new();
         }
     };
@@ -539,6 +596,7 @@ mod tests {
         vault_entry = "deepseek"
         thinking_dialect = "deepseek-nhm"
         context = 1000
+        max_out = 64000
 
         [routes.deepseek-v4-flash.price]
         currency = "CNY"
@@ -561,6 +619,7 @@ mod tests {
         wire = "openai"
         vault_entry = "kimi"
         context = 2000
+        max_out = 64000
 
         [routes."kimi-k2.6".price]
         currency = "USD"
@@ -656,14 +715,18 @@ mod tests {
         let connect_calls = Arc::clone(&calls);
         let connect: ConnectFn = Box::new(move |route| {
             Ok((
-                Box::new(MockClient { reply: "ok".into(), calls: Arc::clone(&connect_calls) })
-                    as Box<dyn ChatClient>,
+                Box::new(MockClient {
+                    reply: "ok".into(),
+                    calls: Arc::clone(&connect_calls),
+                }) as Box<dyn ChatClient>,
                 format!("fake-key-{}", route.vault_entry),
             ))
         });
         let resolver = RouteResolver::from_toml(TEST_CATALOG).expect("test catalog parses");
         let route = resolver.resolve(model).expect("known test route");
-        let (client, literal) = connect(&route).unwrap();
+        let profiles = Profiles::bundled();
+        let execution_policy = profiles.effective("balanced", &route);
+        let (client, literal) = connect(&execution_policy.clamp_route(&route)).unwrap();
         let key_literals = vec![literal];
         let agent = AgentLoop {
             client,
@@ -675,7 +738,8 @@ mod tests {
             },
             model_id: route.model_id.clone(),
             max_turns: 20,
-            thinking: effort_for(None, route.thinking_dialect),
+            thinking: effort_for(None, execution_policy.posture, route.thinking_dialect),
+            profile: Some(execution_policy.profile.clone()),
             constitution: Some("test constitution\n".into()),
             context_limit: route.context,
             on_event: None,
@@ -683,6 +747,8 @@ mod tests {
         let session = ChatSession {
             resolver,
             route,
+            profiles,
+            active_profile: execution_policy.profile,
             agent,
             law_constitution: "test constitution\n".into(),
             history: Vec::new(),
@@ -709,7 +775,10 @@ mod tests {
         let mut out = Vec::new();
         let mut err = Vec::new();
         chat_loop(s, &mut next, &mut out, &mut err).expect("chat loop never errors");
-        (String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
+        (
+            String::from_utf8(out).unwrap(),
+            String::from_utf8(err).unwrap(),
+        )
     }
 
     // ------------------------------------------------------------- switching
@@ -718,7 +787,10 @@ mod tests {
     fn model_switch_preserves_history_and_changes_route() {
         let tmp = tempfile::tempdir().unwrap();
         let (mut s, calls) = test_session("deepseek-v4-flash", tmp.path());
-        let (out, _err) = drive(&mut s, &["write a haiku", "/model kimi-k2.6", "another one"]);
+        let (out, _err) = drive(
+            &mut s,
+            &["write a haiku", "/model kimi-k2.6", "another one"],
+        );
 
         assert!(out.contains("switched to kimi-k2.6"), "got: {out}");
         assert_eq!(calls.load(Ordering::SeqCst), 2, "one wire call per task");
@@ -757,11 +829,41 @@ mod tests {
     }
 
     #[test]
+    fn route_switch_reapplies_active_profile_clamp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, calls) = test_session("deepseek-v4-flash", tmp.path());
+        s.active_profile = "frugal".into();
+        s.agent.profile = Some("frugal".into());
+        let seen_caps = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let caps_for_connect = Arc::clone(&seen_caps);
+        s.connect = Box::new(move |route| {
+            caps_for_connect.lock().unwrap().push(route.max_out);
+            Ok((
+                Box::new(MockClient {
+                    reply: "ok".into(),
+                    calls: Arc::clone(&calls),
+                }),
+                format!("fake-key-{}", route.vault_entry),
+            ))
+        });
+
+        let (out, err) = drive(&mut s, &["/model kimi-k2.6"]);
+
+        assert!(!err.contains("unknown"), "got: {err}");
+        assert!(out.contains("switched to kimi-k2.6"), "got: {out}");
+        assert_eq!(*seen_caps.lock().unwrap(), vec![Some(16_384)]);
+        assert_eq!(s.agent.profile.as_deref(), Some("frugal"));
+    }
+
+    #[test]
     fn unknown_model_prints_resolver_error_and_keeps_route() {
         let tmp = tempfile::tempdir().unwrap();
         let (mut s, _calls) = test_session("deepseek-v4-flash", tmp.path());
         let (out, err) = drive(&mut s, &["/model no-such-model"]);
-        assert!(err.contains("unknown model id 'no-such-model'"), "got: {err}");
+        assert!(
+            err.contains("unknown model id 'no-such-model'"),
+            "got: {err}"
+        );
         assert!(err.contains("available:"), "must list options: {err}");
         assert!(!out.contains("switched"), "got: {out}");
         assert_eq!(s.route.id, "deepseek-v4-flash");
@@ -781,10 +883,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (mut s, _calls) = test_session("deepseek-v4-flash", tmp.path());
         s.connect = Box::new(|route| {
-            anyhow::bail!("no key found for \"{}\" - run `nh key add {}`", route.vault_entry, route.vault_entry)
+            anyhow::bail!(
+                "no key found for \"{}\" - run `nh key add {}`",
+                route.vault_entry,
+                route.vault_entry
+            )
         });
         let (out, err) = drive(&mut s, &["/model kimi-k2.6"]);
-        assert!(err.contains("nh key add kimi"), "error says what to do next: {err}");
+        assert!(
+            err.contains("nh key add kimi"),
+            "error says what to do next: {err}"
+        );
         assert!(!out.contains("switched"), "got: {out}");
         assert_eq!(s.route.id, "deepseek-v4-flash");
         assert_eq!(s.agent.model_id, "deepseek-v4-flash");
@@ -845,7 +954,9 @@ mod tests {
         let (out, _err) = drive(&mut s, &["/price"]);
         assert!(out.contains("off-peak"), "got: {out}");
         assert!(
-            out.contains("warning: price data past valid_until - verify before trusting these numbers"),
+            out.contains(
+                "warning: price data past valid_until - verify before trusting these numbers"
+            ),
             "honest-cost rule: {out}"
         );
     }
@@ -925,7 +1036,11 @@ mod tests {
         let (mut s, calls) = test_session("deepseek-v4-flash", tmp.path());
         let (_out, err) = drive(&mut s, &["/quit", "never runs"]);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        assert_eq!(err.matches("nh> ").count(), 1, "no prompt after quit: {err}");
+        assert_eq!(
+            err.matches("nh> ").count(),
+            1,
+            "no prompt after quit: {err}"
+        );
     }
 
     #[test]
@@ -964,7 +1079,9 @@ mod tests {
         let (out, err) = drive(&mut s, &["/frobnicate"]);
         assert!(out.is_empty(), "help goes to stderr: {out}");
         assert!(
-            err.contains("unknown command - try /model <id>, /provider <name>, /price, /tools, /quit"),
+            err.contains(
+                "unknown command - try /model <id>, /provider <name>, /price, /tools, /quit"
+            ),
             "got: {err}"
         );
     }
@@ -997,7 +1114,11 @@ mod tests {
         });
         s.connected = false;
         s.connect = Box::new(|route| {
-            anyhow::bail!("no key found for \"{}\" - run `nh key add {}`", route.vault_entry, route.vault_entry)
+            anyhow::bail!(
+                "no key found for \"{}\" - run `nh key add {}`",
+                route.vault_entry,
+                route.vault_entry
+            )
         });
     }
 
@@ -1009,7 +1130,10 @@ mod tests {
         let (out, err) = drive(&mut s, &["/price", "hello", "/quit"]);
         assert!(out.contains("off-peak"), "/price works keyless: {out}");
         assert!(!out.contains("hello"), "no answer on stdout: {out}");
-        assert!(err.contains("nh key add deepseek"), "task error says what to do: {err}");
+        assert!(
+            err.contains("nh key add deepseek"),
+            "task error says what to do: {err}"
+        );
     }
 
     #[test]
@@ -1024,12 +1148,23 @@ mod tests {
         });
         s.connected = false;
         let (out, err) = drive(&mut s, &["hello", "again"]);
-        assert_eq!(calls.load(Ordering::SeqCst), 2, "real client answered both tasks");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "real client answered both tasks"
+        );
         assert!(out.contains("ok"), "answer on stdout: {out}");
-        assert!(!err.contains("no key found"), "stale error must not resurface: {err}");
+        assert!(
+            !err.contains("no key found"),
+            "stale error must not resurface: {err}"
+        );
         assert!(s.connected, "session marked connected after the retry");
         // The reconnect registered the new key on the scrub path.
-        assert!(s.key_literals.contains(&"fake-key-deepseek".to_string()), "got: {:?}", s.key_literals);
+        assert!(
+            s.key_literals.contains(&"fake-key-deepseek".to_string()),
+            "got: {:?}",
+            s.key_literals
+        );
     }
 
     // ------------------------------------------------------------- scrubbing
@@ -1058,17 +1193,18 @@ mod tests {
         let route = resolver.resolve("deepseek-v4-flash").unwrap();
         // Beijing 15:00 - inside 14:00-18:00.
         let now = Utc.with_ymd_and_hms(2026, 7, 15, 7, 0, 0).unwrap();
-        assert_eq!(route.peak_status(now, beijing_offset()), "peak 2x until 18:00");
+        assert_eq!(
+            route.peak_status(now, beijing_offset()),
+            "peak 2x until 18:00"
+        );
         // Boundary math: 18:00 itself is off-peak (end exclusive).
         let end = Utc.with_ymd_and_hms(2026, 7, 15, 10, 0, 0).unwrap();
         assert_eq!(route.peak_status(end, beijing_offset()), "off-peak");
-        let fractional = RouteResolver::from_toml(&TEST_CATALOG.replace(
-            "multiplier = 2.0",
-            "multiplier = 1.5",
-        ))
-        .unwrap()
-        .resolve("deepseek-v4-flash")
-        .unwrap();
+        let fractional =
+            RouteResolver::from_toml(&TEST_CATALOG.replace("multiplier = 2.0", "multiplier = 1.5"))
+                .unwrap()
+                .resolve("deepseek-v4-flash")
+                .unwrap();
         assert_eq!(
             fractional.peak_status(now, beijing_offset()),
             "peak 1.5x until 18:00"
@@ -1097,7 +1233,13 @@ mod tests {
         let tools = load_mcp(tmp.path(), &law.policy, &mut warnings);
         assert!(tools.is_empty());
         assert_eq!(warnings.len(), 1, "exactly one warning: {warnings:?}");
-        assert!(warnings[0].contains("mcp.toml"), "names the file: {warnings:?}");
-        assert!(warnings[0].contains("continuing without MCP"), "got: {warnings:?}");
+        assert!(
+            warnings[0].contains("mcp.toml"),
+            "names the file: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("continuing without MCP"),
+            "got: {warnings:?}"
+        );
     }
 }

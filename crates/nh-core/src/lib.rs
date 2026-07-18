@@ -5,7 +5,7 @@ pub mod wire {
     //! Chat wire clients (M1): OpenAI-compatible + Anthropic Messages.
     //! `make_client` picks the client from the route's wire and captures per-route
     //! policy (thinking dialect, reasoning persistence, quirks) at construction.
-    use nh_routes::ThinkingDialect;
+    use nh_routes::{ThinkingDialect, ThinkingPosture};
     use std::time::Duration;
     use zeroize::Zeroizing;
 
@@ -82,6 +82,53 @@ pub mod wire {
         Low,
         High,
         Max,
+    }
+
+    /// Stable user-facing vocabulary for effective thinking effort.
+    pub fn effort_label(effort: ThinkingEffort) -> &'static str {
+        match effort {
+            ThinkingEffort::None => "none",
+            ThinkingEffort::Low => "low",
+            ThinkingEffort::High => "high",
+            ThinkingEffort::Max => "max",
+        }
+    }
+
+    /// Resolve a user override or profile posture within immutable route
+    /// capability. No profile can disable an always-thinking route or enable a
+    /// route with no thinking toggle.
+    pub fn resolve_effort(
+        explicit: Option<ThinkingEffort>,
+        posture: ThinkingPosture,
+        dialect: ThinkingDialect,
+    ) -> ThinkingEffort {
+        if let Some(effort) = explicit {
+            return match dialect {
+                ThinkingDialect::DeepseekNhm | ThinkingDialect::KimiToggle => effort,
+                ThinkingDialect::AlwaysThinking => ThinkingEffort::High,
+                ThinkingDialect::GlmHm => match effort {
+                    ThinkingEffort::High | ThinkingEffort::Max => effort,
+                    ThinkingEffort::None | ThinkingEffort::Low => ThinkingEffort::High,
+                },
+                ThinkingDialect::None => ThinkingEffort::None,
+            };
+        }
+
+        match posture {
+            ThinkingPosture::Floor | ThinkingPosture::Default => match dialect {
+                ThinkingDialect::AlwaysThinking | ThinkingDialect::GlmHm => ThinkingEffort::High,
+                ThinkingDialect::DeepseekNhm
+                | ThinkingDialect::KimiToggle
+                | ThinkingDialect::None => ThinkingEffort::None,
+            },
+            ThinkingPosture::Ceiling => match dialect {
+                ThinkingDialect::DeepseekNhm
+                | ThinkingDialect::KimiToggle
+                | ThinkingDialect::AlwaysThinking
+                | ThinkingDialect::GlmHm => ThinkingEffort::High,
+                ThinkingDialect::None => ThinkingEffort::None,
+            },
+        }
     }
 
     #[derive(Debug, Clone)]
@@ -1283,6 +1330,69 @@ pub mod wire {
             let long = "x".repeat(500);
             assert!(scrub_snippet(&long, "").chars().count() <= 201);
         }
+
+        #[test]
+        fn resolve_effort_covers_every_posture_dialect_cell() {
+            use ThinkingDialect::{
+                AlwaysThinking, DeepseekNhm, GlmHm, KimiToggle, None as NoToggle,
+            };
+            use ThinkingEffort::{High, None as NoEffort};
+            use ThinkingPosture::{Ceiling, Default, Floor};
+
+            let cases = [
+                (Floor, DeepseekNhm, NoEffort),
+                (Floor, KimiToggle, NoEffort),
+                (Floor, AlwaysThinking, High),
+                (Floor, GlmHm, High),
+                (Floor, NoToggle, NoEffort),
+                (Default, DeepseekNhm, NoEffort),
+                (Default, KimiToggle, NoEffort),
+                (Default, AlwaysThinking, High),
+                (Default, GlmHm, High),
+                (Default, NoToggle, NoEffort),
+                (Ceiling, DeepseekNhm, High),
+                (Ceiling, KimiToggle, High),
+                (Ceiling, AlwaysThinking, High),
+                (Ceiling, GlmHm, High),
+                (Ceiling, NoToggle, NoEffort),
+            ];
+
+            for (posture, dialect, expected) in cases {
+                assert_eq!(
+                    resolve_effort(None, posture, dialect),
+                    expected,
+                    "{posture:?} × {dialect:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn explicit_effort_wins_but_stays_route_legal() {
+            assert_eq!(
+                resolve_effort(
+                    Some(ThinkingEffort::Max),
+                    ThinkingPosture::Floor,
+                    ThinkingDialect::DeepseekNhm,
+                ),
+                ThinkingEffort::Max
+            );
+            assert_eq!(
+                resolve_effort(
+                    Some(ThinkingEffort::None),
+                    ThinkingPosture::Ceiling,
+                    ThinkingDialect::AlwaysThinking,
+                ),
+                ThinkingEffort::High
+            );
+            assert_eq!(
+                resolve_effort(
+                    Some(ThinkingEffort::Max),
+                    ThinkingPosture::Ceiling,
+                    ThinkingDialect::None,
+                ),
+                ThinkingEffort::None
+            );
+        }
     }
 }
 
@@ -1322,6 +1432,8 @@ pub mod receipt {
         pub failure_class: Option<FailureClass>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub usage: Option<super::wire::Usage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub effective_profile: Option<String>,
     }
 
     /// Appends scrubbed JSONL lines to .nosis/receipts.jsonl (creates dir if missing).
@@ -1410,6 +1522,9 @@ pub mod agent {
         /// Thinking effort sent with every request; the client maps it to the
         /// route's dialect (the loop stays policy-free). Default: no thinking.
         pub thinking: ThinkingEffort,
+        /// Effective execution profile recorded on every receipt. `None`
+        /// preserves the pre-profile JSONL shape.
+        pub profile: Option<String>,
         /// Byte-stable system prefix. `None` preserves the M0/M1 default.
         pub constitution: Option<String>,
         /// Effective context window. `None` disables compaction.
@@ -1628,6 +1743,7 @@ pub mod agent {
                 outcome,
                 failure_class,
                 usage,
+                effective_profile: self.profile.clone(),
             }
         }
     }

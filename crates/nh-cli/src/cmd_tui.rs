@@ -3,44 +3,46 @@
 use std::path::Path;
 
 use nh_law::LoadOptions;
-use nh_routes::RouteResolver;
+use nh_routes::{Profiles, RouteResolver};
 use nh_tools::McpToolset;
 use nh_tui::{mcp_palette_entries, parse_notify_config, NotifyConfig, PaletteEntry, TuiConfig};
 use nh_vault::Scrubber;
 
 use crate::cmd_run;
 
-pub fn run(model: &str, budget: Option<u64>) -> anyhow::Result<()> {
+pub fn run(model: &str, budget: Option<u64>, profile: &str) -> anyhow::Result<()> {
     let workdir = std::env::current_dir()?;
     let (repo_root, catalog) = cmd_run::find_catalog(&workdir)?;
     let law = nh_law::load(&repo_root, &LoadOptions { cli_autonomy: None });
     let warning_scrubber = Scrubber::new(Vec::new());
     for warning in &law.warnings {
-        eprintln!(
-            "warning: {}",
-            pre_screen_line(&warning_scrubber, warning)
-        );
+        eprintln!("warning: {}", pre_screen_line(&warning_scrubber, warning));
     }
     let mut mcp_warnings = Vec::new();
     let palette_entries = load_mcp_palette(&repo_root, &law.policy, &mut mcp_warnings);
     for warning in &mcp_warnings {
-        eprintln!(
-            "warning: {}",
-            pre_screen_line(&warning_scrubber, warning)
-        );
+        eprintln!("warning: {}", pre_screen_line(&warning_scrubber, warning));
     }
     let mut notify_warnings = Vec::new();
     let notify = load_notify_config(&repo_root, &mut notify_warnings);
     for warning in &notify_warnings {
-        eprintln!(
-            "warning: {}",
-            pre_screen_line(&warning_scrubber, warning)
-        );
+        eprintln!("warning: {}", pre_screen_line(&warning_scrubber, warning));
     }
     let resolver = RouteResolver::from_toml(&catalog)?;
+    let route = resolver.resolve(model)?;
+    let (profiles, profile_warnings) = Profiles::load(&repo_root);
+    for warning in &profile_warnings {
+        eprintln!("warning: {}", pre_screen_line(&warning_scrubber, warning));
+    }
+    let execution_policy = profiles.effective(profile, &route);
+    if let Some(warning) = cmd_run::profile_fallback_warning(profile, &execution_policy.profile) {
+        eprintln!("warning: {}", pre_screen_line(&warning_scrubber, &warning));
+    }
     nh_tui::run(TuiConfig {
         resolver,
         model_id: model.to_owned(),
+        profiles,
+        profile: execution_policy.profile,
         law,
         budget,
         repo_root,

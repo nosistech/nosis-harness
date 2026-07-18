@@ -1,0 +1,10 @@
+[profiles.frugal]
+thinking = "floor"
+max_output_tokens = 16384
+prefer_offpeak = true
+
+[profiles.balanced]
+thinking = "default"
+
+[profiles."max-quality"]
+thinking = "ceiling"
