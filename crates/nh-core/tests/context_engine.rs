@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use nh_core::agent::AgentLoop;
+use nh_core::agent::{AgentLoop, PrefixSeal};
 use nh_core::receipt::ReceiptWriter;
 use nh_core::wire::{
     cache_hit_pct, ChatClient, ChatMessage, ChatRequest, ChatResponse, ThinkingEffort, ToolCallReq,
@@ -180,7 +180,12 @@ fn assert_complete_tool_pairs(history: &[ChatMessage]) {
 fn compaction_preserves_prefix_user_boundary_tool_pairs_and_recent_turns() {
     let dir = tempfile::tempdir().unwrap();
     let mut history = compaction_history();
-    let prefix = serde_json::to_vec(&history[0]).unwrap();
+    let original: Vec<Vec<u8>> = history
+        .iter()
+        .map(|message| serde_json::to_vec(message).unwrap())
+        .collect();
+    let expected_retained = original[7..].to_vec();
+    let prefix_seal = PrefixSeal::new(&history[..1]);
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&events);
     let mut loop_ = agent(dir.path(), Box::new(FinalAnswerClient), None, Some(100));
@@ -192,14 +197,25 @@ fn compaction_preserves_prefix_user_boundary_tool_pairs_and_recent_turns() {
         .run_with_history(&mut history, "current task")
         .unwrap();
 
-    assert_eq!(serde_json::to_vec(&history[0]).unwrap(), prefix);
-    assert_eq!(
-        history[1].role, "user",
-        "suffix after system must begin with user"
+    assert!(
+        prefix_seal.check(&history),
+        "all-build PrefixSeal must hold"
     );
-    let first_user = history[1].content.as_deref().unwrap();
-    assert!(first_user.starts_with("[nosis] earlier context compacted: "));
-    assert!(first_user.ends_with("recent user turn must survive"));
+    assert_eq!(
+        history[1].role, "system",
+        "the elision note is its own message at the compaction boundary"
+    );
+    let note = history[1].content.as_deref().unwrap();
+    assert!(note.starts_with("[nosis] earlier context compacted: "));
+    assert!(!note.contains("recent user turn must survive"));
+    let retained: Vec<Vec<u8>> = history[2..2 + expected_retained.len()]
+        .iter()
+        .map(|message| serde_json::to_vec(message).unwrap())
+        .collect();
+    assert_eq!(
+        retained, expected_retained,
+        "every retained real message must stay byte-identical"
+    );
     assert_eq!(
         history
             .iter()
@@ -210,7 +226,7 @@ fn compaction_preserves_prefix_user_boundary_tool_pairs_and_recent_turns() {
             })
             .count(),
         1,
-        "marker is folded into one retained user message"
+        "the marker is one separate synthetic message"
     );
     assert!(history.iter().any(
         |message| message.role == "user" && message.content.as_deref() == Some("current task")

@@ -14,6 +14,7 @@ pub mod wire {
     /// Generous total cap instead — a dead host still fails fast on connect.
     const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+    const DEFAULT_MAX_TOKENS: u64 = 65_536;
 
     /// One HTTP client config for both wire clients: explicit timeouts (never
     /// the hidden 30 s blocking default) and no redirect following — reqwest
@@ -32,7 +33,10 @@ pub mod wire {
 
     /// Friendly send-failure line: a slow provider is not an unreachable one.
     fn send_error(url: &str, e: &reqwest::Error) -> anyhow::Error {
-        anyhow::anyhow!("{}", send_error_line(url, e.is_timeout() && !e.is_connect(), &e.to_string()))
+        anyhow::anyhow!(
+            "{}",
+            send_error_line(url, e.is_timeout() && !e.is_connect(), &e.to_string())
+        )
     }
 
     fn send_error_line(url: &str, timed_out: bool, detail: &str) -> String {
@@ -130,15 +134,17 @@ pub mod wire {
                 client.policy = OpenAiPolicy {
                     dialect: route.thinking_dialect,
                     preserve_reasoning: route.preserve_reasoning,
+                    preserve_when_thinking: route.preserve_when_thinking,
                     empty_reasoning_on_tool_replay: route
                         .has_quirk("empty-reasoning-content-on-tool-replay"),
+                    max_out: route.max_out,
                 };
                 Box::new(client)
             }
             nh_routes::Wire::AnthropicMessages => Box::new(AnthropicMessagesClient::new(
                 route.base_url.clone(),
                 api_key,
-                route.max_out.unwrap_or(8192).min(8192),
+                route.max_out.unwrap_or(DEFAULT_MAX_TOKENS),
             )),
         }
     }
@@ -148,7 +154,9 @@ pub mod wire {
     struct OpenAiPolicy {
         dialect: ThinkingDialect,
         preserve_reasoning: bool,
+        preserve_when_thinking: bool,
         empty_reasoning_on_tool_replay: bool,
+        max_out: Option<u64>,
     }
 
     impl Default for OpenAiPolicy {
@@ -156,7 +164,9 @@ pub mod wire {
             Self {
                 dialect: ThinkingDialect::None,
                 preserve_reasoning: false,
+                preserve_when_thinking: false,
                 empty_reasoning_on_tool_replay: false,
+                max_out: None,
             }
         }
     }
@@ -223,6 +233,7 @@ pub mod wire {
     /// Build the OpenAI-wire request body. Tool calls and tools use the nested
     /// `{"type":"function","function":{...}}` shape the wire requires.
     fn build_body(req: &ChatRequest, policy: OpenAiPolicy) -> serde_json::Value {
+        let thinking_active = thinking_is_active(policy.dialect, req.thinking);
         let messages: Vec<serde_json::Value> = req
             .messages
             .iter()
@@ -246,13 +257,18 @@ pub mod wire {
                 if let Some(id) = &m.tool_call_id {
                     obj["tool_call_id"] = serde_json::Value::String(id.clone());
                 }
-                if let Some(r) = reasoning_to_send(m, policy) {
+                if let Some(r) = reasoning_to_send(m, policy, thinking_active) {
                     obj["reasoning_content"] = serde_json::Value::String(r.to_string());
                 }
                 obj
             })
             .collect();
-        let mut body = serde_json::json!({ "model": req.model, "messages": messages });
+        let mut body = serde_json::json!({
+            "model": req.model,
+            "messages": messages,
+            "max_tokens": policy.max_out.unwrap_or(DEFAULT_MAX_TOKENS),
+        });
+        // [VERIFY-LIVE §7] Provider-specific output_config effort mapping remains live-pending.
         if !req.tools.is_empty() {
             body["tools"] = req
                 .tools
@@ -280,11 +296,15 @@ pub mod wire {
     /// 3. Deepseek quirk: assistant replay turns carrying ONLY tool_calls get
     ///    `reasoning_content: ""` (empty string, not null) even under rule 2;
     ///    a stored value under rule 1 wins over the empty string.
-    fn reasoning_to_send(m: &ChatMessage, policy: OpenAiPolicy) -> Option<&str> {
+    fn reasoning_to_send(
+        m: &ChatMessage,
+        policy: OpenAiPolicy,
+        thinking_active: bool,
+    ) -> Option<&str> {
         if m.role != "assistant" {
             return None;
         }
-        if policy.preserve_reasoning {
+        if policy.preserve_reasoning || (policy.preserve_when_thinking && thinking_active) {
             if let Some(r) = m.reasoning_content.as_deref() {
                 return Some(r);
             }
@@ -297,6 +317,17 @@ pub mod wire {
         None
     }
 
+    fn thinking_is_active(dialect: ThinkingDialect, effort: ThinkingEffort) -> bool {
+        match dialect {
+            ThinkingDialect::DeepseekNhm | ThinkingDialect::GlmHm => {
+                matches!(effort, ThinkingEffort::High | ThinkingEffort::Max)
+            }
+            ThinkingDialect::KimiToggle => effort != ThinkingEffort::None,
+            ThinkingDialect::AlwaysThinking => true,
+            ThinkingDialect::None => false,
+        }
+    }
+
     /// The ONE place (dialect, effort) → OpenAI-wire params lives (CONTRACTS_M1.md §2.3).
     fn apply_thinking(
         body: &mut serde_json::Value,
@@ -305,17 +336,27 @@ pub mod wire {
     ) {
         match dialect {
             ThinkingDialect::DeepseekNhm => {
-                // Live-confirmed 2026-07-14: valid values are high|low|medium|max|xhigh.
-                // M1 uses low|high|max; "none" is invalid, so omit for non-thinking.
-                let value = match effort {
-                    ThinkingEffort::None => None,
-                    ThinkingEffort::Low => Some("low"),
-                    ThinkingEffort::High => Some("high"),
-                    ThinkingEffort::Max => Some("max"),
-                };
-                if let Some(value) = value {
-                    body["reasoning_effort"] = serde_json::Value::String(value.into());
+                match effort {
+                    ThinkingEffort::None | ThinkingEffort::Low => {
+                        // [VERIFY-LIVE §7] DeepSeek explicit non-thinking wire shape.
+                        body["thinking"] = serde_json::json!({ "type": "disabled" });
+                    }
+                    ThinkingEffort::High => {
+                        body["reasoning_effort"] = serde_json::Value::String("high".into());
+                    }
+                    ThinkingEffort::Max => {
+                        body["reasoning_effort"] = serde_json::Value::String("max".into());
+                    }
                 }
+            }
+            ThinkingDialect::KimiToggle => {
+                // [VERIFY-LIVE §7] Kimi K2.6 documented thinking toggle shape.
+                let kind = if effort == ThinkingEffort::None {
+                    "disabled"
+                } else {
+                    "enabled"
+                };
+                body["thinking"] = serde_json::json!({ "type": kind });
             }
             // Kimi K2.7 has no non-thinking mode — never send a toggle.
             ThinkingDialect::AlwaysThinking => {}
@@ -367,6 +408,10 @@ pub mod wire {
         completion_tokens: u64,
         #[serde(default)]
         prompt_tokens_details: Option<WirePromptDetails>,
+        #[serde(default)]
+        prompt_cache_hit_tokens: Option<u64>,
+        #[serde(default)]
+        prompt_cache_miss_tokens: Option<u64>,
     }
     #[derive(serde::Deserialize)]
     struct WirePromptDetails {
@@ -385,7 +430,11 @@ pub mod wire {
         let tool_calls = choice.message.tool_calls.map(|calls| {
             calls
                 .into_iter()
-                .map(|c| ToolCallReq { id: c.id, name: c.function.name, arguments: c.function.arguments })
+                .map(|c| ToolCallReq {
+                    id: c.id,
+                    name: c.function.name,
+                    arguments: c.function.arguments,
+                })
                 .collect()
         });
         Ok(ChatResponse {
@@ -397,10 +446,17 @@ pub mod wire {
                 reasoning_content: choice.message.reasoning_content,
             },
             finish_reason: choice.finish_reason.unwrap_or_default(),
-            usage: wire.usage.map(|u| Usage {
-                prompt_tokens: u.prompt_tokens,
-                completion_tokens: u.completion_tokens,
-                cached_tokens: u.prompt_tokens_details.and_then(|d| d.cached_tokens),
+            usage: wire.usage.map(|u| {
+                let cached_tokens = u
+                    .prompt_tokens_details
+                    .and_then(|details| details.cached_tokens)
+                    .or(u.prompt_cache_hit_tokens);
+                let _cache_miss_tokens = u.prompt_cache_miss_tokens;
+                Usage {
+                    prompt_tokens: u.prompt_tokens,
+                    completion_tokens: u.completion_tokens,
+                    cached_tokens,
+                }
             }),
         })
     }
@@ -418,7 +474,12 @@ pub mod wire {
 
     impl AnthropicMessagesClient {
         pub fn new(base_url: String, api_key: Zeroizing<String>, max_tokens: u64) -> Self {
-            Self { base_url, api_key, max_tokens, http: http_client() }
+            Self {
+                base_url,
+                api_key,
+                max_tokens,
+                http: http_client(),
+            }
         }
     }
 
@@ -454,12 +515,11 @@ pub mod wire {
     fn build_anthropic_body(req: &ChatRequest, max_tokens: u64) -> serde_json::Value {
         let mut system: Option<String> = None;
         let mut messages: Vec<serde_json::Value> = Vec::new();
-        let mut prev_was_tool = false;
+        let mut prev_was_user = false;
         for m in &req.messages {
             match m.role.as_str() {
                 "system" if system.is_none() => {
                     system = Some(m.content.clone().unwrap_or_default());
-                    prev_was_tool = false;
                 }
                 "tool" => {
                     let block = serde_json::json!({
@@ -468,12 +528,17 @@ pub mod wire {
                         "content": m.content.clone().unwrap_or_default(),
                     });
                     match messages.last_mut() {
-                        Some(last) if prev_was_tool => {
-                            last["content"].as_array_mut().expect("tool_result array").push(block);
+                        Some(last) if prev_was_user => {
+                            last["content"]
+                                .as_array_mut()
+                                .expect("user content array")
+                                .push(block);
                         }
-                        _ => messages.push(serde_json::json!({ "role": "user", "content": [block] })),
+                        _ => {
+                            messages.push(serde_json::json!({ "role": "user", "content": [block] }))
+                        }
                     }
-                    prev_was_tool = true;
+                    prev_was_user = true;
                 }
                 "assistant" => {
                     let mut blocks: Vec<serde_json::Value> = Vec::new();
@@ -488,15 +553,22 @@ pub mod wire {
                         }));
                     }
                     messages.push(serde_json::json!({ "role": "assistant", "content": blocks }));
-                    prev_was_tool = false;
+                    prev_was_user = false;
                 }
                 // "user" — and any unexpected role degrades to user text, never dropped.
                 _ => {
                     let text = m.content.clone().unwrap_or_default();
-                    messages.push(serde_json::json!({
-                        "role": "user", "content": [{ "type": "text", "text": text }],
-                    }));
-                    prev_was_tool = false;
+                    let block = serde_json::json!({ "type": "text", "text": text });
+                    match messages.last_mut() {
+                        Some(last) if prev_was_user => last["content"]
+                            .as_array_mut()
+                            .expect("user content array")
+                            .push(block),
+                        _ => {
+                            messages.push(serde_json::json!({ "role": "user", "content": [block] }))
+                        }
+                    }
+                    prev_was_user = true;
                 }
             }
         }
@@ -599,7 +671,11 @@ pub mod wire {
 
     /// One-line, truncated body snippet with the API key literal redacted.
     fn scrub_snippet(body: &str, key: &str) -> String {
-        let s = if key.is_empty() { body.to_string() } else { body.replace(key, "[REDACTED]") };
+        let s = if key.is_empty() {
+            body.to_string()
+        } else {
+            body.replace(key, "[REDACTED]")
+        };
         let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
         if s.is_empty() {
             return "(empty body)".into();
@@ -635,7 +711,11 @@ pub mod wire {
         }
 
         fn tool_call(id: &str, name: &str, arguments: &str) -> ToolCallReq {
-            ToolCallReq { id: id.into(), name: name.into(), arguments: arguments.into() }
+            ToolCallReq {
+                id: id.into(),
+                name: name.into(),
+                arguments: arguments.into(),
+            }
         }
 
         fn req(messages: Vec<ChatMessage>) -> ChatRequest {
@@ -647,31 +727,126 @@ pub mod wire {
             }
         }
 
-        fn policy(
-            dialect: ThinkingDialect,
-            preserve_reasoning: bool,
-            quirk: bool,
-        ) -> OpenAiPolicy {
-            OpenAiPolicy { dialect, preserve_reasoning, empty_reasoning_on_tool_replay: quirk }
+        fn policy(dialect: ThinkingDialect, preserve_reasoning: bool, quirk: bool) -> OpenAiPolicy {
+            OpenAiPolicy {
+                dialect,
+                preserve_reasoning,
+                preserve_when_thinking: false,
+                empty_reasoning_on_tool_replay: quirk,
+                max_out: None,
+            }
+        }
+
+        #[test]
+        fn anthropic_body_roles_alternate_after_compaction() {
+            // Reproduces the post-L7-compaction shape on the Anthropic wire: the
+            // elision note (a SECOND system message inserted at history[1]) degrades
+            // to a user block and lands immediately before the first retained user
+            // turn — the Anthropic Messages API rejects two consecutive user roles.
+            let request = req(vec![
+                msg("system", Some("sealed constitution")),
+                msg(
+                    "system",
+                    Some("[nosis] earlier context compacted: 3 messages, ~900 tokens elided."),
+                ),
+                msg("user", Some("retained question")),
+                msg("assistant", Some("retained answer")),
+            ]);
+            let body = build_anthropic_body(&request, 1024);
+            let roles: Vec<String> = body["messages"]
+                .as_array()
+                .expect("messages array")
+                .iter()
+                .map(|m| m["role"].as_str().unwrap_or_default().to_string())
+                .collect();
+            assert_eq!(
+                roles.first().map(String::as_str),
+                Some("user"),
+                "first message must be user: {roles:?}"
+            );
+            for pair in roles.windows(2) {
+                assert_ne!(
+                    pair[0], pair[1],
+                    "consecutive same-role messages break the Anthropic wire: {roles:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn anthropic_body_merges_user_role_blocks_in_order() {
+            let request = req(vec![
+                msg("system", Some("sealed constitution")),
+                msg("system", Some("elision note")),
+                msg("user", Some("retained question")),
+                ChatMessage {
+                    tool_call_id: Some("c1".into()),
+                    ..msg("tool", Some("tool output"))
+                },
+                msg("user", Some("follow-up")),
+            ]);
+            let body = build_anthropic_body(&request, 1024);
+            let messages = body["messages"].as_array().expect("messages array");
+
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0]["role"], "user");
+            let blocks = messages[0]["content"].as_array().expect("content array");
+            assert_eq!(blocks.len(), 4);
+            assert_eq!(
+                blocks[0],
+                serde_json::json!({"type": "text", "text": "elision note"})
+            );
+            assert_eq!(
+                blocks[1],
+                serde_json::json!({"type": "text", "text": "retained question"})
+            );
+            assert_eq!(
+                blocks[2],
+                serde_json::json!({
+                    "type": "tool_result",
+                    "tool_use_id": "c1",
+                    "content": "tool output",
+                })
+            );
+            assert_eq!(
+                blocks[3],
+                serde_json::json!({"type": "text", "text": "follow-up"})
+            );
         }
 
         #[test]
         fn endpoint_trims_trailing_slash() {
-            assert_eq!(endpoint("https://api.example.com/"), "https://api.example.com/chat/completions");
-            assert_eq!(endpoint("https://api.example.com"), "https://api.example.com/chat/completions");
+            assert_eq!(
+                endpoint("https://api.example.com/"),
+                "https://api.example.com/chat/completions"
+            );
+            assert_eq!(
+                endpoint("https://api.example.com"),
+                "https://api.example.com/chat/completions"
+            );
         }
 
         #[test]
         fn timeout_error_says_what_happened_and_what_to_do() {
-            let line = send_error_line("https://api.example.com/chat/completions", true, "op timed out");
+            let line = send_error_line(
+                "https://api.example.com/chat/completions",
+                true,
+                "op timed out",
+            );
             assert_eq!(
                 line,
                 "provider at https://api.example.com/chat/completions did not answer within 600s \
                  — retry, or switch to another route"
             );
             // Non-timeout failures keep the reachability wording and the detail.
-            let line = send_error_line("https://api.example.com/chat/completions", false, "dns error");
-            assert!(line.starts_with("could not reach provider at "), "got: {line}");
+            let line = send_error_line(
+                "https://api.example.com/chat/completions",
+                false,
+                "dns error",
+            );
+            assert!(
+                line.starts_with("could not reach provider at "),
+                "got: {line}"
+            );
             assert!(line.ends_with("dns error"), "got: {line}");
         }
 
@@ -679,8 +854,14 @@ pub mod wire {
         fn request_timeout_outlives_slow_thinking_turns() {
             // Guard against the hidden 30 s blocking-client default sneaking back:
             // thinking routes (kimi/glm at High) routinely exceed 30 s per turn.
-            assert!(REQUEST_TIMEOUT >= Duration::from_secs(300), "got: {REQUEST_TIMEOUT:?}");
-            assert!(CONNECT_TIMEOUT <= Duration::from_secs(30), "dead hosts must fail fast");
+            assert!(
+                REQUEST_TIMEOUT >= Duration::from_secs(300),
+                "got: {REQUEST_TIMEOUT:?}"
+            );
+            assert!(
+                CONNECT_TIMEOUT <= Duration::from_secs(30),
+                "dead hosts must fail fast"
+            );
         }
 
         #[test]
@@ -690,7 +871,10 @@ pub mod wire {
                     tool_calls: Some(vec![tool_call("c1", "read_file", r#"{"path":"a.txt"}"#)]),
                     ..msg("assistant", None)
                 },
-                ChatMessage { tool_call_id: Some("c1".into()), ..msg("tool", Some("data")) },
+                ChatMessage {
+                    tool_call_id: Some("c1".into()),
+                    ..msg("tool", Some("data"))
+                },
             ]);
             request.tools = vec![nh_tools::ToolSpec {
                 name: "read_file".into(),
@@ -702,27 +886,30 @@ pub mod wire {
             assert_eq!(body["tools"][0]["type"], "function");
             assert_eq!(body["tools"][0]["function"]["name"], "read_file");
             assert_eq!(body["messages"][0]["tool_calls"][0]["type"], "function");
-            assert_eq!(body["messages"][0]["tool_calls"][0]["function"]["name"], "read_file");
-            assert_eq!(body["messages"][0]["tool_calls"][0]["function"]["arguments"], r#"{"path":"a.txt"}"#);
+            assert_eq!(
+                body["messages"][0]["tool_calls"][0]["function"]["name"],
+                "read_file"
+            );
+            assert_eq!(
+                body["messages"][0]["tool_calls"][0]["function"]["arguments"],
+                r#"{"path":"a.txt"}"#
+            );
             assert_eq!(body["messages"][1]["tool_call_id"], "c1");
             assert!(body["messages"][1].get("tool_calls").is_none());
         }
 
         #[test]
         fn deepseek_dialect_maps_every_effort_tier() {
-            let mut request = req(vec![msg("user", Some("hi"))]);
-            request.thinking = ThinkingEffort::None;
-            let body = build_body(&request, policy(ThinkingDialect::DeepseekNhm, false, false));
-            assert!(
-                body.get("reasoning_effort").is_none(),
-                "None must omit reasoning_effort"
-            );
+            for effort in [ThinkingEffort::None, ThinkingEffort::Low] {
+                let mut request = req(vec![msg("user", Some("hi"))]);
+                request.thinking = effort;
+                let body = build_body(&request, policy(ThinkingDialect::DeepseekNhm, false, false));
+                assert_eq!(body["thinking"]["type"], "disabled", "effort {effort:?}");
+                assert!(body.get("reasoning_effort").is_none());
+            }
 
-            for (effort, expected) in [
-                (ThinkingEffort::Low, "low"),
-                (ThinkingEffort::High, "high"),
-                (ThinkingEffort::Max, "max"),
-            ] {
+            for (effort, expected) in [(ThinkingEffort::High, "high"), (ThinkingEffort::Max, "max")]
+            {
                 let mut request = req(vec![msg("user", Some("hi"))]);
                 request.thinking = effort;
                 let body = build_body(&request, policy(ThinkingDialect::DeepseekNhm, false, false));
@@ -731,10 +918,37 @@ pub mod wire {
         }
 
         #[test]
+        fn kimi_toggle_replays_reasoning_only_while_thinking_is_active() {
+            let mut conditional = policy(ThinkingDialect::KimiToggle, false, false);
+            conditional.preserve_when_thinking = true;
+            conditional.max_out = Some(123_456);
+            let history = vec![ChatMessage {
+                reasoning_content: Some("required chain".into()),
+                tool_calls: Some(vec![tool_call("c1", "read_file", "{}")]),
+                ..msg("assistant", None)
+            }];
+
+            let mut request = req(history.clone());
+            request.thinking = ThinkingEffort::High;
+            let active = build_body(&request, conditional);
+            assert_eq!(active["thinking"]["type"], "enabled");
+            assert_eq!(active["messages"][0]["reasoning_content"], "required chain");
+            assert_eq!(active["max_tokens"], 123_456);
+
+            request.messages = history;
+            request.thinking = ThinkingEffort::None;
+            let inactive = build_body(&request, conditional);
+            assert_eq!(inactive["thinking"]["type"], "disabled");
+            assert!(inactive["messages"][0].get("reasoning_content").is_none());
+        }
+
+        #[test]
         fn non_deepseek_dialects_send_no_thinking_toggle() {
-            for dialect in
-                [ThinkingDialect::AlwaysThinking, ThinkingDialect::GlmHm, ThinkingDialect::None]
-            {
+            for dialect in [
+                ThinkingDialect::AlwaysThinking,
+                ThinkingDialect::GlmHm,
+                ThinkingDialect::None,
+            ] {
                 let mut request = req(vec![msg("user", Some("hi"))]);
                 request.thinking = ThinkingEffort::Max;
                 let body = build_body(&request, policy(dialect, false, false));
@@ -755,7 +969,10 @@ pub mod wire {
                     ..msg("assistant", Some("answer"))
                 },
             ]);
-            let body = build_body(&request, policy(ThinkingDialect::AlwaysThinking, true, false));
+            let body = build_body(
+                &request,
+                policy(ThinkingDialect::AlwaysThinking, true, false),
+            );
             assert!(body["messages"][0].get("reasoning_content").is_none());
             assert_eq!(body["messages"][1]["reasoning_content"], "chain");
         }
@@ -776,28 +993,43 @@ pub mod wire {
             let calls = Some(vec![tool_call("c1", "read_file", "{}")]);
 
             // Tool-only replay (content None) → empty string, not null.
-            let request = req(vec![ChatMessage { tool_calls: calls.clone(), ..msg("assistant", None) }]);
+            let request = req(vec![ChatMessage {
+                tool_calls: calls.clone(),
+                ..msg("assistant", None)
+            }]);
             let body = build_body(&request, quirked);
             assert_eq!(body["messages"][0]["reasoning_content"], "");
 
             // Empty-string content still counts as tool-only.
-            let request = req(vec![ChatMessage { tool_calls: calls.clone(), ..msg("assistant", Some("")) }]);
+            let request = req(vec![ChatMessage {
+                tool_calls: calls.clone(),
+                ..msg("assistant", Some(""))
+            }]);
             let body = build_body(&request, quirked);
             assert_eq!(body["messages"][0]["reasoning_content"], "");
 
             // Assistant turns WITH text do not get it.
-            let request = req(vec![ChatMessage { tool_calls: calls.clone(), ..msg("assistant", Some("look")) }]);
+            let request = req(vec![ChatMessage {
+                tool_calls: calls.clone(),
+                ..msg("assistant", Some("look"))
+            }]);
             let body = build_body(&request, quirked);
             assert!(body["messages"][0].get("reasoning_content").is_none());
 
             // Plain text turns and non-assistant roles do not get it.
-            let request = req(vec![msg("assistant", Some("done")), msg("user", Some("hi"))]);
+            let request = req(vec![
+                msg("assistant", Some("done")),
+                msg("user", Some("hi")),
+            ]);
             let body = build_body(&request, quirked);
             assert!(body["messages"][0].get("reasoning_content").is_none());
             assert!(body["messages"][1].get("reasoning_content").is_none());
 
             // Non-quirked routes never get it, even on tool-only replay.
-            let request = req(vec![ChatMessage { tool_calls: calls, ..msg("assistant", None) }]);
+            let request = req(vec![ChatMessage {
+                tool_calls: calls,
+                ..msg("assistant", None)
+            }]);
             let body = build_body(&request, policy(ThinkingDialect::DeepseekNhm, false, false));
             assert!(body["messages"][0].get("reasoning_content").is_none());
         }
@@ -818,7 +1050,10 @@ pub mod wire {
             let body = r#"{"choices":[{"message":{"role":"assistant","content":"hi",
                 "reasoning_content":"thought hard"},"finish_reason":"stop"}]}"#;
             let resp = parse_response(body).unwrap();
-            assert_eq!(resp.message.reasoning_content.as_deref(), Some("thought hard"));
+            assert_eq!(
+                resp.message.reasoning_content.as_deref(),
+                Some("thought hard")
+            );
         }
 
         #[test]
@@ -842,7 +1077,11 @@ pub mod wire {
             assert_eq!(body["max_tokens"], 8192);
             assert_eq!(body["system"], "be brief");
             let messages = body["messages"].as_array().unwrap();
-            assert_eq!(messages.len(), 2, "system message must not appear in messages");
+            assert_eq!(
+                messages.len(),
+                2,
+                "system message must not appear in messages"
+            );
             assert_eq!(messages[0]["role"], "user");
             assert_eq!(messages[0]["content"][0]["type"], "text");
             assert_eq!(messages[0]["content"][0]["text"], "hi");
@@ -865,8 +1104,14 @@ pub mod wire {
                     ]),
                     ..msg("assistant", Some("let me look"))
                 },
-                ChatMessage { tool_call_id: Some("c1".into()), ..msg("tool", Some("data1")) },
-                ChatMessage { tool_call_id: Some("c2".into()), ..msg("tool", Some("data2")) },
+                ChatMessage {
+                    tool_call_id: Some("c1".into()),
+                    ..msg("tool", Some("data1"))
+                },
+                ChatMessage {
+                    tool_call_id: Some("c2".into()),
+                    ..msg("tool", Some("data2"))
+                },
                 msg("user", Some("thanks")),
             ]);
             request.tools = vec![nh_tools::ToolSpec {
@@ -885,17 +1130,17 @@ pub mod wire {
             // Unparseable arguments degrade to an empty object.
             assert_eq!(assistant["content"][2]["input"], serde_json::json!({}));
 
-            // Two consecutive tool messages → ONE user message, two tool_result blocks.
+            // Tool results and the following user turn → ONE user message, preserving block order.
             let messages = body["messages"].as_array().unwrap();
-            assert_eq!(messages.len(), 4);
+            assert_eq!(messages.len(), 3);
             let results = &messages[2];
             assert_eq!(results["role"], "user");
-            assert_eq!(results["content"].as_array().unwrap().len(), 2);
+            assert_eq!(results["content"].as_array().unwrap().len(), 3);
             assert_eq!(results["content"][0]["type"], "tool_result");
             assert_eq!(results["content"][0]["tool_use_id"], "c1");
             assert_eq!(results["content"][0]["content"], "data1");
             assert_eq!(results["content"][1]["tool_use_id"], "c2");
-            assert_eq!(messages[3]["content"][0]["text"], "thanks");
+            assert_eq!(results["content"][2]["text"], "thanks");
 
             assert_eq!(body["tools"][0]["name"], "read_file");
             assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
@@ -975,6 +1220,41 @@ pub mod wire {
             assert_eq!(usage.prompt_tokens, 12);
             assert_eq!(usage.completion_tokens, 7);
             assert_eq!(usage.cached_tokens, Some(4));
+        }
+
+        #[test]
+        fn parses_top_level_cache_hit_fallback_without_overriding_nested_value() {
+            let fallback = r#"{
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 2,
+                    "prompt_cache_hit_tokens": 7,
+                    "prompt_cache_miss_tokens": 13
+                }
+            }"#;
+            assert_eq!(
+                parse_response(fallback)
+                    .unwrap()
+                    .usage
+                    .unwrap()
+                    .cached_tokens,
+                Some(7)
+            );
+
+            let nested = r#"{
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 2,
+                    "prompt_tokens_details": {"cached_tokens": 5},
+                    "prompt_cache_hit_tokens": 7
+                }
+            }"#;
+            assert_eq!(
+                parse_response(nested).unwrap().usage.unwrap().cached_tokens,
+                Some(5)
+            );
         }
 
         #[test]
@@ -1083,6 +1363,42 @@ pub mod agent {
     const COMPACT_TARGET: f64 = 0.50;
     const KEEP_RECENT: usize = 2;
     const MESSAGE_OVERHEAD_TOKENS: u64 = 4;
+    const EFFECTIVE_CONTEXT_CAP: u64 = 256_000;
+
+    /// Context-rot guard: very large advertised windows use a smaller working
+    /// window so compaction starts while the retained context is still useful.
+    pub fn effective_context(route_window: u64) -> u64 {
+        route_window.min(EFFECTIVE_CONTEXT_CAP)
+    }
+
+    /// Byte seal for a stable message prefix. `check` is active in every build.
+    #[derive(Debug, Clone)]
+    pub struct PrefixSeal {
+        messages: Vec<Vec<u8>>,
+    }
+
+    impl PrefixSeal {
+        pub fn new(prefix: &[ChatMessage]) -> Self {
+            Self {
+                messages: prefix.iter().map(message_bytes).collect(),
+            }
+        }
+
+        pub fn check(&self, messages: &[ChatMessage]) -> bool {
+            self.check_at(messages, 0)
+        }
+
+        fn check_at(&self, messages: &[ChatMessage], start: usize) -> bool {
+            messages
+                .get(start..start.saturating_add(self.messages.len()))
+                .is_some_and(|candidate| {
+                    candidate
+                        .iter()
+                        .map(message_bytes)
+                        .eq(self.messages.iter().cloned())
+                })
+        }
+    }
 
     pub struct AgentLoop {
         pub client: Box<dyn ChatClient>,
@@ -1138,8 +1454,8 @@ pub mod agent {
             }
             history.push(plain_msg("user", task.to_string()));
 
-            #[cfg(debug_assertions)]
-            let prefix_bytes = message_bytes(&history[0]);
+            let prefix_seal = PrefixSeal::new(&history[..1]);
+            let mut prefix_drift_reported = false;
 
             let mut turns: u32 = 0;
             let mut tool_calls: u32 = 0;
@@ -1148,15 +1464,18 @@ pub mod agent {
             let mut latest_prompt_tokens = None;
 
             while turns < self.max_turns {
-                #[cfg(debug_assertions)]
-                debug_assert_eq!(message_bytes(&history[0]), prefix_bytes);
+                self.report_prefix_drift(&prefix_seal, history, &mut prefix_drift_reported);
 
                 if let Some(limit) = self.context_limit {
-                    let input_tokens =
-                        latest_prompt_tokens.unwrap_or_else(|| estimate_tokens(history));
-                    if input_tokens as f64 >= COMPACT_AT * limit as f64 {
-                        if let Some(compaction) = compact_history(history, limit) {
-                            let pct = context_percentage(input_tokens, limit);
+                    let working_limit = effective_context(limit);
+                    let input_tokens = latest_prompt_tokens
+                        .unwrap_or_else(|| estimate_request_tokens(history, &specs, true));
+                    if input_tokens as f64 >= COMPACT_AT * working_limit as f64 {
+                        if let Some(compaction) = compact_history(history, working_limit) {
+                            if !compaction.prefix_held {
+                                self.emit("cache break detected: retained prefix drift");
+                            }
+                            let pct = context_percentage(input_tokens, working_limit);
                             self.emit(&format!(
                                 "context {pct}% — compacted {} earlier messages",
                                 compaction.messages
@@ -1165,8 +1484,7 @@ pub mod agent {
                     }
                 }
 
-                #[cfg(debug_assertions)]
-                debug_assert_eq!(message_bytes(&history[0]), prefix_bytes);
+                self.report_prefix_drift(&prefix_seal, history, &mut prefix_drift_reported);
 
                 turns += 1;
                 let req = ChatRequest {
@@ -1178,8 +1496,7 @@ pub mod agent {
                 let resp = match self.client.complete(&req) {
                     Ok(r) => r,
                     Err(e) => {
-                        #[cfg(debug_assertions)]
-                        debug_assert_eq!(message_bytes(&history[0]), prefix_bytes);
+                        self.report_prefix_drift(&prefix_seal, history, &mut prefix_drift_reported);
                         let receipt = self.make_receipt(
                             task,
                             turns,
@@ -1204,8 +1521,7 @@ pub mod agent {
                 history.push(resp.message.clone());
                 let calls = resp.message.tool_calls.clone().unwrap_or_default();
                 if calls.is_empty() {
-                    #[cfg(debug_assertions)]
-                    debug_assert_eq!(message_bytes(&history[0]), prefix_bytes);
+                    self.report_prefix_drift(&prefix_seal, history, &mut prefix_drift_reported);
                     let text = resp.message.content.clone().unwrap_or_default();
                     let receipt = self.make_receipt(
                         task,
@@ -1231,12 +1547,10 @@ pub mod agent {
                     });
                 }
 
-                #[cfg(debug_assertions)]
-                debug_assert_eq!(message_bytes(&history[0]), prefix_bytes);
+                self.report_prefix_drift(&prefix_seal, history, &mut prefix_drift_reported);
             }
 
-            #[cfg(debug_assertions)]
-            debug_assert_eq!(message_bytes(&history[0]), prefix_bytes);
+            self.report_prefix_drift(&prefix_seal, history, &mut prefix_drift_reported);
 
             let receipt = self.make_receipt(
                 task,
@@ -1248,16 +1562,37 @@ pub mod agent {
             );
             self.receipts.append(&receipt)?;
             Ok((
-                format!("stopped after {} turns without a final answer", self.max_turns),
+                format!(
+                    "stopped after {} turns without a final answer",
+                    self.max_turns
+                ),
                 receipt,
             ))
+        }
+
+        fn report_prefix_drift(
+            &self,
+            seal: &PrefixSeal,
+            history: &[ChatMessage],
+            reported: &mut bool,
+        ) {
+            let held = seal.check(history);
+            if !held && !*reported {
+                self.emit("cache break detected: sealed prefix drift");
+                *reported = true;
+            }
+            debug_assert!(held, "sealed message prefix drifted");
         }
 
         /// Execute one tool call; every failure becomes a message the model can act on.
         fn run_tool(&self, call: &ToolCallReq) -> String {
             let Some(tool) = self.tools.iter().find(|t| t.spec().name == call.name) else {
                 let names: Vec<String> = self.tools.iter().map(|t| t.spec().name).collect();
-                return format!("unknown tool '{}' — available tools: {}", call.name, names.join(", "));
+                return format!(
+                    "unknown tool '{}' — available tools: {}",
+                    call.name,
+                    names.join(", ")
+                );
             };
             let args: serde_json::Value = match serde_json::from_str(&call.arguments) {
                 Ok(v) => v,
@@ -1310,10 +1645,16 @@ pub mod agent {
     #[derive(Debug, Clone, Copy)]
     struct Compaction {
         messages: usize,
+        prefix_held: bool,
     }
 
-    /// Deterministic fallback estimate used when a provider omits usage.
+    /// Message-only estimate used by compaction. Stored reasoning is counted
+    /// conservatively; request builders can use the policy-aware sibling below.
     fn estimate_tokens(messages: &[ChatMessage]) -> u64 {
+        estimate_message_tokens(messages, true)
+    }
+
+    fn estimate_message_tokens(messages: &[ChatMessage], preserve_reasoning: bool) -> u64 {
         messages
             .iter()
             .map(|message| {
@@ -1321,10 +1662,27 @@ pub mod agent {
                 let tool_call_bytes = message.tool_calls.as_ref().map_or(0, |calls| {
                     serde_json::to_vec(calls).map_or(0, |serialized| serialized.len())
                 });
-                let bytes = (content_bytes as u64).saturating_add(tool_call_bytes as u64);
+                let reasoning_bytes = if preserve_reasoning {
+                    message.reasoning_content.as_ref().map_or(0, String::len)
+                } else {
+                    0
+                };
+                let bytes = (content_bytes as u64)
+                    .saturating_add(tool_call_bytes as u64)
+                    .saturating_add(reasoning_bytes as u64);
                 bytes.div_ceil(4).saturating_add(MESSAGE_OVERHEAD_TOKENS)
             })
             .sum()
+    }
+
+    /// Policy-aware request estimate including the serialized tool-spec array.
+    fn estimate_request_tokens(
+        messages: &[ChatMessage],
+        tools: &[nh_tools::ToolSpec],
+        preserve_reasoning: bool,
+    ) -> u64 {
+        let tool_bytes = serde_json::to_vec(tools).map_or(0, |serialized| serialized.len()) as u64;
+        estimate_message_tokens(messages, preserve_reasoning).saturating_add(tool_bytes.div_ceil(4))
     }
 
     /// Drop the smallest earlier prefix that brings the retained history under
@@ -1358,13 +1716,30 @@ pub mod agent {
 
         let messages = start - 1;
         let tokens = estimate_tokens(&history[1..start]);
+        let retained_tokens = estimate_tokens(&history[start..]);
+        // Rebuilding a larger retained suffix would cost more than this
+        // compaction saves, so keep the provider prefix cache warm instead.
+        if tokens <= retained_tokens {
+            return None;
+        }
+        let retained_seal = PrefixSeal::new(&history[start..]);
         history.drain(1..start);
-        let original = history[1].content.take().unwrap_or_default();
-        history[1].content = Some(format!(
-            "[nosis] earlier context compacted: {messages} messages, ~{tokens} tokens elided.\n\n{original}"
-        ));
+        history.insert(
+            1,
+            plain_msg(
+                "system",
+                format!(
+                    "[nosis] earlier context compacted: {messages} messages, ~{tokens} tokens elided."
+                ),
+            ),
+        );
+        let prefix_held = retained_seal.check_at(history, 2);
+        debug_assert!(prefix_held, "compaction changed a retained real message");
 
-        Some(Compaction { messages })
+        Some(Compaction {
+            messages,
+            prefix_held,
+        })
     }
 
     fn context_percentage(input_tokens: u64, limit: u64) -> u64 {
@@ -1375,7 +1750,6 @@ pub mod agent {
         }
     }
 
-    #[cfg(debug_assertions)]
     fn message_bytes(message: &ChatMessage) -> Vec<u8> {
         serde_json::to_vec(message).expect("chat messages serialize")
     }
@@ -1400,6 +1774,86 @@ pub mod agent {
     mod tests {
         use super::*;
 
+        fn message(role: &str, content: impl Into<String>) -> ChatMessage {
+            plain_msg(role, content.into())
+        }
+
+        #[test]
+        fn compaction_keeps_retained_messages_byte_identical_and_prefix_sealed() {
+            let mut history = vec![
+                message("system", "sealed constitution"),
+                message("user", "old turn ".repeat(200)),
+                message("assistant", "old answer"),
+                message("user", "middle turn ".repeat(200)),
+                message("assistant", "middle answer"),
+                message("user", "recent a"),
+                message("assistant", "recent answer a"),
+                message("user", "recent b"),
+                message("assistant", "recent answer b"),
+            ];
+            let retained_before: Vec<Vec<u8>> = history[5..].iter().map(message_bytes).collect();
+            let seal = PrefixSeal::new(&history[..1]);
+
+            let compaction = compact_history(&mut history, 100).expect("compaction fires");
+            assert!(compaction.prefix_held);
+            assert!(
+                seal.check(&history),
+                "PrefixSeal is enforced in release too"
+            );
+            assert_eq!(history[1].role, "system");
+            assert!(history[1]
+                .content
+                .as_deref()
+                .is_some_and(|text| text.starts_with("[nosis] earlier context compacted:")));
+            assert_eq!(
+                history[2..].iter().map(message_bytes).collect::<Vec<_>>(),
+                retained_before
+            );
+
+            let mut drifted = history.clone();
+            drifted[0].content = Some("changed".into());
+            assert!(
+                !seal.check(&drifted),
+                "release builds must detect prefix drift"
+            );
+        }
+
+        #[test]
+        fn request_estimate_counts_preserved_reasoning_and_tool_specs() {
+            let messages = vec![ChatMessage {
+                reasoning_content: Some("r".repeat(40)),
+                ..message("assistant", "12345678")
+            }];
+            let tools = vec![nh_tools::ToolSpec {
+                name: "read_file".into(),
+                description: "read one file".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}}
+                }),
+            }];
+            let old_content_only = estimate_request_tokens(&messages, &[], false);
+            let honest = estimate_request_tokens(&messages, &tools, true);
+            let tool_bytes = serde_json::to_vec(&tools).unwrap().len() as u64;
+            let expected_delta = 40_u64.div_ceil(4) + tool_bytes.div_ceil(4);
+
+            assert!(honest > old_content_only);
+            assert!(honest.abs_diff(old_content_only + expected_delta) <= 1);
+        }
+
+        #[test]
+        fn effective_context_clamps_large_windows_before_compaction_threshold() {
+            let raw = 1_000_000;
+            let working = effective_context(raw);
+            assert_eq!(working, 256_000);
+            assert!(working < raw);
+            assert_eq!(effective_context(128_000), 128_000);
+
+            let observed = 200_000_f64;
+            assert!(observed >= COMPACT_AT * working as f64);
+            assert!(observed < COMPACT_AT * raw as f64);
+        }
+
         #[test]
         fn progress_line_shows_key_arg() {
             let call = ToolCallReq {
@@ -1412,7 +1866,11 @@ pub mod agent {
 
         #[test]
         fn progress_line_survives_bad_json() {
-            let call = ToolCallReq { id: "c1".into(), name: "read_file".into(), arguments: "{oops".into() };
+            let call = ToolCallReq {
+                id: "c1".into(),
+                name: "read_file".into(),
+                arguments: "{oops".into(),
+            };
             assert_eq!(progress_line(1, &call), "turn 1: read_file");
         }
     }

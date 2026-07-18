@@ -6,8 +6,9 @@
 #   wire                "openai" | "anthropic"
 #   modality            array of "text" | "image" | "video" | "audio"
 #   context / max_out   tokens; present only where known — never guessed
-#   thinking_dialect    "deepseek-nhm" | "always-thinking" | "glm-hm" | "none"
-#   preserve_reasoning  true = reasoning_content persists across turns (plan A.10.5)
+#   thinking_dialect    "deepseek-nhm" | "kimi-toggle" | "always-thinking" | "glm-hm" | "none"
+#   preserve_reasoning  true = reasoning_content always persists across turns (plan A.10.5)
+#   preserve_when_thinking true = reasoning_content persists only while thinking is active
 #   quirks              wire quirks the adapters match by exact string
 #   [routes.<id>.price] currency "CNY"|"USD" · unit "per_million_tokens" ·
 #                       cache_hit / cache_miss / output (per M tokens) ·
@@ -187,8 +188,7 @@ cache_miss = 1.90 # was 0.95 (reported)
 output = 8.00
 price_confidence = "confirmed" # 2026-07-13 platform.kimi.ai/docs/pricing/chat-k27-code.md
 
-# K2.6 mode selection (Instant/Thinking/Agent/Swarm) is model-variant, not an
-# effort dialect the M1 adapters map — dialect "none" (send no toggle).
+# K2.6 supports an explicit thinking toggle and requires reasoning replay while enabled.
 [routes."kimi-k2.6"]
 provider = "kimi"
 model_id = "kimi-k2.6"
@@ -198,8 +198,9 @@ vault_entry = "kimi"
 class = "api"
 modality = ["text", "image", "video"]
 context = 262144
-thinking_dialect = "none"
+thinking_dialect = "kimi-toggle"
 preserve_reasoning = false
+preserve_when_thinking = true
 quirks = []
 
 [routes."kimi-k2.6".price]
