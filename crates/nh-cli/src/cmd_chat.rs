@@ -13,7 +13,10 @@ use nh_core::agent::AgentLoop;
 use nh_core::receipt::ReceiptWriter;
 use nh_core::wire::{cache_hit_pct, make_client, ChatClient, ChatMessage};
 use nh_law::LoadOptions;
-use nh_routes::{ResolvedRoute, RouteClass, RouteResolver};
+use nh_routes::{
+    cost_of, money, money_with_gloss, Currency, PriceConfidence, ResolvedRoute, RouteClass,
+    RouteResolver,
+};
 use nh_tools::{builtin_tools, Access, Tool, ToolCtx};
 use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber};
 
@@ -27,6 +30,12 @@ type ConnectFn = Box<dyn Fn(&ResolvedRoute) -> anyhow::Result<(Box<dyn ChatClien
 /// One Scrubber shared by every output path; rebuilt whenever a switch adds a key.
 type SharedScrubber = Arc<RwLock<Scrubber>>;
 
+struct SessionCost {
+    currency: Currency,
+    amount: f64,
+    uncertain: bool,
+}
+
 /// Everything one chat session owns. History and usage survive route switches.
 struct ChatSession {
     resolver: RouteResolver,
@@ -37,6 +46,7 @@ struct ChatSession {
     session_in: u64,
     session_out: u64,
     session_cached: u64,
+    session_cost: Vec<SessionCost>,
     /// Every key literal this session has seen — switched-away keys stay scrubbed.
     key_literals: Vec<String>,
     /// Every catalog vault entry, refreshed into the scrubber after reconnects.
@@ -145,6 +155,7 @@ pub fn run(model: &str) -> anyhow::Result<()> {
         session_in: 0,
         session_out: 0,
         session_cached: 0,
+        session_cost: Vec::new(),
         key_literals,
         vault_entries,
         scrubber,
@@ -264,8 +275,13 @@ fn run_task(s: &mut ChatSession, task: &str, out: &mut dyn Write, err: &mut dyn 
                 s.session_in += u.prompt_tokens;
                 s.session_out += u.completion_tokens;
                 s.session_cached += u.cached_tokens.unwrap_or(0);
+                let at = (s.now)();
+                add_session_cost(s, u, at);
+                if let Some(line) = cmd_run::turn_cost_line(&s.resolver, &s.route, u, at) {
+                    let _ = writeln!(err, "{}", scrub_line(&s.scrubber, &line));
+                }
             }
-            let _ = writeln!(err, "{}", footer(s));
+            let _ = writeln!(err, "{}", scrub_line(&s.scrubber, &footer(s)));
         }
         Err(e) => print_err(s, err, &e.to_string()),
     }
@@ -326,27 +342,29 @@ fn switch_to(s: &mut ChatSession, route: ResolvedRoute, out: &mut dyn Write, err
 fn print_price(s: &ChatSession, out: &mut dyn Write) {
     let now = (s.now)();
     let Some(quote) = s.route.price_at(now) else {
-        let _ = writeln!(
-            out,
+        let line = format!(
             "no price data for {id} — add a [routes.{id}.price] table to catalog.toml",
             id = s.route.id
         );
+        let _ = writeln!(out, "{}", scrub_line(&s.scrubber, &line));
         return;
     };
-    let _ = writeln!(
-        out,
-        "{} | {} | in {:.4} hit / {:.4} miss | out {:.4} | {}/M tokens | confidence {}",
+    let line = format!(
+        "{} | {} | in {:.4} hit / {:.4} miss | out {:.4} | {}/M tokens | confidence {} | session {}",
         s.route.id,
         s.route.peak_status(now, s.local_offset),
         quote.cache_hit,
         quote.cache_miss,
         quote.output,
         quote.currency,
-        quote.confidence
+        quote.confidence,
+        session_money(s, now)
     );
+    let _ = writeln!(out, "{}", scrub_line(&s.scrubber, &line));
     if quote.stale {
         // Honest-cost rule: stale data is flagged, never silently trusted.
-        let _ = writeln!(out, "warning: price data past valid_until — verify before trusting these numbers");
+        let warning = "warning: price data past valid_until — verify before trusting these numbers";
+        let _ = writeln!(out, "{}", scrub_line(&s.scrubber, warning));
     }
 }
 
@@ -364,12 +382,14 @@ fn print_tools(s: &ChatSession, out: &mut dyn Write, err: &mut dyn Write) {
 }
 
 /// Footer: the always-on cost HUD line, e.g.
-/// `deepseek-v4-flash | peak 2x until 22:00 | session tokens 812 in / 340 out / 512 cached | cache 63%`.
+/// `deepseek-v4-flash | peak 2x until 22:00 | session ¥0.11 | tokens 812 in / 340 out / 512 cached | cache 63%`.
 fn footer(s: &ChatSession) -> String {
+    let now = (s.now)();
     let mut line = format!(
-        "{} | {} | session tokens {} in / {} out / {} cached",
+        "{} | {} | session {} | tokens {} in / {} out / {} cached",
         s.route.id,
-        s.route.peak_status((s.now)(), s.local_offset),
+        s.route.peak_status(now, s.local_offset),
+        session_money(s, now),
         s.session_in,
         s.session_out,
         s.session_cached
@@ -378,6 +398,69 @@ fn footer(s: &ChatSession) -> String {
         line.push_str(&format!(" | cache {pct:.0}%"));
     }
     line
+}
+
+fn add_session_cost(s: &mut ChatSession, usage: &nh_core::wire::Usage, at: DateTime<Utc>) {
+    let Some(quote) = s.route.price_at(at) else {
+        return;
+    };
+    let amount = cost_of(
+        &quote,
+        usage.prompt_tokens,
+        usage.cached_tokens.unwrap_or(0),
+        usage.completion_tokens,
+    );
+    let uncertain = quote.stale || quote.confidence == PriceConfidence::VerifyLive;
+    if let Some(total) = s
+        .session_cost
+        .iter_mut()
+        .find(|total| total.currency == quote.currency)
+    {
+        total.amount += amount;
+        total.uncertain |= uncertain;
+    } else {
+        s.session_cost.push(SessionCost {
+            currency: quote.currency,
+            amount,
+            uncertain,
+        });
+    }
+}
+
+fn session_money(s: &ChatSession, at: DateTime<Utc>) -> String {
+    if s.session_cost.is_empty() {
+        return s.route.price_at(at).map_or_else(
+            || "—".into(),
+            |quote| {
+                let mut display = money_with_gloss(0.0, quote.currency, s.resolver.fx(), at);
+                if quote.stale || quote.confidence == PriceConfidence::VerifyLive {
+                    display.push('*');
+                }
+                display
+            },
+        );
+    }
+    let mixed = s.session_cost.len() > 1;
+    [Currency::Cny, Currency::Usd]
+        .into_iter()
+        .filter_map(|currency| {
+            s.session_cost
+                .iter()
+                .find(|total| total.currency == currency)
+                .map(|total| {
+                    let mut display = if mixed {
+                        money(total.amount, total.currency)
+                    } else {
+                        money_with_gloss(total.amount, total.currency, s.resolver.fx(), at)
+                    };
+                    if total.uncertain {
+                        display.push('*');
+                    }
+                    display
+                })
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 /// Load MCP tools from `.nosis/mcp.toml` when it exists. Any failure — unreadable
@@ -443,6 +526,11 @@ mod tests {
     /// Self-contained catalog: a peak-priced deepseek route, kimi, two free glm
     /// routes (alphabetical tie-break), a delegate route, and an unpriced route.
     const TEST_CATALOG: &str = r#"
+        [fx]
+        usd_per_cny = 0.139
+        valid_until = "2026-07-24"
+        price_confidence = "reported"
+
         [routes.deepseek-v4-flash]
         provider = "deepseek"
         model_id = "deepseek-v4-flash"
@@ -601,6 +689,7 @@ mod tests {
             session_in: 0,
             session_out: 0,
             session_cached: 0,
+            session_cost: Vec::new(),
             scrubber: Arc::new(RwLock::new(Scrubber::new(key_literals.clone()))),
             key_literals,
             vault_entries: Vec::new(),
@@ -719,7 +808,7 @@ mod tests {
         let (out, _err) = drive(&mut s, &["/price"]);
         assert_eq!(
             out,
-            "deepseek-v4-flash | off-peak | in 0.0200 hit / 1.0000 miss | out 2.0000 | CNY/M tokens | confidence confirmed\n"
+            "deepseek-v4-flash | off-peak | in 0.0200 hit / 1.0000 miss | out 2.0000 | CNY/M tokens | confidence confirmed | session ¥0.00 (≈$0.00)\n"
         );
     }
 
@@ -732,7 +821,7 @@ mod tests {
         let (out, _err) = drive(&mut s, &["/price"]);
         assert_eq!(
             out,
-            "deepseek-v4-flash | peak 2x until 12:00 | in 0.0400 hit / 2.0000 miss | out 4.0000 | CNY/M tokens | confidence confirmed\n"
+            "deepseek-v4-flash | peak 2x until 12:00 | in 0.0400 hit / 2.0000 miss | out 4.0000 | CNY/M tokens | confidence confirmed | session ¥0.00 (≈$0.00)\n"
         );
     }
 
@@ -782,9 +871,13 @@ mod tests {
         assert!(out.contains("ok"), "answer on stdout: {out}");
         assert!(
             err.contains(
-                "deepseek-v4-flash | off-peak | session tokens 12 in / 7 out / 4 cached | cache 33%"
+                "deepseek-v4-flash | off-peak | session <¥0.0001 (≈<$0.0001) | tokens 12 in / 7 out / 4 cached | cache 33%"
             ),
             "footer on stderr: {err}"
+        );
+        assert!(
+            err.contains("cost <¥0.0001 (≈<$0.0001) — saved 15% vs no-cache"),
+            "turn cost on stderr: {err}"
         );
     }
 
@@ -795,10 +888,11 @@ mod tests {
         let (_out, err) = drive(&mut s, &["one", "/model kimi-k2.6", "two"]);
         assert!(
             err.contains(
-                "kimi-k2.6 | off-peak | session tokens 24 in / 14 out / 8 cached | cache 33%"
+                "kimi-k2.6 | off-peak | session <¥0.0001 · <$0.0001* | tokens 24 in / 14 out / 8 cached | cache 33%"
             ),
             "cumulative after switch: {err}"
         );
+        assert_eq!(s.session_cost.len(), 2, "native currencies stay separate");
     }
 
     #[test]
@@ -808,7 +902,7 @@ mod tests {
         let (_out, err) = drive(&mut s, &["hello"]);
         assert!(
             err.contains(
-                "unpriced | no price data | session tokens 12 in / 7 out / 4 cached | cache 33%"
+                "unpriced | no price data | session — | tokens 12 in / 7 out / 4 cached | cache 33%"
             ),
             "got: {err}"
         );
@@ -819,7 +913,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (s, _calls) = test_session("deepseek-v4-flash", tmp.path());
         let line = footer(&s);
-        assert!(line.contains("session tokens 0 in / 0 out / 0 cached"));
+        assert!(line.contains("session ¥0.00 (≈$0.00) | tokens 0 in / 0 out / 0 cached"));
         assert!(!line.contains("| cache"), "got: {line}");
     }
 

@@ -7,11 +7,15 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use nh_core::agent::AgentLoop;
 use nh_core::receipt::{Outcome, ReceiptWriter};
-use nh_core::wire::{cache_hit_pct, make_client, ThinkingEffort};
+use nh_core::wire::{cache_hit_pct, make_client, ThinkingEffort, Usage};
 use nh_law::{Autonomy, LoadOptions};
-use nh_routes::{RouteClass, RouteResolver, ThinkingDialect};
+use nh_routes::{
+    cost_of, money, money_with_gloss, saved_pct, PriceConfidence, ResolvedRoute, RouteClass,
+    RouteResolver, ThinkingDialect,
+};
 use nh_tools::{builtin_tools, Access, McpAuth, McpServerConfig, ToolCtx};
 use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber};
 
@@ -147,14 +151,23 @@ pub fn run(
         .map(|pct| format!(" | cache {pct:.0}%"))
         .unwrap_or_default();
     println!(
-        "turns {} | tool calls {} | tokens {} in / {} out / {} cached{}",
-        receipt.turns,
-        receipt.tool_calls,
-        usage.prompt_tokens,
-        usage.completion_tokens,
-        usage.cached_tokens.unwrap_or(0),
-        cache
+        "{}",
+        safe_line(
+            &scrubber,
+            &format!(
+                "turns {} | tool calls {} | tokens {} in / {} out / {} cached{}",
+                receipt.turns,
+                receipt.tool_calls,
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                usage.cached_tokens.unwrap_or(0),
+                cache
+            )
+        )
     );
+    if let Some(line) = turn_cost_line(&resolver, &route, &usage, Utc::now()) {
+        println!("{}", safe_line(&scrubber, &line));
+    }
     if receipt.outcome == Outcome::Timeout {
         anyhow::bail!(
             "stopped at max turns ({max_turns}) — rerun with --max-turns {}",
@@ -162,6 +175,49 @@ pub fn run(
         );
     }
     Ok(())
+}
+
+pub(crate) fn turn_cost_line(
+    resolver: &RouteResolver,
+    route: &ResolvedRoute,
+    usage: &Usage,
+    at: DateTime<Utc>,
+) -> Option<String> {
+    let quote = route.price_at(at)?;
+    let cached = usage.cached_tokens.unwrap_or(0);
+    let actual = cost_of(&quote, usage.prompt_tokens, cached, usage.completion_tokens);
+    let mut paid = money_with_gloss(actual, quote.currency, resolver.fx(), at);
+    if quote.stale || quote.confidence == PriceConfidence::VerifyLive {
+        paid.push('*');
+    }
+    let mut line = format!("cost {paid}");
+    let naive = resolver.naive_cost(
+        route,
+        usage.prompt_tokens,
+        cached,
+        usage.completion_tokens,
+        at,
+    );
+    if let Some(percent) = naive
+        .as_ref()
+        .and_then(|costs| saved_pct(actual, costs.no_cache))
+    {
+        line.push_str(&format!(" — saved {percent}% vs no-cache"));
+    }
+    if let Some(costs) = naive {
+        line.push_str(&format!(
+            "   (peak {} · no-cache {} · top-tier {})",
+            money(costs.peak, costs.currency),
+            money(costs.no_cache, costs.currency),
+            money(costs.top_tier, costs.currency)
+        ));
+    }
+    if quote.stale {
+        line.push_str(" · *price stale");
+    } else if quote.confidence == PriceConfidence::VerifyLive {
+        line.push_str(" · *price verify_live");
+    }
+    Some(line)
 }
 
 /// Walk up from `start` looking for catalog.toml; return its directory and contents.

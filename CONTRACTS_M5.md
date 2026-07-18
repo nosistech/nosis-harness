@@ -446,3 +446,22 @@ M6's privacy-router (§0 ruling 3b) — M5 wires no live `Access::Send` producer
 (mcp.rs:621 keeps its deliberate no-`ctx.guard` stance). Host comparison is **host-only** (scheme/path/
 port stripped) so DeepSeek's dual wires — `api.deepseek.com/v1` (OpenAI) and `api.deepseek.com/anthropic`
 (Anthropic, nh-core:506) — both satisfy one audience entry; pinned by a test.
+
+**A-M5-6 (2026-07-18, orchestrator Opus 4.8; owner-ratified) — Slice C approximate USD gloss + `[fx]`
+catalog data.** The open-weight routes mix currencies (DeepSeek/most = CNY; `kimi-k2.7-code` = USD,
+catalog:162). A Western user has no gut feel for `¥`, so the owner ratified adding an **approximate USD
+gloss** (`¥0.11 (≈$0.02)`) to the money surfaces. This is additive to the already-open nh-routes
+"`naive_cost` / cost helper (new)" row (§0.1) and the "Data (always allowed): catalog.toml" note; it is
+logged here for auditability because it introduces a new data block + type. **The meter-must-not-lie
+invariant governs it:** CNY stays the billed source of truth; USD is `≈`-marked, **never** exact;
+sessions **never** FX-sum across currencies (per-currency subtotals only — the gloss is display, never a
+summation basis); a stale/absent rate → the gloss is **omitted**, never guessed.
+| Crate | Seam | Ref | Tag | Change |
+|---|---|---|:--:|---|
+| `catalog.toml` | `[fx]` block | data | + | `usd_per_cny` + `valid_until` + `price_confidence` — reuses the price honesty machinery (`valid_until`/`confidence`/stale). A catalog with no `[fx]` still parses; gloss omitted. |
+| `nh-routes` | `Fx` type + `RouteResolver::fx()` + `to_usd_approx` + `money`/`money_with_gloss` | near `price_at` ~181 | + | pure, deterministic (cache-safe); `to_usd_approx` returns `Some` only for a fresh CNY→USD (never for USD-native or a stale/absent rate). |
+Ratified FEEL/format calls (not surface — recorded so the FEEL gate has a fixed target): savings
+headline baseline = **no-cache** (same model, zero cache — the honest "our caching saved you N%";
+top-tier/peak are breakdown context, never the headline); dual-currency = native primary + `≈$` gloss
+on the paid number (per-turn headline, HUD session total, `/why`), naive breakdown native-only. `/profile`
++ the profile HUD chip stay **Slice D** (they need the not-yet-built `Profiles` module) and are OUT of C.
