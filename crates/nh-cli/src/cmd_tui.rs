@@ -22,7 +22,7 @@ pub fn run(model: &str, budget: Option<u64>) -> anyhow::Result<()> {
         );
     }
     let mut mcp_warnings = Vec::new();
-    let palette_entries = load_mcp_palette(&repo_root, &mut mcp_warnings);
+    let palette_entries = load_mcp_palette(&repo_root, &law.policy, &mut mcp_warnings);
     for warning in &mcp_warnings {
         eprintln!(
             "warning: {}",
@@ -55,7 +55,11 @@ fn pre_screen_line(scrubber: &Scrubber, line: &str) -> String {
 }
 
 /// Load and discover MCP once, before nh-tui takes terminal ownership.
-fn load_mcp_palette(root: &Path, warnings: &mut Vec<String>) -> Vec<PaletteEntry> {
+fn load_mcp_palette(
+    root: &Path,
+    policy: &nh_law::Policy,
+    warnings: &mut Vec<String>,
+) -> Vec<PaletteEntry> {
     let path = root.join(".nosis").join("mcp.toml");
     if !path.is_file() {
         return Vec::new();
@@ -77,6 +81,7 @@ fn load_mcp_palette(root: &Path, warnings: &mut Vec<String>) -> Vec<PaletteEntry
     };
     match nh_tools::load_mcp_config(&text) {
         Ok(configs) => {
+            let configs = cmd_run::filter_mcp_audiences(configs, policy, warnings);
             let toolset = nh_tools::mcp_tools(&configs);
             let entries = mcp_palette_entries(&configs, &toolset);
             warnings.extend(toolset.warnings.iter().cloned());
@@ -131,8 +136,9 @@ mod tests {
         std::fs::create_dir_all(root.path().join(".nosis")).unwrap();
         std::fs::write(root.path().join(".nosis").join("mcp.toml"), "").unwrap();
         let mut warnings = Vec::new();
+        let law = nh_law::load(root.path(), &LoadOptions { cli_autonomy: None });
 
-        let entries = load_mcp_palette(root.path(), &mut warnings);
+        let entries = load_mcp_palette(root.path(), &law.policy, &mut warnings);
 
         assert!(entries.is_empty());
         assert!(warnings.is_empty());
@@ -144,8 +150,9 @@ mod tests {
         std::fs::create_dir_all(root.path().join(".nosis")).unwrap();
         std::fs::write(root.path().join(".nosis").join("mcp.toml"), "not [ valid").unwrap();
         let mut warnings = Vec::new();
+        let law = nh_law::load(root.path(), &LoadOptions { cli_autonomy: None });
 
-        let entries = load_mcp_palette(root.path(), &mut warnings);
+        let entries = load_mcp_palette(root.path(), &law.policy, &mut warnings);
 
         assert_eq!(entries.len(), 1);
         assert_eq!(warnings.len(), 1);

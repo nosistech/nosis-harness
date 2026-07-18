@@ -3,6 +3,7 @@
 
 use anyhow::{bail, Context};
 use serde_json::json;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
 
 pub mod mcp;
@@ -14,8 +15,10 @@ pub use mcp::{
 
 /// What a tool is about to do. Write paths are normalized and workdir-relative.
 pub enum Access<'a> {
+    Read(&'a str),
     Write(&'a str),
     Exec(&'a str),
+    Send(&'a str),
 }
 
 /// The guard's answer. Block carries a short user-facing reason.
@@ -53,8 +56,10 @@ impl ToolCtx {
             workdir,
             approve,
             guard: Box::new(|access| match access {
+                Access::Read(_) => Guard::Allow,
                 Access::Write(_) => Guard::Allow,
                 Access::Exec(_) => Guard::Ask,
+                Access::Send(_) => Guard::Allow,
             }),
         }
     }
@@ -83,11 +88,83 @@ pub struct EditFile;
 /// shell, captures stdout+stderr+exit code.
 pub struct ExecShell;
 
-/// Env vars that may hold harness secrets: the `NH_<ENTRY>_KEY` vault fallback
-/// shape (nh-vault). Case-insensitive - Windows env names are.
-fn is_secret_env_var(name: &str) -> bool {
+/// Maximum returned tool-result excerpt before head/tail elision.
+const MAX_TOOL_RESULT_CHARS: usize = 32_000;
+
+struct ToolResultEnvelope {
+    excerpt: String,
+    digest: String,
+    bytes: usize,
+}
+
+impl ToolResultEnvelope {
+    fn new(content: String) -> Self {
+        let bytes = content.len();
+        let mut hasher = DefaultHasher::new();
+        content.hash(&mut hasher);
+        let digest = format!("{:016x}", hasher.finish());
+        let scrubbed = nh_vault::Scrubber::new(Vec::new()).scrub(&content);
+        let chars = scrubbed.chars().count();
+        let excerpt = if chars <= MAX_TOOL_RESULT_CHARS {
+            scrubbed
+        } else {
+            let head_chars = MAX_TOOL_RESULT_CHARS / 2;
+            let tail_chars = MAX_TOOL_RESULT_CHARS - head_chars;
+            let head: String = scrubbed.chars().take(head_chars).collect();
+            let mut tail: Vec<char> = scrubbed.chars().rev().take(tail_chars).collect();
+            tail.reverse();
+            let tail: String = tail.into_iter().collect();
+            format!(
+                "{head}\n…[+{} chars elided; digest {digest}]\n{tail}",
+                chars - MAX_TOOL_RESULT_CHARS
+            )
+        };
+        Self {
+            excerpt,
+            digest,
+            bytes,
+        }
+    }
+
+    fn render(&self) -> String {
+        let _metadata = (&self.digest, self.bytes);
+        self.excerpt.clone()
+    }
+}
+
+/// Child-process environment allowlist. Names are case-insensitive because
+/// Windows environment variables are case-insensitive.
+fn is_allowed_env_var(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
-    upper.starts_with("NH_") && upper.ends_with("_KEY")
+    let base = matches!(
+        upper.as_str(),
+        "PATH"
+            | "PATHEXT"
+            | "SYSTEMROOT"
+            | "WINDIR"
+            | "COMSPEC"
+            | "TEMP"
+            | "TMP"
+            | "TZ"
+            | "LANG"
+            | "TERM"
+            | "USERPROFILE"
+            | "HOMEDRIVE"
+            | "HOMEPATH"
+            | "HOME"
+            | "APPDATA"
+            | "LOCALAPPDATA"
+            | "PROCESSOR_ARCHITECTURE"
+            | "PROCESSOR_IDENTIFIER"
+            | "NUMBER_OF_PROCESSORS"
+            | "CARGO_HOME"
+            | "RUSTUP_HOME"
+    );
+    #[cfg(not(windows))]
+    let locale = upper.starts_with("LC_");
+    #[cfg(windows)]
+    let locale = false;
+    base || locale
 }
 
 /// Pull a required string argument out of the tool-call args.
@@ -171,12 +248,23 @@ impl Tool for ReadFile {
 
     fn execute(&self, args: serde_json::Value, ctx: &ToolCtx) -> anyhow::Result<String> {
         let path = str_arg(&args, "path")?;
-        let (resolved, _) = resolve_in_workdir(&ctx.workdir, path)?;
+        let (resolved, relative) = resolve_in_workdir(&ctx.workdir, path)?;
+        match (ctx.guard)(&Access::Read(&relative)) {
+            Guard::Block(reason) => return Ok(format!("blocked by law: {reason}")),
+            Guard::Ask => {
+                let action = format!("read {relative}");
+                if !(ctx.approve)(&action) {
+                    return Ok(format!("user denied: {action}"));
+                }
+            }
+            Guard::Allow => {}
+        }
         if !resolved.is_file() {
             bail!("file not found: {path} - check the path against the working directory");
         }
-        std::fs::read_to_string(&resolved)
-            .with_context(|| format!("could not read {path} - is it UTF-8 text?"))
+        let content = std::fs::read_to_string(&resolved)
+            .with_context(|| format!("could not read {path} - is it UTF-8 text?"))?;
+        Ok(ToolResultEnvelope::new(content).render())
     }
 }
 
@@ -283,12 +371,12 @@ impl Tool for ExecShell {
             c
         };
         cmd.current_dir(&ctx.workdir);
-        // SECURITY INVARIANT: no plaintext key ever hits disk. The child must not inherit the
-        // NH_<ENTRY>_KEY vault fallback, or an approved `echo $NH_X_KEY > f`
-        // would exfiltrate the key into the workdir.
-        for (name, _) in std::env::vars_os() {
-            if is_secret_env_var(&name.to_string_lossy()) {
-                cmd.env_remove(&name);
+        // SECURITY INVARIANT: approved commands get only the minimum environment required
+        // for shells and normal build tools, never ambient credentials.
+        cmd.env_clear();
+        for (name, value) in std::env::vars_os() {
+            if is_allowed_env_var(&name.to_string_lossy()) {
+                cmd.env(&name, value);
             }
         }
         let output = cmd
@@ -299,11 +387,12 @@ impl Tool for ExecShell {
             .code()
             .map(|c| c.to_string())
             .unwrap_or_else(|| "killed by signal".into());
-        Ok(format!(
+        let content = format!(
             "exit code: {code}\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
-        ))
+        );
+        Ok(ToolResultEnvelope::new(content).render())
     }
 }
 
@@ -482,12 +571,13 @@ mod tests {
     }
 
     #[test]
-    fn secret_env_var_shape_is_detected_case_insensitively() {
-        assert!(is_secret_env_var("NH_DEEPSEEK_KEY"));
-        assert!(is_secret_env_var("nh_test_entry_key"));
-        assert!(!is_secret_env_var("PATH"));
-        assert!(!is_secret_env_var("NH_WORKDIR"));
-        assert!(!is_secret_env_var("MY_KEY"));
+    fn child_env_allowlist_is_case_insensitive_and_minimal() {
+        assert!(is_allowed_env_var("PATH"));
+        assert!(is_allowed_env_var("path"));
+        assert!(is_allowed_env_var("CARGO_HOME"));
+        assert!(!is_allowed_env_var("NH_DEEPSEEK_KEY"));
+        assert!(!is_allowed_env_var("GITHUB_TOKEN"));
+        assert!(!is_allowed_env_var("OPENAI_API_KEY"));
     }
 
     #[test]
@@ -508,6 +598,46 @@ mod tests {
             !result.contains("sk-test-0000-exec"),
             "child must not inherit NH_*_KEY: {result}"
         );
+    }
+
+    #[test]
+    fn exec_child_never_sees_ambient_github_token() {
+        const SECRET: &str = "ambient-secret-must-not-pass";
+        let previous = std::env::var_os("GITHUB_TOKEN");
+        std::env::set_var("GITHUB_TOKEN", SECRET);
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_with(dir.path(), true);
+        let command = if cfg!(windows) {
+            "echo [%GITHUB_TOKEN%]"
+        } else {
+            "echo [${GITHUB_TOKEN:-unset}]"
+        };
+        let result = ExecShell
+            .execute(json!({"command": command}), &ctx)
+            .unwrap();
+        match previous {
+            Some(value) => std::env::set_var("GITHUB_TOKEN", value),
+            None => std::env::remove_var("GITHUB_TOKEN"),
+        }
+        assert!(!result.contains(SECRET), "ambient credential leaked: {result}");
+    }
+
+    #[test]
+    fn over_cap_exec_result_is_bounded_with_digest_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_with(dir.path(), true);
+        let command = if cfg!(windows) {
+            "for /L %i in (1,1,40000) do @echo x"
+        } else {
+            "yes x | head -n 40000"
+        };
+        let raw_chars = 80_000;
+        let result = ExecShell
+            .execute(json!({"command": command}), &ctx)
+            .unwrap();
+        assert!(result.contains("chars elided; digest "), "got: {result}");
+        assert!(result.chars().count() < raw_chars);
+        assert!(result.chars().count() <= MAX_TOOL_RESULT_CHARS + 100);
     }
 
     #[test]
@@ -552,6 +682,40 @@ mod tests {
 
         assert_eq!(result, "blocked by law: protected path (.nosis/**)");
         assert_eq!(std::fs::read_to_string(protected).unwrap(), "before");
+    }
+
+    #[test]
+    fn protected_read_is_blocked_before_io_and_normal_source_is_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src").join("lib.rs"), "pub fn safe() {}").unwrap();
+        let ctx = ToolCtx::new(dir.path().to_path_buf(), Box::new(|_| true)).with_guard(
+            Box::new(|access| match access {
+                Access::Read(".env") => Guard::Block("protected read (**/.env*)".into()),
+                _ => Guard::Allow,
+            }),
+        );
+
+        let blocked = ReadFile
+            .execute(json!({"path": ".env"}), &ctx)
+            .unwrap();
+        assert_eq!(blocked, "blocked by law: protected read (**/.env*)");
+        let allowed = ReadFile
+            .execute(json!({"path": "src/lib.rs"}), &ctx)
+            .unwrap();
+        assert_eq!(allowed, "pub fn safe() {}");
+    }
+
+    #[test]
+    fn tool_result_redacts_key_shapes_before_egress() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = format!("ghp_{}", "A".repeat(36));
+        std::fs::write(dir.path().join("output.txt"), &fake).unwrap();
+        let result = ReadFile
+            .execute(json!({"path": "output.txt"}), &ctx_with(dir.path(), true))
+            .unwrap();
+        assert_eq!(result, "[REDACTED]");
+        assert!(!result.contains(&fake));
     }
 
     #[test]
