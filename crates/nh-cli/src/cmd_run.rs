@@ -10,11 +10,11 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use nh_core::agent::AgentLoop;
 use nh_core::receipt::{Outcome, ReceiptWriter};
-use nh_core::wire::{cache_hit_pct, make_client, ThinkingEffort, Usage};
+use nh_core::wire::{cache_hit_pct, make_client, resolve_effort, ThinkingEffort, Usage};
 use nh_law::{Autonomy, LoadOptions};
 use nh_routes::{
     cost_of, money, money_with_gloss, saved_pct, PriceConfidence, ResolvedRoute, RouteClass,
-    RouteResolver, ThinkingDialect,
+    RouteResolver, ThinkingDialect, ThinkingPosture,
 };
 use nh_tools::{builtin_tools, Access, McpAuth, McpServerConfig, ToolCtx};
 use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber};
@@ -48,22 +48,28 @@ pub(crate) fn autonomy_for(autonomy: Option<AutonomyArg>) -> Option<Autonomy> {
     })
 }
 
-/// Map the `--think` flag to a wire `ThinkingEffort`. When the flag is absent,
-/// default per route dialect: routes that always think (or only think high/max)
-/// run at High; effort-toggle routes stay at None — cheap until the user asks.
-pub(crate) fn effort_for(think: Option<ThinkArg>, dialect: ThinkingDialect) -> ThinkingEffort {
-    match think {
-        Some(ThinkArg::None) => ThinkingEffort::None,
-        Some(ThinkArg::Low) => ThinkingEffort::Low,
-        Some(ThinkArg::High) => ThinkingEffort::High,
-        Some(ThinkArg::Max) => ThinkingEffort::Max,
-        None => match dialect {
-            ThinkingDialect::AlwaysThinking | ThinkingDialect::GlmHm => ThinkingEffort::High,
-            ThinkingDialect::DeepseekNhm | ThinkingDialect::KimiToggle | ThinkingDialect::None => {
-                ThinkingEffort::None
-            }
-        },
-    }
+/// Translate the CLI override once, then delegate the posture × capability
+/// matrix to nh-core.
+pub(crate) fn effort_for(
+    think: Option<ThinkArg>,
+    posture: ThinkingPosture,
+    dialect: ThinkingDialect,
+) -> ThinkingEffort {
+    let explicit = think.map(|value| match value {
+        ThinkArg::None => ThinkingEffort::None,
+        ThinkArg::Low => ThinkingEffort::Low,
+        ThinkArg::High => ThinkingEffort::High,
+        ThinkArg::Max => ThinkingEffort::Max,
+    });
+    resolve_effort(explicit, posture, dialect)
+}
+
+pub(crate) fn profile_fallback_warning(requested: &str, effective: &str) -> Option<String> {
+    (requested != effective).then(|| {
+        format!(
+            "unknown profile '{requested}' — using {effective}; run `nh profile` to list choices"
+        )
+    })
 }
 
 pub fn run(
@@ -72,6 +78,7 @@ pub fn run(
     max_turns: u32,
     think: Option<ThinkArg>,
     autonomy: Option<AutonomyArg>,
+    profile: &str,
 ) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let (root, catalog) = find_catalog(&cwd)?;
@@ -87,11 +94,21 @@ pub fn run(
     }
     let resolver = RouteResolver::from_toml(&catalog)?;
     let route = resolver.resolve(model)?;
+    let (profiles, profile_warnings) = nh_routes::Profiles::load(&root);
+    for warning in &profile_warnings {
+        eprintln!("warning: {}", safe_line(&warning_scrubber, warning));
+    }
+    let execution_policy = profiles.effective(profile, &route);
+    if let Some(warning) = profile_fallback_warning(profile, &execution_policy.profile) {
+        eprintln!("warning: {}", safe_line(&warning_scrubber, &warning));
+    }
     if route.class == RouteClass::Delegate {
         anyhow::bail!("{DELEGATE_MSG}");
     }
 
-    let vault = EnvFallbackVault { inner: KeyringVault };
+    let vault = EnvFallbackVault {
+        inner: KeyringVault,
+    };
     let approved = law.policy.approved_audiences(&route.vault_entry);
     let key = nh_vault::get_scoped(
         &vault,
@@ -105,7 +122,7 @@ pub fn run(
     let session_scrubber = nh_vault::from_vault(&vault, &vault_entries);
     // Scrubbers hold every resolvable catalog credential so no output path can
     // leak one — receipts, stdout, progress, and approvals all pass one.
-    let client = make_client(&route, key);
+    let client = make_client(&execution_policy.clamp_route(&route), key);
     let approve_scrubber = session_scrubber.clone();
     let event_scrubber = session_scrubber.clone();
     let policy = law.policy.clone();
@@ -132,11 +149,14 @@ pub fn run(
         receipts,
         model_id: route.model_id.clone(),
         max_turns,
-        thinking: effort_for(think, route.thinking_dialect),
+        thinking: effort_for(think, execution_policy.posture, route.thinking_dialect),
+        profile: Some(execution_policy.profile.clone()),
         // Honest identity: name the real route + forbid claiming to be Claude/GPT.
         constitution: Some(nh_tui::identity_constitution(&law.constitution, &route)),
         context_limit: route.context,
-        on_event: Some(Box::new(move |line| eprintln!("  {}", safe_line(&event_scrubber, line)))),
+        on_event: Some(Box::new(move |line| {
+            eprintln!("  {}", safe_line(&event_scrubber, line))
+        })),
     };
 
     eprintln!("running {} (max {max_turns} turns)", route.model_id);
@@ -267,10 +287,8 @@ fn unapproved_mcp_target<'a>(
 ) -> Option<(&'a str, &'a str)> {
     match &config.auth {
         McpAuth::None => None,
-        McpAuth::ApiKey { vault_entry } => {
-            (!nh_vault::audience_allows(&config.url, approved))
-                .then_some((vault_entry.as_str(), config.url.as_str()))
-        }
+        McpAuth::ApiKey { vault_entry } => (!nh_vault::audience_allows(&config.url, approved))
+            .then_some((vault_entry.as_str(), config.url.as_str())),
         McpAuth::OAuth2 {
             token_url,
             vault_entry,
@@ -294,9 +312,7 @@ pub(crate) fn filter_mcp_audiences(
     policy: &nh_law::Policy,
     warnings: &mut Vec<String>,
 ) -> Vec<McpServerConfig> {
-    filter_mcp_audiences_with(configs, warnings, |entry| {
-        policy.approved_audiences(entry)
-    })
+    filter_mcp_audiences_with(configs, warnings, |entry| policy.approved_audiences(entry))
 }
 
 fn filter_mcp_audiences_with(
@@ -427,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn think_flag_overrides_any_dialect() {
+    fn think_flag_wins_within_route_capability() {
         let cases = [
             (ThinkArg::None, ThinkingEffort::None),
             (ThinkArg::Low, ThinkingEffort::Low),
@@ -435,8 +451,22 @@ mod tests {
             (ThinkArg::Max, ThinkingEffort::Max),
         ];
         for (arg, want) in cases {
-            assert_eq!(effort_for(Some(arg), ThinkingDialect::DeepseekNhm), want);
-            assert_eq!(effort_for(Some(arg), ThinkingDialect::AlwaysThinking), want);
+            assert_eq!(
+                effort_for(
+                    Some(arg),
+                    ThinkingPosture::Default,
+                    ThinkingDialect::DeepseekNhm,
+                ),
+                want
+            );
+            assert_eq!(
+                effort_for(
+                    Some(arg),
+                    ThinkingPosture::Default,
+                    ThinkingDialect::AlwaysThinking,
+                ),
+                ThinkingEffort::High
+            );
         }
     }
 
@@ -444,10 +474,26 @@ mod tests {
     fn think_default_follows_route_dialect() {
         // Always-thinking and high/max-only routes run at High; effort-toggle
         // routes stay at None until the user asks (cheap by default).
-        assert_eq!(effort_for(None, ThinkingDialect::AlwaysThinking), ThinkingEffort::High);
-        assert_eq!(effort_for(None, ThinkingDialect::GlmHm), ThinkingEffort::High);
-        assert_eq!(effort_for(None, ThinkingDialect::DeepseekNhm), ThinkingEffort::None);
-        assert_eq!(effort_for(None, ThinkingDialect::None), ThinkingEffort::None);
+        assert_eq!(
+            effort_for(
+                None,
+                ThinkingPosture::Default,
+                ThinkingDialect::AlwaysThinking,
+            ),
+            ThinkingEffort::High
+        );
+        assert_eq!(
+            effort_for(None, ThinkingPosture::Default, ThinkingDialect::GlmHm),
+            ThinkingEffort::High
+        );
+        assert_eq!(
+            effort_for(None, ThinkingPosture::Default, ThinkingDialect::DeepseekNhm,),
+            ThinkingEffort::None
+        );
+        assert_eq!(
+            effort_for(None, ThinkingPosture::Default, ThinkingDialect::None),
+            ThinkingEffort::None
+        );
     }
 
     #[test]

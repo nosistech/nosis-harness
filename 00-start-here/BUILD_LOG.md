@@ -2,6 +2,46 @@
 
 Record every meaningful session here.
 
+## 2026-07-18: M5 Slice D — LEVER (E4 implementation)
+
+Builder:
+
+- Codex (GPT-5.6 Sol xhigh) — Slice D executor from the locked seam-by-seam brief.
+
+What changed:
+
+- Added embedded, user, and repository execution profiles with deterministic
+  tighten-only repository layering. Profiles clamp only thinking posture and
+  output cap on the already-selected route.
+- Added the route-legal posture/effort matrix, receipt profile field, and
+  profile-aware client construction on run, chat, route-switch, reconnect, and
+  TUI worker paths.
+- Added `--profile` to run/chat/TUI, the read-only `nh profile` listing,
+  `/profile` live switching, and the HUD profile chip.
+- Refined the `nh profile` and TUI `/profile` displays to report the route-resolved
+  effective thinking effort (`none` / `low` / `high` / `max`) instead of the
+  abstract profile posture; added the shared additive `nh-core::wire::effort_label`.
+- Applied the A-M5-7 compile glue to exhaustive `AgentLoop` and `Receipt`
+  literals, including the three authorized frozen nh-fleet additions.
+
+Tests/checks:
+
+- Scoped `cargo fmt -p` was run for nh-routes, nh-core, nh-cli, nh-tui, and
+  nh-fleet; pre-existing formatter-only drift outside the slice was removed.
+- `cargo test --workspace --release`: **357 passed / 0 failed / 1 ignored**
+  after the display refinement.
+- `cargo clippy --workspace --all-targets --release -- -D warnings`: clean
+  after the display refinement.
+- Keyless `nh profile` smoke on a toggle-capable route printed effective
+  thinking efforts `none` / `none` / `high` for the three bundled profiles.
+- `cargo test --workspace`: **357 passed / 0 failed / 1 ignored**.
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+
+Next step:
+
+- Orchestrator adversarial review and owner FEEL approval of `nh profile`, the
+  `/profile` confirmation, and the HUD chip before the Slice D commit.
+
 ## 2026-07-18: M5 Slice B — FLOOR (E2 implementation)
 
 Builder:

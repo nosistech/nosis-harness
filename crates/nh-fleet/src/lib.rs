@@ -1237,6 +1237,7 @@ fn run_one_task(
         thinking: job
             .effort
             .unwrap_or_else(|| effort_for(route.thinking_dialect)),
+        profile: None,
         constitution: Some(runtime.law.constitution.clone()),
         context_limit: route.context,
         on_event: Some(Box::new(move |line| {
