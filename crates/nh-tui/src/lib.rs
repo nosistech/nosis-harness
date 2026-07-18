@@ -26,7 +26,10 @@ use nh_core::agent::AgentLoop;
 use nh_core::receipt::{FailureClass, Outcome, Receipt, ReceiptWriter};
 use nh_core::wire::{cache_hit_pct, make_client, ChatClient, ChatMessage, ThinkingEffort, Usage};
 use nh_law::{Autonomy, Law, PolicyView, Verdict};
-use nh_routes::{ResolvedRoute, RouteClass, RouteResolver, ThinkingDialect};
+use nh_routes::{
+    cost_of, money, money_with_gloss, saved_pct, Currency, PriceConfidence, ResolvedRoute,
+    RouteClass, RouteResolver, ThinkingDialect,
+};
 use nh_tools::{
     builtin_tools, Access, Guard, McpAuth, McpServerConfig, McpToolset, McpTrust, ToolCtx,
 };
@@ -49,6 +52,9 @@ const BUDGET_REASON: &str = "budget reached";
 const MAX_NOTIFY_CHARS: usize = 160;
 const TELEGRAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const TELEGRAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const APPROVAL_LEGEND: &str = "[y] yes  [a] always  [n] no  Esc interrupt";
+const TASKBAR_WAITING: &[u8] = b"\x1b]9;4;4;0\x07";
+const TASKBAR_CLEAR: &[u8] = b"\x1b]9;4;0;0\x07";
 
 /// The single status shown by the semáforo.
 #[derive(Debug, Clone, PartialEq)]
@@ -197,6 +203,7 @@ enum PaletteAction {
     Quit,
     TrustDial,
     Timeline,
+    Why,
     Palette,
     Prefill(&'static str),
     Describe,
@@ -263,9 +270,17 @@ struct TranscriptLine {
     kind: TranscriptKind,
 }
 
+#[derive(Debug, Clone)]
+struct SessionCost {
+    currency: Currency,
+    amount: f64,
+    uncertain: bool,
+}
+
 /// Unit-testable state for the renderer.
 pub struct App {
     status: Status,
+    working_since: Option<DateTime<Utc>>,
     resolver: RouteResolver,
     route: ResolvedRoute,
     effort: ThinkingEffort,
@@ -283,6 +298,8 @@ pub struct App {
     overlay: Overlay,
     timeline: Vec<TimelineEntry>,
     current_task_compacted: bool,
+    session_cost: Vec<SessionCost>,
+    session_allow: Vec<String>,
 }
 
 impl App {
@@ -302,6 +319,7 @@ impl App {
             } else {
                 Status::Idle
             },
+            working_since: None,
             effort: effort_for(route.thinking_dialect),
             resolver,
             route,
@@ -319,6 +337,8 @@ impl App {
             overlay: Overlay::None,
             timeline: Vec::new(),
             current_task_compacted: false,
+            session_cost: Vec::new(),
+            session_allow: Vec::new(),
         }
     }
 
@@ -338,6 +358,25 @@ impl App {
         }
         if !saw_line {
             self.push_line(prefix, kind);
+        }
+    }
+
+    fn push_approval_line(&mut self, text: &str) {
+        self.transcript.push(TranscriptLine {
+            text: scrub_full_line(&self.scrubber, text),
+            kind: TranscriptKind::Approval,
+        });
+        self.scroll_back = 0;
+    }
+
+    fn set_status(&mut self, status: Status, now: DateTime<Utc>) {
+        let entering_work =
+            matches!(status, Status::Working) && !matches!(self.status, Status::Working);
+        self.status = status;
+        if entering_work {
+            self.working_since = Some(now);
+        } else if !matches!(self.status, Status::Working) {
+            self.working_since = None;
         }
     }
 
@@ -362,7 +401,7 @@ impl App {
         self.input.clear();
         self.current_task_compacted = false;
         self.push_line(&task, TranscriptKind::Task);
-        self.status = Status::Working;
+        self.set_status(Status::Working, Utc::now());
         Some(task)
     }
 
@@ -384,25 +423,91 @@ impl App {
     }
 
     fn answer_approval(&mut self, approved: bool) {
+        self.answer_approval_with_rule(approved, false);
+    }
+
+    fn answer_approval_with_rule(&mut self, approved: bool, always: bool) {
         if let Some(request) = self.pending_approval.take() {
+            if approved && always && !self.session_allow.contains(&request.prompt) {
+                self.session_allow.push(request.prompt.clone());
+            }
             let _ = request.reply.send(approved);
             self.push_line(
-                if approved {
+                if approved && always {
+                    "approval: yes, always this session"
+                } else if approved {
                     "approval: yes"
                 } else {
                     "approval: no"
                 },
                 TranscriptKind::Progress,
             );
-            self.status = Status::Working;
+            self.set_status(Status::Working, Utc::now());
         }
+    }
+
+    fn add_session_cost(&mut self, currency: Currency, amount: f64, uncertain: bool) {
+        if let Some(total) = self
+            .session_cost
+            .iter_mut()
+            .find(|total| total.currency == currency)
+        {
+            total.amount += amount;
+            total.uncertain |= uncertain;
+        } else {
+            self.session_cost.push(SessionCost {
+                currency,
+                amount,
+                uncertain,
+            });
+        }
+    }
+
+    fn session_money(&self, now: DateTime<Utc>) -> String {
+        if self.session_cost.is_empty() {
+            return self.route.price_at(now).map_or_else(
+                || "-".into(),
+                |quote| {
+                    let mut display =
+                        money_with_gloss(0.0, quote.currency, self.resolver.fx(), now);
+                    if quote.stale || quote.confidence == PriceConfidence::VerifyLive {
+                        display.push('*');
+                    }
+                    display
+                },
+            );
+        }
+
+        let mixed = self.session_cost.len() > 1;
+        [Currency::Cny, Currency::Usd]
+            .into_iter()
+            .filter_map(|currency| {
+                self.session_cost
+                    .iter()
+                    .find(|total| total.currency == currency)
+                    .map(|total| {
+                        let mut display = if mixed {
+                            money(total.amount, total.currency)
+                        } else {
+                            money_with_gloss(total.amount, total.currency, self.resolver.fx(), now)
+                        };
+                        if total.uncertain {
+                            display.push('*');
+                        }
+                        display
+                    })
+            })
+            .collect::<Vec<_>>()
+            .join(" · ")
     }
 
     fn hud_line(&self, now: DateTime<Utc>) -> String {
         let cached = self.usage.cached_tokens.unwrap_or(0);
         let mut line = format!(
-            "in {} · out {} · cached {}",
-            self.usage.prompt_tokens, self.usage.completion_tokens, cached
+            "session {} · in {} · out {}",
+            self.session_money(now),
+            self.usage.prompt_tokens,
+            self.usage.completion_tokens
         );
         if let Some(pct) = cache_hit_pct(self.usage.prompt_tokens, cached) {
             line.push_str(&format!(" · cache {pct:.0}%"));
@@ -423,6 +528,13 @@ impl App {
                 " · {} {pct}% {used}/{limit}",
                 budget_bar(used, limit)
             ));
+        }
+        if let Some(quote) = self.route.price_at(now) {
+            if quote.stale {
+                line.push_str(" · *price stale");
+            } else if quote.confidence == PriceConfidence::VerifyLive {
+                line.push_str(" · *price verify_live");
+            }
         }
         safe_line(&self.scrubber, &line)
     }
@@ -522,6 +634,11 @@ fn builtin_palette_entries() -> Vec<PaletteEntry> {
             "/timeline",
             "view session receipts and answers",
             PaletteAction::Timeline,
+        ),
+        (
+            "/why",
+            "explain the chosen route and the cheaper ones it beat",
+            PaletteAction::Why,
         ),
         (
             "/model <id>",
@@ -675,18 +792,33 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
             app.push_line(&line, TranscriptKind::Progress);
         }
         AgentEvent::Approval(request) => {
-            let line = format!("approve? {}  [y/N]", request.prompt);
-            app.push_line(&line, TranscriptKind::Approval);
-            app.pending_approval = Some(request);
-            app.status = Status::Waiting;
+            if app.session_allow.contains(&request.prompt) {
+                let _ = request.reply.send(true);
+                app.push_line(
+                    &format!("auto-approved (session rule): {}", request.prompt),
+                    TranscriptKind::Progress,
+                );
+                app.set_status(Status::Working, Utc::now());
+            } else {
+                let line = format!("approve: {}   {APPROVAL_LEGEND}", request.prompt);
+                app.push_approval_line(&line);
+                app.pending_approval = Some(request);
+                app.set_status(Status::Waiting, Utc::now());
+            }
         }
         AgentEvent::Usage(usage) => {
             app.usage = usage;
             if app.budget_reached() {
-                app.status = Status::Blocked(BUDGET_REASON.into());
+                app.set_status(Status::Blocked(BUDGET_REASON.into()), Utc::now());
             }
         }
         AgentEvent::TaskReceipt(summary) => {
+            if let (Some(usage), Ok(at)) = (
+                summary.receipt.usage.as_ref(),
+                DateTime::parse_from_rfc3339(&summary.receipt.ts_utc),
+            ) {
+                record_turn_cost(app, usage, at.with_timezone(&Utc));
+            }
             let turn = app.timeline.len().saturating_add(1);
             let compacted = std::mem::take(&mut app.current_task_compacted);
             app.timeline.push(TimelineEntry::from_receipt(
@@ -698,11 +830,12 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
         }
         AgentEvent::Answer(answer) => {
             app.push_text("", &answer, TranscriptKind::Answer);
-            app.status = if app.budget_reached() {
+            let status = if app.budget_reached() {
                 Status::Blocked(BUDGET_REASON.into())
             } else {
                 Status::Idle
             };
+            app.set_status(status, Utc::now());
         }
         AgentEvent::Failed(reason) => {
             let status_reason = safe_line(&app.scrubber, &reason);
@@ -716,10 +849,72 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
                 &format!("! {what} - retry the task or type /help"),
                 TranscriptKind::Error,
             );
-            app.status = Status::Blocked(status_reason);
+            app.set_status(Status::Blocked(status_reason), Utc::now());
         }
     }
     &app.status
+}
+
+fn record_turn_cost(app: &mut App, usage: &Usage, at: DateTime<Utc>) {
+    let Some(quote) = app.route.price_at(at) else {
+        return;
+    };
+    let cached = usage.cached_tokens.unwrap_or(0);
+    let actual = cost_of(&quote, usage.prompt_tokens, cached, usage.completion_tokens);
+    let uncertain = quote.stale || quote.confidence == PriceConfidence::VerifyLive;
+    app.add_session_cost(quote.currency, actual, uncertain);
+    for line in savings_lines(&app.resolver, &app.route, usage, at) {
+        app.push_line(&line, TranscriptKind::Progress);
+    }
+}
+
+fn savings_lines(
+    resolver: &RouteResolver,
+    route: &ResolvedRoute,
+    usage: &Usage,
+    at: DateTime<Utc>,
+) -> Vec<String> {
+    let Some(quote) = route.price_at(at) else {
+        return Vec::new();
+    };
+    let cached = usage.cached_tokens.unwrap_or(0);
+    let actual = cost_of(&quote, usage.prompt_tokens, cached, usage.completion_tokens);
+    let mut paid = money_with_gloss(actual, quote.currency, resolver.fx(), at);
+    let uncertain = quote.stale || quote.confidence == PriceConfidence::VerifyLive;
+    if uncertain {
+        paid.push('*');
+    }
+    let mut headline = format!("cost {paid}");
+    let naive = resolver.naive_cost(
+        route,
+        usage.prompt_tokens,
+        cached,
+        usage.completion_tokens,
+        at,
+    );
+    if let Some(percent) = naive
+        .as_ref()
+        .and_then(|costs| saved_pct(actual, costs.no_cache))
+    {
+        headline.push_str(&format!(" - saved {percent}% vs no-cache"));
+    }
+    let mut lines = vec![headline];
+    if let Some(costs) = naive {
+        lines.push(format!(
+            "naive: peak {} · no-cache {} · top-tier {}",
+            money(costs.peak, costs.currency),
+            money(costs.no_cache, costs.currency),
+            money(costs.top_tier, costs.currency)
+        ));
+    }
+    if uncertain {
+        lines.push(if quote.stale {
+            "*price stale".into()
+        } else {
+            "*price verify_live".into()
+        });
+    }
+    lines
 }
 
 /// Build the short, scrubbed Telegram body for a state that needs attention.
@@ -994,7 +1189,7 @@ fn worker_loop(
             return false;
         };
         let request = ApprovalRequest {
-            prompt: safe_line(&approval_scrubber, prompt),
+            prompt: scrub_full_line(&approval_scrubber, prompt),
             reply,
         };
         if approval_events.send(AgentEvent::Approval(request)).is_err() {
@@ -1239,6 +1434,8 @@ fn ui_loop(
                     let ring = matches!(agent_event, AgentEvent::Approval(_))
                         && !matches!(app.status, Status::Waiting);
                     apply_event(app, agent_event);
+                    emit_taskbar_transition(terminal.backend_mut(), &previous, &app.status)
+                        .context("could not update taskbar status")?;
                     if ring {
                         ring_bell();
                     }
@@ -1261,7 +1458,11 @@ fn ui_loop(
             continue;
         }
         let input = event::read().context("could not read terminal input")?;
-        if handle_input_event(app, worker, input) {
+        let previous = app.status.clone();
+        let should_quit = handle_input_event(app, worker, input);
+        emit_taskbar_transition(terminal.backend_mut(), &previous, &app.status)
+            .context("could not update taskbar status")?;
+        if should_quit {
             worker.stop();
             return Ok(());
         }
@@ -1357,7 +1558,12 @@ fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
         return reduce_overlay_key(app, key);
     }
     if matches!(app.status, Status::Waiting) {
-        app.answer_approval(matches!(key.code, KeyCode::Char('y' | 'Y')));
+        match key.code {
+            KeyCode::Char('y' | 'Y') => app.answer_approval(true),
+            KeyCode::Char('a' | 'A') => app.answer_approval_with_rule(true, true),
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => app.answer_approval(false),
+            _ => {}
+        }
         return UiAction::None;
     }
     if matches!(app.status, Status::Working) {
@@ -1580,34 +1786,127 @@ fn execute_command(app: &mut App) -> UiAction {
             };
             UiAction::None
         }
+        ("why", None) => explain_why(app),
+        ("why", Some(_)) => command_error(app, "/why takes no arguments", "run /why by itself"),
         ("model", Some(id)) => resolved_route_action(app, app.resolver.resolve(id)),
-        ("model", None) => command_error(app, "usage: /model <id>"),
+        ("model", None) => command_error(app, "model id is required", "use /model <id>"),
         ("provider", Some(provider)) => {
             resolved_route_action(app, app.resolver.provider_default(provider))
         }
-        ("provider", None) => command_error(app, "usage: /provider <name>"),
+        ("provider", None) => {
+            command_error(app, "provider name is required", "use /provider <name>")
+        }
         ("effort", Some(value)) => match parse_effort(value) {
             Some(effort) => UiAction::SetEffort(effort),
-            None => command_error(app, "usage: /effort <none|low|high|max>"),
+            None => command_error(
+                app,
+                "unknown reasoning effort",
+                "use /effort <none|low|high|max>",
+            ),
         },
-        ("effort", None) => command_error(app, "usage: /effort <none|low|high|max>"),
+        ("effort", None) => command_error(
+            app,
+            "reasoning effort is required",
+            "use /effort <none|low|high|max>",
+        ),
         ("quit", _) => UiAction::Quit,
-        _ => command_error(app, "unknown command - type / to see all"),
+        _ => command_error(app, "unknown command", "type / to see all"),
     }
 }
 
 fn resolved_route_action(app: &mut App, resolved: anyhow::Result<ResolvedRoute>) -> UiAction {
     match resolved {
-        Ok(route) if route.class == RouteClass::Delegate => {
-            command_error(app, "delegate routes arrive in M4 - pick an api route")
-        }
+        Ok(route) if route.class == RouteClass::Delegate => command_error(
+            app,
+            "delegate routes are not available here",
+            "pick an api route with /model",
+        ),
         Ok(route) => UiAction::SwitchRoute(route.id),
-        Err(error) => command_error(app, &error.to_string()),
+        Err(error) => command_error(app, &error.to_string(), "run /model to list routes"),
     }
 }
 
-fn command_error(app: &mut App, message: &str) -> UiAction {
-    app.push_line(message, TranscriptKind::Error);
+fn teaching_error(cause: &str, next: &str) -> String {
+    format!("{cause} - {next}")
+}
+
+fn command_error(app: &mut App, cause: &str, next: &str) -> UiAction {
+    app.push_line(&teaching_error(cause, next), TranscriptKind::Error);
+    UiAction::None
+}
+
+fn explain_why(app: &mut App) -> UiAction {
+    let prompt_est = app
+        .timeline
+        .last()
+        .and_then(|entry| entry.usage.as_ref())
+        .map_or(0, |usage| usage.prompt_tokens);
+    let cached_est = app
+        .timeline
+        .last()
+        .and_then(|entry| entry.usage.as_ref())
+        .and_then(|usage| usage.cached_tokens)
+        .unwrap_or(0)
+        .min(prompt_est);
+    let output_est = 1_024;
+    let available = app.resolver.available();
+    let allowed: Vec<&str> = available
+        .iter()
+        .filter(|id| {
+            app.resolver
+                .resolve(id)
+                .is_ok_and(|route| route.class == RouteClass::Api)
+        })
+        .map(String::as_str)
+        .collect();
+    let at = Utc::now();
+    let resolved = app
+        .resolver
+        .resolve_capable(prompt_est, output_est, &allowed, at);
+    let (route, trace) = match resolved {
+        Ok(result) => result,
+        Err(error) => {
+            return command_error(
+                app,
+                &error.to_string(),
+                "add a priced api route with enough context",
+            )
+        }
+    };
+
+    app.push_line(
+        &format!(
+            "route: {} (cheapest capable at ~{} tokens, est)",
+            route.id,
+            prompt_est.saturating_add(output_est)
+        ),
+        TranscriptKind::Progress,
+    );
+    if let Some(quote) = route.price_at(at) {
+        let estimate = cost_of(&quote, prompt_est, cached_est, output_est);
+        let mut line = format!(
+            "  {} this turn (est)",
+            money_with_gloss(estimate, quote.currency, app.resolver.fx(), at)
+        );
+        if quote.stale {
+            line.push_str(" · *price stale");
+        } else if quote.confidence == PriceConfidence::VerifyLive {
+            line.push_str(" · *price verify_live");
+        }
+        app.push_line(&line, TranscriptKind::Progress);
+    }
+    for line in trace.lines() {
+        app.push_line(&line, TranscriptKind::Progress);
+    }
+    if app.route.id != route.id {
+        app.push_line(
+            &format!(
+                "current route {} was selected explicitly; cheapest capable is {}",
+                app.route.id, route.id
+            ),
+            TranscriptKind::Progress,
+        );
+    }
     UiAction::None
 }
 
@@ -1699,6 +1998,7 @@ fn activate_palette_entry(app: &mut App, entry: PaletteEntry) -> UiAction {
             };
             UiAction::None
         }
+        PaletteAction::Why => explain_why(app),
         PaletteAction::Palette => {
             app.overlay = Overlay::Palette {
                 filter: String::new(),
@@ -1746,7 +2046,7 @@ fn render(frame: &mut Frame<'_>, app: &App) {
 }
 
 fn main_block(app: &App) -> Block<'static> {
-    let (status, status_style) = status_chip(&app.status);
+    let (status, status_style) = status_chip(&app.status, app.working_since, Utc::now());
     let left_title = Line::from(vec![
         Span::styled(
             safe_line(&app.scrubber, " nosis "),
@@ -2299,7 +2599,7 @@ fn chat_lines(app: &App) -> Vec<Line<'static>> {
                     .add_modifier(Modifier::DIM),
             ))),
             TranscriptKind::Approval => rendered.push(Line::from(Span::styled(
-                safe_line(&app.scrubber, &format!(" {} ", item.text)),
+                scrub_full_line(&app.scrubber, &format!(" {} ", item.text)),
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD | Modifier::REVERSED),
@@ -2323,7 +2623,11 @@ fn wrapped_rows(lines: &[Line<'_>], width: u16) -> u16 {
     })
 }
 
-fn status_chip(status: &Status) -> (String, Style) {
+fn status_chip(
+    status: &Status,
+    working_since: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> (String, Style) {
     match status {
         Status::Idle => (
             "○ IDLE".into(),
@@ -2332,7 +2636,13 @@ fn status_chip(status: &Status) -> (String, Style) {
                 .add_modifier(Modifier::DIM),
         ),
         Status::Working => (
-            "● WORKING".into(),
+            working_since.map_or_else(
+                || "● WORKING".into(),
+                |since| {
+                    let elapsed = now.signed_duration_since(since).num_seconds().max(0);
+                    format!("● WORKING · {elapsed}s")
+                },
+            ),
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
@@ -2375,10 +2685,42 @@ fn safe_line(scrubber: &SharedScrubber, text: &str) -> String {
     }
 }
 
+fn scrub_full_line(scrubber: &SharedScrubber, text: &str) -> String {
+    let scrubbed = match scrubber.read() {
+        Ok(guard) => guard.scrub(text),
+        Err(poisoned) => poisoned.into_inner().scrub(text),
+    };
+    let mut escaped = String::with_capacity(scrubbed.len());
+    for character in scrubbed.chars() {
+        if character.is_control() {
+            escaped.extend(character.escape_debug());
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
+}
+
 fn ring_bell() {
     let mut stdout = io::stdout();
     let _ = stdout.write_all(b"\x07");
     let _ = stdout.flush();
+}
+
+fn emit_taskbar_transition(
+    writer: &mut impl Write,
+    previous: &Status,
+    current: &Status,
+) -> io::Result<()> {
+    if matches!(current, Status::Waiting) && !matches!(previous, Status::Waiting) {
+        writer.write_all(TASKBAR_WAITING)?;
+        writer.flush()
+    } else if matches!(previous, Status::Waiting) && !matches!(current, Status::Waiting) {
+        writer.write_all(TASKBAR_CLEAR)?;
+        writer.flush()
+    } else {
+        Ok(())
+    }
 }
 
 struct TerminalGuard {
@@ -2446,6 +2788,7 @@ fn write_setup_commands(writer: &mut impl Write) -> io::Result<()> {
 fn restore_terminal() {
     let _ = disable_raw_mode();
     let mut stdout = io::stdout();
+    let _ = stdout.write_all(TASKBAR_CLEAR);
     let _ = write_restore_commands(&mut stdout);
     let _ = stdout.flush();
 }
@@ -2543,6 +2886,66 @@ mod tests {
         context = 2000
     "#;
 
+    const METER_CATALOG: &str = r#"
+        [fx]
+        usd_per_cny = 0.139
+        valid_until = "2026-07-24"
+        price_confidence = "reported"
+
+        [routes.meter-route]
+        provider = "test"
+        model_id = "meter-route"
+        base_url = "https://example.invalid"
+        wire = "openai"
+        vault_entry = "test"
+        class = "api"
+        context = 1000000
+        [routes.meter-route.price]
+        currency = "CNY"
+        unit = "per_million_tokens"
+        cache_hit = 0.02
+        cache_miss = 1.0
+        output = 2.0
+        price_confidence = "confirmed"
+        valid_until = "2026-07-24"
+        [routes.meter-route.price.peak]
+        multiplier = 2.0
+        timezone = "Asia/Shanghai"
+        windows = ["09:00-12:00"]
+
+        [routes.cny-top]
+        provider = "test"
+        model_id = "cny-top"
+        base_url = "https://example.invalid"
+        wire = "openai"
+        vault_entry = "test"
+        class = "api"
+        context = 1000000
+        [routes.cny-top.price]
+        currency = "CNY"
+        unit = "per_million_tokens"
+        cache_hit = 0.1
+        cache_miss = 4.0
+        output = 8.0
+        price_confidence = "confirmed"
+
+        [routes.usd-top]
+        provider = "test"
+        model_id = "usd-top"
+        base_url = "https://example.invalid"
+        wire = "openai"
+        vault_entry = "test"
+        class = "api"
+        context = 1000000
+        [routes.usd-top.price]
+        currency = "USD"
+        unit = "per_million_tokens"
+        cache_hit = 99.0
+        cache_miss = 99.0
+        output = 99.0
+        price_confidence = "confirmed"
+    "#;
+
     fn test_resolver() -> RouteResolver {
         RouteResolver::from_toml(TEST_CATALOG).expect("test catalog parses")
     }
@@ -2566,6 +2969,31 @@ mod tests {
             },
             Vec::new(),
         )
+    }
+
+    fn meter_app() -> App {
+        let resolver = RouteResolver::from_toml(METER_CATALOG).unwrap();
+        let route = resolver.resolve("meter-route").unwrap();
+        App::new(
+            resolver,
+            route,
+            None,
+            Arc::new(RwLock::new(Scrubber::new(Vec::new()))),
+            PolicyView {
+                autonomy: Autonomy::Ask,
+                auto_paths: Vec::new(),
+                ask_paths: Vec::new(),
+                block_paths: Vec::new(),
+                block_commands: Vec::new(),
+            },
+            Vec::new(),
+        )
+    }
+
+    fn fixed_at() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-07-18T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
     }
 
     fn render_buffer(app: &App, width: u16, height: u16) -> ratatui::buffer::Buffer {
@@ -2893,6 +3321,68 @@ mod tests {
     }
 
     #[test]
+    fn approval_reducer_accepts_only_explicit_choices() {
+        for (key, expected) in [
+            (KeyCode::Char('y'), true),
+            (KeyCode::Char('Y'), true),
+            (KeyCode::Char('n'), false),
+            (KeyCode::Char('N'), false),
+            (KeyCode::Esc, false),
+        ] {
+            let mut app = test_app(None);
+            app.status = Status::Working;
+            let (event, answer) = approval("cargo test --workspace");
+            apply_event(&mut app, event);
+            assert_eq!(reduce_key(&mut app, code_key(key)), UiAction::None);
+            assert_eq!(answer.recv().unwrap(), expected);
+            assert!(app.pending_approval.is_none());
+            assert_eq!(app.status, Status::Working);
+        }
+
+        let mut app = test_app(None);
+        app.status = Status::Working;
+        let (event, answer) = approval("cargo test --workspace");
+        apply_event(&mut app, event);
+        assert_eq!(
+            reduce_key(&mut app, code_key(KeyCode::Char('x'))),
+            UiAction::None
+        );
+        assert_eq!(answer.try_recv(), Err(TryRecvError::Empty));
+        assert!(app.pending_approval.is_some());
+        assert_eq!(app.status, Status::Waiting);
+    }
+
+    #[test]
+    fn approval_always_records_and_auto_approves_identical_action() {
+        let mut uppercase = test_app(None);
+        uppercase.status = Status::Working;
+        let (event, answer) = approval("cargo test");
+        apply_event(&mut uppercase, event);
+        reduce_key(&mut uppercase, char_key('A'));
+        assert!(answer.recv().unwrap());
+        assert_eq!(uppercase.session_allow, vec!["cargo test"]);
+
+        let mut app = test_app(None);
+        app.status = Status::Working;
+        let action = "cargo test --workspace";
+        let (first, first_answer) = approval(action);
+        apply_event(&mut app, first);
+        reduce_key(&mut app, char_key('a'));
+        assert!(first_answer.recv().unwrap());
+        assert_eq!(app.session_allow, vec![action]);
+
+        let (second, second_answer) = approval(action);
+        apply_event(&mut app, second);
+        assert!(second_answer.recv().unwrap());
+        assert!(app.pending_approval.is_none());
+        assert_eq!(app.status, Status::Working);
+        assert!(app
+            .transcript
+            .iter()
+            .any(|line| line.text.contains("auto-approved (session rule)")));
+    }
+
+    #[test]
     fn approval_row_names_the_command_and_is_amber_reversed() {
         let mut app = test_app(None);
         app.status = Status::Working;
@@ -2901,14 +3391,30 @@ mod tests {
 
         let buffer = render_buffer(&app, 100, 20);
         let text = buffer_text(&buffer);
-        let (x, y) = find_ascii_text(&buffer, "approve?");
+        let (x, y) = find_ascii_text(&buffer, "approve:");
         let cell = &buffer[(x, y)];
         assert!(
-            text.contains("approve? cargo test --workspace  [y/N]"),
+            text.contains(
+                "approve: cargo test --workspace   [y] yes  [a] always  [n] no  Esc interrupt"
+            ),
             "got: {text}"
         );
         assert_eq!(cell.fg, Color::Yellow);
         assert!(cell.modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn approval_row_keeps_the_full_action_and_visible_legend() {
+        let mut app = test_app(None);
+        app.status = Status::Working;
+        let action = format!("exec {}", "x".repeat(700));
+        let (event, _answer) = approval(&action);
+        apply_event(&mut app, event);
+
+        let line = app.transcript.last().unwrap();
+        assert!(line.text.contains(&action));
+        assert!(line.text.contains(APPROVAL_LEGEND));
+        assert!(!line.text.contains("more chars"));
     }
 
     #[test]
@@ -3142,7 +3648,7 @@ mod tests {
         assert_eq!(app.transcript.len(), before + 1);
         assert_eq!(
             app.transcript.last().map(|line| line.text.as_str()),
-            Some("usage: /effort <none|low|high|max>")
+            Some("unknown reasoning effort - use /effort <none|low|high|max>")
         );
         assert_eq!(app.effort, ThinkingEffort::Max);
     }
@@ -3404,7 +3910,7 @@ mod tests {
     fn cost_hud_omits_cache_before_usage_and_shows_it_after() {
         let mut app = test_app(None);
         let before = app.hud_line(Utc::now());
-        assert!(before.contains("in 0 · out 0 · cached 0"), "got: {before}");
+        assert!(before.contains("session - · in 0 · out 0"), "got: {before}");
         assert!(before.contains("no price data"), "got: {before}");
         assert!(!before.contains("| cache "), "got: {before}");
         assert!(!before.contains("· cache "), "got: {before}");
@@ -3417,11 +3923,94 @@ mod tests {
             }),
         );
         let after = app.hud_line(Utc::now());
-        assert!(
-            after.contains("in 100 · out 20 · cached 25"),
-            "got: {after}"
-        );
+        assert!(after.contains("in 100 · out 20"), "got: {after}");
         assert!(after.contains("cache 25%"), "got: {after}");
+    }
+
+    #[test]
+    fn money_hud_uses_accumulated_turn_cost_in_native_currency() {
+        let mut app = meter_app();
+        let usage = Usage {
+            prompt_tokens: 100_000,
+            completion_tokens: 50_000,
+            cached_tokens: Some(90_000),
+        };
+        app.usage = usage.clone();
+        record_turn_cost(&mut app, &usage, fixed_at());
+
+        let hud = app.hud_line(fixed_at());
+        assert!(
+            hud.contains("session ¥0.11 (≈$0.02) · in 100000 · out 50000 · cache 90%"),
+            "got: {hud}"
+        );
+        assert!(hud.contains("off-peak"), "got: {hud}");
+    }
+
+    #[test]
+    fn savings_line_renders_counterfactuals_and_omits_cold_claim() {
+        let app = meter_app();
+        let usage = Usage {
+            prompt_tokens: 100_000,
+            completion_tokens: 50_000,
+            cached_tokens: Some(90_000),
+        };
+        assert_eq!(
+            savings_lines(&app.resolver, &app.route, &usage, fixed_at()),
+            vec![
+                "cost ¥0.11 (≈$0.02) - saved 44% vs no-cache",
+                "naive: peak ¥0.22 · no-cache ¥0.20 · top-tier ¥0.45",
+            ]
+        );
+
+        let cold = Usage {
+            cached_tokens: Some(0),
+            ..usage
+        };
+        let cold_lines = savings_lines(&app.resolver, &app.route, &cold, fixed_at());
+        assert_eq!(cold_lines[0], "cost ¥0.20 (≈$0.03)");
+        assert!(!cold_lines[0].contains("saved"));
+    }
+
+    #[test]
+    fn why_command_uses_live_resolver_trace() {
+        let mut app = meter_app();
+        assert_eq!(explain_why(&mut app), UiAction::None);
+        assert!(app
+            .transcript
+            .iter()
+            .any(|line| line.text.starts_with("route: meter-route")));
+        assert!(app
+            .transcript
+            .iter()
+            .any(|line| line.text.starts_with("skipped ")));
+    }
+
+    #[test]
+    fn heartbeat_formats_two_elapsed_deltas() {
+        let now = fixed_at();
+        for (seconds, expected) in [(2, "● WORKING · 2s"), (34, "● WORKING · 34s")] {
+            let since = now - chrono::Duration::seconds(seconds);
+            let (label, _) = status_chip(&Status::Working, Some(since), now);
+            assert_eq!(label, expected);
+        }
+    }
+
+    #[test]
+    fn teaching_error_contains_cause_and_next_action() {
+        let error = teaching_error("unknown model 'x'", "run /model to list routes");
+        assert!(error.contains("unknown model 'x'"));
+        assert!(error.contains("run /model to list routes"));
+        assert!(error.contains(" - "));
+    }
+
+    #[test]
+    fn taskbar_semaforo_writes_only_on_waiting_transitions() {
+        let mut bytes = Vec::new();
+        emit_taskbar_transition(&mut bytes, &Status::Working, &Status::Waiting).unwrap();
+        emit_taskbar_transition(&mut bytes, &Status::Waiting, &Status::Waiting).unwrap();
+        emit_taskbar_transition(&mut bytes, &Status::Waiting, &Status::Working).unwrap();
+        assert_eq!(&bytes[..TASKBAR_WAITING.len()], TASKBAR_WAITING);
+        assert_eq!(&bytes[TASKBAR_WAITING.len()..], TASKBAR_CLEAR);
     }
 
     #[test]

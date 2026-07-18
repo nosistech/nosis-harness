@@ -12,6 +12,7 @@ mod cmd_key;
 mod cmd_mcp;
 mod cmd_run;
 mod cmd_tui;
+mod cmd_why;
 
 fn guard_from(verdict: nh_law::Verdict) -> nh_tools::Guard {
     match verdict {
@@ -59,6 +60,14 @@ enum Cmd {
         /// Model id from catalog.toml
         #[arg(long, default_value = "deepseek-v4-flash")]
         model: String,
+    },
+    /// Explain the cheapest capable route for a task estimate
+    Why {
+        /// Optional task text used for a rough token estimate
+        task: Option<String>,
+        /// Explicitly selected model to compare with the cheapest capable route
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Open the full-screen terminal UI
     Tui {
@@ -129,6 +138,7 @@ fn main() -> anyhow::Result<()> {
             cmd_run::run(&task, &model, max_turns, think, autonomy)
         }
         Cmd::Chat { model } => cmd_chat::run(&model),
+        Cmd::Why { task, model } => cmd_why::run(task.as_deref(), model.as_deref()),
         Cmd::Tui { model, budget } => cmd_tui::run(&model, budget),
         Cmd::Fleet {
             action:
@@ -280,6 +290,29 @@ mod tests {
             Cmd::Chat { model } => assert_eq!(model, "kimi-k2.6"),
             _ => panic!("expected chat"),
         }
+    }
+
+    #[test]
+    fn parses_why_with_optional_task_and_model() {
+        let cli =
+            Cli::try_parse_from(["nh", "why", "review the diff", "--model", "deepseek-v4-pro"])
+                .unwrap();
+        match cli.cmd {
+            Cmd::Why { task, model } => {
+                assert_eq!(task.as_deref(), Some("review the diff"));
+                assert_eq!(model.as_deref(), Some("deepseek-v4-pro"));
+            }
+            _ => panic!("expected why"),
+        }
+
+        let cli = Cli::try_parse_from(["nh", "why"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Why {
+                task: None,
+                model: None
+            }
+        ));
     }
 
     #[test]

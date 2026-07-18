@@ -97,6 +97,14 @@ impl fmt::Display for PriceConfidence {
     }
 }
 
+/// Approximate CNY-to-USD display rate carried by catalog data.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fx {
+    pub usd_per_cny: f64,
+    pub valid_until: Option<NaiveDate>,
+    pub confidence: PriceConfidence,
+}
+
 /// Peak-pricing windows in a fixed-offset timezone (Asia/Shanghai = UTC+8, no DST).
 /// Window start is inclusive, end exclusive, local to that timezone.
 #[derive(Debug, Clone)]
@@ -144,6 +152,98 @@ pub struct PriceQuote {
     pub confidence: PriceConfidence,
     /// True when the quote instant is past `valid_until` - flag it, never guess.
     pub stale: bool,
+}
+
+/// Counterfactual costs for the same turn and token counts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NaiveCost {
+    pub no_cache: f64,
+    pub peak: f64,
+    pub top_tier: f64,
+    pub currency: Currency,
+}
+
+/// Currency cost of one turn in the quote's native currency.
+pub fn cost_of(
+    quote: &PriceQuote,
+    prompt_tokens: u64,
+    cached_tokens: u64,
+    output_tokens: u64,
+) -> f64 {
+    let miss_tokens = prompt_tokens.saturating_sub(cached_tokens);
+    (cached_tokens as f64 * quote.cache_hit
+        + miss_tokens as f64 * quote.cache_miss
+        + output_tokens as f64 * quote.output)
+        / 1_000_000.0
+}
+
+/// Percent saved by cache reuse versus the same route with no cache.
+pub fn saved_pct(actual: f64, no_cache: f64) -> Option<u8> {
+    if !actual.is_finite() || !no_cache.is_finite() || no_cache <= actual {
+        return None;
+    }
+    Some(
+        (((no_cache - actual) / no_cache) * 100.0)
+            .round()
+            .clamp(0.0, 99.0) as u8,
+    )
+}
+
+/// Approximate USD for a fresh CNY amount. USD-native amounts need no gloss.
+pub fn to_usd_approx(amount: f64, currency: Currency, fx: &Fx, at: DateTime<Utc>) -> Option<f64> {
+    if currency != Currency::Cny
+        || fx
+            .valid_until
+            .is_some_and(|valid_until| at.date_naive() > valid_until)
+    {
+        return None;
+    }
+    Some(amount * fx.usd_per_cny)
+}
+
+/// Format native currency money for terminal surfaces.
+pub fn money(amount: f64, currency: Currency) -> String {
+    let (is_tiny, digits) = format_money_digits(amount);
+    let marker = if is_tiny { "<" } else { "" };
+    let symbol = match currency {
+        Currency::Cny => "¥",
+        Currency::Usd => "$",
+    };
+    format!("{marker}{symbol}{digits}")
+}
+
+/// Format native money with a fresh approximate USD gloss when useful.
+pub fn money_with_gloss(
+    amount: f64,
+    currency: Currency,
+    fx: Option<&Fx>,
+    at: DateTime<Utc>,
+) -> String {
+    let native = money(amount, currency);
+    match fx.and_then(|fx| to_usd_approx(amount, currency, fx, at)) {
+        Some(usd) => {
+            let (is_tiny, digits) = format_money_digits(usd);
+            let marker = if is_tiny { "<" } else { "" };
+            format!("{native} (≈{marker}${digits})")
+        }
+        None => native,
+    }
+}
+
+fn format_money_digits(amount: f64) -> (bool, String) {
+    if !amount.is_finite() {
+        return (false, "0.00".to_owned());
+    }
+    if amount == 0.0 || amount >= 0.01 {
+        return (false, format!("{amount:.2}"));
+    }
+    if amount >= 0.0001 {
+        return (false, format!("{amount:.4}"));
+    }
+    if amount > 0.0 {
+        return (true, "0.0001".to_owned());
+    }
+    (false, format!("{amount:.2}"))
 }
 
 #[derive(Debug, Clone)]
@@ -277,6 +377,8 @@ fn replacement_for(model_id: &str) -> Option<&'static str> {
 #[derive(Deserialize)]
 struct RawCatalog {
     routes: BTreeMap<String, RawRoute>,
+    #[serde(default)]
+    fx: Option<RawFx>,
 }
 
 #[derive(Deserialize)]
@@ -328,6 +430,14 @@ struct RawPrice {
     valid_until: Option<String>,
     #[serde(default)]
     peak: Option<RawPeak>,
+}
+
+#[derive(Deserialize)]
+struct RawFx {
+    usd_per_cny: f64,
+    #[serde(default)]
+    valid_until: Option<String>,
+    price_confidence: String,
 }
 
 #[derive(Deserialize)]
@@ -423,16 +533,7 @@ fn parse_price(id: &str, raw: RawPrice) -> anyhow::Result<RoutePrice> {
     check_rate(id, "cache_hit", raw.cache_hit)?;
     check_rate(id, "cache_miss", raw.cache_miss)?;
     check_rate(id, "output", raw.output)?;
-    let confidence = match raw.price_confidence.as_str() {
-        "confirmed" => PriceConfidence::Confirmed,
-        "reported" => PriceConfidence::Reported,
-        "verify_live" => PriceConfidence::VerifyLive,
-        other => {
-            return Err(anyhow!(
-                "route '{id}': unknown price_confidence '{other}' - use confirmed, reported, or verify_live"
-            ))
-        }
-    };
+    let confidence = parse_confidence(&format!("route '{id}'"), &raw.price_confidence)?;
     let valid_until = raw
         .valid_until
         .map(|s| {
@@ -449,6 +550,35 @@ fn parse_price(id: &str, raw: RawPrice) -> anyhow::Result<RoutePrice> {
         confidence,
         valid_until,
         peak,
+    })
+}
+
+fn parse_confidence(scope: &str, value: &str) -> anyhow::Result<PriceConfidence> {
+    match value {
+        "confirmed" => Ok(PriceConfidence::Confirmed),
+        "reported" => Ok(PriceConfidence::Reported),
+        "verify_live" => Ok(PriceConfidence::VerifyLive),
+        other => Err(anyhow!(
+            "{scope}: unknown price_confidence '{other}' - use confirmed, reported, or verify_live"
+        )),
+    }
+}
+
+fn parse_fx(raw: RawFx) -> anyhow::Result<Fx> {
+    if !raw.usd_per_cny.is_finite() || raw.usd_per_cny <= 0.0 {
+        return Err(anyhow!("fx.usd_per_cny must be a number > 0"));
+    }
+    let valid_until = raw
+        .valid_until
+        .map(|s| {
+            NaiveDate::parse_from_str(&s, "%Y-%m-%d")
+                .map_err(|_| anyhow!("fx: bad valid_until '{s}' - use YYYY-MM-DD"))
+        })
+        .transpose()?;
+    Ok(Fx {
+        usd_per_cny: raw.usd_per_cny,
+        valid_until,
+        confidence: parse_confidence("fx", &raw.price_confidence)?,
     })
 }
 
@@ -495,6 +625,7 @@ fn parse_window(id: &str, s: &str) -> anyhow::Result<(NaiveTime, NaiveTime)> {
 pub struct RouteResolver {
     // catalog parsed from catalog.toml
     routes: BTreeMap<String, ResolvedRoute>,
+    fx: Option<Fx>,
 }
 
 impl RouteResolver {
@@ -546,7 +677,67 @@ impl RouteResolver {
                 },
             );
         }
-        Ok(Self { routes })
+        Ok(Self {
+            routes,
+            fx: raw.fx.map(parse_fx).transpose()?,
+        })
+    }
+
+    /// Optional catalog FX data for approximate display glosses.
+    pub fn fx(&self) -> Option<&Fx> {
+        self.fx.as_ref()
+    }
+
+    /// Honest counterfactuals for one turn using catalog price data.
+    pub fn naive_cost(
+        &self,
+        route: &ResolvedRoute,
+        prompt_tokens: u64,
+        cached_tokens: u64,
+        output_tokens: u64,
+        at: DateTime<Utc>,
+    ) -> Option<NaiveCost> {
+        let quote = route.price_at(at)?;
+        let actual = cost_of(&quote, prompt_tokens, cached_tokens, output_tokens);
+        let no_cache = cost_of(&quote, prompt_tokens, 0, output_tokens);
+
+        let peak = route
+            .price
+            .as_ref()
+            .and_then(|price| {
+                price.peak.as_ref().map(|peak| PriceQuote {
+                    cache_hit: price.cache_hit * peak.multiplier,
+                    cache_miss: price.cache_miss * peak.multiplier,
+                    output: price.output * peak.multiplier,
+                    currency: price.currency,
+                    peak: true,
+                    confidence: price.confidence,
+                    stale: quote.stale,
+                })
+            })
+            .map_or(actual, |peak_quote| {
+                cost_of(&peak_quote, prompt_tokens, cached_tokens, output_tokens)
+            });
+
+        let top_tier_quote = self
+            .routes
+            .values()
+            .filter(|candidate| candidate.class == RouteClass::Api)
+            .filter_map(|candidate| candidate.price_at(at))
+            .filter(|candidate| {
+                candidate.currency == quote.currency && candidate.cache_miss > quote.cache_miss
+            })
+            .max_by(|left, right| left.cache_miss.total_cmp(&right.cache_miss));
+        let top_tier = top_tier_quote.map_or(actual, |top_quote| {
+            cost_of(&top_quote, prompt_tokens, cached_tokens, output_tokens)
+        });
+
+        Some(NaiveCost {
+            no_cache,
+            peak,
+            top_tier,
+            currency: quote.currency,
+        })
     }
 
     /// Resolve by route id (catalog key). Banned strings error with the replacement
@@ -1095,6 +1286,196 @@ mod tests {
         let r = RouteResolver::from_toml(&route_toml("")).unwrap();
         let route = r.resolve("test-model").unwrap();
         assert!(route.price_at(utc(2026, 7, 15, 12, 0, 0)).is_none());
+    }
+
+    #[test]
+    fn cost_of_splits_cached_miss_and_output_tokens() {
+        let quote = PriceQuote {
+            cache_hit: 1.0,
+            cache_miss: 10.0,
+            output: 20.0,
+            currency: Currency::Cny,
+            peak: false,
+            confidence: PriceConfidence::Confirmed,
+            stale: false,
+        };
+        assert!(close(cost_of(&quote, 1_000, 400, 100), 0.0084));
+        assert!(
+            close(cost_of(&quote, 100, 200, 0), 0.0002),
+            "cached tokens beyond prompt are billed only at the hit rate"
+        );
+    }
+
+    #[test]
+    fn naive_no_cache_is_not_less_than_actual() {
+        let resolver = resolver();
+        let route = resolver.resolve("deepseek-v4-flash").unwrap();
+        let costs = resolver
+            .naive_cost(&route, 20_000, 15_000, 2_000, utc(2026, 7, 15, 0, 0, 0))
+            .unwrap();
+        let actual = cost_of(
+            &route.price_at(utc(2026, 7, 15, 0, 0, 0)).unwrap(),
+            20_000,
+            15_000,
+            2_000,
+        );
+        assert!(costs.no_cache >= actual);
+    }
+
+    #[test]
+    fn saved_pct_rounds_and_omits_non_savings() {
+        assert_eq!(saved_pct(0.07, 1.0), Some(93));
+        assert_eq!(saved_pct(0.0, 1.0), Some(99));
+        assert_eq!(saved_pct(1.0, 1.0), None);
+        assert_eq!(saved_pct(2.0, 1.0), None);
+    }
+
+    #[test]
+    fn naive_top_tier_never_crosses_currency() {
+        let catalog = r#"
+            [routes.actual]
+            provider = "p"
+            model_id = "actual"
+            base_url = "https://example.invalid"
+            wire = "openai"
+            vault_entry = "p"
+            [routes.actual.price]
+            currency = "CNY"
+            unit = "per_million_tokens"
+            cache_hit = 1.0
+            cache_miss = 2.0
+            output = 1.0
+            price_confidence = "confirmed"
+
+            [routes.cny-top]
+            provider = "p"
+            model_id = "cny-top"
+            base_url = "https://example.invalid"
+            wire = "openai"
+            vault_entry = "p"
+            [routes.cny-top.price]
+            currency = "CNY"
+            unit = "per_million_tokens"
+            cache_hit = 1.0
+            cache_miss = 3.0
+            output = 1.0
+            price_confidence = "confirmed"
+
+            [routes.usd-top]
+            provider = "p"
+            model_id = "usd-top"
+            base_url = "https://example.invalid"
+            wire = "openai"
+            vault_entry = "p"
+            [routes.usd-top.price]
+            currency = "USD"
+            unit = "per_million_tokens"
+            cache_hit = 99.0
+            cache_miss = 99.0
+            output = 99.0
+            price_confidence = "confirmed"
+        "#;
+        let resolver = RouteResolver::from_toml(catalog).unwrap();
+        let route = resolver.resolve("actual").unwrap();
+        let costs = resolver
+            .naive_cost(&route, 1_000_000, 0, 0, utc(2026, 7, 15, 0, 0, 0))
+            .unwrap();
+        assert_eq!(costs.currency, Currency::Cny);
+        assert!(close(costs.top_tier, 3.0));
+    }
+
+    #[test]
+    fn usd_approx_requires_fresh_cny_and_formats_consistently() {
+        let fx = Fx {
+            usd_per_cny: 0.139,
+            valid_until: Some(NaiveDate::from_ymd_opt(2026, 7, 24).unwrap()),
+            confidence: PriceConfidence::Reported,
+        };
+        let fresh = utc(2026, 7, 24, 23, 59, 59);
+        let stale = utc(2026, 7, 25, 0, 0, 0);
+        assert!(close(
+            to_usd_approx(0.11, Currency::Cny, &fx, fresh).unwrap(),
+            0.01529
+        ));
+        assert!(to_usd_approx(0.11, Currency::Cny, &fx, stale).is_none());
+        assert!(to_usd_approx(0.11, Currency::Usd, &fx, fresh).is_none());
+        assert_eq!(money(0.11, Currency::Cny), "¥0.11");
+        assert_eq!(money(0.015, Currency::Usd), "$0.01");
+        assert_eq!(
+            money_with_gloss(0.11, Currency::Cny, Some(&fx), fresh),
+            "¥0.11 (≈$0.02)"
+        );
+        assert_eq!(
+            money_with_gloss(0.11, Currency::Cny, Some(&fx), stale),
+            "¥0.11"
+        );
+        assert_eq!(
+            money_with_gloss(0.02, Currency::Usd, Some(&fx), fresh),
+            "$0.02"
+        );
+    }
+
+    #[test]
+    fn money_uses_adaptive_precision_without_hiding_positive_spend() {
+        assert_eq!(money(0.11, Currency::Cny), "¥0.11");
+        assert_eq!(money(0.09, Currency::Usd), "$0.09");
+        assert_eq!(money(0.01, Currency::Usd), "$0.01");
+        assert_eq!(money(0.0027, Currency::Usd), "$0.0027");
+        assert_eq!(money(0.0001, Currency::Usd), "$0.0001");
+        assert_eq!(money(0.00009, Currency::Usd), "<$0.0001");
+        assert_eq!(money(0.0, Currency::Usd), "$0.00");
+        assert_eq!(money(0.0, Currency::Cny), "¥0.00");
+    }
+
+    #[test]
+    fn money_with_gloss_uses_adaptive_precision_for_usd() {
+        let fx = Fx {
+            usd_per_cny: 0.139,
+            valid_until: None,
+            confidence: PriceConfidence::Reported,
+        };
+        let at = utc(2026, 7, 18, 0, 0, 0);
+        assert_eq!(
+            money_with_gloss(0.019, Currency::Cny, Some(&fx), at),
+            "¥0.02 (≈$0.0026)"
+        );
+        assert_eq!(
+            money_with_gloss(0.00019, Currency::Cny, Some(&fx), at),
+            "¥0.0002 (≈<$0.0001)"
+        );
+    }
+
+    #[test]
+    fn money_falls_back_safely_for_non_finite_amounts() {
+        assert_eq!(money(f64::NAN, Currency::Cny), "¥0.00");
+        assert_eq!(money(f64::INFINITY, Currency::Usd), "$0.00");
+        assert_eq!(money(f64::NEG_INFINITY, Currency::Usd), "$0.00");
+
+        let fx = Fx {
+            usd_per_cny: 0.139,
+            valid_until: None,
+            confidence: PriceConfidence::Reported,
+        };
+        assert_eq!(
+            money_with_gloss(
+                f64::NAN,
+                Currency::Cny,
+                Some(&fx),
+                utc(2026, 7, 18, 0, 0, 0)
+            ),
+            "¥0.00 (≈$0.00)"
+        );
+    }
+
+    #[test]
+    fn fx_is_optional_catalog_data() {
+        let without_fx = RouteResolver::from_toml(&route_toml("")).unwrap();
+        assert!(without_fx.fx().is_none());
+        let with_fx = resolver();
+        assert_eq!(
+            with_fx.fx().map(|fx| fx.confidence),
+            Some(PriceConfidence::Reported)
+        );
     }
 
     // ---------------------------------------------------------------- provider defaults
