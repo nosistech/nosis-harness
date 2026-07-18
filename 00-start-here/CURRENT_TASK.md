@@ -1,6 +1,6 @@
 # Current Task
 
-## Immediate Goal — M5 Slice A DONE + committed (`9c96259`, 2026-07-18). NEXT = brief Sol for Slice B (FLOOR).
+## Immediate Goal — M5 Slices A + B DONE + committed. NEXT = brief Sol for Slice C (VISIBLE — the FEEL gate).
 
 **Slice A "TRUTH" SHIPPED (E1 met).** Committed `9c96259` on `0bd1d7f` on `fe04ce5`. Full workspace gate
 green: **306 pass / 0 fail / 1 ignored** `--release`, clippy `-D warnings` clean (baseline 292 → +14
@@ -23,12 +23,33 @@ resolver, then an Anthropic-wire fix); gated + adversarially reviewed by the orc
   --all` mid-slice — use scoped `cargo fmt -p <crate>`; and always `git diff --stat` after a Sol run to
   confirm scope.** Slice E must add a scoped `cargo fmt --check` gate + a one-time workspace normalization.
 
-**NEXT = Slice B "FLOOR" (E2).** Independent of A; can follow directly. Adversarial security review on
-EVERY item. Seams in nh-tools/nh-law/nh-vault/nh-mcp (see `CONTRACTS_M5.md` Slice B): `Access::Read`/`Send`
-+ read_file guard + `[read]`/`[send]` law class; ToolResultEnvelope; MCP sanitize; credential audience
-binding; nh-mcp inbound auth + Host/Origin; Scrubber widen + registry; min-env exec allowlist; OAuth
-`resource`. Write the Slice B Sol brief (ground it seam-by-seam like Slice A; pre-authorize the mutable
-surface up front; enumerate any cross-crate enum/type ripples BEFORE briefing). Slice C is the FEEL gate.
+**Slice B "FLOOR" SHIPPED (E2 met).** Committed `1a9d92a` on `70a2f9d`. Gate green: **319 pass / 0 fail /
+1 ignored** (`--release`), clippy `-D warnings` clean (306 → +13). Built by Sol (single handoff), gated +
+adversarially reviewed + live-demoed (audience redirect refused 3 ways incl. userinfo `@`-trick + suffix
+spoof; nh-mcp unauth `fleet_run`→401, cross-Origin/Host→403, loopback→200). Delivered: L3 read guard
+(`Access::Read`/`Send` + `[read]`/`[send]`/`[credential]` law classes mirroring `write_verdict`) +
+`ToolResultEnvelope` (bounds + shape-scrubs tool output); L4 `get_scoped` credential-audience broker
+(**trusted-law** source — bundled/user, repo can't grant; host-only compare; refuses BEFORE materialize)
+wired on CLI routes + MCP config-load; L5 nh-mcp fail-closed OS-seeded token + Host/Origin (DNS-rebind);
+L10 min-env exec allowlist; L11 MCP text sanitize; F8 scrubber widen (ghp_/AKIA/AIza/xox…) + `from_vault`;
+F7 OAuth `resource` (RFC 8707). Amendments **A-M5-4** (Access-variant ripple; frozen nh-fleet + nh-tui got
+exactly +2 guard arms each) + **A-M5-5** (audience broker call-sites; owner-ratified trusted-law source)
+logged in `CONTRACTS_M5.md` §8.
+
+**NEXT = Slice C "VISIBLE" (E3) — THE FEEL GATE (the milestone is won or lost here).** Crates: `nh-tui` +
+`nh-cli` + the `nh-routes` cost helpers. **Graded by FEEL first, tests second; `drop-if-hard` per sub-item;
+owner FEEL-approves every human-facing surface BEFORE commit.** Items (see `CONTRACTS_M5.md` Slice C): money
+cost HUD (currency split over cached/miss/output + running session total + budget hard-stop, replacing the
+token-only HUD); **THE counterfactual savings line** (`cost ¥0.11 — saved 93% vs naive (peak ¥0.44 ·
+cache-miss ¥1.62 · pro-tier ¥3.90)` — the launch screenshot) via a new nh-routes `naive_cost`; `/why`
+route-explain (CLI + TUI chip + receipt) using Slice A's `RejectionTrace`; approval cluster (explicit
+y/n/Esc + visible legend — fixes L6 — prefix-rule approvals, Esc-to-interrupt, working heartbeat); OSC 9;4
+Windows taskbar semáforo; "errors that teach" as a tested invariant. Slice C consumes Slice A's
+`RejectionTrace` (shipped) + Slice B's floor (shipped). Brief Sol the SAME way that worked for A and B:
+read the real nh-tui/nh-cli/nh-routes seams first, ground the brief seam-by-seam with file:line, define +
+pre-authorize the mutable surface UP FRONT, enumerate cross-crate ripples BEFORE briefing, then ASK the
+owner before launching the Sol run. Because C is the FEEL gate, plan to run the built `nh.exe` / TUI and
+have the owner approve the FEEL before committing.
 
 **M5 "The Honest Meter" — scope ratified & contract locked (2026-07-17, this session):**
 - **Five slices A–E**, re-slotted by *seam* (not theme) for congruence: A TRUTH (nh-core meter-math
