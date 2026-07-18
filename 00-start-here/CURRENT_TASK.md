@@ -139,24 +139,36 @@ review on every Slice-B item.
   Gemini CLI died as open delegate). Reposition: **"open-weight-first harness with a frontier review
   gate."** Keep the commented catalog delegate schema; don't build the full adapter class in v1.
 
-### ON RESUME ("continue") — PLANNING IS DONE. Next = brief Sol for Slice A.
-**State (2026-07-17):** M5 scope RATIFIED + `CONTRACTS_M5.md` LOCKED + committed. HEAD `e2b2f02`
-(docs: lock CONTRACTS_M5 + positioning) on `6de331a`. `git status` clean. Baseline 292 pass `--release`,
-clippy clean. Read `CONTRACTS_M5.md` (esp. §0.1 mutable surface + Slice A) + this file's top block first.
+### ON RESUME ("continue") — Slices A + B DONE. Next = brief Sol for Slice C (VISIBLE — THE FEEL GATE).
+If the owner just typed **"continue"**, this is the task: drive Slice C. **State (2026-07-18):** M5 Slices
+A "TRUTH" (`9c96259`) + B "FLOOR" (`1a9d92a`) shipped; HEAD `b777290` on `1a9d92a` on `70a2f9d`; git clean;
+**319 pass / 0 fail / 1 ignored** `--release`, clippy `-D warnings` clean. Read `CONTRACTS_M5.md` (esp.
+§0.1 mutable surface + Slice C + §8 amendments A-M5-1..5) + this file's top two blocks first.
 
-1. **Confirm clean:** `git log --oneline -3` = `e2b2f02` / `6de331a` / `d3cac39`; `git status` clean.
-   Kill any `nh.exe` before builds (locks `target\debug\nh.exe`).
-2. **ONE open owner decision before briefing Sol** (raise it first): brief Slice A as a SINGLE handoff
-   (contract allows Sol to self-split into ≤3), or as THREE smaller handoffs from the start
-   (thinking/reasoning → cache/context → resolver)? Cleaner gate vs. two extra handoffs. Default =
-   single handoff, Sol splits if the first gate is rough.
-3. **Write the Slice A Sol brief** (nh-core truth-math L1/L2/L7/L8/L9/L12/clamp/cache + nh-routes thin
-   resolver `resolve_capable` + `RejectionTrace`) from `CONTRACTS_M5.md` Slice A. Use the Executor
-   invocation below; consider `--output-schema` for a machine-readable self-report. Run in background;
-   NEVER two nosis codexes at once.
-4. **The loop per slice (A→E, order in §6):** Sol implements → Claude re-gates (`cargo test --workspace
-   --release` ≥292 pass + clippy `-D warnings`) + adversarial review (esp. every Slice-B item) → owner
-   **FEEL-approve** any human-facing surface → commit (`wip/slice-<x>` → `main`).
+1. **Confirm clean:** `git log --oneline -3` = `b777290` / `1a9d92a` / `70a2f9d`; `git status` clean.
+   Kill any `nh.exe` before builds (it locks `target\debug\nh.exe`).
+2. **Read the real seams FIRST** in `nh-tui` (hud_line/render_hud ~401-428/~1840; reduce_key/approval row
+   ~1355), `nh-cli` (cost display in cmd_run/cmd_chat; a `nh why` path), and `nh-routes` (a NEW `naive_cost`
+   near `price_at` ~173, reusing Slice A's priced route + `RejectionTrace`). Ground the brief seam-by-seam
+   with file:line refs — the way Slices A and B worked well.
+3. **Pre-authorize the mutable surface UP FRONT + enumerate cross-crate ripples** BEFORE briefing Sol
+   (the A-M5-2/A-M5-4 lesson: a new type/variant can break exhaustive matches in frozen crates). Log any
+   needed §8 amendment first. Then **ask the owner** the one or two genuine decisions, and **ask before
+   launching the Sol run**.
+4. **Brief Sol** (gpt-5.6 xhigh, `codex exec`, background — invocation below; NEVER two nosis codexes at
+   once) for Slice C: money cost HUD (currency over cached/miss/output + session total + budget hard-stop);
+   THE counterfactual savings line via `naive_cost`; `/why` off the `RejectionTrace`; approval cluster
+   (explicit y/n/Esc + legend, fixes L6, prefix-rule approvals, Esc-to-interrupt, working heartbeat);
+   OSC 9;4 Windows taskbar semáforo; "errors that teach" as a tested invariant. `drop-if-hard` per sub-item.
+5. **Gate:** `git diff --stat` for scope → kill nh.exe → `cargo test --workspace --release` (≥319 + new,
+   0 fail) + `cargo clippy --workspace --all-targets --release -- -D warnings`. **GATE RULE:** never pipe
+   `cargo test`/`clippy` through `| tail` — a pipeline's exit code is the LAST command's, so `tail`'s 0
+   masks a real failure; redirect to a file + `echo $?`. Never `cargo fmt --all` (scoped `cargo fmt -p`
+   only). Adversarial review.
+6. **THE FEEL GATE (C is where best-in-category is won):** build `nh.exe`, RUN the TUI + CLI cost surfaces,
+   and the **owner FEEL-approves every human-facing surface BEFORE commit** ("pretty but frustrating" =
+   failure). Then commit per-slice to `main` and update this file + memory. Slices D (LEVER/profiles) and
+   E (LOOP/gate.ps1+CI — can land anytime, ideally soon to mechanize the gate) follow.
 
 **When M5 is "done" (shipped + FEEL-approved):** write the ≥5 launch posts from
 `01-product/WHY_BEST_IN_CATEGORY_2026.md` (append new article seeds there as they surface). [[why-best-in-category-2026]]
