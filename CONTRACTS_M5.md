@@ -405,3 +405,44 @@ the merge. L7/cache-safety is PRESERVED — the note stays a separate message an
 stay byte-identical; only the transient Anthropic wire body coalesces. Pinned by the orchestrator-authored
 test `anthropic_body_roles_alternate_after_compaction` (already in the tree, currently failing = the
 proof). This is Slice A follow-up handoff #2 (the contract pre-authorized Sol to split Slice A into ≤3).
+
+**A-M5-4 (2026-07-18, orchestrator Opus 4.8) — `Access::{Read,Send}` variant ripple into the four
+policy-backed guard closures (Slice B L3).** §0.1 opens the nh-tools `Access` enum to add `Read(&str)` /
+`Send(&str)` **[+]** and `ReadFile::execute` to consult `Access::Read` **[Δ]**. Adding two variants to the
+public enum forces every *exhaustive* `match Access` in the workspace to gain arms or fail to compile
+(E0004) — the A-M5-2 pattern. The non-wildcard matches live in four crates the §0.1 nh-tools row does not
+enumerate. Unlike A-M5-2 these arms are **behavior-adding** (they wire the new read/send verdicts live),
+which is the point: the read guard must bite in every real path, most of all the unattended fleet path.
+| Crate | Seam | Ref | Tag | Change |
+|---|---|---|:--:|---|
+| `nh-tui` | `verdict_to_guard` guard closure | lib.rs ~1012-1014 | Δ | add `Access::Read(p) => verdict_to_guard(policy.read_verdict(p))` + `Access::Send(t) => verdict_to_guard(policy.send_verdict(t))`. |
+| `nh-fleet` | guard closure (**FROZEN** crate) | lib.rs ~1218-1220 | Δ | same two arms — closes the read leg on the autonomous fleet path. The only lines nh-fleet gains; ladder/workers stay frozen. |
+| `nh-cli` | `guard_from` closure (`nh run`) | cmd_run.rs ~105-108 | Δ | same two arms via `guard_from`. |
+| `nh-cli` | `guard_from` closure (`nh chat`) | cmd_chat.rs ~107-109 | Δ | same two arms via `guard_from`. |
+| `nh-tools` | default guard (`ToolCtx::new`) | lib.rs 55-58 | Δ | `Access::Read(_) => Guard::Allow`, `Access::Send(_) => Guard::Allow` — preserves M0/M1 no-law behavior (reads allowed when no policy is installed; the bundled `[read]` block bites only through the policy-backed closures above). |
+Everything else in nh-fleet and nh-tui stays frozen; this is the only line each gains (mirrors A-M5-2).
+Applied by the orchestrator as integration glue if Sol stops at the frozen boundary.
+
+**A-M5-5 (2026-07-18, orchestrator Opus 4.8) — L4 credential-audience broker: trusted-law source +
+call-site ripple + `[read]`/`[send]`/`[credential]` law schema.** §0.1 nh-vault lists only the new
+`get_scoped` broker; it does not enumerate the *trusted* source of an entry's approved audience nor the
+callers, and closing the redirect hole (`find_catalog` walks up to a repo-controlled `catalog.toml`;
+`.nosis/mcp.toml` is repo-controlled) requires opening key-materialization choke points outside the
+enumerated surface. **Owner-ratified 2026-07-18:** the trusted source is **law** (bundled/user; repo
+cannot add — reuses the `repo_tries_to_weaken` / `compile_policy` layering, nh-law:196/297, exactly as
+`write.auto` is repo-refused). Pre-authorized surface:
+| Crate | Seam | Ref | Tag | Change |
+|---|---|---|:--:|---|
+| `nh-law` | `[read]` / `[send]` / `[credential]` sections + `ReadRules`/`SendRules`/`CredentialRules` | LawFile 440-446, compile_policy 297-327 | + | data-only additive sections. `[credential.<entry>] audience=[hosts]` layered **bundled→user only** (repo entries dropped by the weaken-guard, like `write.auto`). Bundled defaults for the four shipped provider entries (deepseek→api.deepseek.com, kimi→api.moonshot.ai, mimo→api.xiaomimimo.com, glm→api.z.ai — from catalog.toml). |
+| `nh-law` | `read_verdict` / `send_verdict` / `approved_audiences(entry)` | mirror `write_verdict` 88-104 | + | two two-tier verdicts (Block/Allow, no Ask); a pure accessor returning an entry's approved hosts. |
+| `nh-vault` | `audience_allows(host, approved)` + `get_scoped(entry, requested_host, approved)` | new, alongside `Vault` | + | pure host-compare helper (normalize both sides to host) + broker that **refuses before the secret materializes** when `approved` is non-empty and the host ∉ it; empty (undeclared) → returns as today. No nh-law dep — caller passes `approved`. |
+| `nh-cli` | primary-key materialization | cmd_run.rs 90, cmd_chat.rs 69 | Δ | `vault.get(&route.vault_entry)` → `get_scoped(entry, host_of(route.base_url), law.approved_audiences(entry))`; refusal is one friendly, secret-free line. |
+| `nh-cli` | MCP config-load audience gate | cmd_chat.rs `load_mcp` ~364, cmd_tui.rs `load_mcp_palette` ~58 | Δ | before building each `McpClient`, drop+warn any server whose `url` host (and, for oauth2, `token_url` host) is not in `law.approved_audiences(vault_entry)` — validates the pairing **without materializing the secret** (fetch is lazy in `request_headers`). |
+| `nh-tools` | OAuth `resource` (RFC 8707) | mcp.rs `refresh_oauth` form 446-454 | + | `form.push(("resource", config.url.trim_end_matches('/')))` — the only nh-tools/mcp.rs L4 change (the audience gate is enforced at nh-cli load, so the MCP client needs no policy threading). |
+`Access::Send` ships as the **[send] mechanism** (variant + `send_verdict` + `[send]` law + the A-M5-4
+guard arms + a unit test that a `[send]`-blocked host → `Block`); the concrete "a secret cannot egress to
+a non-approved host" enforcement is `get_scoped` + the MCP load gate. The **broad** egress consult site is
+M6's privacy-router (§0 ruling 3b) — M5 wires no live `Access::Send` producer into the MCP adapter
+(mcp.rs:621 keeps its deliberate no-`ctx.guard` stance). Host comparison is **host-only** (scheme/path/
+port stripped) so DeepSeek's dual wires — `api.deepseek.com/v1` (OpenAI) and `api.deepseek.com/anthropic`
+(Anthropic, nh-core:506) — both satisfy one audience entry; pinned by a test.

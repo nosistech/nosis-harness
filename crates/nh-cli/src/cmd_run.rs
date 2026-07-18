@@ -2,6 +2,7 @@
 //! Progress = one short line per tool call via `on_event`; exec_shell additionally
 //! surfaces through its approval prompt. All errors: one friendly line, exit 1.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -11,8 +12,8 @@ use nh_core::receipt::{Outcome, ReceiptWriter};
 use nh_core::wire::{cache_hit_pct, make_client, ThinkingEffort};
 use nh_law::{Autonomy, LoadOptions};
 use nh_routes::{RouteClass, RouteResolver, ThinkingDialect};
-use nh_tools::{builtin_tools, Access, ToolCtx};
-use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, Vault};
+use nh_tools::{builtin_tools, Access, McpAuth, McpServerConfig, ToolCtx};
+use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber};
 
 use crate::guard_from;
 
@@ -87,14 +88,22 @@ pub fn run(
     }
 
     let vault = EnvFallbackVault { inner: KeyringVault };
-    let key = vault.get(&route.vault_entry)?;
-    // Scrubbers hold the literal so no output path can leak it — receipts, stdout,
-    // AND every stderr path (progress lines, approval prompt) pass one.
-    let key_literal: String = key.as_str().to_owned();
-
+    let approved = law.policy.approved_audiences(&route.vault_entry);
+    let key = nh_vault::get_scoped(
+        &vault,
+        &route.vault_entry,
+        host_of(&route.base_url),
+        &approved,
+    )?;
+    // Audience validation happens before this best-effort registry fetch, so an
+    // untrusted catalog cannot materialize a credential by redirecting its route.
+    let vault_entries = catalog_vault_entries(&resolver);
+    let session_scrubber = nh_vault::from_vault(&vault, &vault_entries);
+    // Scrubbers hold every resolvable catalog credential so no output path can
+    // leak one — receipts, stdout, progress, and approvals all pass one.
     let client = make_client(&route, key);
-    let approve_scrubber = Scrubber::new(vec![key_literal.clone()]);
-    let event_scrubber = Scrubber::new(vec![key_literal.clone()]);
+    let approve_scrubber = session_scrubber.clone();
+    let event_scrubber = session_scrubber.clone();
     let policy = law.policy.clone();
     let ctx = ToolCtx::new(
         cwd,
@@ -103,12 +112,14 @@ pub fn run(
         Box::new(move |action| approve_on_stdin(&safe_line(&approve_scrubber, action))),
     )
     .with_guard(Box::new(move |access| match access {
+        Access::Read(path) => guard_from(policy.read_verdict(path)),
         Access::Write(path) => guard_from(policy.write_verdict(path)),
         Access::Exec(command) => guard_from(policy.exec_verdict(command)),
+        Access::Send(target) => guard_from(policy.send_verdict(target)),
     }));
     let receipts = ReceiptWriter {
         path: root.join(".nosis").join("receipts.jsonl"),
-        scrubber: Scrubber::new(vec![key_literal.clone()]),
+        scrubber: session_scrubber.clone(),
     };
     let mut agent = AgentLoop {
         client,
@@ -125,7 +136,7 @@ pub fn run(
     };
 
     eprintln!("running {} (max {max_turns} turns)", route.model_id);
-    let scrubber = Scrubber::new(vec![key_literal]);
+    let scrubber = session_scrubber;
     let (answer, receipt) = agent
         .run(task)
         .map_err(|e| anyhow::anyhow!("{}", scrubber.scrub(&e.to_string())))?;
@@ -163,6 +174,102 @@ pub(crate) fn find_catalog(start: &Path) -> anyhow::Result<(PathBuf, String)> {
         }
     }
     anyhow::bail!("no catalog.toml found - run `nh init` to create one")
+}
+
+/// Bare host projection for trusted-audience checks.
+pub(crate) fn host_of(url: &str) -> &str {
+    let authority = url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(url)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .rsplit('@')
+        .next()
+        .unwrap_or("");
+    authority
+        .split_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or(authority)
+}
+
+pub(crate) fn catalog_vault_entries(resolver: &RouteResolver) -> Vec<String> {
+    resolver
+        .available()
+        .into_iter()
+        .filter_map(|id| resolver.resolve(&id).ok())
+        .map(|route| route.vault_entry)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn unapproved_mcp_target<'a>(
+    config: &'a McpServerConfig,
+    approved: &[String],
+) -> Option<(&'a str, &'a str)> {
+    match &config.auth {
+        McpAuth::None => None,
+        McpAuth::ApiKey { vault_entry } => {
+            (!nh_vault::audience_allows(&config.url, approved))
+                .then_some((vault_entry.as_str(), config.url.as_str()))
+        }
+        McpAuth::OAuth2 {
+            token_url,
+            vault_entry,
+            ..
+        } => {
+            if !nh_vault::audience_allows(&config.url, approved) {
+                Some((vault_entry.as_str(), config.url.as_str()))
+            } else if !nh_vault::audience_allows(token_url, approved) {
+                Some((vault_entry.as_str(), token_url.as_str()))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Drop MCP servers whose configured credential could be sent outside its
+/// trusted law audience. Each dropped server contributes one secret-free line.
+pub(crate) fn filter_mcp_audiences(
+    configs: Vec<McpServerConfig>,
+    policy: &nh_law::Policy,
+    warnings: &mut Vec<String>,
+) -> Vec<McpServerConfig> {
+    filter_mcp_audiences_with(configs, warnings, |entry| {
+        policy.approved_audiences(entry)
+    })
+}
+
+fn filter_mcp_audiences_with(
+    configs: Vec<McpServerConfig>,
+    warnings: &mut Vec<String>,
+    approved_for: impl Fn(&str) -> Vec<String>,
+) -> Vec<McpServerConfig> {
+    configs
+        .into_iter()
+        .filter_map(|config| {
+            let entry = match &config.auth {
+                McpAuth::None => return Some(config),
+                McpAuth::ApiKey { vault_entry } | McpAuth::OAuth2 { vault_entry, .. } => {
+                    vault_entry
+                }
+            };
+            let approved = approved_for(entry);
+            if let Some((entry, target)) = unapproved_mcp_target(&config, &approved) {
+                warnings.push(format!(
+                    "mcp server \"{}\" dropped — credential \"{entry}\" is not approved for {}",
+                    config.name,
+                    host_of(target)
+                ));
+                None
+            } else {
+                Some(config)
+            }
+        })
+        .collect()
 }
 
 /// Scrub secrets, then escape for display. Every stderr line built from
@@ -210,6 +317,48 @@ mod tests {
         fs::create_dir_all(&nested).unwrap();
         let err = find_catalog(&nested).unwrap_err();
         assert!(err.to_string().contains("nh init"), "got: {err}");
+    }
+
+    #[test]
+    fn host_projection_and_mcp_audience_checks_are_host_only() {
+        assert_eq!(
+            host_of("https://user@API.DEEPSEEK.COM:443/anthropic"),
+            "API.DEEPSEEK.COM"
+        );
+        let approved = vec!["api.deepseek.com".to_string()];
+        let api = McpServerConfig {
+            name: "api".into(),
+            url: "https://evil.example/mcp".into(),
+            spec: "2026-07-28".into(),
+            auth: McpAuth::ApiKey {
+                vault_entry: "deepseek".into(),
+            },
+            scopes: Vec::new(),
+            default_mode: None,
+            trust: nh_tools::McpTrust::Ask,
+        };
+        assert_eq!(
+            unapproved_mcp_target(&api, &approved),
+            Some(("deepseek", "https://evil.example/mcp"))
+        );
+
+        let mut oauth = api.clone();
+        oauth.url = "https://api.deepseek.com/mcp".into();
+        oauth.auth = McpAuth::OAuth2 {
+            token_url: "https://evil.example/token".into(),
+            client_id: "client".into(),
+            vault_entry: "deepseek".into(),
+        };
+        assert_eq!(
+            unapproved_mcp_target(&oauth, &approved),
+            Some(("deepseek", "https://evil.example/token"))
+        );
+
+        let mut warnings = Vec::new();
+        let kept = filter_mcp_audiences_with(vec![api, oauth], &mut warnings, |_| approved.clone());
+        assert!(kept.is_empty());
+        assert_eq!(warnings.len(), 2, "one warning per dropped server");
+        assert!(warnings.iter().all(|warning| warning.contains("dropped")));
     }
 
     #[test]

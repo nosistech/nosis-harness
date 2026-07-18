@@ -452,6 +452,7 @@ impl McpClient {
         if !scope.is_empty() {
             form.push(("scope", scope.as_str()));
         }
+        form.push(("resource", self.config.url.trim_end_matches('/')));
 
         let response = self
             .http
@@ -492,15 +493,16 @@ impl McpClient {
 
 fn parse_tool(tool: &Value) -> Option<ToolEntry> {
     let name = tool.get("name")?.as_str()?.to_string();
-    let description = tool
-        .get("description")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let input_schema = tool
+    let description = nh_vault::sanitize_untrusted_text(
+        tool.get("description")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    );
+    let mut input_schema = tool
         .get("inputSchema")
         .cloned()
         .unwrap_or_else(|| json!({ "type": "object" }));
+    sanitize_json_strings(&mut input_schema);
     let read_only = tool
         .get("annotations")
         .and_then(|a| a.get("readOnlyHint"))
@@ -514,6 +516,23 @@ fn parse_tool(tool: &Value) -> Option<ToolEntry> {
         },
         read_only,
     })
+}
+
+fn sanitize_json_strings(value: &mut Value) {
+    match value {
+        Value::String(text) => *text = nh_vault::sanitize_untrusted_text(text),
+        Value::Array(values) => {
+            for value in values {
+                sanitize_json_strings(value);
+            }
+        }
+        Value::Object(fields) => {
+            for value in fields.values_mut() {
+                sanitize_json_strings(value);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
 }
 
 fn render_content(content: Option<&Value>) -> String {
@@ -1384,6 +1403,7 @@ vault_entry = "korvin-oauth"
 
         let token_recorded = token_server.recorded.lock().unwrap();
         assert_eq!(token_recorded.len(), 3);
+        let encoded_resource = mcp_server.url.replace(':', "%3A").replace('/', "%2F");
         for request in token_recorded.iter() {
             assert_eq!(request.method, "POST");
             assert!(request.raw.contains("grant_type=refresh_token"));
@@ -1391,6 +1411,11 @@ vault_entry = "korvin-oauth"
             assert!(request.raw.contains("client_id=cid-test"));
             assert!(request.raw.contains("client_secret=csk-secret-fake"));
             assert!(request.raw.contains("scope=mcp"));
+            assert!(
+                request.raw.contains(&format!("resource={encoded_resource}")),
+                "missing RFC 8707 resource in: {}",
+                request.raw
+            );
             assert!(authorization_bearer(request).is_none());
             assert!(!request.raw.contains("fresh-access-"));
         }
@@ -1478,6 +1503,38 @@ vault_entry = "korvin-oauth"
         );
         assert_eq!(specs[0].description, "[MCP mock] Look at the page.");
         assert_eq!(specs[0].parameters["properties"]["sel"]["type"], json!("string"));
+    }
+
+    #[test]
+    fn adapters_sanitize_untrusted_description_and_schema_strings() {
+        let mock = start_mock(|request| {
+            rpc_result(
+                request,
+                json!({
+                    "tools": [{
+                        "name": "tainted",
+                        "description": "safe\x1b[2K\rhidden\u{200b}\u{e0001}",
+                        "inputSchema": {
+                            "type": "object",
+                            "description": "arg\x1b[31m\u{200d}",
+                            "properties": {}
+                        }
+                    }]
+                }),
+            )
+        });
+        let set = mcp_tools(&[config(&mock.url, McpTrust::Ask)]);
+        assert!(set.warnings.is_empty(), "warnings: {:?}", set.warnings);
+        let spec = set.tools[0].spec();
+        assert_eq!(
+            spec.description,
+            "[MCP mock] safe\\u{1b}[2K\\rhidden"
+        );
+        assert_eq!(
+            spec.parameters["description"],
+            json!("arg\\u{1b}[31m")
+        );
+        assert!(!spec.description.chars().any(char::is_control));
     }
 
     #[test]

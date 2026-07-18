@@ -2,6 +2,39 @@
 
 Record every meaningful session here.
 
+## 2026-07-18: M5 Slice B — FLOOR (E2 implementation)
+
+Builder:
+
+- Codex (GPT-5.6 Sol xhigh) — Slice B executor from the locked seam-by-seam brief.
+
+What changed:
+
+- Added law-backed read/send verdicts and credential audiences. `read_file` now
+  consults the guard before I/O; bundled law blocks repository metadata, runtime
+  state, environment files, private keys, and certificates from reads.
+- Bounded and shape-scrubbed built-in tool results with head/tail excerpts and a
+  full-result digest; approved shell commands now inherit only a minimal environment.
+- Sanitized untrusted MCP descriptions/schema strings, widened secret-shape
+  redaction, and seeded session scrubbers from all resolvable catalog vault entries.
+- Added the credential-audience broker and enforced it on CLI routes and MCP
+  configuration before secrets materialize; repository law cannot approve audiences.
+- Made nh-mcp fail closed with an OS-seeded bearer token plus strict loopback
+  Host/Origin checks while retaining the loopback bind and preview banner.
+- Added the OAuth resource indicator and authenticated the existing E3 MCP fleet test.
+- Kept nh-fleet frozen except for the two authorized read/send guard arms.
+
+Tests/checks:
+
+- `cargo test --workspace --release`: **319 passed / 0 failed / 1 ignored**.
+- `cargo clippy --workspace --all-targets --release -- -D warnings`: clean.
+- Scoped rustfmt check exposed the repository's known pre-existing formatting drift;
+  no formatter was applied, avoiding unrelated changes in touched/frozen crates.
+
+Next step:
+
+- Orchestrator adversarial review and commit gate for Slice B, then Slice C VISIBLE.
+
 ## 2026-07-17: M4 CLOSED (Slice D committed `aa751f4`) + M5 direction research
 
 **M4 is complete.** Slice D (OAuth2 MCP client, E4) committed `aa751f4` after a clean re-gate

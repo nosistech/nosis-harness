@@ -1010,8 +1010,10 @@ fn worker_loop(
     let event_scrubber = Arc::clone(&scrubber);
     let progress_events = events.clone();
     let ctx = ToolCtx::new(workdir, approve).with_guard(Box::new(move |access| match access {
+        Access::Read(path) => verdict_to_guard(policy.read_verdict(path)),
         Access::Write(path) => verdict_to_guard(policy.write_verdict(path)),
         Access::Exec(command) => verdict_to_guard(policy.exec_verdict(command)),
+        Access::Send(target) => verdict_to_guard(policy.send_verdict(target)),
     }));
     let law_constitution = law.constitution;
     let mut agent = AgentLoop {

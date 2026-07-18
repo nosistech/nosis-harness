@@ -3,6 +3,8 @@
 //! The server mirrors `nh_tools::mcp::McpClient`: blocking JSON-RPC over HTTP,
 //! no initialize handshake, no sessions, and durable run IDs as ordinary handles.
 
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,6 +32,7 @@ pub struct ServeConfig {
 }
 
 struct State {
+    addr: SocketAddr,
     catalog: String,
     law: nh_law::Law,
     default_route: String,
@@ -41,6 +44,7 @@ struct State {
 impl From<ServeConfig> for State {
     fn from(config: ServeConfig) -> Self {
         Self {
+            addr: config.addr,
             catalog: config.catalog,
             law: config.law,
             default_route: config.default_route,
@@ -53,6 +57,7 @@ impl From<ServeConfig> for State {
 
 pub struct McpServer {
     addr: SocketAddr,
+    token: String,
     shutdown: Arc<AtomicBool>,
     handle: JoinHandle<()>,
 }
@@ -61,6 +66,10 @@ impl McpServer {
     /// Bind first, then run the blocking accept loop on a background thread.
     pub fn start(config: ServeConfig) -> anyhow::Result<McpServer> {
         let (server, addr, state) = bind(config)?;
+        let token = state
+            .token
+            .clone()
+            .expect("bind always installs an nh-mcp token");
         let shutdown = Arc::new(AtomicBool::new(false));
         let loop_shutdown = Arc::clone(&shutdown);
         let handle = thread::Builder::new()
@@ -69,6 +78,7 @@ impl McpServer {
             .context("could not start the nh-mcp server thread")?;
         Ok(Self {
             addr,
+            token,
             shutdown,
             handle,
         })
@@ -76,6 +86,10 @@ impl McpServer {
 
     pub fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    pub fn token(&self) -> &str {
+        &self.token
     }
 
     pub fn shutdown(self) -> anyhow::Result<()> {
@@ -94,7 +108,7 @@ pub fn serve(config: ServeConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn bind(config: ServeConfig) -> anyhow::Result<(Server, SocketAddr, Arc<State>)> {
+fn bind(mut config: ServeConfig) -> anyhow::Result<(Server, SocketAddr, Arc<State>)> {
     if config.addr.ip() != IpAddr::V4(Ipv4Addr::LOCALHOST) {
         bail!("nh-mcp only binds 127.0.0.1 — use 127.0.0.1:PORT");
     }
@@ -105,18 +119,38 @@ fn bind(config: ServeConfig) -> anyhow::Result<(Server, SocketAddr, Arc<State>)>
         .server_addr()
         .to_ip()
         .ok_or_else(|| anyhow::anyhow!("nh-mcp did not bind a TCP address"))?;
-    Ok((server, addr, Arc::new(State::from(config))))
+    if config.token.is_none() {
+        config.token = Some(mint_token());
+    }
+    let mut state = State::from(config);
+    state.addr = addr;
+    Ok((server, addr, Arc::new(state)))
+}
+
+/// Loopback preview token, OS-seeded; not a long-term credential.
+fn mint_token() -> String {
+    (0_u8..4)
+        .map(|part| {
+            let state = RandomState::new();
+            format!("{:016x}", state.hash_one(part))
+        })
+        .collect()
 }
 
 fn print_banner(addr: SocketAddr, state: &State) {
     let scrubber = scrubber(state);
     println!("{}", nh_vault::safe_line(&scrubber, PREVIEW_NOTICE));
+    let connect_scrubber = nh_vault::Scrubber::new(Vec::new());
+    let token = state
+        .token
+        .as_deref()
+        .expect("bind always installs an nh-mcp token");
     println!(
         "{}",
         nh_vault::safe_line(
-            &scrubber,
+            &connect_scrubber,
             &format!(
-                "listening on http://{addr}/mcp   (tools: route_resolve, fleet_run, fleet_status)"
+                "connect http://{addr}/mcp with Bearer {token}   (tools: route_resolve, fleet_run, fleet_status)"
             ),
         )
     );
@@ -133,6 +167,10 @@ fn accept_loop(server: Server, state: Arc<State>, shutdown: Arc<AtomicBool>) {
 }
 
 fn handle(mut request: Request, state: &State) {
+    if !loopback_headers(&request, state.addr.port()) {
+        respond_json(request, state, 403, &json!({}));
+        return;
+    }
     if !authorized(&request, state) {
         respond_json(request, state, 401, &json!({}));
         return;
@@ -186,9 +224,48 @@ fn handle(mut request: Request, state: &State) {
     respond_json(request, state, 200, &response);
 }
 
+fn loopback_headers(request: &Request, port: u16) -> bool {
+    let expected_ip = format!("127.0.0.1:{port}");
+    let expected_name = format!("localhost:{port}");
+    let hosts: Vec<_> = request
+        .headers()
+        .iter()
+        .filter(|header| header.field.equiv("Host"))
+        .collect();
+    let host_ok = hosts.len() == 1
+        && (hosts[0].value.as_str().eq_ignore_ascii_case(&expected_ip)
+            || hosts[0].value.as_str().eq_ignore_ascii_case(&expected_name));
+    if !host_ok {
+        return false;
+    }
+    request
+        .headers()
+        .iter()
+        .filter(|header| header.field.equiv("Origin"))
+        .all(|header| localhost_origin(header.value.as_str()))
+}
+
+fn localhost_origin(origin: &str) -> bool {
+    let origin = origin.trim().to_ascii_lowercase();
+    let Some(authority) = origin
+        .strip_prefix("http://")
+        .and_then(|rest| rest.split('/').next())
+    else {
+        return false;
+    };
+    if matches!(authority, "127.0.0.1" | "localhost") {
+        return true;
+    }
+    ["127.0.0.1:", "localhost:"].iter().any(|prefix| {
+        authority
+            .strip_prefix(prefix)
+            .is_some_and(|port| port.parse::<u16>().is_ok())
+    })
+}
+
 fn authorized(request: &Request, state: &State) -> bool {
     let Some(token) = state.token.as_deref() else {
-        return true;
+        return false;
     };
     let expected = format!("Bearer {token}");
     request
@@ -462,5 +539,112 @@ fn scrub_json(value: &mut Value, scrubber: &nh_vault::Scrubber) {
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read as _, Write as _};
+    use std::net::{Shutdown, TcpStream};
+
+    use super::*;
+
+    fn test_server() -> (tempfile::TempDir, McpServer) {
+        let root = tempfile::tempdir().unwrap();
+        let catalog =
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../catalog.toml")).to_string();
+        let law = nh_law::load(root.path(), &nh_law::LoadOptions { cli_autonomy: None });
+        let server = McpServer::start(ServeConfig {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            catalog,
+            law,
+            default_route: "deepseek-v4-flash".into(),
+            run_root: root.path().to_path_buf(),
+            token: None,
+            max_workers: 1,
+        })
+        .unwrap();
+        (root, server)
+    }
+
+    fn raw_post(
+        addr: SocketAddr,
+        host: &str,
+        origin: Option<&str>,
+        token: Option<&str>,
+        body: &Value,
+    ) -> String {
+        let body = body.to_string();
+        let mut headers = format!(
+            "POST /mcp HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+            body.len()
+        );
+        if let Some(origin) = origin {
+            headers.push_str(&format!("Origin: {origin}\r\n"));
+        }
+        if let Some(token) = token {
+            headers.push_str(&format!("Authorization: Bearer {token}\r\n"));
+        }
+        let request = format!("{headers}\r\n{body}");
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        stream.shutdown(Shutdown::Write).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    }
+
+    #[test]
+    fn minted_token_is_required_and_host_origin_fail_closed() {
+        let (_root, server) = test_server();
+        let addr = server.addr();
+        let token = server.token().to_string();
+        assert_eq!(token.len(), 64);
+        assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
+
+        let fleet_run = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "fleet_run",
+                "arguments": { "tasks": [{ "task": "must not dispatch" }] }
+            }
+        });
+        let no_auth = raw_post(addr, &addr.to_string(), None, None, &fleet_run);
+        assert!(no_auth.starts_with("HTTP/1.1 401"), "{no_auth}");
+
+        let bad_host = raw_post(
+            addr,
+            "evil.example",
+            None,
+            Some(&token),
+            &json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+        );
+        assert!(bad_host.starts_with("HTTP/1.1 403"), "{bad_host}");
+
+        let bad_origin = raw_post(
+            addr,
+            &addr.to_string(),
+            Some("https://evil.example"),
+            Some(&token),
+            &json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}),
+        );
+        assert!(bad_origin.starts_with("HTTP/1.1 403"), "{bad_origin}");
+
+        let allowed = raw_post(
+            addr,
+            &addr.to_string(),
+            Some("http://localhost:3000"),
+            Some(&token),
+            &json!({"jsonrpc":"2.0","id":4,"method":"tools/list","params":{}}),
+        );
+        assert!(allowed.starts_with("HTTP/1.1 200"), "{allowed}");
+        assert!(allowed.contains("\"fleet_run\""), "{allowed}");
+
+        server.shutdown().unwrap();
     }
 }
