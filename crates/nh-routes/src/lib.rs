@@ -3,6 +3,10 @@
 //! peak windows, thinking dialects, modality flags, provider defaults, banned-string
 //! rejection. Catalog and pricing stay DATA in catalog.toml — never hard-coded here.
 
+mod profiles;
+
+pub use profiles::*;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 

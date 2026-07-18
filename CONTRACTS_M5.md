@@ -465,3 +465,52 @@ headline baseline = **no-cache** (same model, zero cache — the honest "our cac
 top-tier/peak are breakdown context, never the headline); dual-currency = native primary + `≈$` gloss
 on the paid number (per-turn headline, HUD session total, `/why`), naive breakdown native-only. `/profile`
 + the profile HUD chip stay **Slice D** (they need the not-yet-built `Profiles` module) and are OUT of C.
+
+**A-M5-7 (2026-07-18, orchestrator Opus 4.8; owner-ratified) — Slice D receipt-profile field +
+`AgentLoop.profile` + the AgentLoop-literal ripple into frozen nh-fleet.** §0.1's nh-core row opens
+"`EffectiveExecutionPolicy` application | request build" for the output-cap + thinking clamp, but Slice
+D's E4 also requires "the receipt carries the effective profile" (D tests) — a seam in the `Receipt`
+struct + the receipt-recording path, NOT request-build. Recording the active profile needs (a) a new
+`Receipt.effective_profile` field and (b) `AgentLoop` to carry the profile name so `make_receipt` can
+write it. Adding a public field to `AgentLoop` forces every *exhaustive* struct-literal site to add it or
+fail to compile (E0063) — the A-M5-2/-4 pattern. The production sites in the D-open crates set the real
+profile name; the **frozen** nh-fleet site + the nh-core test literals get the behavior-preserving `None`.
+**Owner-ratified design calls (2026-07-18):** profiles clamp **thinking tier + output cap** on the
+user-chosen route only (route *selection* by profile → M6 auto-router); frugal = route thinking floor +
+output cap ≤16 384 + off-peak preferred; balanced = today's behavior exactly; max-quality = route thinking
+ceiling + cap = route.max_out. **No currency session hard-stop in D** (held to a separate lever / M6).
+| Crate | Seam | Ref | Tag | Change |
+|---|---|---|:--:|---|
+| `nh-core` | `Receipt.effective_profile` | lib.rs `Receipt` 1313-1325 | + | `#[serde(default, skip_serializing_if = "Option::is_none")] pub effective_profile: Option<String>`. Additive; pre-D `receipts.jsonl` still parse (`default`). |
+| `nh-core` | `AgentLoop.profile` + `make_receipt` | lib.rs 1403-1422, `make_receipt` 1613-1632 | + | new `pub profile: Option<String>` field; `make_receipt` copies `self.profile.clone()` onto every receipt. `None` = today's behavior (no profile line). |
+| `nh-fleet` | `AgentLoop { … }` literal (**FROZEN** crate) | lib.rs 1227 | Δ | add `profile: None` — the only line nh-fleet gains (ladder/workers stay frozen); fleet runs are profile-agnostic in M5. Compile-compat glue, mirrors A-M5-2/-4. |
+| `nh-core` | test `AgentLoop` literals | tests/agent_loop.rs:99, tests/context_engine.rs:118 | Δ | add `profile: None` (test-only compile glue). |
+Applied by the orchestrator as integration glue if Sol stops at the frozen boundary; Sol owns all
+substantive Slice D logic (the nh-routes `profiles` module + `EffectiveExecutionPolicy`, the thinking +
+output-cap clamps, and the `/profile` / `--profile` / `nh profile` surfaces + HUD chip). The nh-cli
+(`cmd_run.rs:128`, `cmd_chat.rs:120`/`:668`) and nh-tui (`lib.rs:1214`) `AgentLoop` sites are inside
+D-open crates and set the real profile name — no amendment needed for them. **Application stays at the
+caller** (clamp a `ResolvedRoute` clone's `max_out` → the existing `make_client`; set the live
+`AgentLoop.thinking` field) so `AgentLoop` stays policy-free and `make_client`'s signature (5 callers incl.
+frozen nh-fleet:1203) is untouched — the §0.1 nh-core "application" row is satisfied in spirit (the
+clamped values ARE applied at build time) without opening a new nh-core function.
+
+**A-M5-7 addendum (2026-07-18, orchestrator Opus 4.8) — the `Receipt`-literal ripple (Sol correctly
+stopped here on the first handoff).** Adding the public `Receipt.effective_profile` field forces every
+*exhaustive* `Receipt { … }` literal in the workspace to gain `effective_profile: None`, exactly as the
+`AgentLoop` field forces the `profile:` glue (E0063). A-M5-7's tables enumerated the `AgentLoop` literals
+but not the `Receipt` literals; a full-workspace grep finds the complete set — the real constructor
+`nh-core::make_receipt` (lib.rs:1622) sets the live value, and the remaining four literals (two in FROZEN
+nh-fleet's test file, two in nh-tui) take the behavior-preserving `None`:
+| Crate | Seam | Ref | Tag | Change |
+|---|---|---|:--:|---|
+| `nh-fleet` | `MockSwarm::submit_and_collect` Receipt literal (**FROZEN** test) | tests/slice_b.rs:405 | Δ | add `effective_profile: None` — test-only compile glue; the swarm mock is profile-agnostic. |
+| `nh-fleet` | `failed_receipt` helper (**FROZEN** test) | tests/slice_b.rs:490 | Δ | add `effective_profile: None`. |
+| `nh-tui` | `failed_timeline_summary` synthetic Receipt | lib.rs:1373 | Δ | add `effective_profile: None` — a connection-failure placeholder, no active turn/profile. |
+| `nh-tui` | test `receipt` helper | lib.rs:3067 | Δ | add `effective_profile: None`. |
+**Blanket (prevents a further stop-and-wait on pure glue):** any *additional* exhaustive-literal site that
+the `Receipt.effective_profile` or `AgentLoop.profile` field additions force to compile is pre-authorized
+as behavior-preserving glue — Sol **applies** the trivial `effective_profile: None` / `profile: None`
+(or the real active-profile value at a live caller site) and **reports** it in the self-report, rather
+than stopping. This blanket covers ONLY the two field-addition ripples of A-M5-7; every other frozen line
+still requires an amendment.

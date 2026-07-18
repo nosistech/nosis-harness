@@ -24,11 +24,13 @@ use crossterm::{
 };
 use nh_core::agent::AgentLoop;
 use nh_core::receipt::{FailureClass, Outcome, Receipt, ReceiptWriter};
-use nh_core::wire::{cache_hit_pct, make_client, ChatClient, ChatMessage, ThinkingEffort, Usage};
+use nh_core::wire::{
+    cache_hit_pct, make_client, resolve_effort, ChatClient, ChatMessage, ThinkingEffort, Usage,
+};
 use nh_law::{Autonomy, Law, PolicyView, Verdict};
 use nh_routes::{
-    cost_of, money, money_with_gloss, saved_pct, Currency, PriceConfidence, ResolvedRoute,
-    RouteClass, RouteResolver, ThinkingDialect,
+    cost_of, money, money_with_gloss, saved_pct, Currency, PriceConfidence, Profiles,
+    ResolvedRoute, RouteClass, RouteResolver, ThinkingDialect, ThinkingPosture,
 };
 use nh_tools::{
     builtin_tools, Access, Guard, McpAuth, McpServerConfig, McpToolset, McpTrust, ToolCtx,
@@ -248,6 +250,8 @@ pub struct ApprovalRequest {
 pub struct TuiConfig {
     pub resolver: RouteResolver,
     pub model_id: String,
+    pub profiles: Profiles,
+    pub profile: String,
     pub law: Law,
     pub budget: Option<u64>,
     pub repo_root: PathBuf,
@@ -283,6 +287,8 @@ pub struct App {
     working_since: Option<DateTime<Utc>>,
     resolver: RouteResolver,
     route: ResolvedRoute,
+    profiles: Profiles,
+    active_profile: String,
     effort: ThinkingEffort,
     transcript: Vec<TranscriptLine>,
     pending_approval: Option<ApprovalRequest>,
@@ -310,9 +316,12 @@ impl App {
         scrubber: SharedScrubber,
         policy_view: PolicyView,
         mcp_entries: Vec<PaletteEntry>,
+        profile_config: (Profiles, String),
     ) -> Self {
+        let (profiles, active_profile) = profile_config;
         let mut palette_entries = builtin_palette_entries();
         palette_entries.extend(mcp_entries);
+        let execution_policy = profiles.effective(&active_profile, &route);
         Self {
             status: if budget == Some(0) {
                 Status::Blocked(BUDGET_REASON.into())
@@ -320,9 +329,11 @@ impl App {
                 Status::Idle
             },
             working_since: None,
-            effort: effort_for(route.thinking_dialect),
+            effort: effort_for(execution_policy.posture, route.thinking_dialect),
             resolver,
             route,
+            profiles,
+            active_profile: execution_policy.profile,
             transcript: Vec::new(),
             pending_approval: None,
             usage: Usage::default(),
@@ -406,7 +417,9 @@ impl App {
     }
 
     fn switch_route(&mut self, route: ResolvedRoute) {
-        self.effort = effort_for(route.thinking_dialect);
+        let policy = self.profiles.effective(&self.active_profile, &route);
+        self.effort = effort_for(policy.posture, route.thinking_dialect);
+        self.active_profile = policy.profile;
         self.route = route;
         self.push_line(
             &format!("switched to {} — context kept, cache resets", self.route.id),
@@ -516,6 +529,7 @@ impl App {
             " · {}",
             self.route.peak_status(now, self.local_offset)
         ));
+        line.push_str(&format!(" · profile {}", self.active_profile));
         if let Some(limit) = self.budget {
             let used = self.used_tokens();
             let pct = if limit == 0 {
@@ -639,6 +653,11 @@ fn builtin_palette_entries() -> Vec<PaletteEntry> {
             "/why",
             "explain the chosen route and the cheaper ones it beat",
             PaletteAction::Why,
+        ),
+        (
+            "/profile <frugal|balanced|max-quality>",
+            "set thinking and output spend for the next turn",
+            PaletteAction::Prefill("/profile "),
         ),
         (
             "/model <id>",
@@ -1047,6 +1066,8 @@ fn run_with_connect(
     let TuiConfig {
         resolver,
         model_id: _,
+        profiles,
+        profile,
         law,
         budget,
         repo_root,
@@ -1055,7 +1076,8 @@ fn run_with_connect(
         notify,
     } = config;
     let scrubber = Arc::new(RwLock::new(Scrubber::new(Vec::new())));
-    let initial = connect(&route);
+    let execution_policy = profiles.effective(&profile, &route);
+    let initial = connect(&execution_policy.clamp_route(&route));
     if let Ok((_, literal)) = &initial {
         install_literal(&scrubber, &mut Vec::new(), literal.clone());
     }
@@ -1067,6 +1089,7 @@ fn run_with_connect(
         Arc::clone(&scrubber),
         policy_view,
         palette_entries,
+        (profiles.clone(), execution_policy.profile.clone()),
     );
     let notifier = Notifier::new(notify, Arc::new(TelegramSender));
     let mut worker = spawn_worker(WorkerConfig {
@@ -1077,6 +1100,8 @@ fn run_with_connect(
         scrubber,
         connect,
         initial: Some(initial),
+        profiles,
+        active_profile: execution_policy.profile,
     })?;
 
     let _panic_hook = PanicHookGuard::install();
@@ -1093,6 +1118,7 @@ enum WorkerCommand {
     Task(String),
     SwitchRoute(Box<ResolvedRoute>),
     SetEffort(ThinkingEffort),
+    SetProfile(String),
     Stop,
 }
 
@@ -1121,6 +1147,8 @@ impl Drop for Worker {
 
 struct WorkerConfig {
     route: ResolvedRoute,
+    profiles: Profiles,
+    active_profile: String,
     law: Law,
     repo_root: PathBuf,
     workdir: PathBuf,
@@ -1150,6 +1178,8 @@ fn worker_loop(
 ) {
     let WorkerConfig {
         mut route,
+        profiles,
+        mut active_profile,
         law,
         repo_root,
         workdir,
@@ -1157,9 +1187,11 @@ fn worker_loop(
         connect,
         initial,
     } = config;
+    let initial_policy = profiles.effective(&active_profile, &route);
+    active_profile = initial_policy.profile.clone();
     let connection = match initial {
         Some(connection) => connection,
-        None => connect(&route),
+        None => connect(&initial_policy.clamp_route(&route)),
     };
     let (client, mut key_literals, mut connected) = match connection {
         Ok((client, literal)) => {
@@ -1221,7 +1253,8 @@ fn worker_loop(
         },
         model_id: route.model_id.clone(),
         max_turns: 20,
-        thinking: effort_for(route.thinking_dialect),
+        thinking: effort_for(initial_policy.posture, route.thinking_dialect),
+        profile: Some(active_profile.clone()),
         constitution: Some(identity_constitution(&law_constitution, &route)),
         context_limit: route.context,
         on_event: Some(Box::new(move |line| {
@@ -1235,7 +1268,8 @@ fn worker_loop(
         let task = match command {
             WorkerCommand::Task(task) => task,
             WorkerCommand::SwitchRoute(next_route) => {
-                let connection = connect(&next_route);
+                let execution_policy = profiles.effective(&active_profile, &next_route);
+                let connection = connect(&execution_policy.clamp_route(&next_route));
                 match connection {
                     Ok((client, literal)) => {
                         install_literal(&scrubber, &mut key_literals, literal);
@@ -1251,7 +1285,9 @@ fn worker_loop(
                     }
                 }
                 agent.model_id = next_route.model_id.clone();
-                agent.thinking = effort_for(next_route.thinking_dialect);
+                agent.thinking = effort_for(execution_policy.posture, next_route.thinking_dialect);
+                agent.profile = Some(execution_policy.profile.clone());
+                active_profile = execution_policy.profile;
                 let constitution = identity_constitution(&law_constitution, &next_route);
                 agent.constitution = Some(constitution.clone());
                 replace_system_message(&mut history, constitution);
@@ -1263,10 +1299,33 @@ fn worker_loop(
                 agent.thinking = effort;
                 continue;
             }
+            WorkerCommand::SetProfile(name) => {
+                let execution_policy = profiles.effective(&name, &route);
+                let connection = connect(&execution_policy.clamp_route(&route));
+                match connection {
+                    Ok((client, literal)) => {
+                        install_literal(&scrubber, &mut key_literals, literal);
+                        agent.receipts.scrubber = Scrubber::new(key_literals.clone());
+                        agent.client = client;
+                        connected = true;
+                    }
+                    Err(error) => {
+                        agent.client = Box::new(NotConnected {
+                            message: error.to_string(),
+                        });
+                        connected = false;
+                    }
+                }
+                agent.thinking = effort_for(execution_policy.posture, route.thinking_dialect);
+                agent.profile = Some(execution_policy.profile.clone());
+                active_profile = execution_policy.profile;
+                continue;
+            }
             WorkerCommand::Stop => break,
         };
         if !connected {
-            match connect(&route) {
+            let execution_policy = profiles.effective(&active_profile, &route);
+            match connect(&execution_policy.clamp_route(&route)) {
                 Ok((client, literal)) => {
                     install_literal(&scrubber, &mut key_literals, literal);
                     agent.receipts.scrubber = Scrubber::new(key_literals.clone());
@@ -1379,6 +1438,7 @@ fn failed_timeline_summary(model_id: &str, task: &str, reason: &str) -> Timeline
             outcome: Outcome::Fail,
             failure_class: Some(FailureClass::Verification),
             usage: None,
+            effective_profile: None,
         },
         answer: format!("error: {reason}"),
     }
@@ -1392,13 +1452,8 @@ fn verdict_to_guard(verdict: Verdict) -> Guard {
     }
 }
 
-fn effort_for(dialect: ThinkingDialect) -> ThinkingEffort {
-    match dialect {
-        ThinkingDialect::AlwaysThinking | ThinkingDialect::GlmHm => ThinkingEffort::High,
-        ThinkingDialect::DeepseekNhm | ThinkingDialect::KimiToggle | ThinkingDialect::None => {
-            ThinkingEffort::None
-        }
-    }
+fn effort_for(posture: ThinkingPosture, dialect: ThinkingDialect) -> ThinkingEffort {
+    resolve_effort(None, posture, dialect)
 }
 
 fn effort_name(effort: ThinkingEffort) -> &'static str {
@@ -1475,6 +1530,7 @@ enum UiAction {
     Dispatch(String),
     SwitchRoute(String),
     SetEffort(ThinkingEffort),
+    SetProfile(String),
     Quit,
 }
 
@@ -1527,6 +1583,19 @@ fn handle_action(app: &mut App, worker: &mut Worker, action: UiAction) -> bool {
                 );
             } else {
                 app.set_effort(effort);
+            }
+            false
+        }
+        UiAction::SetProfile(profile) => {
+            if worker
+                .commands
+                .send(WorkerCommand::SetProfile(profile))
+                .is_err()
+            {
+                apply_event(
+                    app,
+                    AgentEvent::Failed("agent stopped — retry the task".into()),
+                );
             }
             false
         }
@@ -1788,6 +1857,12 @@ fn execute_command(app: &mut App) -> UiAction {
         }
         ("why", None) => explain_why(app),
         ("why", Some(_)) => command_error(app, "/why takes no arguments", "run /why by itself"),
+        ("profile", Some(name)) => set_profile(app, name),
+        ("profile", None) => command_error(
+            app,
+            "profile name is required",
+            "use /profile <frugal|balanced|max-quality>",
+        ),
         ("model", Some(id)) => resolved_route_action(app, app.resolver.resolve(id)),
         ("model", None) => command_error(app, "model id is required", "use /model <id>"),
         ("provider", Some(provider)) => {
@@ -1833,6 +1908,32 @@ fn teaching_error(cause: &str, next: &str) -> String {
 fn command_error(app: &mut App, cause: &str, next: &str) -> UiAction {
     app.push_line(&teaching_error(cause, next), TranscriptKind::Error);
     UiAction::None
+}
+
+fn set_profile(app: &mut App, name: &str) -> UiAction {
+    if !app.profiles.contains(name) {
+        return command_error(
+            app,
+            &format!("unknown profile '{name}'"),
+            "use /profile <frugal|balanced|max-quality>",
+        );
+    }
+    let policy = app.profiles.effective(name, &app.route);
+    app.active_profile = policy.profile.clone();
+    app.effort = effort_for(policy.posture, app.route.thinking_dialect);
+    let cap = policy
+        .output_cap
+        .map_or_else(|| "route default".to_owned(), |cap| cap.to_string());
+    app.push_line(
+        &format!(
+            "profile {} — next turn: thinking {} · max output {}",
+            policy.profile,
+            effort_name(app.effort),
+            cap
+        ),
+        TranscriptKind::Progress,
+    );
+    UiAction::SetProfile(policy.profile)
 }
 
 fn explain_why(app: &mut App) -> UiAction {
@@ -2968,6 +3069,7 @@ mod tests {
                 block_commands: Vec::new(),
             },
             Vec::new(),
+            (Profiles::bundled(), "balanced".into()),
         )
     }
 
@@ -2987,6 +3089,7 @@ mod tests {
                 block_commands: Vec::new(),
             },
             Vec::new(),
+            (Profiles::bundled(), "balanced".into()),
         )
     }
 
@@ -3073,6 +3176,7 @@ mod tests {
             outcome,
             failure_class: (outcome != Outcome::Pass).then_some(FailureClass::Constraint),
             usage,
+            effective_profile: None,
         }
     }
 
@@ -3252,6 +3356,7 @@ mod tests {
                 block_commands: Vec::new(),
             },
             Vec::new(),
+            (Profiles::bundled(), "balanced".into()),
         );
 
         let empty = buffer_text(&render_buffer(&app, 100, 24));
@@ -3651,6 +3756,42 @@ mod tests {
             Some("unknown reasoning effort — use /effort <none|low|high|max>")
         );
         assert_eq!(app.effort, ThinkingEffort::Max);
+    }
+
+    #[test]
+    fn profile_command_updates_active_profile_and_hud_chip() {
+        let mut app = test_app(None);
+        assert!(app.hud_line(fixed_at()).contains("profile balanced"));
+
+        type_text(&mut app, "/profile frugal");
+        assert_eq!(
+            reduce_key(&mut app, code_key(KeyCode::Enter)),
+            UiAction::SetProfile("frugal".into())
+        );
+        assert_eq!(app.active_profile, "frugal");
+        assert!(app.hud_line(fixed_at()).contains("profile frugal"));
+        assert_eq!(
+            app.transcript.last().map(|line| line.text.as_str()),
+            Some("profile frugal — next turn: thinking none · max output 16384")
+        );
+    }
+
+    #[test]
+    fn unknown_profile_is_a_calm_no_op() {
+        let mut app = test_app(None);
+        let before = app.active_profile.clone();
+
+        type_text(&mut app, "/profile extravagant");
+        assert_eq!(
+            reduce_key(&mut app, code_key(KeyCode::Enter)),
+            UiAction::None
+        );
+
+        assert_eq!(app.active_profile, before);
+        assert_eq!(
+            app.transcript.last().map(|line| line.text.as_str()),
+            Some("unknown profile 'extravagant' — use /profile <frugal|balanced|max-quality>")
+        );
     }
 
     #[test]
@@ -4190,6 +4331,7 @@ mod tests {
                 block_commands: Vec::new(),
             },
             Vec::new(),
+            (Profiles::bundled(), "balanced".into()),
         );
         apply_event(
             &mut app,
@@ -4224,6 +4366,7 @@ mod tests {
                 state: Some(McpState::Enabled),
                 action: PaletteAction::Describe,
             }],
+            (Profiles::bundled(), "balanced".into()),
         );
         app.overlay = Overlay::Palette {
             filter: "secret-tool".into(),
@@ -4474,6 +4617,8 @@ mod tests {
         let law = nh_law::load(&root, &nh_law::LoadOptions { cli_autonomy: None });
         let mut worker = spawn_worker(WorkerConfig {
             route: test_route(),
+            profiles: Profiles::bundled(),
+            active_profile: "balanced".into(),
             law,
             repo_root: root.clone(),
             workdir: root.clone(),
@@ -4557,6 +4702,8 @@ mod tests {
         let law = nh_law::load(&root, &nh_law::LoadOptions { cli_autonomy: None });
         let mut worker = spawn_worker(WorkerConfig {
             route: test_route(),
+            profiles: Profiles::bundled(),
+            active_profile: "balanced".into(),
             law,
             repo_root: root.clone(),
             workdir: root.clone(),
@@ -4614,6 +4761,8 @@ mod tests {
         let scrubber = Arc::new(RwLock::new(Scrubber::new(Vec::new())));
         let mut worker = spawn_worker(WorkerConfig {
             route: test_route(),
+            profiles: Profiles::bundled(),
+            active_profile: "balanced".into(),
             law,
             repo_root: root.clone(),
             workdir: root.clone(),
@@ -4657,6 +4806,67 @@ mod tests {
     }
 
     #[test]
+    fn worker_profile_change_reconnects_with_clamp_and_records_next_turn() {
+        let root = temp_dir();
+        let seen_caps = Arc::new(Mutex::new(Vec::new()));
+        let caps_for_connect = Arc::clone(&seen_caps);
+        let request_lengths = Arc::new(Mutex::new(Vec::new()));
+        let lengths_for_connect = Arc::clone(&request_lengths);
+        let connect: ConnectFn = Box::new(move |route| {
+            caps_for_connect.lock().unwrap().push(route.max_out);
+            Ok((
+                Box::new(MockClient {
+                    request_lengths: Arc::clone(&lengths_for_connect),
+                }),
+                "fake-worker-secret".into(),
+            ))
+        });
+        let law = nh_law::load(&root, &nh_law::LoadOptions { cli_autonomy: None });
+        let mut worker = spawn_worker(WorkerConfig {
+            route: test_route(),
+            profiles: Profiles::bundled(),
+            active_profile: "balanced".into(),
+            law,
+            repo_root: root.clone(),
+            workdir: root.clone(),
+            scrubber: Arc::new(RwLock::new(Scrubber::new(Vec::new()))),
+            connect,
+            initial: None,
+        })
+        .unwrap();
+
+        worker
+            .commands
+            .send(WorkerCommand::SetProfile("frugal".into()))
+            .unwrap();
+        worker
+            .commands
+            .send(WorkerCommand::Task("profiled turn".into()))
+            .unwrap();
+
+        let receipt = loop {
+            match worker.events.recv_timeout(Duration::from_secs(2)).unwrap() {
+                AgentEvent::TaskReceipt(summary) => break summary.receipt,
+                AgentEvent::Usage(_) | AgentEvent::Answer(_) | AgentEvent::Progress(_) => {}
+                AgentEvent::Approval(_) => panic!("mock never asks for approval"),
+                AgentEvent::Failed(reason) => panic!("worker failed: {reason}"),
+            }
+        };
+        assert_eq!(
+            *seen_caps.lock().unwrap(),
+            vec![None, Some(16_384)],
+            "profile change rebuilds the client with the clamped route"
+        );
+        assert_eq!(receipt.effective_profile.as_deref(), Some("frugal"));
+
+        worker.stop();
+        if let Some(join) = worker.join.take() {
+            join.join().unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn keyless_worker_starts_and_task_surfaces_the_add_key_line() {
         let root = temp_dir();
         let message = "no key found for \"test\" — run `nh key add test`";
@@ -4664,6 +4874,8 @@ mod tests {
         let law = nh_law::load(&root, &nh_law::LoadOptions { cli_autonomy: None });
         let mut worker = spawn_worker(WorkerConfig {
             route: test_route(),
+            profiles: Profiles::bundled(),
+            active_profile: "balanced".into(),
             law,
             repo_root: root.clone(),
             workdir: root.clone(),
