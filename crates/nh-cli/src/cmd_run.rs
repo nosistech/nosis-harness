@@ -54,7 +54,9 @@ pub(crate) fn effort_for(think: Option<ThinkArg>, dialect: ThinkingDialect) -> T
         Some(ThinkArg::Max) => ThinkingEffort::Max,
         None => match dialect {
             ThinkingDialect::AlwaysThinking | ThinkingDialect::GlmHm => ThinkingEffort::High,
-            ThinkingDialect::DeepseekNhm | ThinkingDialect::None => ThinkingEffort::None,
+            ThinkingDialect::DeepseekNhm | ThinkingDialect::KimiToggle | ThinkingDialect::None => {
+                ThinkingEffort::None
+            }
         },
     }
 }

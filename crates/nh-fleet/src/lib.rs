@@ -1477,7 +1477,9 @@ fn stable_hash(text: &str) -> u64 {
 fn effort_for(dialect: ThinkingDialect) -> ThinkingEffort {
     match dialect {
         ThinkingDialect::AlwaysThinking | ThinkingDialect::GlmHm => ThinkingEffort::High,
-        ThinkingDialect::DeepseekNhm | ThinkingDialect::None => ThinkingEffort::None,
+        ThinkingDialect::DeepseekNhm | ThinkingDialect::KimiToggle | ThinkingDialect::None => {
+            ThinkingEffort::None
+        }
     }
 }
 

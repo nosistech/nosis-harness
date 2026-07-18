@@ -74,7 +74,12 @@ fn one_shot_server_with(
         }
         let body = serde_json::from_slice(&buf[header_end..header_end + content_length])
             .unwrap_or(serde_json::Value::Null);
-        tx.send(Captured { path, headers, body }).ok();
+        tx.send(Captured {
+            path,
+            headers,
+            body,
+        })
+        .ok();
         let resp = format!(
             "HTTP/1.1 {status} X\r\n{extra_headers}content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response_body}",
             response_body.len()
@@ -105,6 +110,7 @@ fn route(
         max_out,
         thinking_dialect: dialect,
         preserve_reasoning,
+        preserve_when_thinking: false,
         quirks: quirks.iter().map(|s| s.to_string()).collect(),
         price: None,
     }
@@ -121,7 +127,12 @@ fn msg(role: &str, content: Option<&str>) -> ChatMessage {
 }
 
 fn req(messages: Vec<ChatMessage>, thinking: ThinkingEffort) -> ChatRequest {
-    ChatRequest { model: "mock-model".into(), messages, tools: vec![], thinking }
+    ChatRequest {
+        model: "mock-model".into(),
+        messages,
+        tools: vec![],
+        thinking,
+    }
 }
 
 const OPENAI_OK: &str = r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1}}"#;
@@ -136,7 +147,7 @@ fn factory_openai_wire_posts_chat_completions_with_route_policy() {
         ThinkingDialect::DeepseekNhm,
         false,
         &["empty-reasoning-content-on-tool-replay"],
-        None,
+        Some(384_000),
     );
     let client = make_client(&r, Zeroizing::new(FAKE_SECRET.into()));
 
@@ -151,7 +162,10 @@ fn factory_openai_wire_posts_chat_completions_with_route_policy() {
                 }]),
                 ..msg("assistant", None)
             },
-            ChatMessage { tool_call_id: Some("c1".into()), ..msg("tool", Some("data")) },
+            ChatMessage {
+                tool_call_id: Some("c1".into()),
+                ..msg("tool", Some("data"))
+            },
         ],
         ThinkingEffort::None,
     );
@@ -160,17 +174,93 @@ fn factory_openai_wire_posts_chat_completions_with_route_policy() {
 
     let captured = rx.recv().unwrap();
     assert_eq!(captured.path, "/chat/completions");
-    assert_eq!(captured.headers["authorization"], format!("Bearer {FAKE_SECRET}"));
-    // Route policy captured by the factory: non-thinking omission + deepseek quirk.
+    assert_eq!(
+        captured.headers["authorization"],
+        format!("Bearer {FAKE_SECRET}")
+    );
+    // Route policy captured by the factory: explicit disable + deepseek quirk.
+    assert_eq!(captured.body["thinking"]["type"], "disabled");
     assert!(captured.body.get("reasoning_effort").is_none());
     assert_eq!(captured.body["messages"][1]["reasoning_content"], "");
+    assert_eq!(captured.body["max_tokens"], 384_000);
+}
+
+#[test]
+fn deepseek_none_and_low_send_explicit_disable_with_route_cap() {
+    for effort in [ThinkingEffort::None, ThinkingEffort::Low] {
+        let (url, rx) = one_shot_server(200, OPENAI_OK.into());
+        let r = route(
+            &url,
+            Wire::OpenAi,
+            ThinkingDialect::DeepseekNhm,
+            false,
+            &[],
+            Some(384_000),
+        );
+        let client = make_client(&r, Zeroizing::new(FAKE_SECRET.into()));
+        client
+            .complete(&req(vec![msg("user", Some("hi"))], effort))
+            .unwrap();
+
+        let body = rx.recv().unwrap().body;
+        assert_eq!(body["thinking"]["type"], "disabled", "effort {effort:?}");
+        assert!(body.get("reasoning_effort").is_none());
+        assert_eq!(body["max_tokens"], 384_000);
+    }
+}
+
+#[test]
+fn factory_kimi_toggle_replays_reasoning_only_while_thinking_is_active() {
+    for (effort, toggle, replays) in [
+        (ThinkingEffort::High, "enabled", true),
+        (ThinkingEffort::None, "disabled", false),
+    ] {
+        let (url, rx) = one_shot_server(200, OPENAI_OK.into());
+        let mut r = route(
+            &url,
+            Wire::OpenAi,
+            ThinkingDialect::KimiToggle,
+            false,
+            &[],
+            Some(131_072),
+        );
+        r.preserve_when_thinking = true;
+        let client = make_client(&r, Zeroizing::new(FAKE_SECRET.into()));
+        let request = req(
+            vec![ChatMessage {
+                reasoning_content: Some("required chain".into()),
+                tool_calls: Some(vec![ToolCallReq {
+                    id: "c1".into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                }]),
+                ..msg("assistant", None)
+            }],
+            effort,
+        );
+        client.complete(&request).unwrap();
+
+        let body = rx.recv().unwrap().body;
+        assert_eq!(body["thinking"]["type"], toggle);
+        assert_eq!(body["max_tokens"], 131_072);
+        assert_eq!(
+            body["messages"][0].get("reasoning_content").is_some(),
+            replays
+        );
+    }
 }
 
 #[test]
 fn factory_anthropic_wire_posts_v1_messages_with_required_headers() {
     let (url, rx) = one_shot_server(200, ANTHROPIC_OK.into());
-    // max_out above the cap → max_tokens clamps to 8192.
-    let r = route(&url, Wire::AnthropicMessages, ThinkingDialect::None, false, &[], Some(200_000));
+    let r = route(
+        &url,
+        Wire::AnthropicMessages,
+        ThinkingDialect::None,
+        false,
+        &[],
+        Some(384_000),
+    );
     let client = make_client(&r, Zeroizing::new(FAKE_SECRET.into()));
 
     let request = req(
@@ -189,8 +279,11 @@ fn factory_anthropic_wire_posts_v1_messages_with_required_headers() {
     assert_eq!(captured.path, "/v1/messages");
     assert_eq!(captured.headers["x-api-key"], FAKE_SECRET);
     assert_eq!(captured.headers["anthropic-version"], "2023-06-01");
-    assert!(!captured.headers.contains_key("authorization"), "no bearer auth on this wire");
-    assert_eq!(captured.body["max_tokens"], 8192);
+    assert!(
+        !captured.headers.contains_key("authorization"),
+        "no bearer auth on this wire"
+    );
+    assert_eq!(captured.body["max_tokens"], 384_000);
     assert_eq!(captured.body["system"], "be brief");
     assert_eq!(captured.body["messages"][0]["content"][0]["text"], "hi");
 }
@@ -198,10 +291,37 @@ fn factory_anthropic_wire_posts_v1_messages_with_required_headers() {
 #[test]
 fn anthropic_max_tokens_follows_route_max_out_below_cap() {
     let (url, rx) = one_shot_server(200, ANTHROPIC_OK.into());
-    let r = route(&url, Wire::AnthropicMessages, ThinkingDialect::None, false, &[], Some(4096));
+    let r = route(
+        &url,
+        Wire::AnthropicMessages,
+        ThinkingDialect::None,
+        false,
+        &[],
+        Some(4096),
+    );
     let client = make_client(&r, Zeroizing::new(FAKE_SECRET.into()));
-    client.complete(&req(vec![msg("user", Some("hi"))], ThinkingEffort::None)).unwrap();
+    client
+        .complete(&req(vec![msg("user", Some("hi"))], ThinkingEffort::None))
+        .unwrap();
     assert_eq!(rx.recv().unwrap().body["max_tokens"], 4096);
+}
+
+#[test]
+fn anthropic_route_cap_is_not_artificially_clamped() {
+    let (url, rx) = one_shot_server(200, ANTHROPIC_OK.into());
+    let r = route(
+        &url,
+        Wire::AnthropicMessages,
+        ThinkingDialect::None,
+        false,
+        &[],
+        Some(384_000),
+    );
+    let client = make_client(&r, Zeroizing::new(FAKE_SECRET.into()));
+    client
+        .complete(&req(vec![msg("user", Some("hi"))], ThinkingEffort::None))
+        .unwrap();
+    assert_eq!(rx.recv().unwrap().body["max_tokens"], 384_000);
 }
 
 #[test]
@@ -223,11 +343,17 @@ fn cross_host_redirects_are_refused_never_followed() {
             .complete(&req(vec![msg("user", Some("hi"))], ThinkingEffort::None))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("HTTP 307"), "redirect surfaces as an HTTP error: {err}");
+        assert!(
+            err.contains("HTTP 307"),
+            "redirect surfaces as an HTTP error: {err}"
+        );
     }
     // complete() already returned for both wires - if a redirect had been
     // followed, the attacker's capture would be in the channel by now.
-    assert!(attacker_rx.try_recv().is_err(), "cross-host redirect was followed - key leaked");
+    assert!(
+        attacker_rx.try_recv().is_err(),
+        "cross-host redirect was followed - key leaked"
+    );
 }
 
 #[test]
@@ -236,7 +362,14 @@ fn anthropic_error_is_one_friendly_scrubbed_line() {
         401,
         format!(r#"{{"error":{{"message":"bad key {FAKE_SECRET} rejected"}}}}"#),
     );
-    let r = route(&url, Wire::AnthropicMessages, ThinkingDialect::None, false, &[], None);
+    let r = route(
+        &url,
+        Wire::AnthropicMessages,
+        ThinkingDialect::None,
+        false,
+        &[],
+        None,
+    );
     let client = make_client(&r, Zeroizing::new(FAKE_SECRET.into()));
     let err = client
         .complete(&req(vec![msg("user", Some("hi"))], ThinkingEffort::None))

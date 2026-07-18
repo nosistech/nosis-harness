@@ -1198,7 +1198,9 @@ fn verdict_to_guard(verdict: Verdict) -> Guard {
 fn effort_for(dialect: ThinkingDialect) -> ThinkingEffort {
     match dialect {
         ThinkingDialect::AlwaysThinking | ThinkingDialect::GlmHm => ThinkingEffort::High,
-        ThinkingDialect::DeepseekNhm | ThinkingDialect::None => ThinkingEffort::None,
+        ThinkingDialect::DeepseekNhm | ThinkingDialect::KimiToggle | ThinkingDialect::None => {
+            ThinkingEffort::None
+        }
     }
 }
 
