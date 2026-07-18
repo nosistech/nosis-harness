@@ -1,24 +1,34 @@
 # Current Task
 
-## Immediate Goal — M5 Slice A BRIEFED; Sol running (2026-07-17). NEXT = gate + review Sol's Slice A diff.
+## Immediate Goal — M5 Slice A DONE + committed (`9c96259`, 2026-07-18). NEXT = brief Sol for Slice B (FLOOR).
 
-**LIVE STATE (2026-07-17, this session):** Slice A brief written + Sol launched.
-- `CONTRACTS_M5.md` §8 amendment **A-M5-1** logged (orchestrator authority): two additive `nh-routes`
-  catalog-schema seams Slice A needs — `ThinkingDialect::KimiToggle` variant + `preserve_when_thinking`
-  route field. Both `[+]` source-compatible. This applied the A-M4-1 pre-authorize-the-seam lesson.
-- Owner decisions (this session): Slice A = **single handoff** (Sol self-splits ≤3 if needed);
-  sequence = **Slice A first** (gate manually; Slice E deferred, not run before A).
-- Brief: `C:\Users\capv2\AppData\Local\Temp\slice_a_brief.txt` (grounded seam-by-seam in nh-core +
-  nh-routes with file:line refs, the E1 tests T1–T8, the gate bar, and a required self-report).
-- Sol = `codex exec` GPT-5.6 xhigh, **running in background** (baseline before = 292 pass; the only
-  red allowed is the 2 Kaspersky-AV-blocked spawn tests `fleet_kill_resume` + `m2_exit`).
-- **ON RESUME if Sol done:** `git diff --numstat` (truth) → confirm only nh-core/nh-routes/catalog +
-  tests touched (NO nh-fleet/nh-tools/nh-law/nh-vault/nh-mcp/nh-tui/nh-cli) → kill nh.exe →
-  `cargo test --workspace --release` (≥292+new pass; 2 AV reds OK) + `cargo clippy --workspace
-  --all-targets -- -D warnings` → adversarial review (L1 disable shape, L7 byte-identical retained
-  msgs, L12 release PrefixSeal, resolve_capable context-fit + trace) → read Sol's self-report for any
-  `[VERIFY-LIVE §7]` guesses + AMENDMENT-NEEDED notes → commit (`wip/slice-a` → main). Slice A has NO
-  human-facing surface, so no owner FEEL gate (that's Slice C).
+**Slice A "TRUTH" SHIPPED (E1 met).** Committed `9c96259` on `0bd1d7f` on `fe04ce5`. Full workspace gate
+green: **306 pass / 0 fail / 1 ignored** `--release`, clippy `-D warnings` clean (baseline 292 → +14
+Slice A tests). No FEEL gate needed (no human-facing surface). Built by Sol (two handoffs: truth-math +
+resolver, then an Anthropic-wire fix); gated + adversarially reviewed by the orchestrator.
+- **Delivered:** L1 explicit thinking-disable + kimi-toggle dialect; L2 state-aware reasoning replay
+  (K2.6 thinking+tools no longer errors); L7 cache-safe compaction (elision note = new msg, retained
+  msgs byte-identical); L8 reasoning+tool-spec token counting; L9 output cap on both wires; L12
+  all-builds PrefixSeal + cache-break signal; effective_context clamp; native cache-field fallback;
+  nh-routes `resolve_capable` + `RejectionTrace` (cheapest context-fitting priced route + audit trace).
+- **Amendments logged (all in `CONTRACTS_M5.md` §8):** A-M5-1 (KimiToggle variant + preserve_when_thinking
+  field, nh-routes); A-M5-2 (KimiToggle compile-compat arm in nh-fleet/nh-tui/nh-cli `effort_for` — the
+  enum-variant ripple; orchestrator glue); A-M5-3 (build_anthropic_body consecutive-user merge — fixes an
+  L7 regression the review caught: two consecutive user messages post-compaction 400 the Anthropic wire).
+- **Two `[VERIFY-LIVE §7]` guesses to confirm with a live key later:** DeepSeek explicit non-thinking
+  wire shape (`thinking:{type:disabled}`) + Kimi K2.6 toggle shape (`thinking:{type:enabled|disabled}`).
+- **PROCESS LESSON (bit us this slice):** the workspace was clippy-clean but NEVER `cargo fmt`-clean;
+  running `cargo fmt --all` mid-gate reformatted the ENTIRE workspace and polluted the diff across frozen
+  crates. Recovered by reverting fmt-only churn to HEAD + re-applying the glue. **RULE: never `cargo fmt
+  --all` mid-slice — use scoped `cargo fmt -p <crate>`; and always `git diff --stat` after a Sol run to
+  confirm scope.** Slice E must add a scoped `cargo fmt --check` gate + a one-time workspace normalization.
+
+**NEXT = Slice B "FLOOR" (E2).** Independent of A; can follow directly. Adversarial security review on
+EVERY item. Seams in nh-tools/nh-law/nh-vault/nh-mcp (see `CONTRACTS_M5.md` Slice B): `Access::Read`/`Send`
++ read_file guard + `[read]`/`[send]` law class; ToolResultEnvelope; MCP sanitize; credential audience
+binding; nh-mcp inbound auth + Host/Origin; Scrubber widen + registry; min-env exec allowlist; OAuth
+`resource`. Write the Slice B Sol brief (ground it seam-by-seam like Slice A; pre-authorize the mutable
+surface up front; enumerate any cross-crate enum/type ripples BEFORE briefing). Slice C is the FEEL gate.
 
 **M5 "The Honest Meter" — scope ratified & contract locked (2026-07-17, this session):**
 - **Five slices A–E**, re-slotted by *seam* (not theme) for congruence: A TRUTH (nh-core meter-math
