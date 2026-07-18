@@ -140,7 +140,11 @@ context = 128000
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
         stdout.contains("blocked by law: protected path (.nosis/**) - held even at max autonomy"),

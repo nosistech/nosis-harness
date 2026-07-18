@@ -35,7 +35,9 @@ const ARGS_SUMMARY_MAX: usize = 120;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpAuth {
     None,
-    ApiKey { vault_entry: String },
+    ApiKey {
+        vault_entry: String,
+    },
     OAuth2 {
         token_url: String,
         client_id: String,
@@ -1043,7 +1045,10 @@ vault_entry = "korvin-oauth"
     #[test]
     fn config_bad_toml_is_one_friendly_line() {
         let err = load_mcp_config("not = = toml").unwrap_err().to_string();
-        assert!(err.starts_with("could not parse .nosis/mcp.toml"), "got: {err}");
+        assert!(
+            err.starts_with("could not parse .nosis/mcp.toml"),
+            "got: {err}"
+        );
         assert!(!err.contains('\n'), "must be one line, got: {err}");
     }
 
@@ -1063,7 +1068,10 @@ vault_entry = "korvin-oauth"
         client.discover().unwrap();
 
         let recorded = mock.recorded.lock().unwrap();
-        assert!(recorded.len() >= 5, "expected list + 2 calls + GET + fallback POST");
+        assert!(
+            recorded.len() >= 5,
+            "expected list + 2 calls + GET + fallback POST"
+        );
         for request in recorded.iter() {
             assert!(
                 !request.head.to_ascii_lowercase().contains("mcp-session-id"),
@@ -1080,7 +1088,10 @@ vault_entry = "korvin-oauth"
                 let meta = &request.body["params"]["_meta"];
                 assert_eq!(meta["protocolVersion"], json!("2026-07-28"));
                 assert_eq!(meta["clientInfo"]["name"], json!("nosis-harness"));
-                assert_eq!(meta["clientInfo"]["version"], json!(env!("CARGO_PKG_VERSION")));
+                assert_eq!(
+                    meta["clientInfo"]["version"],
+                    json!(env!("CARGO_PKG_VERSION"))
+                );
                 assert_eq!(meta["capabilities"], json!({}));
             }
         }
@@ -1287,7 +1298,10 @@ vault_entry = "korvin-oauth"
             .unwrap();
         let recorded = mock.recorded.lock().unwrap();
         assert!(
-            !recorded[0].head.to_ascii_lowercase().contains("authorization:"),
+            !recorded[0]
+                .head
+                .to_ascii_lowercase()
+                .contains("authorization:"),
             "unexpected auth header in: {}",
             recorded[0].head
         );
@@ -1412,7 +1426,9 @@ vault_entry = "korvin-oauth"
             assert!(request.raw.contains("client_secret=csk-secret-fake"));
             assert!(request.raw.contains("scope=mcp"));
             assert!(
-                request.raw.contains(&format!("resource={encoded_resource}")),
+                request
+                    .raw
+                    .contains(&format!("resource={encoded_resource}")),
                 "missing RFC 8707 resource in: {}",
                 request.raw
             );
@@ -1502,7 +1518,10 @@ vault_entry = "korvin-oauth"
             ["mcp__mock__peek", "mcp__mock__shout"]
         );
         assert_eq!(specs[0].description, "[MCP mock] Look at the page.");
-        assert_eq!(specs[0].parameters["properties"]["sel"]["type"], json!("string"));
+        assert_eq!(
+            specs[0].parameters["properties"]["sel"]["type"],
+            json!("string")
+        );
     }
 
     #[test]
@@ -1526,14 +1545,8 @@ vault_entry = "korvin-oauth"
         let set = mcp_tools(&[config(&mock.url, McpTrust::Ask)]);
         assert!(set.warnings.is_empty(), "warnings: {:?}", set.warnings);
         let spec = set.tools[0].spec();
-        assert_eq!(
-            spec.description,
-            "[MCP mock] safe\\u{1b}[2K\\rhidden"
-        );
-        assert_eq!(
-            spec.parameters["description"],
-            json!("arg\\u{1b}[31m")
-        );
+        assert_eq!(spec.description, "[MCP mock] safe\\u{1b}[2K\\rhidden");
+        assert_eq!(spec.parameters["description"], json!("arg\\u{1b}[31m"));
         assert!(!spec.description.chars().any(char::is_control));
     }
 
@@ -1583,7 +1596,10 @@ vault_entry = "korvin-oauth"
         // readOnlyHint == true: runs even when the gate would deny.
         let (ctx, seen) = approving_ctx(false);
         assert_eq!(peek.execute(json!({}), &ctx).unwrap(), "peeked");
-        assert!(seen.lock().unwrap().is_empty(), "read-only must skip the gate");
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "read-only must skip the gate"
+        );
 
         // No read-only annotation: still asks, at every autonomy level.
         let (ctx, seen) = approving_ctx(false);
@@ -1618,7 +1634,10 @@ vault_entry = "korvin-oauth"
                 },
                 read_only: false,
             },
-            client: Arc::new(McpClient::new(config("http://127.0.0.1:1/mcp", McpTrust::Block))),
+            client: Arc::new(McpClient::new(config(
+                "http://127.0.0.1:1/mcp",
+                McpTrust::Block,
+            ))),
         };
         let (ctx, seen) = approving_ctx(true);
         let out = adapter.execute(json!({}), &ctx).unwrap();

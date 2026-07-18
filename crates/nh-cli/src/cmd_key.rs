@@ -12,9 +12,11 @@ const STORE: &str = "the OS keyring";
 
 pub fn add(entry: &str) -> anyhow::Result<()> {
     let key = Zeroizing::new(
-        rpassword::prompt_password(format!("key for {entry} (input hidden): ")).map_err(
-            |_| anyhow::anyhow!("couldn't read input - run `nh key add {entry}` in an interactive terminal"),
-        )?,
+        rpassword::prompt_password(format!("key for {entry} (input hidden): ")).map_err(|_| {
+            anyhow::anyhow!(
+                "couldn't read input - run `nh key add {entry}` in an interactive terminal"
+            )
+        })?,
     );
     let value = key.trim();
     if value.is_empty() {

@@ -33,9 +33,9 @@ impl Vault for KeyringVault {
     }
 
     fn set(&self, entry: &str, value: &str) -> anyhow::Result<()> {
-        open_entry(entry)?
-            .set_password(value)
-            .map_err(|e| anyhow::anyhow!("could not store key \"{entry}\" in the OS key store ({e})"))
+        open_entry(entry)?.set_password(value).map_err(|e| {
+            anyhow::anyhow!("could not store key \"{entry}\" in the OS key store ({e})")
+        })
     }
 }
 
@@ -218,8 +218,10 @@ pub fn sanitize_untrusted_text(text: &str) -> String {
 
     let mut escaped = String::with_capacity(text.len());
     for c in text.chars() {
-        if matches!(c, '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}')
-            || ('\u{e0000}'..='\u{e007f}').contains(&c)
+        if matches!(
+            c,
+            '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}'
+        ) || ('\u{e0000}'..='\u{e007f}').contains(&c)
         {
             continue;
         }
@@ -272,14 +274,20 @@ mod tests {
     #[test]
     fn scrub_redacts_sk_shape() {
         let s = Scrubber::new(vec![]);
-        assert_eq!(s.scrub("auth: sk-test-0000abcd done"), "auth: [REDACTED] done");
+        assert_eq!(
+            s.scrub("auth: sk-test-0000abcd done"),
+            "auth: [REDACTED] done"
+        );
     }
 
     #[test]
     fn scrub_redacts_csk_shape_fully() {
         let s = Scrubber::new(vec![]);
         // Whole token redacted - no stray leading "c" from the sk- alternative.
-        assert_eq!(s.scrub("auth: csk-test-0000abcd done"), "auth: [REDACTED] done");
+        assert_eq!(
+            s.scrub("auth: csk-test-0000abcd done"),
+            "auth: [REDACTED] done"
+        );
     }
 
     #[test]
@@ -342,14 +350,24 @@ mod tests {
         let display = sanitize_line(spoofed);
         assert!(!display.chars().any(|c| c.is_control()), "got: {display}");
         assert!(display.contains("\\r"), "CR must be visible: {display}");
-        assert!(display.contains("\\u{1b}"), "ESC must be visible: {display}");
-        assert!(display.contains("rm -rf /"), "payload must stay visible: {display}");
+        assert!(
+            display.contains("\\u{1b}"),
+            "ESC must be visible: {display}"
+        );
+        assert!(
+            display.contains("rm -rf /"),
+            "payload must stay visible: {display}"
+        );
     }
 
     #[test]
     fn sanitize_line_truncates_with_visible_marker() {
         let display = sanitize_line(&"x".repeat(600));
-        assert!(display.chars().count() < 600, "got len {}", display.chars().count());
+        assert!(
+            display.chars().count() < 600,
+            "got len {}",
+            display.chars().count()
+        );
         assert!(display.contains("(+100 more chars)"), "got: {display}");
         // Short text passes through untouched.
         assert_eq!(sanitize_line("cargo test"), "cargo test");
@@ -474,7 +492,9 @@ mod tests {
     fn keyring_round_trip() {
         let entry = "nh-vault-test-entry";
         let vault = KeyringVault;
-        vault.set(entry, "sk-test-0000").expect("set should succeed");
+        vault
+            .set(entry, "sk-test-0000")
+            .expect("set should succeed");
         let got = vault.get(entry);
         // Clean up before asserting so a failure never leaves a test credential behind.
         keyring::Entry::new(SERVICE, entry)

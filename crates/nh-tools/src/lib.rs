@@ -272,8 +272,8 @@ impl Tool for EditFile {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "edit_file".into(),
-            description:
-                "Replace one exact occurrence of old_string with new_string in a file.".into(),
+            description: "Replace one exact occurrence of old_string with new_string in a file."
+                .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -333,8 +333,8 @@ impl Tool for ExecShell {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "exec_shell".into(),
-            description:
-                "Run a shell command in the working directory. Requires user approval.".into(),
+            description: "Run a shell command in the working directory. Requires user approval."
+                .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -434,9 +434,7 @@ mod tests {
         std::fs::write(dir.path().join("note.txt"), "hello old world").unwrap();
         let ctx = ctx_with(dir.path(), true);
 
-        let text = ReadFile
-            .execute(json!({"path": "note.txt"}), &ctx)
-            .unwrap();
+        let text = ReadFile.execute(json!({"path": "note.txt"}), &ctx).unwrap();
         assert_eq!(text, "hello old world");
 
         let result = EditFile
@@ -447,9 +445,7 @@ mod tests {
             .unwrap();
         assert_eq!(result, "edited note.txt");
 
-        let text = ReadFile
-            .execute(json!({"path": "note.txt"}), &ctx)
-            .unwrap();
+        let text = ReadFile.execute(json!({"path": "note.txt"}), &ctx).unwrap();
         assert_eq!(text, "hello new world");
     }
 
@@ -491,7 +487,10 @@ mod tests {
             )
             .unwrap_err()
             .to_string();
-        assert_eq!(err, "old_string appears 2 times in a.txt - provide more context");
+        assert_eq!(
+            err,
+            "old_string appears 2 times in a.txt - provide more context"
+        );
     }
 
     #[test]
@@ -552,7 +551,11 @@ mod tests {
             .execute(json!({"command": "echo pwned > marker.txt"}), &ctx)
             .unwrap();
         assert_eq!(result, "user denied: echo pwned > marker.txt");
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "approval gate must be consulted");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "approval gate must be consulted"
+        );
         assert!(
             !dir.path().join("marker.txt").exists(),
             "denied command must never execute"
@@ -619,7 +622,10 @@ mod tests {
             Some(value) => std::env::set_var("GITHUB_TOKEN", value),
             None => std::env::remove_var("GITHUB_TOKEN"),
         }
-        assert!(!result.contains(SECRET), "ambient credential leaked: {result}");
+        assert!(
+            !result.contains(SECRET),
+            "ambient credential leaked: {result}"
+        );
     }
 
     #[test]
@@ -664,14 +670,14 @@ mod tests {
         let protected = dir.path().join(".nosis").join("law.toml");
         std::fs::create_dir_all(protected.parent().unwrap()).unwrap();
         std::fs::write(&protected, "before").unwrap();
-        let ctx = ToolCtx::new(dir.path().to_path_buf(), Box::new(|_| true)).with_guard(
-            Box::new(|access| match access {
+        let ctx = ToolCtx::new(dir.path().to_path_buf(), Box::new(|_| true)).with_guard(Box::new(
+            |access| match access {
                 Access::Write(path) if *path == ".nosis/law.toml" => {
                     Guard::Block("protected path (.nosis/**)".into())
                 }
                 _ => Guard::Allow,
-            }),
-        );
+            },
+        ));
 
         let result = EditFile
             .execute(
@@ -689,16 +695,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("src")).unwrap();
         std::fs::write(dir.path().join("src").join("lib.rs"), "pub fn safe() {}").unwrap();
-        let ctx = ToolCtx::new(dir.path().to_path_buf(), Box::new(|_| true)).with_guard(
-            Box::new(|access| match access {
+        let ctx = ToolCtx::new(dir.path().to_path_buf(), Box::new(|_| true)).with_guard(Box::new(
+            |access| match access {
                 Access::Read(".env") => Guard::Block("protected read (**/.env*)".into()),
                 _ => Guard::Allow,
-            }),
-        );
+            },
+        ));
 
-        let blocked = ReadFile
-            .execute(json!({"path": ".env"}), &ctx)
-            .unwrap();
+        let blocked = ReadFile.execute(json!({"path": ".env"}), &ctx).unwrap();
         assert_eq!(blocked, "blocked by law: protected read (**/.env*)");
         let allowed = ReadFile
             .execute(json!({"path": "src/lib.rs"}), &ctx)
@@ -721,12 +725,12 @@ mod tests {
     #[test]
     fn protected_missing_edit_is_blocked_before_file_check() {
         let dir = tempfile::tempdir().unwrap();
-        let ctx = ToolCtx::new(dir.path().to_path_buf(), Box::new(|_| true)).with_guard(
-            Box::new(|access| match access {
+        let ctx = ToolCtx::new(dir.path().to_path_buf(), Box::new(|_| true)).with_guard(Box::new(
+            |access| match access {
                 Access::Write(".nosis/new.toml") => Guard::Block("protected path".into()),
                 _ => Guard::Allow,
-            }),
-        );
+            },
+        ));
 
         let result = EditFile
             .execute(
@@ -766,7 +770,10 @@ mod tests {
 
         assert_eq!(result, "user denied: edit note.txt");
         assert_eq!(*seen.lock().unwrap(), ["edit note.txt"]);
-        assert_eq!(std::fs::read_to_string(dir.path().join("note.txt")).unwrap(), "before");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("note.txt")).unwrap(),
+            "before"
+        );
     }
 
     #[test]
