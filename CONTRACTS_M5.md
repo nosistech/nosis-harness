@@ -372,4 +372,36 @@ for routes that don't set them):
 Consumers stay inside the already-enumerated nh-core seams (`apply_thinking`, `reasoning_to_send` /
 `OpenAiPolicy`). Catalog data edits (set `kimi-k2.6` → `thinking_dialect="kimi-toggle"`,
 `preserve_when_thinking=true`) are already "always allowed" (§0.1 Data). No other `nh-routes` line opens.
-**`nh-fleet` stays frozen.**
+
+**A-M5-2 (2026-07-17, orchestrator Opus 4.8) — compile-compat ripple of the KimiToggle variant into two
+frozen crates.** A-M5-1 under-scoped: adding a public enum variant forces every *exhaustive* `match
+ThinkingDialect` in the workspace to gain an arm, or the crate fails to compile (E0004). Sol correctly
+STOPPED at the frozen boundary instead of editing these; the full-workspace build fails in exactly three
+identical spots (Sol's self-report named two; the orchestrator's full-workspace gate surfaced the third,
+`nh-cli`) until they gain the arm:
+| Crate | Seam | Ref | Tag | Change |
+|---|---|---|:--:|---|
+| `nh-fleet` | `effort_for(dialect)` match | lib.rs ~1478-1482 | Δ | add `KimiToggle` to the existing `DeepseekNhm \| None => ThinkingEffort::None` arm. |
+| `nh-tui` | `effort_for(dialect)` match | lib.rs ~1198-1203 | Δ | same one-token addition. |
+| `nh-cli` | `effort_for(_, dialect)` match | cmd_run.rs ~55-58 | Δ | same one-token addition (default-effort branch). |
+All three are **behavior-preserving compile-compat glue**, not design: a toggle model (K2.6) defaults to
+*no-thinking*, identical to `DeepseekNhm`/`None` — congruent with Slice A ("never silently buy
+thinking"). This is the *only* line each frozen crate gains; `nh-fleet`'s escalation ladder and
+`nh-tui`'s render logic are otherwise untouched, and everything else in both crates **stays frozen**.
+Applied by the orchestrator as gating/integration glue (Sol owns all substantive Slice A logic).
+
+**A-M5-3 (2026-07-17, orchestrator Opus 4.8) — `build_anthropic_body` consecutive-user merge (fixes an
+L7 regression on the Anthropic wire).** Adversarial review + an added regression test empirically proved
+that the L7 fix (elision note inserted as a separate message) makes `build_anthropic_body` emit **two
+consecutive `user` messages** after a compaction: the second system note degrades to a user block (the
+`_ =>` arm) and lands immediately before the first retained user turn — output `["user","user",...]`,
+which the Anthropic Messages API rejects ("roles must alternate"). Reachable on the `deepseek-*-anthropic`
+routes (1M window, now compacting earlier under the 256K `effective_context` cap).
+| Crate | Seam | Ref | Tag | Change |
+|---|---|---|:--:|---|
+| `nh-core` | `build_anthropic_body` message-assembly loop | lib.rs ~515-585 | Δ | merge **consecutive same-role `user` messages** into one (content-block concat — generalizing the existing consecutive-`tool` merge). |
+The §0.1 nh-core row opened `build_anthropic_body` for `max_tokens` only; this opens its message loop for
+the merge. L7/cache-safety is PRESERVED — the note stays a separate message and retained real messages
+stay byte-identical; only the transient Anthropic wire body coalesces. Pinned by the orchestrator-authored
+test `anthropic_body_roles_alternate_after_compaction` (already in the tree, currently failing = the
+proof). This is Slice A follow-up handoff #2 (the contract pre-authorized Sol to split Slice A into ≤3).

@@ -3,7 +3,7 @@
 //! peak windows, thinking dialects, modality flags, provider defaults, banned-string
 //! rejection. Catalog and pricing stay DATA in catalog.toml — never hard-coded here.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use anyhow::anyhow;
@@ -29,6 +29,8 @@ pub enum RouteClass {
 pub enum ThinkingDialect {
     /// DeepSeek Non/High/Max via a body param (mapping pinned in CONTRACTS_M1.md).
     DeepseekNhm,
+    /// Kimi K2.6: explicit thinking enable/disable toggle.
+    KimiToggle,
     /// Kimi K2.7: no non-thinking mode exists — never send a toggle.
     AlwaysThinking,
     /// GLM thinking High/Max only.
@@ -41,6 +43,7 @@ impl ThinkingDialect {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::DeepseekNhm => "deepseek-nhm",
+            Self::KimiToggle => "kimi-toggle",
             Self::AlwaysThinking => "always-thinking",
             Self::GlmHm => "glm-hm",
             Self::None => "none",
@@ -108,9 +111,12 @@ pub struct PeakWindows {
 
 impl PeakWindows {
     fn is_peak(&self, at: DateTime<Utc>) -> bool {
-        let offset = FixedOffset::east_opt(self.utc_offset_secs).expect("offset validated at parse");
+        let offset =
+            FixedOffset::east_opt(self.utc_offset_secs).expect("offset validated at parse");
         let local = at.with_timezone(&offset).time();
-        self.windows.iter().any(|(start, end)| local >= *start && local < *end)
+        self.windows
+            .iter()
+            .any(|(start, end)| local >= *start && local < *end)
     }
 }
 
@@ -158,6 +164,8 @@ pub struct ResolvedRoute {
     pub thinking_dialect: ThinkingDialect,
     /// True = reasoning_content must persist across turns (plan A.10.5).
     pub preserve_reasoning: bool,
+    /// True = reasoning_content persists only while thinking is active.
+    pub preserve_when_thinking: bool,
     /// Wire quirks matched by exact string (e.g. "empty-reasoning-content-on-tool-replay").
     pub quirks: Vec<String>,
     /// None = no token price (delegate routes are quota-metered, plan A.0).
@@ -291,6 +299,8 @@ struct RawRoute {
     #[serde(default)]
     preserve_reasoning: bool,
     #[serde(default)]
+    preserve_when_thinking: bool,
+    #[serde(default)]
     quirks: Vec<String>,
     #[serde(default)]
     price: Option<RawPrice>,
@@ -361,18 +371,21 @@ fn parse_class(id: &str, s: &str) -> anyhow::Result<RouteClass> {
 fn parse_dialect(id: &str, s: &str) -> anyhow::Result<ThinkingDialect> {
     match s {
         "deepseek-nhm" => Ok(ThinkingDialect::DeepseekNhm),
+        "kimi-toggle" => Ok(ThinkingDialect::KimiToggle),
         "always-thinking" => Ok(ThinkingDialect::AlwaysThinking),
         "glm-hm" => Ok(ThinkingDialect::GlmHm),
         "none" => Ok(ThinkingDialect::None),
         other => Err(anyhow!(
-            "route '{id}': unknown thinking_dialect '{other}' — use deepseek-nhm, always-thinking, glm-hm, or none"
+            "route '{id}': unknown thinking_dialect '{other}' — use deepseek-nhm, kimi-toggle, always-thinking, glm-hm, or none"
         )),
     }
 }
 
 fn check_modality(id: &str, modality: &[String]) -> anyhow::Result<()> {
     if modality.is_empty() {
-        return Err(anyhow!("route '{id}': modality must not be empty — start with [\"text\"]"));
+        return Err(anyhow!(
+            "route '{id}': modality must not be empty — start with [\"text\"]"
+        ));
     }
     for m in modality {
         if !MODALITIES.contains(&m.as_str()) {
@@ -401,7 +414,11 @@ fn parse_price(id: &str, raw: RawPrice) -> anyhow::Result<RoutePrice> {
     let currency = match raw.currency.as_str() {
         "CNY" => Currency::Cny,
         "USD" => Currency::Usd,
-        other => return Err(anyhow!("route '{id}': unknown currency '{other}' — use CNY or USD")),
+        other => {
+            return Err(anyhow!(
+                "route '{id}': unknown currency '{other}' — use CNY or USD"
+            ))
+        }
     };
     check_rate(id, "cache_hit", raw.cache_hit)?;
     check_rate(id, "cache_miss", raw.cache_miss)?;
@@ -437,7 +454,9 @@ fn parse_price(id: &str, raw: RawPrice) -> anyhow::Result<RoutePrice> {
 
 fn parse_peak(id: &str, raw: RawPeak) -> anyhow::Result<PeakWindows> {
     if !raw.multiplier.is_finite() || raw.multiplier <= 0.0 {
-        return Err(anyhow!("route '{id}': peak multiplier must be a number > 0"));
+        return Err(anyhow!(
+            "route '{id}': peak multiplier must be a number > 0"
+        ));
     }
     let utc_offset_secs = peak_tz_offset_secs(&raw.timezone).ok_or_else(|| {
         anyhow!(
@@ -452,7 +471,12 @@ fn parse_peak(id: &str, raw: RawPeak) -> anyhow::Result<PeakWindows> {
     for w in &raw.windows {
         windows.push(parse_window(id, w)?);
     }
-    Ok(PeakWindows { multiplier: raw.multiplier, timezone: raw.timezone, utc_offset_secs, windows })
+    Ok(PeakWindows {
+        multiplier: raw.multiplier,
+        timezone: raw.timezone,
+        utc_offset_secs,
+        windows,
+    })
 }
 
 fn parse_window(id: &str, s: &str) -> anyhow::Result<(NaiveTime, NaiveTime)> {
@@ -516,6 +540,7 @@ impl RouteResolver {
                     max_out: r.max_out,
                     thinking_dialect,
                     preserve_reasoning: r.preserve_reasoning,
+                    preserve_when_thinking: r.preserve_when_thinking,
                     quirks: r.quirks,
                     price,
                 },
@@ -579,12 +604,90 @@ impl RouteResolver {
         }
     }
 
-    /// Route ids grouped by provider, both levels sorted — for `/provider`
+    /// Pick the cheapest priced API route that fits the estimated request.
+    /// Unknown context is rejected when the request has a non-zero estimate:
+    /// the honest meter never promises capacity the catalog does not establish.
+    pub fn resolve_capable(
+        &self,
+        estimated_prompt_tokens: u64,
+        estimated_output_tokens: u64,
+        allowed: &[&str],
+        at: DateTime<Utc>,
+    ) -> anyhow::Result<(ResolvedRoute, RejectionTrace)> {
+        let required = estimated_prompt_tokens.saturating_add(estimated_output_tokens);
+        let allowed: BTreeSet<&str> = allowed.iter().copied().collect();
+        let mut trace = RejectionTrace::default();
+        let mut capable = Vec::new();
+
+        for id in allowed {
+            let Some(route) = self.routes.get(id) else {
+                trace.push(id, "unknown route");
+                continue;
+            };
+            if route.class != RouteClass::Api {
+                trace.push(id, "delegate");
+                continue;
+            }
+            match route.context {
+                Some(context) if context < required => {
+                    trace.push(
+                        id,
+                        format!(
+                            "ctx {} < {}",
+                            compact_token_count(context),
+                            compact_token_count(required)
+                        ),
+                    );
+                    continue;
+                }
+                None if required > 0 => {
+                    trace.push(id, "unknown context");
+                    continue;
+                }
+                _ => {}
+            }
+            let Some(price) = route.price_at(at) else {
+                trace.push(id, "no price");
+                continue;
+            };
+            let expected_cost = (price.cache_miss * estimated_prompt_tokens as f64
+                + price.output * estimated_output_tokens as f64)
+                / 1_000_000.0;
+            capable.push((route, expected_cost));
+        }
+
+        capable.sort_by(|(left_route, left_cost), (right_route, right_cost)| {
+            left_cost
+                .total_cmp(right_cost)
+                .then_with(|| left_route.id.cmp(&right_route.id))
+        });
+        let Some((chosen, chosen_cost)) = capable.first().copied() else {
+            return Err(anyhow!(
+                "no capable priced api route fits {} estimated tokens",
+                required
+            ));
+        };
+        for (route, cost) in capable.into_iter().skip(1) {
+            let reason = if cost == chosen_cost {
+                "same price; route id tie-break".to_string()
+            } else if chosen_cost == 0.0 {
+                "higher price".to_string()
+            } else {
+                format!("{:.1}x price", cost / chosen_cost)
+            };
+            trace.push(route.id.clone(), reason);
+        }
+        Ok((chosen.clone(), trace))
+    }
+
+    /// Route ids grouped by provider, both levels sorted; used for provider
     /// suggestions and catalog listings.
     pub fn available_by_provider(&self) -> BTreeMap<String, Vec<String>> {
         let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for (id, route) in &self.routes {
-            map.entry(route.provider.clone()).or_default().push(id.clone());
+            map.entry(route.provider.clone())
+                .or_default()
+                .push(id.clone());
         }
         map
     }
@@ -601,6 +704,52 @@ impl RouteResolver {
         } else {
             self.available().join(", ")
         }
+    }
+}
+
+/// One plain-data explanation for a route that was not selected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteRejection {
+    pub route_id: String,
+    pub reason: String,
+}
+
+/// Auditable reasons why allowed routes were skipped by `resolve_capable`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RejectionTrace {
+    pub rejections: Vec<RouteRejection>,
+}
+
+impl RejectionTrace {
+    fn push(&mut self, route_id: impl Into<String>, reason: impl Into<String>) {
+        self.rejections.push(RouteRejection {
+            route_id: route_id.into(),
+            reason: reason.into(),
+        });
+    }
+
+    /// Short, side-effect-free lines suitable for a later scrubbed `/why` view.
+    pub fn lines(&self) -> Vec<String> {
+        self.rejections
+            .iter()
+            .map(|rejection| format!("skipped {}: {}", rejection.route_id, rejection.reason))
+            .collect()
+    }
+}
+
+impl fmt::Display for RejectionTrace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.lines().join("\n"))
+    }
+}
+
+fn compact_token_count(tokens: u64) -> String {
+    if tokens >= 1_000_000 && tokens.is_multiple_of(1_000_000) {
+        format!("{}M", tokens / 1_000_000)
+    } else if tokens >= 1_000 && tokens.is_multiple_of(1_000) {
+        format!("{}K", tokens / 1_000)
+    } else {
+        tokens.to_string()
     }
 }
 
@@ -640,6 +789,58 @@ mod tests {
             {extra}
         "#
         )
+    }
+
+    fn priced_route(
+        id: &str,
+        class: &str,
+        context: Option<u64>,
+        cache_miss: f64,
+        output: f64,
+    ) -> String {
+        let context = context.map_or_else(String::new, |value| format!("context = {value}"));
+        format!(
+            r#"
+            [routes."{id}"]
+            provider = "p"
+            model_id = "{id}"
+            base_url = "https://example.invalid"
+            wire = "openai"
+            vault_entry = "p"
+            class = "{class}"
+            {context}
+            [routes."{id}".price]
+            currency = "USD"
+            unit = "per_million_tokens"
+            cache_hit = 0.1
+            cache_miss = {cache_miss}
+            output = {output}
+            price_confidence = "reported"
+            "#
+        )
+    }
+
+    fn capable_resolver() -> RouteResolver {
+        let catalog = [
+            priced_route("cheap-small", "api", Some(32_000), 0.1, 0.1),
+            priced_route("fit-a", "api", Some(64_000), 1.0, 1.0),
+            priced_route("fit-b", "api", Some(64_000), 1.0, 1.0),
+            priced_route("fit-expensive", "api", Some(64_000), 4.0, 4.0),
+            priced_route("unknown-context", "api", None, 0.1, 0.1),
+            priced_route("delegated", "delegate", Some(64_000), 0.0, 0.0),
+            r#"
+            [routes.unpriced]
+            provider = "p"
+            model_id = "unpriced"
+            base_url = "https://example.invalid"
+            wire = "openai"
+            vault_entry = "p"
+            context = 64000
+            "#
+            .to_string(),
+        ]
+        .join("\n");
+        RouteResolver::from_toml(&catalog).unwrap()
     }
 
     // ---------------------------------------------------------------- catalog shape
@@ -682,7 +883,9 @@ mod tests {
     #[test]
     fn anthropic_wire_variant_keeps_model_id_and_changes_base_url() {
         // The deepclaude-proven path: same model, Anthropic Messages wire.
-        let route = resolver().resolve("deepseek-v4-pro-anthropic").expect("known id");
+        let route = resolver()
+            .resolve("deepseek-v4-pro-anthropic")
+            .expect("known id");
         assert_eq!(route.id, "deepseek-v4-pro-anthropic");
         assert_eq!(route.model_id, "deepseek-v4-pro");
         assert_eq!(route.wire, Wire::AnthropicMessages);
@@ -707,10 +910,26 @@ mod tests {
         let r = resolver();
         for id in ["kimi-k2.7-code", "kimi-k2.7-code-highspeed"] {
             let route = r.resolve(id).unwrap();
-            assert_eq!(route.thinking_dialect, ThinkingDialect::AlwaysThinking, "{id}");
-            assert!(route.preserve_reasoning, "{id} must preserve reasoning (plan A.10.5)");
+            assert_eq!(
+                route.thinking_dialect,
+                ThinkingDialect::AlwaysThinking,
+                "{id}"
+            );
+            assert!(
+                route.preserve_reasoning,
+                "{id} must preserve reasoning (plan A.10.5)"
+            );
             assert_eq!(route.modality, vec!["text", "image", "video"], "{id}");
         }
+    }
+
+    #[test]
+    fn kimi_k26_uses_toggle_and_state_aware_reasoning_replay() {
+        let route = resolver().resolve("kimi-k2.6").unwrap();
+        assert_eq!(route.thinking_dialect, ThinkingDialect::KimiToggle);
+        assert!(!route.preserve_reasoning);
+        assert!(route.preserve_when_thinking);
+        assert_eq!(route.thinking_dialect.as_str(), "kimi-toggle");
     }
 
     #[test]
@@ -719,7 +938,11 @@ mod tests {
         for id in ["mimo-v2.5", "mimo-v2.5-pro"] {
             let route = r.resolve(id).unwrap();
             assert!(route.preserve_reasoning, "{id}");
-            assert_eq!(route.modality, vec!["text", "image", "video", "audio"], "{id}");
+            assert_eq!(
+                route.modality,
+                vec!["text", "image", "video", "audio"],
+                "{id}"
+            );
             assert_eq!(route.context, Some(1_000_000), "{id}");
         }
     }
@@ -740,6 +963,7 @@ mod tests {
         assert_eq!(route.modality, vec!["text"]);
         assert_eq!(route.thinking_dialect, ThinkingDialect::None);
         assert!(!route.preserve_reasoning);
+        assert!(!route.preserve_when_thinking);
         assert!(route.quirks.is_empty());
         assert!(route.context.is_none());
         assert!(route.max_out.is_none());
@@ -835,7 +1059,10 @@ mod tests {
         let fresh = route.price_at(utc(2026, 7, 24, 23, 59, 59)).unwrap();
         assert!(!fresh.stale, "still valid on the valid_until day");
         let stale = route.price_at(utc(2026, 7, 25, 0, 0, 0)).unwrap();
-        assert!(stale.stale, "past valid_until must flag stale — honest-cost rule");
+        assert!(
+            stale.stale,
+            "past valid_until must flag stale — honest-cost rule"
+        );
     }
 
     #[test]
@@ -873,10 +1100,51 @@ mod tests {
     // ---------------------------------------------------------------- provider defaults
 
     #[test]
+    fn resolve_capable_picks_cheapest_fitting_route_and_explains_every_skip() {
+        let resolver = capable_resolver();
+        let allowed = [
+            "fit-expensive",
+            "missing",
+            "cheap-small",
+            "fit-b",
+            "delegated",
+            "fit-a",
+            "unknown-context",
+            "unpriced",
+        ];
+        let (route, trace) = resolver
+            .resolve_capable(40_000, 5_000, &allowed, utc(2026, 7, 15, 12, 0, 0))
+            .unwrap();
+        assert_eq!(route.id, "fit-a", "equal-cost ties break by route id");
+
+        let reasons: BTreeMap<&str, &str> = trace
+            .rejections
+            .iter()
+            .map(|entry| (entry.route_id.as_str(), entry.reason.as_str()))
+            .collect();
+        assert_eq!(reasons.len(), allowed.len() - 1);
+        assert_eq!(reasons["cheap-small"], "ctx 32K < 45K");
+        assert_eq!(reasons["delegated"], "delegate");
+        assert_eq!(reasons["unknown-context"], "unknown context");
+        assert_eq!(reasons["unpriced"], "no price");
+        assert_eq!(reasons["missing"], "unknown route");
+        assert_eq!(reasons["fit-b"], "same price; route id tie-break");
+        assert_eq!(reasons["fit-expensive"], "4.0x price");
+        assert!(trace
+            .lines()
+            .iter()
+            .all(|line| line.starts_with("skipped ")));
+        assert_eq!(trace.to_string(), trace.lines().join("\n"));
+    }
+
+    #[test]
     fn provider_default_picks_lowest_output_price() {
         let r = resolver();
         // Rule: cheapest api route by off-peak output price, ties alphabetical.
-        assert_eq!(r.provider_default("deepseek").unwrap().id, "deepseek-v4-flash");
+        assert_eq!(
+            r.provider_default("deepseek").unwrap().id,
+            "deepseek-v4-flash"
+        );
         assert_eq!(r.provider_default("kimi").unwrap().id, "kimi-k2.6");
         assert_eq!(r.provider_default("mimo").unwrap().id, "mimo-v2.5");
         // Three free GLM routes tie at 0 — alphabetical order breaks the tie.
@@ -976,7 +1244,10 @@ mod tests {
         let r = resolver();
         for (banned, replacement) in super::BANNED_REPLACEMENTS {
             let msg = r.resolve(banned).unwrap_err().to_string();
-            assert!(msg.contains(replacement), "error for {banned} must name {replacement}: {msg}");
+            assert!(
+                msg.contains(replacement),
+                "error for {banned} must name {replacement}: {msg}"
+            );
         }
     }
 
@@ -1026,9 +1297,15 @@ mod tests {
         "#,
             BANNED_EXACT[0]
         );
-        let msg = RouteResolver::from_toml(&toml).err().expect("must fail").to_string();
+        let msg = RouteResolver::from_toml(&toml)
+            .err()
+            .expect("must fail")
+            .to_string();
         assert!(msg.contains("dead"), "must say the id is dead: {msg}");
-        assert!(msg.contains("deepseek-v4-flash"), "must name the replacement: {msg}");
+        assert!(
+            msg.contains("deepseek-v4-flash"),
+            "must name the replacement: {msg}"
+        );
     }
 
     #[test]
@@ -1044,9 +1321,15 @@ mod tests {
             vault_entry = "p"
         "#
         );
-        let msg = RouteResolver::from_toml(&toml).err().expect("must fail").to_string();
+        let msg = RouteResolver::from_toml(&toml)
+            .err()
+            .expect("must fail")
+            .to_string();
         assert!(msg.contains("dead"), "must say the id is dead: {msg}");
-        assert!(msg.contains("remove it from catalog.toml"), "must be actionable: {msg}");
+        assert!(
+            msg.contains("remove it from catalog.toml"),
+            "must be actionable: {msg}"
+        );
     }
 
     // ---------------------------------------------------------------- validation errors
@@ -1054,8 +1337,14 @@ mod tests {
     #[test]
     fn unknown_wire_is_rejected() {
         let toml = route_toml("").replace(r#"wire = "openai""#, r#"wire = "carrier-pigeon""#);
-        let msg = RouteResolver::from_toml(&toml).err().expect("must fail").to_string();
-        assert!(msg.contains("carrier-pigeon"), "must name the bad wire: {msg}");
+        let msg = RouteResolver::from_toml(&toml)
+            .err()
+            .expect("must fail")
+            .to_string();
+        assert!(
+            msg.contains("carrier-pigeon"),
+            "must name the bad wire: {msg}"
+        );
         assert!(msg.contains("openai"), "must say valid values: {msg}");
     }
 
@@ -1076,7 +1365,10 @@ mod tests {
             .expect("must fail")
             .to_string();
         assert!(msg.contains("vibes"), "got: {msg}");
-        assert!(msg.contains("always-thinking"), "must say valid values: {msg}");
+        assert!(
+            msg.contains("always-thinking"),
+            "must say valid values: {msg}"
+        );
     }
 
     #[test]
@@ -1107,19 +1399,34 @@ mod tests {
         };
         // Wrong unit.
         let toml = price("").replace("per_million_tokens", "per_token");
-        let msg = RouteResolver::from_toml(&toml).err().expect("must fail").to_string();
+        let msg = RouteResolver::from_toml(&toml)
+            .err()
+            .expect("must fail")
+            .to_string();
         assert!(msg.contains("per_million_tokens"), "got: {msg}");
         // Bad currency.
         let toml = price("").replace(r#"currency = "USD""#, r#"currency = "EUR""#);
-        let msg = RouteResolver::from_toml(&toml).err().expect("must fail").to_string();
+        let msg = RouteResolver::from_toml(&toml)
+            .err()
+            .expect("must fail")
+            .to_string();
         assert!(msg.contains("EUR") && msg.contains("CNY"), "got: {msg}");
         // Bad confidence.
         let toml = price("").replace("reported", "hopeful");
-        let msg = RouteResolver::from_toml(&toml).err().expect("must fail").to_string();
-        assert!(msg.contains("hopeful") && msg.contains("verify_live"), "got: {msg}");
+        let msg = RouteResolver::from_toml(&toml)
+            .err()
+            .expect("must fail")
+            .to_string();
+        assert!(
+            msg.contains("hopeful") && msg.contains("verify_live"),
+            "got: {msg}"
+        );
         // Negative rate.
         let toml = price("").replace("output = 0.3", "output = -1.0");
-        let msg = RouteResolver::from_toml(&toml).err().expect("must fail").to_string();
+        let msg = RouteResolver::from_toml(&toml)
+            .err()
+            .expect("must fail")
+            .to_string();
         assert!(msg.contains("output"), "got: {msg}");
         // Bad valid_until.
         let msg = RouteResolver::from_toml(&price(r#"valid_until = "July 24""#))
@@ -1154,7 +1461,10 @@ mod tests {
             .expect("must fail")
             .to_string();
         assert!(msg.contains("Mars/Olympus"), "got: {msg}");
-        assert!(msg.contains("Asia/Shanghai"), "must name a supported tz: {msg}");
+        assert!(
+            msg.contains("Asia/Shanghai"),
+            "must name a supported tz: {msg}"
+        );
         // Malformed window.
         let msg = RouteResolver::from_toml(&peak("2.0", "Asia/Shanghai", "9am-noon"))
             .err()
@@ -1177,8 +1487,14 @@ mod tests {
 
     #[test]
     fn invalid_toml_is_a_friendly_error() {
-        let msg = RouteResolver::from_toml("not [ valid").err().expect("must fail").to_string();
-        assert!(msg.contains("catalog.toml is invalid"), "friendly message: {msg}");
+        let msg = RouteResolver::from_toml("not [ valid")
+            .err()
+            .expect("must fail")
+            .to_string();
+        assert!(
+            msg.contains("catalog.toml is invalid"),
+            "friendly message: {msg}"
+        );
     }
 
     // ---------------------------------------------------------------- display helpers
