@@ -1,6 +1,24 @@
 # Current Task
 
-## Immediate Goal — M5 scope RATIFIED + `CONTRACTS_M5.md` LOCKED (2026-07-17). NEXT = brief Sol for Slice A.
+## Immediate Goal — M5 Slice A BRIEFED; Sol running (2026-07-17). NEXT = gate + review Sol's Slice A diff.
+
+**LIVE STATE (2026-07-17, this session):** Slice A brief written + Sol launched.
+- `CONTRACTS_M5.md` §8 amendment **A-M5-1** logged (orchestrator authority): two additive `nh-routes`
+  catalog-schema seams Slice A needs — `ThinkingDialect::KimiToggle` variant + `preserve_when_thinking`
+  route field. Both `[+]` source-compatible. This applied the A-M4-1 pre-authorize-the-seam lesson.
+- Owner decisions (this session): Slice A = **single handoff** (Sol self-splits ≤3 if needed);
+  sequence = **Slice A first** (gate manually; Slice E deferred, not run before A).
+- Brief: `C:\Users\capv2\AppData\Local\Temp\slice_a_brief.txt` (grounded seam-by-seam in nh-core +
+  nh-routes with file:line refs, the E1 tests T1–T8, the gate bar, and a required self-report).
+- Sol = `codex exec` GPT-5.6 xhigh, **running in background** (baseline before = 292 pass; the only
+  red allowed is the 2 Kaspersky-AV-blocked spawn tests `fleet_kill_resume` + `m2_exit`).
+- **ON RESUME if Sol done:** `git diff --numstat` (truth) → confirm only nh-core/nh-routes/catalog +
+  tests touched (NO nh-fleet/nh-tools/nh-law/nh-vault/nh-mcp/nh-tui/nh-cli) → kill nh.exe →
+  `cargo test --workspace --release` (≥292+new pass; 2 AV reds OK) + `cargo clippy --workspace
+  --all-targets -- -D warnings` → adversarial review (L1 disable shape, L7 byte-identical retained
+  msgs, L12 release PrefixSeal, resolve_capable context-fit + trace) → read Sol's self-report for any
+  `[VERIFY-LIVE §7]` guesses + AMENDMENT-NEEDED notes → commit (`wip/slice-a` → main). Slice A has NO
+  human-facing surface, so no owner FEEL gate (that's Slice C).
 
 **M5 "The Honest Meter" — scope ratified & contract locked (2026-07-17, this session):**
 - **Five slices A–E**, re-slotted by *seam* (not theme) for congruence: A TRUTH (nh-core meter-math

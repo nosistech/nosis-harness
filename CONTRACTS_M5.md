@@ -354,5 +354,22 @@ only in Temp).
 - **GLM / jurisdiction / learning** — OUT of M5 (M6/M7). No key acquired this milestone.
 
 ## 8. Integration amendments (append here, dated, orchestrator authority)
-*(none yet — the §0.1 mutable surface is the standing pre-authorization. Anything beyond it lands here,
-dated, before Sol proceeds.)*
+
+**A-M5-1 (2026-07-17, orchestrator Opus 4.8) — Slice A catalog-schema seams in `nh-routes`.**
+Writing the Slice A brief surfaced that L1's `kimi-toggle` dialect and L2's state-aware reasoning replay
+both need catalog schema that the §0.1 `nh-routes` table did not enumerate (it listed only
+`resolve_capable`, `naive_cost`, `Profiles`). The §0.1 "Data (always allowed)" note already anticipates
+these catalog *flags*; this amendment makes the *parsing code* explicit so Sol never faces a
+break-scope-or-duplicate choice (the A-M4-1 lesson). Both seams are **[+] additive / source-compatible**
+(new enum variant + new `#[serde(default)]` field — no existing signature changes, no behavior change
+for routes that don't set them):
+
+| Crate | Seam | Ref | Tag | Change |
+|---|---|---|:--:|---|
+| `nh-routes` | `ThinkingDialect::KimiToggle` | enum ~28-38, `as_str` ~41, `from_toml` validate ~480 | + | new variant carrying K2.6's thinking toggle; `from_toml` parses the catalog string `"kimi-toggle"`; `as_str` round-trips it. Existing variants + their wire behavior unchanged. |
+| `nh-routes` | `preserve_when_thinking` field | `RawRoute` ~274-297, `ResolvedRoute` ~144-165 | + | `#[serde(default)] bool` on both structs; carried onto the resolved route so nh-core can gate L2 reasoning replay on the *effective* thinking state. Default `false` = today's static behavior. |
+
+Consumers stay inside the already-enumerated nh-core seams (`apply_thinking`, `reasoning_to_send` /
+`OpenAiPolicy`). Catalog data edits (set `kimi-k2.6` → `thinking_dialect="kimi-toggle"`,
+`preserve_when_thinking=true`) are already "always allowed" (§0.1 Data). No other `nh-routes` line opens.
+**`nh-fleet` stays frozen.**
