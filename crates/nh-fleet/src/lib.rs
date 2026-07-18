@@ -879,10 +879,8 @@ fn execute_tasks(
                                 remaining.push_back(job);
                             }
                             Some(Step::Gate) => {
-                                let failed_attempts = failed_attempts
-                                    .get(&job.task_id)
-                                    .copied()
-                                    .unwrap_or(0);
+                                let failed_attempts =
+                                    failed_attempts.get(&job.task_id).copied().unwrap_or(0);
                                 ledger.append(&LedgerEvent::TaskGate {
                                     task_id: job.task_id.clone(),
                                     reason: format!(
@@ -1948,9 +1946,7 @@ mod tests {
         .unwrap();
         assert_eq!(report.run_id, run_id);
 
-        let ledger_path = fleet_root(tmp.path())
-            .join(&run_id)
-            .join("ledger.jsonl");
+        let ledger_path = fleet_root(tmp.path()).join(&run_id).join("ledger.jsonl");
         assert!(ledger_path.is_file());
         let events = read_ledger(&ledger_path).unwrap();
         assert!(matches!(
@@ -2198,8 +2194,14 @@ mod tests {
         let mut explicit = task("owned", "work");
         explicit.model = Some("glm-4.7-flash".into());
         let ladder = Ladder::default_ladder();
-        let error = prepare_new_tasks(&resolver, "glm-4.7-flash", &[explicit], false, Some(&ladder))
-            .unwrap_err();
+        let error = prepare_new_tasks(
+            &resolver,
+            "glm-4.7-flash",
+            &[explicit],
+            false,
+            Some(&ladder),
+        )
+        .unwrap_err();
         assert_eq!(
             error.to_string(),
             "escalation ladder owns route selection — remove per-task model, or drop --escalate"
@@ -2211,8 +2213,9 @@ mod tests {
         let spec: TaskSpec =
             serde_json::from_str(r#"{"task":"work","backend":"kimi-swarm"}"#).unwrap();
         assert_eq!(spec.backend, Some(Backend::KimiSwarm));
-        assert!(serde_json::from_str::<TaskSpec>(r#"{"task":"work","backend":"kimi_swarm"}"#)
-            .is_err());
+        assert!(
+            serde_json::from_str::<TaskSpec>(r#"{"task":"work","backend":"kimi_swarm"}"#).is_err()
+        );
     }
 
     #[test]

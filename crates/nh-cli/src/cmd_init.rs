@@ -4,7 +4,8 @@ use std::fs;
 use std::path::Path;
 
 /// .nosis/.gitignore: runtime artifacts and auth material never reach git.
-const GITIGNORE: &str = "# nosis-harness runtime artifacts — never commit\nreceipts.jsonl\n*.log\nauth*\n";
+const GITIGNORE: &str =
+    "# nosis-harness runtime artifacts — never commit\nreceipts.jsonl\n*.log\nauth*\n";
 
 /// Starter route catalog for repos that have none, so `nh run` works right after
 /// `nh init`. Catalog stays DATA: this embeds the repo-root catalog.toml at build
@@ -131,7 +132,11 @@ mod tests {
     fn never_overwrites_an_existing_law() {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir(tmp.path().join(".nosis")).unwrap();
-        fs::write(tmp.path().join(".nosis").join("law.toml"), "# user's policy\n").unwrap();
+        fs::write(
+            tmp.path().join(".nosis").join("law.toml"),
+            "# user's policy\n",
+        )
+        .unwrap();
         init_at(tmp.path()).unwrap();
         let text = fs::read_to_string(tmp.path().join(".nosis").join("law.toml")).unwrap();
         assert_eq!(text, "# user's policy\n");
