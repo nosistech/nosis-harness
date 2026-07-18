@@ -1,6 +1,26 @@
 # Current Task
 
-## Immediate Goal — M5 Slices A + B DONE + committed. NEXT = brief Sol for Slice C (VISIBLE — the FEEL gate).
+## Immediate Goal — M5 Slices A + B + C DONE + committed. NEXT = brief Sol for Slice D (LEVER — profiles).
+
+**Slice C "VISIBLE" SHIPPED (E3 met — THE FEEL GATE PASSED).** Committed `a0a4036` on `e97ec1f`. Gate
+green: **339 pass / 0 fail / 1 ignored** `--release`, clippy `-D warnings` clean (319 → +20: Slice C +17,
+sub-cent fix +3). Built by Sol (two handoffs: the full slice, then a sub-cent honesty fix live-testing
+exposed); gated + adversarially reviewed + **live-verified with the owner's real GLM key** (free
+glm-4.7-flash end-to-end → honest `$0.00`; paid glm-5.2 → clean "insufficient balance" error; `nh why`
+live) + **owner FEEL-approved before commit**. Delivered: money HUD (currency cached/miss/output split +
+per-currency session total, replacing token-only; token budget hard-stop kept); THE counterfactual
+savings line (`cost … — saved N% vs no-cache` + peak/no-cache/top-tier breakdown; cold turn makes no
+false claim); approximate USD gloss (native = billed truth, `≈$` omitted when stale/absent, NEVER
+FX-summed across CNY/USD); adaptive money precision (a real sub-cent spend never renders `$0.00` — only a
+genuinely-free route does); `/why` (TUI + `nh why` CLI) off live `resolve_capable` + `RejectionTrace`;
+approval cluster L6 fix (y/a/n/Esc only, any other key = no-op never a silent deny, always-this-session
+rule, visible legend, Esc-to-interrupt); working heartbeat; OSC 9;4 Windows taskbar; errors-that-teach.
+**drop-if-hard call:** "Esc to stop" while working was dropped (no truthful cooperative-cancel path — the
+heartbeat shows `● WORKING · Ns` without claiming an interrupt). Amendment **A-M5-6** (USD gloss + `[fx]`
+catalog data + no-cache-headline FEEL ruling) logged in `CONTRACTS_M5.md` §8. **FEEL finding worth
+remembering:** at 2 dp a real ~$0.003 turn rounded to `$0.00` — fixed with adaptive precision (congruent
+with "the meter must not lie"). Live money/savings % demo still pending a key with paid balance (free GLM
+caps at `$0.00`; DeepSeek/Kimi or a funded GLM key would light up "saved 93%").
 
 **Slice A "TRUTH" SHIPPED (E1 met).** Committed `9c96259` on `0bd1d7f` on `fe04ce5`. Full workspace gate
 green: **306 pass / 0 fail / 1 ignored** `--release`, clippy `-D warnings` clean (baseline 292 → +14
@@ -139,36 +159,35 @@ review on every Slice-B item.
   Gemini CLI died as open delegate). Reposition: **"open-weight-first harness with a frontier review
   gate."** Keep the commented catalog delegate schema; don't build the full adapter class in v1.
 
-### ON RESUME ("continue") — Slices A + B DONE. Next = brief Sol for Slice C (VISIBLE — THE FEEL GATE).
-If the owner just typed **"continue"**, this is the task: drive Slice C. **State (2026-07-18):** M5 Slices
-A "TRUTH" (`9c96259`) + B "FLOOR" (`1a9d92a`) shipped; HEAD `b777290` on `1a9d92a` on `70a2f9d`; git clean;
-**319 pass / 0 fail / 1 ignored** `--release`, clippy `-D warnings` clean. Read `CONTRACTS_M5.md` (esp.
-§0.1 mutable surface + Slice C + §8 amendments A-M5-1..5) + this file's top two blocks first.
+### ON RESUME ("continue") — Slices A + B + C DONE + committed. Next = brief Sol for Slice D (LEVER — profiles).
+**State (2026-07-18):** M5 Slices A "TRUTH" (`9c96259`) + B "FLOOR" (`1a9d92a`) + C "VISIBLE" (`a0a4036`,
+FEEL-approved) shipped; HEAD `a0a4036`; **339 pass / 0 fail / 1 ignored** `--release`, clippy clean. §8
+amendments A-M5-1..6 logged. If the owner typed **"continue"**, drive **Slice D "LEVER" (E4)** — the
+owner's toggle-per-provider-by-profile ask. Read `CONTRACTS_M5.md` (Slice D + §0.1 nh-routes `Profiles`/
+`EffectiveExecutionPolicy` row + nh-core `EffectiveExecutionPolicy application` row + nh-tui `/profile`
+chip) + this file's top blocks first.
 
-1. **Confirm clean:** `git log --oneline -3` = `b777290` / `1a9d92a` / `70a2f9d`; `git status` clean.
-   Kill any `nh.exe` before builds (it locks `target\debug\nh.exe`).
-2. **Read the real seams FIRST** in `nh-tui` (hud_line/render_hud ~401-428/~1840; reduce_key/approval row
-   ~1355), `nh-cli` (cost display in cmd_run/cmd_chat; a `nh why` path), and `nh-routes` (a NEW `naive_cost`
-   near `price_at` ~173, reusing Slice A's priced route + `RejectionTrace`). Ground the brief seam-by-seam
-   with file:line refs — the way Slices A and B worked well.
-3. **Pre-authorize the mutable surface UP FRONT + enumerate cross-crate ripples** BEFORE briefing Sol
-   (the A-M5-2/A-M5-4 lesson: a new type/variant can break exhaustive matches in frozen crates). Log any
-   needed §8 amendment first. Then **ask the owner** the one or two genuine decisions, and **ask before
-   launching the Sol run**.
+1. **Confirm clean:** `git log --oneline -1` = `a0a4036`; `git status` clean. Kill any `nh.exe` before builds.
+2. **Read the real seams FIRST** for Slice D: `nh-routes` (a NEW `Profiles` module + `EffectiveExecutionPolicy`
+   that clamps profile wishes to route caps — layered bundled→user→repo like law, repo may only *tighten*);
+   `nh-core` (apply the clamped policy at request-build: output cap [Slice A's mechanism], thinking tier);
+   `nh-tui`/`nh-cli` (`/profile` toggle + HUD **profile chip** [deferred from C] + receipt field). Ground the
+   brief seam-by-seam with file:line, the way A/B/C worked.
+3. **Pre-authorize the mutable surface + enumerate cross-crate ripples** BEFORE briefing (the A-M5-2/-4/-6
+   lesson). `profiles.toml` is new DATA (frugal/balanced/max-quality). Log any needed §8 amendment first.
+   Then **ask the owner** the genuine decisions (e.g. the three profiles' exact caps; whether a *currency*
+   budget hard-stop lands here — it was held out of C as a D lever) and **ask before launching the Sol run**.
 4. **Brief Sol** (gpt-5.6 xhigh, `codex exec`, background — invocation below; NEVER two nosis codexes at
-   once) for Slice C: money cost HUD (currency over cached/miss/output + session total + budget hard-stop);
-   THE counterfactual savings line via `naive_cost`; `/why` off the `RejectionTrace`; approval cluster
-   (explicit y/n/Esc + legend, fixes L6, prefix-rule approvals, Esc-to-interrupt, working heartbeat);
-   OSC 9;4 Windows taskbar semáforo; "errors that teach" as a tested invariant. `drop-if-hard` per sub-item.
-5. **Gate:** `git diff --stat` for scope → kill nh.exe → `cargo test --workspace --release` (≥319 + new,
+   once) for Slice D per `CONTRACTS_M5.md` Slice D. `drop-if-hard` per sub-item.
+5. **Gate:** `git diff --stat` for scope → kill nh.exe → `cargo test --workspace --release` (≥339 + new,
    0 fail) + `cargo clippy --workspace --all-targets --release -- -D warnings`. **GATE RULE:** never pipe
-   `cargo test`/`clippy` through `| tail` — a pipeline's exit code is the LAST command's, so `tail`'s 0
-   masks a real failure; redirect to a file + `echo $?`. Never `cargo fmt --all` (scoped `cargo fmt -p`
-   only). Adversarial review.
-6. **THE FEEL GATE (C is where best-in-category is won):** build `nh.exe`, RUN the TUI + CLI cost surfaces,
-   and the **owner FEEL-approves every human-facing surface BEFORE commit** ("pretty but frustrating" =
-   failure). Then commit per-slice to `main` and update this file + memory. Slices D (LEVER/profiles) and
-   E (LOOP/gate.ps1+CI — can land anytime, ideally soon to mechanize the gate) follow.
+   `cargo test`/`clippy` through `| tail` (a pipeline's exit code is the LAST command's — `tail`'s 0 masks a
+   real failure); redirect to a file + `echo $?`. Never `cargo fmt --all` (scoped `cargo fmt -p` only).
+   Adversarial review. If Sol STOPS at a frozen boundary, apply the compile-glue as orchestrator + log §8.
+6. **FEEL gate + commit:** switching frugal↔max-quality must visibly change the built body (output cap /
+   route ceiling) + HUD profile chip + receipt; a **repo** profile may only *tighten*. Owner FEEL-approves
+   the profile chip/`/profile` BEFORE commit, then commit per-slice to `main` + update this file + memory.
+   Slice E (LOOP/gate.ps1+CI — can land anytime, ideally soon to mechanize the gate) is the last M5 slice.
 
 **When M5 is "done" (shipped + FEEL-approved):** write the ≥5 launch posts from
 `01-product/WHY_BEST_IN_CATEGORY_2026.md` (append new article seeds there as they surface). [[why-best-in-category-2026]]
