@@ -15,7 +15,7 @@ use nh_core::wire::{cache_hit_pct, make_client, ChatClient, ChatMessage};
 use nh_law::LoadOptions;
 use nh_routes::{ResolvedRoute, RouteClass, RouteResolver};
 use nh_tools::{builtin_tools, Access, Tool, ToolCtx};
-use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, Vault};
+use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber};
 
 use crate::guard_from;
 use crate::cmd_run::{self, effort_for, DELEGATE_MSG};
@@ -39,6 +39,8 @@ struct ChatSession {
     session_cached: u64,
     /// Every key literal this session has seen — switched-away keys stay scrubbed.
     key_literals: Vec<String>,
+    /// Every catalog vault entry, refreshed into the scrubber after reconnects.
+    vault_entries: Vec<String>,
     scrubber: SharedScrubber,
     connect: ConnectFn,
     /// False after a keyless start (stand-in client installed); tasks retry the
@@ -64,9 +66,15 @@ pub fn run(model: &str) -> anyhow::Result<()> {
         anyhow::bail!("{DELEGATE_MSG}");
     }
 
-    let connect: ConnectFn = Box::new(|route| {
+    let connect_policy = law.policy.clone();
+    let connect: ConnectFn = Box::new(move |route| {
         let vault = EnvFallbackVault { inner: KeyringVault };
-        let key = vault.get(&route.vault_entry)?;
+        let key = nh_vault::get_scoped(
+            &vault,
+            &route.vault_entry,
+            cmd_run::host_of(&route.base_url),
+            &connect_policy.approved_audiences(&route.vault_entry),
+        )?;
         let literal = key.as_str().to_owned();
         Ok((make_client(route, key), literal))
     });
@@ -75,18 +83,22 @@ pub fn run(model: &str) -> anyhow::Result<()> {
     // Commands (/model, /provider, /price, /tools, /quit) all work keyless.
     let (client, key_literals, connected) = match connect(&route) {
         Ok((client, literal)) => (client, vec![literal], true),
+        Err(e) if e.to_string().starts_with("refused:") => return Err(e),
         Err(e) => {
             eprintln!("warning: {e}");
             (Box::new(NotConnected { msg: e.to_string() }) as Box<dyn ChatClient>, Vec::new(), false)
         }
     };
-    let scrubber: SharedScrubber = Arc::new(RwLock::new(Scrubber::new(key_literals.clone())));
+    let vault_entries = cmd_run::catalog_vault_entries(&resolver);
+    let vault = EnvFallbackVault { inner: KeyringVault };
+    let registry_scrubber = nh_vault::from_vault(&vault, &vault_entries);
+    let scrubber: SharedScrubber = Arc::new(RwLock::new(registry_scrubber.clone()));
 
     // MCP tools load at chat start when .nosis/mcp.toml exists; a broken file is
     // one warning line and the chat continues without MCP — never a hard failure.
     let mut mcp_warnings = Vec::new();
     let mut tools = builtin_tools();
-    tools.extend(load_mcp(&root, &mut mcp_warnings));
+    tools.extend(load_mcp(&root, &law.policy, &mut mcp_warnings));
     for w in &mcp_warnings {
         eprintln!("warning: {}", scrub_line(&scrubber, w));
     }
@@ -105,12 +117,14 @@ pub fn run(model: &str) -> anyhow::Result<()> {
             }),
         )
         .with_guard(Box::new(move |access| match access {
+            Access::Read(path) => guard_from(policy.read_verdict(path)),
             Access::Write(path) => guard_from(policy.write_verdict(path)),
             Access::Exec(command) => guard_from(policy.exec_verdict(command)),
+            Access::Send(target) => guard_from(policy.send_verdict(target)),
         })),
         receipts: ReceiptWriter {
             path: root.join(".nosis").join("receipts.jsonl"),
-            scrubber: Scrubber::new(key_literals.clone()),
+            scrubber: registry_scrubber,
         },
         model_id: route.model_id.clone(),
         max_turns: 20,
@@ -132,6 +146,7 @@ pub fn run(model: &str) -> anyhow::Result<()> {
         session_out: 0,
         session_cached: 0,
         key_literals,
+        vault_entries,
         scrubber,
         connect,
         connected,
@@ -262,11 +277,17 @@ fn install_client(s: &mut ChatSession, client: Box<dyn ChatClient>, literal: Str
     if !literal.is_empty() && !s.key_literals.contains(&literal) {
         s.key_literals.push(literal);
     }
+    let registry = if s.vault_entries.is_empty() {
+        Scrubber::new(s.key_literals.clone())
+    } else {
+        let vault = EnvFallbackVault { inner: KeyringVault };
+        nh_vault::from_vault(&vault, &s.vault_entries)
+    };
     match s.scrubber.write() {
-        Ok(mut guard) => *guard = Scrubber::new(s.key_literals.clone()),
-        Err(poisoned) => *poisoned.into_inner() = Scrubber::new(s.key_literals.clone()),
+        Ok(mut guard) => *guard = registry.clone(),
+        Err(poisoned) => *poisoned.into_inner() = registry.clone(),
     }
-    s.agent.receipts.scrubber = Scrubber::new(s.key_literals.clone());
+    s.agent.receipts.scrubber = registry;
     s.agent.client = client;
     s.connected = true;
 }
@@ -361,7 +382,11 @@ fn footer(s: &ChatSession) -> String {
 
 /// Load MCP tools from `.nosis/mcp.toml` when it exists. Any failure — unreadable
 /// file, bad TOML, unreachable server — becomes a warning line, never an error.
-fn load_mcp(root: &Path, warnings: &mut Vec<String>) -> Vec<Box<dyn Tool>> {
+fn load_mcp(
+    root: &Path,
+    policy: &nh_law::Policy,
+    warnings: &mut Vec<String>,
+) -> Vec<Box<dyn Tool>> {
     let path = root.join(".nosis").join("mcp.toml");
     if !path.is_file() {
         return Vec::new();
@@ -375,6 +400,7 @@ fn load_mcp(root: &Path, warnings: &mut Vec<String>) -> Vec<Box<dyn Tool>> {
     };
     match nh_tools::mcp::load_mcp_config(&text) {
         Ok(configs) => {
+            let configs = cmd_run::filter_mcp_audiences(configs, policy, warnings);
             let set = nh_tools::mcp::mcp_tools(&configs);
             warnings.extend(set.warnings);
             set.tools
@@ -577,6 +603,7 @@ mod tests {
             session_cached: 0,
             scrubber: Arc::new(RwLock::new(Scrubber::new(key_literals.clone()))),
             key_literals,
+            vault_entries: Vec::new(),
             connect,
             connected: true,
             now: Box::new(off_peak_now),
@@ -960,7 +987,8 @@ mod tests {
     fn missing_mcp_toml_means_no_tools_and_no_warnings() {
         let tmp = tempfile::tempdir().unwrap();
         let mut warnings = Vec::new();
-        let tools = load_mcp(tmp.path(), &mut warnings);
+        let law = nh_law::load(tmp.path(), &LoadOptions { cli_autonomy: None });
+        let tools = load_mcp(tmp.path(), &law.policy, &mut warnings);
         assert!(tools.is_empty());
         assert!(warnings.is_empty(), "got: {warnings:?}");
     }
@@ -971,7 +999,8 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join(".nosis")).unwrap();
         std::fs::write(tmp.path().join(".nosis").join("mcp.toml"), "not [ valid").unwrap();
         let mut warnings = Vec::new();
-        let tools = load_mcp(tmp.path(), &mut warnings);
+        let law = nh_law::load(tmp.path(), &LoadOptions { cli_autonomy: None });
+        let tools = load_mcp(tmp.path(), &law.policy, &mut warnings);
         assert!(tools.is_empty());
         assert_eq!(warnings.len(), 1, "exactly one warning: {warnings:?}");
         assert!(warnings[0].contains("mcp.toml"), "names the file: {warnings:?}");

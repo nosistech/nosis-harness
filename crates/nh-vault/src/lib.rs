@@ -83,7 +83,14 @@ const MAX_DISPLAY_CHARS: usize = 500;
 /// Known key shapes, one alternation compiled once. `csk-` must precede `sk-`
 /// so a `csk-` token is never matched from its second character onward.
 const KEY_SHAPES: &str = concat!(
-    r"csk-[A-Za-z0-9_\-]{8,}",
+    r"github_pat_[A-Za-z0-9_]{22,}",
+    r"|gh[opushr]_[A-Za-z0-9]{36}",
+    r"|AKIA[0-9A-Z]{16}",
+    r"|AIza[0-9A-Za-z_\-]{35}",
+    r"|xox[baprs]-[A-Za-z0-9-]{10,}",
+    r"|glpat-[A-Za-z0-9_\-]{20}",
+    r"|npm_[A-Za-z0-9]{36}",
+    r"|csk-[A-Za-z0-9_\-]{8,}",
     r"|sk-[A-Za-z0-9_\-]{8,}",
     r"|eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+",
 );
@@ -91,6 +98,7 @@ const KEY_SHAPES: &str = concat!(
 /// Redacts known key shapes (`sk-…`, `csk-…`, JWT-like) plus the literal secret values
 /// currently loaded. Sits on EVERY output path: stdout, logs, receipts.
 /// A leaked key shape in any output is a failing test.
+#[derive(Clone)]
 pub struct Scrubber {
     literals: Vec<String>,
     shapes: Regex,
@@ -115,6 +123,73 @@ impl Scrubber {
     }
 }
 
+/// Build a scrubber from every vault entry that can be read. Missing or
+/// unavailable entries are skipped so redaction setup never blocks a session.
+pub fn from_vault<V: Vault>(vault: &V, entries: &[String]) -> Scrubber {
+    let mut literals = Vec::new();
+    for entry in entries {
+        if let Ok(secret) = vault.get(entry) {
+            let literal = secret.as_str().to_owned();
+            if !literal.is_empty() && !literals.contains(&literal) {
+                literals.push(literal);
+            }
+        }
+    }
+    Scrubber::new(literals)
+}
+
+fn normalized_host(value: &str) -> String {
+    let value = value.trim();
+    let authority = value
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(value)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .rsplit('@')
+        .next()
+        .unwrap_or("");
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split_once(']').map(|(host, _)| host).unwrap_or(rest)
+    } else {
+        authority
+            .split_once(':')
+            .map(|(host, _)| host)
+            .unwrap_or(authority)
+    };
+    host.to_ascii_lowercase()
+}
+
+/// Whether a requested destination host is permitted for one vault entry.
+/// An empty approved list preserves today's behavior for undeclared entries.
+pub fn audience_allows(requested_host: &str, approved: &[String]) -> bool {
+    if approved.is_empty() {
+        return true;
+    }
+    let requested = normalized_host(requested_host);
+    approved
+        .iter()
+        .any(|candidate| normalized_host(candidate) == requested)
+}
+
+/// Fetch a secret only after its destination host passes the trusted audience
+/// policy supplied by the caller.
+pub fn get_scoped<V: Vault>(
+    vault: &V,
+    entry: &str,
+    requested_host: &str,
+    approved: &[String],
+) -> anyhow::Result<Zeroizing<String>> {
+    let host = normalized_host(requested_host);
+    if !audience_allows(&host, approved) {
+        anyhow::bail!(
+            "refused: \"{entry}\" is not approved for {host} — add it to [credential.{entry}] in law.toml"
+        );
+    }
+    vault.get(entry)
+}
+
 /// Render untrusted text as one safe terminal line: control characters (\n, \r,
 /// ESC/ANSI, …) become visible escapes so model output cannot spoof the display,
 /// and very long text truncates with an explicit marker.
@@ -131,6 +206,33 @@ pub fn sanitize_line(text: &str) -> String {
     if len > MAX_DISPLAY_CHARS {
         let head: String = escaped.chars().take(MAX_DISPLAY_CHARS).collect();
         format!("{head}… (+{} more chars)", len - MAX_DISPLAY_CHARS)
+    } else {
+        escaped
+    }
+}
+
+/// Make MCP-provided descriptions and schema strings visibly inert and bounded.
+/// Invisible carrier characters are removed; controls are escaped, never run.
+pub fn sanitize_untrusted_text(text: &str) -> String {
+    const MAX_UNTRUSTED_CHARS: usize = 1_000;
+
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(c, '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}')
+            || ('\u{e0000}'..='\u{e007f}').contains(&c)
+        {
+            continue;
+        }
+        if c.is_control() {
+            escaped.extend(c.escape_debug());
+        } else {
+            escaped.push(c);
+        }
+    }
+    let len = escaped.chars().count();
+    if len > MAX_UNTRUSTED_CHARS {
+        let head: String = escaped.chars().take(MAX_UNTRUSTED_CHARS).collect();
+        format!("{head}… (+{} more chars)", len - MAX_UNTRUSTED_CHARS)
     } else {
         escaped
     }
@@ -196,6 +298,31 @@ mod tests {
     }
 
     #[test]
+    fn scrub_redacts_extended_high_precision_key_shapes() {
+        let shapes = [
+            format!("github_pat_{}", "A".repeat(22)),
+            format!("ghp_{}", "B".repeat(36)),
+            format!("gho_{}", "C".repeat(36)),
+            format!("ghu_{}", "D".repeat(36)),
+            format!("ghs_{}", "E".repeat(36)),
+            format!("ghr_{}", "F".repeat(36)),
+            format!("AKIA{}", "G".repeat(16)),
+            format!("AIza{}", "H".repeat(35)),
+            "xoxb-1234567890-abcdef".to_string(),
+            format!("glpat-{}", "i".repeat(20)),
+            format!("npm_{}", "j".repeat(36)),
+        ];
+        let scrubber = Scrubber::new(Vec::new());
+        for shape in shapes {
+            assert_eq!(
+                scrubber.scrub(&format!("before {shape} after")),
+                "before [REDACTED] after",
+                "shape was not fully redacted: {shape}"
+            );
+        }
+    }
+
+    #[test]
     fn scrub_leaves_normal_text_alone() {
         let s = Scrubber::new(vec!["hunter2-fake-secret".to_string()]);
         let text = "ran cargo test, 3 passed; ask me anything. risk-free task-list eyJustKidding";
@@ -226,6 +353,87 @@ mod tests {
         assert!(display.contains("(+100 more chars)"), "got: {display}");
         // Short text passes through untouched.
         assert_eq!(sanitize_line("cargo test"), "cargo test");
+    }
+
+    #[test]
+    fn sanitize_untrusted_text_escapes_controls_removes_carriers_and_caps() {
+        let sanitized = sanitize_untrusted_text("safe\r\x1b[2K\u{200b}\u{e0001}payload");
+        assert_eq!(sanitized, "safe\\r\\u{1b}[2Kpayload");
+        assert!(!sanitized.chars().any(char::is_control));
+        assert_eq!(
+            sanitize_untrusted_text("normal tool description"),
+            "normal tool description"
+        );
+
+        let capped = sanitize_untrusted_text(&"x".repeat(1_100));
+        assert!(capped.contains("(+100 more chars)"), "got: {capped}");
+        assert!(capped.chars().count() < 1_100);
+    }
+
+    #[test]
+    fn audience_matching_is_host_only_and_empty_is_compatible() {
+        let approved = vec!["api.deepseek.com".to_string()];
+        assert!(!audience_allows("https://evil.example", &approved));
+        assert!(audience_allows(
+            "https://API.DEEPSEEK.COM:443/anthropic",
+            &approved
+        ));
+        assert!(audience_allows("https://anything.example/path", &[]));
+    }
+
+    #[test]
+    fn scoped_get_refuses_before_materializing_and_allows_a_match() {
+        struct PanicVault;
+        impl Vault for PanicVault {
+            fn get(&self, _entry: &str) -> anyhow::Result<Zeroizing<String>> {
+                panic!("secret must not materialize for a refused audience")
+            }
+            fn set(&self, _entry: &str, _value: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+
+        let approved = vec!["api.deepseek.com".to_string()];
+        let err = get_scoped(&PanicVault, "deepseek", "https://evil.example", &approved)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "refused: \"deepseek\" is not approved for evil.example — add it to [credential.deepseek] in law.toml"
+        );
+
+        let got = get_scoped(
+            &AlwaysHit,
+            "deepseek",
+            "https://api.deepseek.com/v1",
+            &approved,
+        )
+        .unwrap();
+        assert_eq!(got.as_str(), "sk-test-0000-inner");
+    }
+
+    #[test]
+    fn scrubber_from_vault_registers_every_resolvable_literal() {
+        struct RegistryVault;
+        impl Vault for RegistryVault {
+            fn get(&self, entry: &str) -> anyhow::Result<Zeroizing<String>> {
+                match entry {
+                    "one" => Ok(Zeroizing::new("odd-secret-one".to_string())),
+                    "two" => Ok(Zeroizing::new("odd-secret-two".to_string())),
+                    _ => anyhow::bail!("missing"),
+                }
+            }
+            fn set(&self, _entry: &str, _value: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+
+        let entries = vec!["one".into(), "missing".into(), "two".into(), "one".into()];
+        let scrubber = from_vault(&RegistryVault, &entries);
+        assert_eq!(
+            scrubber.scrub("odd-secret-one / odd-secret-two"),
+            "[REDACTED] / [REDACTED]"
+        );
     }
 
     #[test]

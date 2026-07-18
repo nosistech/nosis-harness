@@ -3,6 +3,7 @@
 //! Policy is data: bundled, user-global, and repository law files are merged once
 //! at session start. Repository law may add protections, never weaken them.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -15,7 +16,7 @@ const PROJECT_LAW_LABEL: &str = "## Project law";
 const AGENTS_LABEL: &str = "## Project instructions (AGENTS.md)";
 const MEMORY_LABEL: &str = "## Memory";
 const REPO_RESTRICTION_WARNING: &str =
-    "repo .nosis/law.toml cannot raise autonomy or auto-approve paths — ignored";
+    "repo .nosis/law.toml cannot raise autonomy, auto-approve paths, or approve credential audiences — ignored";
 
 /// The bundled default constitution and policy.
 pub const BUNDLED_LAW: &str = include_str!("bundled_law.toml");
@@ -46,6 +47,9 @@ pub struct Policy {
     write_auto: Vec<String>,
     write_ask: Vec<String>,
     write_block: Vec<String>,
+    read_block: Vec<String>,
+    send_block: Vec<String>,
+    credential_audiences: BTreeMap<String, Vec<String>>,
     exec_block: Vec<String>,
 }
 
@@ -101,6 +105,30 @@ impl Policy {
             Autonomy::Ask => Verdict::Ask,
             Autonomy::Auto => Verdict::Allow,
         }
+    }
+
+    /// Decide whether a normalized, forward-slashed relative path may be read.
+    pub fn read_verdict(&self, rel_path: &str) -> Verdict {
+        if let Some(pattern) = first_match(&self.read_block, rel_path) {
+            return Verdict::Block(format!("protected read ({pattern})"));
+        }
+        Verdict::Allow
+    }
+
+    /// Decide whether a destination host may receive outbound data.
+    pub fn send_verdict(&self, target_host: &str) -> Verdict {
+        if let Some(pattern) = first_match(&self.send_block, target_host) {
+            return Verdict::Block(format!("blocked destination ({pattern})"));
+        }
+        Verdict::Allow
+    }
+
+    /// Trusted destination hosts for one vault entry.
+    pub fn approved_audiences(&self, entry: &str) -> Vec<String> {
+        self.credential_audiences
+            .get(entry)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Decide whether a shell command is blocked. Execution is never auto-allowed.
@@ -291,7 +319,9 @@ fn autonomy_from(
 }
 
 fn repo_tries_to_weaken(law: &LawFile) -> bool {
-    law.autonomy.is_some() || law.write.as_ref().is_some_and(|write| write.auto.is_some())
+    law.autonomy.is_some()
+        || law.write.as_ref().is_some_and(|write| write.auto.is_some())
+        || law.credential.is_some()
 }
 
 fn compile_policy(
@@ -305,6 +335,9 @@ fn compile_policy(
         write_auto: Vec::new(),
         write_ask: Vec::new(),
         write_block: Vec::new(),
+        read_block: Vec::new(),
+        send_block: Vec::new(),
+        credential_audiences: BTreeMap::new(),
         exec_block: Vec::new(),
     };
 
@@ -312,11 +345,28 @@ fn compile_policy(
         if let Some(write) = &law.write {
             extend_unique(&mut policy.write_auto, write.auto.as_deref());
         }
+        if let Some(credentials) = &law.credential {
+            for (entry, rule) in credentials {
+                extend_unique(
+                    policy
+                        .credential_audiences
+                        .entry(entry.clone())
+                        .or_default(),
+                    rule.audience.as_deref(),
+                );
+            }
+        }
     }
     for law in [bundled, user, repo].into_iter().flatten() {
         if let Some(write) = &law.write {
             extend_unique(&mut policy.write_ask, write.ask.as_deref());
             extend_unique(&mut policy.write_block, write.block.as_deref());
+        }
+        if let Some(read) = &law.read {
+            extend_unique(&mut policy.read_block, read.block.as_deref());
+        }
+        if let Some(send) = &law.send {
+            extend_unique(&mut policy.send_block, send.block.as_deref());
         }
         if let Some(exec) = &law.exec {
             extend_unique(&mut policy.exec_block, exec.block.as_deref());
@@ -441,6 +491,9 @@ fn segment_matches(pattern: &str, value: &str) -> bool {
 struct LawFile {
     constitution: Option<ConstitutionSection>,
     write: Option<WriteRules>,
+    read: Option<ReadRules>,
+    send: Option<SendRules>,
+    credential: Option<BTreeMap<String, CredentialRule>>,
     exec: Option<ExecRules>,
     autonomy: Option<AutonomyRule>,
 }
@@ -455,6 +508,21 @@ struct WriteRules {
     auto: Option<Vec<String>>,
     ask: Option<Vec<String>>,
     block: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ReadRules {
+    block: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SendRules {
+    block: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CredentialRule {
+    audience: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -528,6 +596,9 @@ text = "operating"
             write_auto: auto.iter().map(|value| (*value).to_owned()).collect(),
             write_ask: ask.iter().map(|value| (*value).to_owned()).collect(),
             write_block: block.iter().map(|value| (*value).to_owned()).collect(),
+            read_block: Vec::new(),
+            send_block: Vec::new(),
+            credential_audiences: BTreeMap::new(),
             exec_block: exec_block.iter().map(|value| (*value).to_owned()).collect(),
         }
     }
@@ -679,6 +750,34 @@ block = ["git push*"]
     }
 
     #[test]
+    fn read_and_send_verdicts_are_two_tier_and_reuse_globs() {
+        let configured = parse_law(
+            r#"
+[read]
+block = ["**/.env*", "**/*.pem", "**/id_rsa*"]
+
+[send]
+block = ["evil.example", "*.blocked.test"]
+"#,
+        )
+        .unwrap();
+        let policy = compile_policy(Autonomy::Ask, None, Some(&configured), None);
+
+        for path in [".env", "cert.pem", "home/id_rsa"] {
+            assert!(
+                matches!(policy.read_verdict(path), Verdict::Block(_)),
+                "read should block {path}"
+            );
+        }
+        assert_eq!(policy.read_verdict("src/lib.rs"), Verdict::Allow);
+        assert!(matches!(
+            policy.send_verdict("evil.example"),
+            Verdict::Block(_)
+        ));
+        assert_eq!(policy.send_verdict("api.deepseek.com"), Verdict::Allow);
+    }
+
+    #[test]
     fn repo_cannot_raise_autonomy_or_add_auto_paths_and_warns_once() {
         let repo = TempTree::new("repo-boundary");
         let home = TempTree::new("repo-boundary-home");
@@ -691,6 +790,12 @@ default = "auto"
 [write]
 auto = ["src/**"]
 block = ["locked/**"]
+
+[read]
+block = ["private/**"]
+
+[credential.deepseek]
+audience = ["evil.example"]
 "#,
         );
 
@@ -705,6 +810,14 @@ block = ["locked/**"]
             law.policy.write_verdict("locked/file.txt"),
             Verdict::Block(_)
         ));
+        assert!(matches!(
+            law.policy.read_verdict("private/data.txt"),
+            Verdict::Block(_)
+        ));
+        assert_eq!(
+            law.policy.approved_audiences("deepseek"),
+            ["api.deepseek.com"]
+        );
         assert_eq!(law.warnings, vec![REPO_RESTRICTION_WARNING.to_owned()]);
     }
 
@@ -734,7 +847,16 @@ block = ["locked/**"]
                 matches!(law.policy.write_verdict(path), Verdict::Block(_)),
                 "bundled law should block {path}"
             );
+            assert!(
+                matches!(law.policy.read_verdict(path), Verdict::Block(_)),
+                "bundled read law should block {path}"
+            );
         }
+        assert_eq!(
+            law.policy.approved_audiences("deepseek"),
+            ["api.deepseek.com"]
+        );
+        assert!(law.policy.approved_audiences("undeclared").is_empty());
     }
 
     #[test]

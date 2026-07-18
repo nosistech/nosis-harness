@@ -19,6 +19,7 @@ impl Drop for FleetTestEnv {
     fn drop(&mut self) {
         std::env::remove_var("NH_FLEET_TEST_PROVIDER");
         std::env::remove_var("NH_FLEET_TEST_SLEEP_MS");
+        std::env::remove_var("NH_NH_MCP_E3_KEY");
     }
 }
 
@@ -38,11 +39,15 @@ fn e3_korvin_starts_and_polls_a_stateless_fleet_run() -> anyhow::Result<()> {
         token: None,
         max_workers: 2,
     })?;
+    let token = server.token().to_string();
+    std::env::set_var("NH_NH_MCP_E3_KEY", &token);
     let cfg = nh_tools::mcp::McpServerConfig {
         name: "nh-mcp".into(),
         url: format!("http://{}/mcp", server.addr()),
         spec: "2026-07-28".into(),
-        auth: nh_tools::mcp::McpAuth::None,
+        auth: nh_tools::mcp::McpAuth::ApiKey {
+            vault_entry: "nh-mcp-e3".into(),
+        },
         scopes: vec![],
         default_mode: None,
         trust: nh_tools::mcp::McpTrust::Ask,
@@ -90,7 +95,7 @@ fn e3_korvin_starts_and_polls_a_stateless_fleet_run() -> anyhow::Result<()> {
     };
     assert!(finished.contains("2 done"), "{finished}");
 
-    let raw = raw_tools_list(server.addr())?;
+    let raw = raw_tools_list(server.addr(), &token)?;
     let headers = raw.split("\r\n\r\n").next().unwrap_or(&raw);
     assert!(!headers.to_ascii_lowercase().contains("mcp-session-id"));
 
@@ -99,7 +104,7 @@ fn e3_korvin_starts_and_polls_a_stateless_fleet_run() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn raw_tools_list(addr: SocketAddr) -> anyhow::Result<String> {
+fn raw_tools_list(addr: SocketAddr, token: &str) -> anyhow::Result<String> {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 99,
@@ -108,7 +113,7 @@ fn raw_tools_list(addr: SocketAddr) -> anyhow::Result<String> {
     })
     .to_string();
     let request = format!(
-        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     let mut stream = TcpStream::connect(addr)?;
