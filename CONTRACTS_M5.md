@@ -145,7 +145,30 @@ crate (§0.4 exception below), not a hand-rolled splitter; **(Q2)** undeclared v
 | W1-13 | nit-7 | nh-law `repo_tries_to_weaken` L321 | Δ | warn only when a repo field would actually grant. |
 
 **Held for W4 (not W1):** low-16 (`from_vault` skip-signal) + medium-20 (install_client key-literal union) —
-both nh-cli display/rebuild surface. W2/W3/W5 seam tables to be appended when each wave is briefed.
+both nh-cli display/rebuild surface. W2/W5 seam tables to be appended when each wave is briefed.
+
+**W3 — METER TRUTH (nh-core + nh-routes; +2-line resolve_effort glue in nh-cli/nh-tui). Owner-ratified three
+design calls 2026-07-19: (Q1) med-2 fixed via wire-aware `resolve_effort` → §8 amendment A-M5-9; (Q2) high-1
+drops the compaction cost guard; (Q3) high-2 normalizes cross-currency to USD via FRESH fx, fail-safe when
+stale.** Only signature change is `resolve_effort` gaining a trailing `wire` param (nh-fleet does NOT call it).
+Brief: `Temp/slice-f-w3-brief-v1.txt`.
+
+| # | Ref (audit) | Crate:seam | Tag | Change |
+|---|---|---|:--:|---|
+| W3-1 | high-1 | nh-core `compact_history` L1836 | Δ | drop the `elided<=retained` guard (compaction only runs post-trigger; overflow-avoidance beats cache-warmth). Realistic uniform-turn test. |
+| W3-2 | medium-1 | nh-core compaction trigger L1586 | Δ | `input_tokens = max(latest_prompt_tokens, estimate_request_tokens(...))` so the trigger sees this turn's tool-result additions. |
+| W3-3 | medium-3 | nh-core `resolve_effort` explicit branch L107 | Δ | coerce DeepseekNhm explicit Low → None (display==wire; mirrors GlmHm). `nh run` path only; TUI `/effort` is W4. |
+| W3-4 | medium-2 | nh-core `resolve_effort` L100 (+ cmd_run.rs:64, nh-tui:1456 glue) | Δ | **A-M5-9**: add trailing `wire` param; AnthropicMessages → None (honest provider-default). OpenAi unchanged. |
+| W3-5 | low-1 | nh-core `cache_hit_pct` L152 | Δ | return None when cached>prompt (no fabricated 100%). Update blessing test L747. |
+| W3-6 | low-2 | nh-core `run_with_history` receipt append L1623,1649,1678 | Δ | receipt-write failure is NON-FATAL: keep the real Ok/answer or the original provider Err; warn via `emit`. |
+| W3-7 | low-3 | nh-core wire clients `resp.text()` L252,545 | Δ | `.map_err(send_error)?` instead of `unwrap_or_default()` (no silent empty-body). |
+| W3-8 | low-4 | nh-core `parse_anthropic_response` L691 | Δ | tool_use block missing id/name → parse Err (clear local error, not a downstream 400). |
+| W3-9 | nit-1 | nh-core `WireUsage.prompt_cache_miss_tokens` L460,501 | Δ | delete dead field + binding (miss derived in cost_of). |
+| W3-10 | nit-2 | nh-core `build_anthropic_body` L577,609 | Δ | extract one `push_user_block` helper (dedupe the merge logic). |
+| W3-11 | high-2 | nh-routes `resolve_capable` L848 | Δ | single-currency compares native; cross-currency normalizes to USD via FRESH fx, fail-safe refuse when stale; trace prints native amounts cross-currency. |
+| W3-12 | low-5 | nh-routes `read_optional_profiles` L285,292 | Δ | include the io/parse error in the warning (surface the actionable ThinkingPosture message). |
+| W3-13 | nit-3 | nh-routes `from_toml` L639 | Δ | validate one-currency-per-provider at parse (fail-closed; shipped catalog is clean). |
+| W3-14 | nit-4 | nh-routes `Profiles::effective`/`clamp_route` profiles.rs L207,247 | Δ | one shared `min_cap` helper (one truth; defensive re-min preserved). |
 
 ### 0.2 THE LAW + UX-first
 - THE LAW (top authority): small, simple, secure, safe, lightweight, readable, auditable, modular,
@@ -551,3 +574,25 @@ as behavior-preserving glue — Sol **applies** the trivial `effective_profile: 
 (or the real active-profile value at a live caller site) and **reports** it in the self-report, rather
 than stopping. This blanket covers ONLY the two field-addition ripples of A-M5-7; every other frozen line
 still requires an amendment.
+
+**A-M5-9 (2026-07-19, orchestrator Opus 4.8; owner-ratified) — Slice F W3 wire-aware `resolve_effort`
+(medium-2 fix).** The two anthropic-wire deepseek routes (`deepseek-v4-pro-anthropic`,
+`deepseek-v4-flash-anthropic`; `wire="anthropic"`, `thinking_dialect="deepseek-nhm"`) displayed a resolved
+thinking tier (High under Ceiling/explicit) that `build_anthropic_body` never sends — a meter-honesty lie in
+the display. The honest fix makes `nh_core::wire::resolve_effort` **wire-aware**: it gains a trailing
+`wire: nh_routes::Wire` parameter and returns `ThinkingEffort::None` for `Wire::AnthropicMessages` regardless
+of posture/explicit (None is the only tier that matches a wire sending no thinking directive); `Wire::OpenAi`
+behavior is byte-for-byte unchanged. This is a **public type-signature change** (source-compat break) to a
+`pub fn`, so it forces its call-sites to update — the A-M5-2 ripple pattern, but a signature widen rather than
+an enum arm. Authorized call-site glue (both non-frozen, route/wire already in scope, no logic change):
+
+| Crate | Seam | Ref | Tag | Change |
+|---|---|---|:--:|---|
+| `nh-cli` | `effort_for` call to `resolve_effort` | cmd_run.rs:64 | Δ | pass `route.wire` as the new trailing arg. |
+| `nh-tui` | posture→effort call to `resolve_effort` | lib.rs:1456 | Δ | pass `route.wire` as the new trailing arg. |
+
+**nh-fleet does NOT call `resolve_effort`** (verified by workspace grep — it uses `effort_for`/`SetEffort`),
+so the FROZEN crate takes NO ripple from this signature change. The real Anthropic thinking-wire mapping stays
+deferred to a live-verify (report §7); until then None (provider-default) is the honest displayed tier. The
+matching display-honesty fix for the TUI `/effort low` direct-set path (medium-3's TUI caveat) is a separate
+W4 concern, not covered here.
