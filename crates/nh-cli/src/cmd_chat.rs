@@ -100,10 +100,11 @@ pub fn run(model: &str, profile: &str) -> anyhow::Result<()> {
         let vault = EnvFallbackVault {
             inner: KeyringVault,
         };
+        let host = nh_vault::normalized_host(&route.base_url).unwrap_or_default();
         let key = nh_vault::get_scoped(
             &vault,
             &route.vault_entry,
-            cmd_run::host_of(&route.base_url),
+            &host,
             &connect_policy.approved_audiences(&route.vault_entry),
         )?;
         let literal = key.as_str().to_owned();
@@ -114,7 +115,7 @@ pub fn run(model: &str, profile: &str) -> anyhow::Result<()> {
     // Commands (/model, /provider, /price, /tools, /quit) all work keyless.
     let (client, key_literals, connected) = match connect(&execution_policy.clamp_route(&route)) {
         Ok((client, literal)) => (client, vec![literal], true),
-        Err(e) if e.to_string().starts_with("refused:") => return Err(e),
+        Err(e) if e.downcast_ref::<nh_vault::AudienceRefused>().is_some() => return Err(e),
         Err(e) => {
             eprintln!("warning: {e}");
             (

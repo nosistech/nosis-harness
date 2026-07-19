@@ -1371,6 +1371,7 @@ dependencies = [
  "anyhow",
  "keyring",
  "regex",
+ "url",
  "zeroize",
 ]
 
