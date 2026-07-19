@@ -1,34 +1,40 @@
 # Current Task
 
-## Immediate Goal — **W1 IS BRIEFED + LAUNCH-READY.** Slice A–D + fmt/gate/toolchain DONE; FULL Fable 5 audit DONE (75 findings; report `d868f16`). Owner chose EVERYTHING ACTIONABLE → M5 "Slice F: HARDEN" (waves W1→W3→W2→W5→W4, Sol-implemented). **NEXT = LAUNCH Sol on W1** (or a bare "continue" = re-orient + offer launch; do NOT auto-launch without a go).
+## Immediate Goal — **W1 "SECURITY FLOOR" DONE + committed `d95a8d6`.** Slice A–D + fmt/gate/toolchain DONE; FULL Fable 5 audit DONE (75 findings; report `d868f16`). Owner chose EVERYTHING ACTIONABLE → M5 "Slice F: HARDEN" (waves W1→W3→W2→W5→W4, Sol-implemented). **NEXT = W3 "METER TRUTH" (nh-core + nh-routes)** — not yet briefed; ground the seams → draft a file:line brief → owner-approve → launch Sol (a bare "continue" = ground + draft the W3 brief, ask before Sol launch).
 
-**⇒⇒ W1 BRIEFED — LAUNCH-READY (2026-07-18, this session).** Grounded seam-by-seam (read nh-vault/src/lib.rs
-+ nh-law/src/lib.rs in full + every cross-crate caller + the shipped catalog). **Brief written:
-`C:\Users\capv2\AppData\Local\Temp\slice-f-w1-brief-v1.txt`** (16.9 KB, 13 fixes W1-1..W1-13, each file:line +
-required adversarial tests). **Owner ratified 2 calls:** (Q1) host-parse uses the **`url` crate** (exact
-reqwest parity — closes the whole parser-differential exfil class, not just backslash; url 2.5.8 already
-transitive → zero build weight; §0.4 exception logged); (Q2) undeclared vault entries are **FAIL-CLOSED**
-(verified: all 4 bundled entries' hosts match declared audiences, so nothing shipping today is refused).
-**CLEAN WAVE — no frozen crate touched → NO A-M5-8** (that stays reserved for W5): W1 keeps
-`Scrubber::new(Vec<String>)` + `Policy::send_verdict(&self,&str)->Verdict` signatures byte-stable so
-nh-fleet's 10+ call sites don't ripple. **Contract pre-authorization committed** (CONTRACTS_M5.md §0.1-F seam
-table + §0.4 url exception). Files W1 may touch: nh-vault/src/lib.rs, nh-law/src/lib.rs, nh-cli
-cmd_run.rs+cmd_chat.rs (host_of delete + downcast glue), root Cargo.toml + nh-vault/Cargo.toml (one `url` dep
-line each). NOT FEEL-gated (security internals; W4 is the FEEL wave).
-- **W1 items:** nh-vault — W1-1 url-parse host+make pub+kill nh-cli host_of dup (high-5/low-15); W1-2 IPv6
-  audiences work (medium-8, falls out of W1-1); W1-3 `\b`-anchor sk-/csk- (medium-9); W1-4 escape bidi
-  (medium-10); W1-5 `Vec<Zeroizing<String>>` field, `new` sig unchanged (low-12); W1-6 empty-audience
-  REFUSE (low-14); W1-7 keep keyring error in miss msg (low-13); W1-8 typed `AudienceRefused` (low-29).
-  nh-law — W1-9 iterative glob rewrite kills stack-overflow DoS, drop-if-hard=clamp to fail-safe verdict
-  (medium-7); W1-10 send_verdict host-norm (low-10); W1-11 exec_block case/wrapper hardening (low-11);
-  W1-12 parse BUNDLED_LAW once (nit-6); W1-13 repo-weaken value-aware warn (nit-7).
-- **Held for W4 (NOT W1):** low-16 (from_vault skip-signal), medium-20 (install_client key-literal union).
+**⇒⇒ W1 DONE + committed `d95a8d6` (2026-07-19).** Sol (codex exec, xhigh) implemented all 13 items
+W1-1..W1-13 (14 audit findings: 1 high / 4 med / 7 low / 2 nit); orchestrator gated + adversarially reviewed
++ committed to main. **Gate: 363/0/1 `--release`, clippy `-D` clean, `cargo fmt --all --check` clean.**
+8 files: nh-vault+nh-law src, nh-cli cmd_run/cmd_chat, root Cargo.toml + nh-vault/Cargo.toml, Cargo.lock
+(only the nh-vault→url edge), + 1 owner-approved scope amendment (`nh-cli/tests/m2_exit.rs` — isolated temp
+user-law declares the synthetic entry's audience; W1-6 fail-closed required it; security-neutral, also fixed
+a real-home leak). Frozen signatures byte-stable (`Scrubber::new(Vec<String>)`, `send_verdict(&self,&str)`);
+**nh-fleet untouched → NO A-M5-8** (reserved for W5). `url` = zero build weight (transitive via reqwest
+2.5.8). Key fixes: url-crate host parity closes the `\@` exfil differential + `pub normalized_host`;
+fail-closed audience; typed `AudienceRefused` + downcast; `\b`-anchored key shapes; bidi escape both
+sanitizers; `Zeroizing` literals; keyring error surfaced; ITERATIVE glob/segment matchers (O(1) stack, no
+60k-segment/200k-char DoS, semantics byte-identical); send_verdict + exec normalize. **Sol correctly STOPPED
+CLEAN once** on a real scope conflict (M2 exit test's undeclared synthetic entry → W1-6 rightly refused);
+the amendment resolved it. Full detail in BUILD_LOG 2026-07-19; brief archived
+`Temp/slice-f-w1-brief-v1.txt`, amendment prompt `Temp/w1-amend-prompt.txt`.
+
+**⇒⇒ NEXT: W3 "METER TRUTH" (nh-core + nh-routes)** — ratified order W1✓→**W3**→W2→W5→W4. NOT yet briefed.
+Same cycle W1 got: ground seam-by-seam (read the nh-core meter-math + nh-routes routing that W3 touches) →
+draft a file:line brief with adversarial tests → owner approves the design calls → launch Sol.
+- **W3 targets** (enumerate precisely when grounding): the meter-truth findings in nh-core + nh-routes
+  (cost/estimate honesty, cache accounting, routing-cost surfaces). Pull the exact finding IDs from
+  `04-research/AUDIT_2026-07_fable5-full.md` and the Slice F plan (below in this doc).
+- **Held for W4 (NOT W3):** low-16 (from_vault skip-signal), medium-20 (install_client key-literal union).
 - **LAUNCH INVOCATION** (background, xhigh, single codex — never two nosis codexes at once):
-  `codex exec --skip-git-repo-check -s workspace-write -m gpt-5.6-sol -c model_reasoning_effort=xhigh "$(cat /c/Users/capv2/AppData/Local/Temp/slice-f-w1-brief-v1.txt)" < /dev/null`
-- **After Sol returns:** kill nh.exe → `git diff --stat` (scope) → authoritative gate `cargo test --workspace
-  --release` + `cargo clippy --workspace --all-targets --release -- -D warnings` (redirect to file + `echo $?`,
-  NEVER `| tail`) → adversarial security review (fail-closed holds, url parity, fail-safe verdicts, no leaked
-  signatures, nh-fleet untouched) → commit W1 → main → then **W3 (meter truth: nh-core + nh-routes)**.
+  `codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m gpt-5.6-sol -c model_reasoning_effort=xhigh -o <last-msg-file> - < <W3-brief-file>`
+  (W1 used this form — brief piped via stdin `-`, `-o` captures Sol's machine-readable self-report; the older
+  `-s workspace-write` sandbox form also works — pick per environment. Verify `19820`-style stray codex
+  sessions are yours before launching a second codex; NEVER two *nosis* codexes at once.)
+- **After Sol returns:** kill nh.exe → `git diff --stat` (scope) → authoritative gate via `gate.ps1`
+  (fmt --check + clippy + test --release; redirect + `echo $?`, NEVER `| tail`; **note the gate's real
+  verdict is its `GATE: PASS/FAIL` summary line, NOT the background wrapper's exit code**; if `fmt --check`
+  flags Sol's hand-written reflow drift, orch runs the normalizing `cargo fmt` under pinned 1.96.0 then
+  re-gates) → adversarial security review → commit → next wave.
 
 **PRIOR IN FLIGHT (Slice D — DONE, historical):**
 

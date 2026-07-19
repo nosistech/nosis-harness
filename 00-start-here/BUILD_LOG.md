@@ -2,6 +2,57 @@
 
 Record every meaningful session here.
 
+## 2026-07-19: M5 Slice F Wave 1 — SECURITY FLOOR (audit W1-1..W1-13)
+
+Builder:
+
+- Codex (GPT-5.6 Sol xhigh) — W1 executor from the locked seam-by-seam brief
+  (`Temp/slice-f-w1-brief-v1.txt`), with one owner-approved mid-run scope amendment.
+
+What changed (hardens the credential broker + policy engine against a hostile repo;
+every fix fails safe — refuse/escape/block on ambiguity):
+
+- nh-vault: `normalized_host` now parses with the `url` crate (WHATWG parity with
+  reqwest) and is `pub` — closing the credential-exfil differential where
+  `https://evil.example\@api.deepseek.com/v1` passed the broker as `api.deepseek.com`
+  while reqwest dialed `evil.example` (W1-1). `audience_allows` fails CLOSED for
+  undeclared/unparseable entries (W1-6); IPv6 audiences match via one idempotent
+  normalization (W1-2). Refusals carry a typed `AudienceRefused` error, ending the
+  `"refused:"` string coupling (W1-8). Key-shape alternation is `\b`-anchored so
+  `risk-`/`desk-` no longer corrupt displays/ledger (W1-3); both sanitizers escape
+  bidi format chars (Trojan-Source, W1-4); stored literals are `Zeroizing<String>`
+  (W1-5); `EnvFallbackVault` surfaces the real key-store error (W1-7).
+- nh-law: glob/segment matchers rewritten ITERATIVELY (two-pointer backtrack, O(1)
+  stack) — a 60k-segment path / 200k-char segment can no longer overflow the
+  main-thread stack (W1-9); semantics byte-identical. `send_verdict` normalizes its
+  target (lowercase + trailing dot) so a block binds (W1-10); exec matching
+  case-folds and unwraps cmd/sh/bash wrappers and `&&`/`;`/`|` chains (W1-11).
+  BUNDLED_LAW parsed once, not twice (W1-12); repo-weaken warning fires only on an
+  actual grant, not field presence (W1-13).
+- nh-cli: deleted the duplicate `host_of` parser; all three uses route through
+  `nh_vault::normalized_host` (W1-1e). cmd_chat classifies a fatal refusal by
+  downcast to `AudienceRefused`, not a string prefix (W1-8).
+- Scope amendment (owner-approved): `nh-cli/tests/m2_exit.rs` gained an isolated
+  temp user-law declaring the synthetic entry's audience — required by W1-6
+  fail-closed, security-neutral, and it removed the test's prior leak to the real
+  home dir.
+
+Frozen surfaces byte-stable: `Scrubber::new(Vec<String>)`, `send_verdict(&self,&str)`;
+nh-fleet untouched (no A-M5-8). `url` is a direct dep of nh-vault now (already
+transitive via reqwest 2.5.8 → zero build weight); Cargo.lock gains only that edge.
+
+Tests/checks (authoritative gate, `gate.ps1`, on the committed tree):
+
+- `cargo fmt --all --check`: clean (orchestrator ran the normalizing `cargo fmt`
+  post-Sol under pinned 1.96.0 — Sol never runs fmt; file-set did not expand).
+- `cargo clippy --workspace --all-targets --release -- -D warnings`: clean.
+- `cargo test --workspace --release`: **363 passed / 0 failed / 1 ignored**.
+
+Next step:
+
+- Ground + brief W3 "METER TRUTH" (nh-core + nh-routes), the next wave in the
+  ratified order W1→W3→W2→W5→W4.
+
 ## 2026-07-18: M5 Slice D — LEVER (E4 implementation)
 
 Builder:
