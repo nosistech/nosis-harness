@@ -1,0 +1,8 @@
+# Pins the toolchain so `cargo fmt`, `clippy`, and the build produce identical
+# results on every machine and in CI. The workspace was fmt-normalized under
+# 1.96.0 (2026-07-18); pinning stops a newer rustfmt from silently
+# re-introducing the reflow drift we just cleared (see gate.ps1).
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

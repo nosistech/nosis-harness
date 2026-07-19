@@ -1,0 +1,40 @@
+# cargo-deny policy for the nosis workspace — the supply-chain gate.
+#
+# DORMANT until cargo-deny is installed. To enforce:
+#   cargo install cargo-deny --locked
+#   cargo deny check
+# then add  Invoke-GateStep 'deny' { cargo deny check }  to gate.ps1.
+#
+# This is a starting policy; reconcile the schema against the installed
+# cargo-deny version with `cargo deny init` if any key is rejected.
+
+[advisories]
+# RUSTSEC advisory DB: fail on known-vulnerable or yanked crates.
+yanked = "deny"
+ignore = []
+
+[bans]
+# Multiple versions of one crate = bloat + wider audit surface (warn, don't block).
+multiple-versions = "warn"
+# A wildcard version requirement ("*") is a supply-chain footgun.
+wildcards = "deny"
+
+[licenses]
+# Permissive licenses only; anything else is a manual review gate.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+
+[sources]
+# Only crates.io. An unknown registry or a git dependency is a supply-chain risk.
+unknown-registry = "deny"
+unknown-git = "deny"
