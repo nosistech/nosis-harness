@@ -53,14 +53,15 @@ pub struct EnvFallbackVault<V: Vault> {
 
 impl<V: Vault> Vault for EnvFallbackVault<V> {
     fn get(&self, entry: &str) -> anyhow::Result<Zeroizing<String>> {
-        if let Ok(secret) = self.inner.get(entry) {
-            return Ok(secret);
-        }
+        let inner_err = match self.inner.get(entry) {
+            Ok(secret) => return Ok(secret),
+            Err(error) => error,
+        };
         let var = env_var_name(entry);
         match std::env::var(&var) {
             Ok(value) if !value.is_empty() => Ok(Zeroizing::new(value)),
             _ => Err(anyhow::anyhow!(
-                "no key found for \"{entry}\" — run `nh key add {entry}` (or set {var})"
+                "no key found for \"{entry}\" — run `nh key add {entry}` (or set {var}); key store said: {inner_err}"
             )),
         }
     }
@@ -83,7 +84,7 @@ const MAX_DISPLAY_CHARS: usize = 500;
 /// Known key shapes, one alternation compiled once. `csk-` must precede `sk-`
 /// so a `csk-` token is never matched from its second character onward.
 const KEY_SHAPES: &str = concat!(
-    r"github_pat_[A-Za-z0-9_]{22,}",
+    r"\b(?:github_pat_[A-Za-z0-9_]{22,}",
     r"|gh[opushr]_[A-Za-z0-9]{36}",
     r"|AKIA[0-9A-Z]{16}",
     r"|AIza[0-9A-Za-z_\-]{35}",
@@ -93,6 +94,7 @@ const KEY_SHAPES: &str = concat!(
     r"|csk-[A-Za-z0-9_\-]{8,}",
     r"|sk-[A-Za-z0-9_\-]{8,}",
     r"|eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+",
+    r")",
 );
 
 /// Redacts known key shapes (`sk-…`, `csk-…`, JWT-like) plus the literal secret values
@@ -100,14 +102,14 @@ const KEY_SHAPES: &str = concat!(
 /// A leaked key shape in any output is a failing test.
 #[derive(Clone)]
 pub struct Scrubber {
-    literals: Vec<String>,
+    literals: Vec<Zeroizing<String>>,
     shapes: Regex,
 }
 
 impl Scrubber {
     pub fn new(literal_secrets: Vec<String>) -> Self {
         Self {
-            literals: literal_secrets,
+            literals: literal_secrets.into_iter().map(Zeroizing::new).collect(),
             shapes: Regex::new(KEY_SHAPES).expect("static key-shape regex is valid"),
         }
     }
@@ -138,40 +140,56 @@ pub fn from_vault<V: Vault>(vault: &V, entries: &[String]) -> Scrubber {
     Scrubber::new(literals)
 }
 
-fn normalized_host(value: &str) -> String {
+/// Parse and normalize a destination host with the same URL parser used by
+/// reqwest, preventing credential-broker and HTTP-client authority drift.
+pub fn normalized_host(value: &str) -> Option<String> {
     let value = value.trim();
-    let authority = value
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(value)
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or("")
-        .rsplit('@')
-        .next()
-        .unwrap_or("");
-    let host = if let Some(rest) = authority.strip_prefix('[') {
-        rest.split_once(']').map(|(host, _)| host).unwrap_or(rest)
+    let absolute;
+    let value = if value.contains("://") {
+        value
     } else {
-        authority
-            .split_once(':')
-            .map(|(host, _)| host)
-            .unwrap_or(authority)
+        absolute = format!("https://{value}");
+        &absolute
     };
-    host.to_ascii_lowercase()
+    url::Url::parse(value)
+        .ok()?
+        .host_str()
+        .map(|host| host.to_ascii_lowercase())
 }
 
 /// Whether a requested destination host is permitted for one vault entry.
-/// An empty approved list preserves today's behavior for undeclared entries.
+/// Undeclared entries fail closed.
 pub fn audience_allows(requested_host: &str, approved: &[String]) -> bool {
     if approved.is_empty() {
-        return true;
+        return false;
     }
-    let requested = normalized_host(requested_host);
+    let Some(requested) = normalized_host(requested_host) else {
+        return false;
+    };
     approved
         .iter()
-        .any(|candidate| normalized_host(candidate) == requested)
+        .filter_map(|candidate| normalized_host(candidate))
+        .any(|candidate| candidate == requested)
 }
+
+/// A credential request refused before the secret was materialized.
+#[derive(Debug)]
+pub struct AudienceRefused {
+    pub entry: String,
+    pub host: String,
+}
+
+impl std::fmt::Display for AudienceRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "refused: \"{}\" is not approved for {} — add [credential.{}] audience = [\"{}\"] to your user law",
+            self.entry, self.host, self.entry, self.host
+        )
+    }
+}
+
+impl std::error::Error for AudienceRefused {}
 
 /// Fetch a secret only after its destination host passes the trusted audience
 /// policy supplied by the caller.
@@ -181,13 +199,25 @@ pub fn get_scoped<V: Vault>(
     requested_host: &str,
     approved: &[String],
 ) -> anyhow::Result<Zeroizing<String>> {
-    let host = normalized_host(requested_host);
-    if !audience_allows(&host, approved) {
-        anyhow::bail!(
-            "refused: \"{entry}\" is not approved for {host} — add it to [credential.{entry}] in law.toml"
-        );
+    let host = normalized_host(requested_host).ok_or_else(|| {
+        anyhow::Error::new(AudienceRefused {
+            entry: entry.to_string(),
+            host: "<unparseable destination>".to_string(),
+        })
+    })?;
+    if !audience_allows(requested_host, approved) {
+        return Err(anyhow::Error::new(AudienceRefused {
+            entry: entry.to_string(),
+            host,
+        }));
     }
     vault.get(entry)
+}
+
+fn is_bidi_control(c: char) -> bool {
+    c == '\u{061c}'
+        || ('\u{202a}'..='\u{202e}').contains(&c)
+        || ('\u{2066}'..='\u{2069}').contains(&c)
 }
 
 /// Render untrusted text as one safe terminal line: control characters (\n, \r,
@@ -196,7 +226,7 @@ pub fn get_scoped<V: Vault>(
 pub fn sanitize_line(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for c in text.chars() {
-        if c.is_control() {
+        if c.is_control() || is_bidi_control(c) {
             escaped.extend(c.escape_debug());
         } else {
             escaped.push(c);
@@ -225,7 +255,7 @@ pub fn sanitize_untrusted_text(text: &str) -> String {
         {
             continue;
         }
-        if c.is_control() {
+        if c.is_control() || is_bidi_control(c) {
             escaped.extend(c.escape_debug());
         } else {
             escaped.push(c);
@@ -288,6 +318,14 @@ mod tests {
             s.scrub("auth: csk-test-0000abcd done"),
             "auth: [REDACTED] done"
         );
+    }
+
+    #[test]
+    fn scrub_does_not_redact_sk_shape_inside_words() {
+        let s = Scrubber::new(vec![]);
+        assert_eq!(s.scrub("risk-assessment"), "risk-assessment");
+        assert_eq!(s.scrub("desk-organizer-v2"), "desk-organizer-v2");
+        assert_eq!(s.scrub(" sk-test-0000abcd "), " [REDACTED] ");
     }
 
     #[test]
@@ -374,6 +412,15 @@ mod tests {
     }
 
     #[test]
+    fn sanitizers_escape_bidi_controls_visibly() {
+        let spoofed = "allow\u{202e}deny";
+        for sanitized in [sanitize_line(spoofed), sanitize_untrusted_text(spoofed)] {
+            assert_eq!(sanitized, "allow\\u{202e}deny");
+            assert!(!sanitized.contains('\u{202e}'));
+        }
+    }
+
+    #[test]
     fn sanitize_untrusted_text_escapes_controls_removes_carriers_and_caps() {
         let sanitized = sanitize_untrusted_text("safe\r\x1b[2K\u{200b}\u{e0001}payload");
         assert_eq!(sanitized, "safe\\r\\u{1b}[2Kpayload");
@@ -389,14 +436,26 @@ mod tests {
     }
 
     #[test]
-    fn audience_matching_is_host_only_and_empty_is_compatible() {
+    fn audience_matching_is_host_only_and_empty_is_refused() {
         let approved = vec!["api.deepseek.com".to_string()];
         assert!(!audience_allows("https://evil.example", &approved));
         assert!(audience_allows(
             "https://API.DEEPSEEK.COM:443/anthropic",
             &approved
         ));
-        assert!(audience_allows("https://anything.example/path", &[]));
+        assert!(!audience_allows("https://anything.example/path", &[]));
+        assert!(!audience_allows(
+            "https://evil.example\\@api.deepseek.com/v1",
+            &approved
+        ));
+    }
+
+    #[test]
+    fn ipv6_audience_is_normalized_once_and_allowed() {
+        let approved = vec!["[::1]".to_string()];
+        assert!(audience_allows("http://[::1]:8080", &approved));
+        let got = get_scoped(&AlwaysHit, "local", "http://[::1]:11434", &approved).unwrap();
+        assert_eq!(got.as_str(), "sk-test-0000-inner");
     }
 
     #[test]
@@ -412,13 +471,21 @@ mod tests {
         }
 
         let approved = vec!["api.deepseek.com".to_string()];
-        let err = get_scoped(&PanicVault, "deepseek", "https://evil.example", &approved)
-            .unwrap_err()
-            .to_string();
+        let error =
+            get_scoped(&PanicVault, "deepseek", "https://evil.example", &approved).unwrap_err();
+        assert!(error.downcast_ref::<AudienceRefused>().is_some());
+        let err = error.to_string();
         assert_eq!(
             err,
-            "refused: \"deepseek\" is not approved for evil.example — add it to [credential.deepseek] in law.toml"
+            "refused: \"deepseek\" is not approved for evil.example — add [credential.deepseek] audience = [\"evil.example\"] to your user law"
         );
+
+        let empty_error =
+            get_scoped(&PanicVault, "custom", "https://custom.example", &[]).unwrap_err();
+        assert!(empty_error.downcast_ref::<AudienceRefused>().is_some());
+        assert!(empty_error
+            .to_string()
+            .contains("[credential.custom] audience = [\"custom.example\"]"));
 
         let got = get_scoped(
             &AlwaysHit,
@@ -484,6 +551,10 @@ mod tests {
         let err = vault.get("test-missing").unwrap_err().to_string();
         assert!(err.contains("nh key add test-missing"), "error was: {err}");
         assert!(err.contains("NH_TEST_MISSING_KEY"), "error was: {err}");
+        assert!(
+            err.contains("key store said: no key stored for \"test-missing\""),
+            "error was: {err}"
+        );
     }
 
     /// Touches the real OS credential store — run manually with `cargo test -- --ignored`.
