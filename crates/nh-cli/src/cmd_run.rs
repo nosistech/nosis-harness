@@ -110,12 +110,8 @@ pub fn run(
         inner: KeyringVault,
     };
     let approved = law.policy.approved_audiences(&route.vault_entry);
-    let key = nh_vault::get_scoped(
-        &vault,
-        &route.vault_entry,
-        host_of(&route.base_url),
-        &approved,
-    )?;
+    let host = nh_vault::normalized_host(&route.base_url).unwrap_or_default();
+    let key = nh_vault::get_scoped(&vault, &route.vault_entry, &host, &approved)?;
     // Audience validation happens before this best-effort registry fetch, so an
     // untrusted catalog cannot materialize a credential by redirecting its route.
     let vault_entries = catalog_vault_entries(&resolver);
@@ -252,24 +248,6 @@ pub(crate) fn find_catalog(start: &Path) -> anyhow::Result<(PathBuf, String)> {
     anyhow::bail!("no catalog.toml found - run `nh init` to create one")
 }
 
-/// Bare host projection for trusted-audience checks.
-pub(crate) fn host_of(url: &str) -> &str {
-    let authority = url
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(url)
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or("")
-        .rsplit('@')
-        .next()
-        .unwrap_or("");
-    authority
-        .split_once(':')
-        .map(|(host, _)| host)
-        .unwrap_or(authority)
-}
-
 pub(crate) fn catalog_vault_entries(resolver: &RouteResolver) -> Vec<String> {
     resolver
         .available()
@@ -334,7 +312,7 @@ fn filter_mcp_audiences_with(
                 warnings.push(format!(
                     "mcp server \"{}\" dropped - credential \"{entry}\" is not approved for {}",
                     config.name,
-                    host_of(target)
+                    nh_vault::normalized_host(target).as_deref().unwrap_or("")
                 ));
                 None
             } else {
@@ -392,11 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn host_projection_and_mcp_audience_checks_are_host_only() {
-        assert_eq!(
-            host_of("https://user@API.DEEPSEEK.COM:443/anthropic"),
-            "API.DEEPSEEK.COM"
-        );
+    fn mcp_audience_checks_are_host_only() {
         let approved = vec!["api.deepseek.com".to_string()];
         let api = McpServerConfig {
             name: "api".into(),

@@ -107,6 +107,14 @@ fn mock_provider() -> (String, mpsc::Receiver<Vec<serde_json::Value>>) {
 #[test]
 fn protected_path_is_blocked_at_auto_end_to_end() {
     let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let home_nosis = home.path().join(".nosis");
+    std::fs::create_dir(&home_nosis).unwrap();
+    std::fs::write(
+        home_nosis.join("law.toml"),
+        "[credential.m2-slice-c-exit]\naudience = [\"127.0.0.1\"]\n",
+    )
+    .unwrap();
     let nosis = repo.path().join(".nosis");
     std::fs::create_dir(&nosis).unwrap();
     let protected = nosis.join("law.toml");
@@ -128,6 +136,8 @@ context = 128000
 
     let output = Command::new(env!("CARGO_BIN_EXE_nh"))
         .current_dir(repo.path())
+        .env("USERPROFILE", home.path())
+        .env("HOME", home.path())
         .env("NH_M2_SLICE_C_EXIT_KEY", "test-only-value")
         .args([
             "run",

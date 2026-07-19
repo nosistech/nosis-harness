@@ -80,7 +80,7 @@ pub struct LoadOptions {
 /// Inputs to deterministic constitution assembly.
 #[derive(Debug, Clone)]
 pub struct ConstitutionSources {
-    pub bundled: &'static str,
+    pub bundled: Option<String>,
     pub user_law_text: Option<String>,
     pub repo_law_text: Option<String>,
     pub agents_md: Option<String>,
@@ -117,7 +117,9 @@ impl Policy {
 
     /// Decide whether a destination host may receive outbound data.
     pub fn send_verdict(&self, target_host: &str) -> Verdict {
-        if let Some(pattern) = first_match(&self.send_block, target_host) {
+        let normalized = target_host.to_ascii_lowercase();
+        let normalized = normalized.strip_suffix('.').unwrap_or(&normalized);
+        if let Some(pattern) = first_match(&self.send_block, normalized) {
             return Verdict::Block(format!("blocked destination ({pattern})"));
         }
         Verdict::Allow
@@ -169,12 +171,13 @@ pub fn load(repo_root: &Path, opts: &LoadOptions) -> Law {
 
 /// Assemble a deterministic constitution with fixed labels, order, and separators.
 pub fn assemble_constitution(sources: &ConstitutionSources) -> String {
-    let bundled_text = parse_law(sources.bundled)
-        .ok()
-        .and_then(|law| law.constitution.and_then(|section| section.text));
     let mut sections = Vec::with_capacity(5);
 
-    push_section(&mut sections, OPERATING_LAW_LABEL, bundled_text.as_deref());
+    push_section(
+        &mut sections,
+        OPERATING_LAW_LABEL,
+        sources.bundled.as_deref(),
+    );
     push_section(
         &mut sections,
         USER_LAW_LABEL,
@@ -246,7 +249,7 @@ fn load_with_home(repo_root: &Path, opts: &LoadOptions, home: Option<&Path>) -> 
 
     let policy = compile_policy(autonomy, bundled.as_ref(), user.as_ref(), repo.as_ref());
     let sources = ConstitutionSources {
-        bundled: BUNDLED_LAW,
+        bundled: constitution_text(bundled.as_ref()),
         user_law_text: constitution_text(user.as_ref()),
         repo_law_text: constitution_text(repo.as_ref()),
         agents_md,
@@ -319,9 +322,21 @@ fn autonomy_from(
 }
 
 fn repo_tries_to_weaken(law: &LawFile) -> bool {
-    law.autonomy.is_some()
-        || law.write.as_ref().is_some_and(|write| write.auto.is_some())
-        || law.credential.is_some()
+    law.autonomy
+        .as_ref()
+        .and_then(|rule| rule.default.as_deref())
+        .is_some_and(|value| value != "ask")
+        || law
+            .write
+            .as_ref()
+            .is_some_and(|write| write.auto.as_ref().is_some_and(|paths| !paths.is_empty()))
+        || law.credential.as_ref().is_some_and(|credentials| {
+            credentials.values().any(|rule| {
+                rule.audience
+                    .as_ref()
+                    .is_some_and(|audience| !audience.is_empty())
+            })
+        })
 }
 
 fn compile_policy(
@@ -404,87 +419,129 @@ fn first_match<'a>(patterns: &'a [String], value: &str) -> Option<&'a str> {
 
 /// Keep the exec first-token/whole-command rule in this one function.
 fn exec_pattern_matches(pattern: &str, command: &str) -> bool {
-    if pattern.contains('/') {
-        return glob_matches(pattern, command);
+    if glob_matches(pattern, command) {
+        return true;
     }
 
-    let first_token = command.split_whitespace().next().unwrap_or("");
-    glob_matches(pattern, first_token) || glob_matches(pattern, command)
+    command
+        .split(['&', ';', '|'])
+        .filter_map(exec_command_fragment)
+        .any(|fragment| {
+            let mut tokens = fragment.split_whitespace();
+            let first = tokens.next().unwrap_or("");
+            exec_token_matches(pattern, first)
+                || wrapper_command_token(first, tokens.next(), tokens.next())
+                    .is_some_and(|token| exec_token_matches(pattern, token))
+                || glob_matches(pattern, fragment)
+        })
+}
+
+fn exec_command_fragment(fragment: &str) -> Option<&str> {
+    let fragment = fragment.trim().trim_start_matches(['\'', '"']);
+    (!fragment.is_empty()).then_some(fragment)
+}
+
+fn wrapper_command_token<'a>(
+    wrapper: &str,
+    option: Option<&str>,
+    command: Option<&'a str>,
+) -> Option<&'a str> {
+    let wrapper = wrapper.trim_start_matches(['\'', '"']);
+    let option = option?;
+    let is_wrapper = (wrapper.eq_ignore_ascii_case("cmd")
+        && (option.eq_ignore_ascii_case("/c") || option.eq_ignore_ascii_case("/k")))
+        || ((wrapper == "sh" || wrapper == "bash") && option == "-c");
+    if !is_wrapper {
+        return None;
+    }
+    command.map(|command| command.trim_start_matches(['\'', '"']))
+}
+
+fn exec_token_matches(pattern: &str, token: &str) -> bool {
+    let token = token.trim_start_matches(['\'', '"']);
+    #[cfg(windows)]
+    {
+        glob_matches(&pattern.to_ascii_lowercase(), &token.to_ascii_lowercase())
+    }
+    #[cfg(not(windows))]
+    {
+        glob_matches(pattern, token)
+    }
 }
 
 fn glob_matches(pattern: &str, value: &str) -> bool {
     let pattern_segments: Vec<&str> = pattern.split('/').collect();
     let value_segments: Vec<&str> = value.split('/').collect();
-    let mut memo = vec![vec![None; value_segments.len() + 1]; pattern_segments.len() + 1];
+    let mut pattern_index = 0;
+    let mut value_index = 0;
+    let mut wildcard_index = None;
+    let mut wildcard_value_index = 0;
 
-    fn matches_from(
-        pattern: &[&str],
-        value: &[&str],
-        pattern_index: usize,
-        value_index: usize,
-        memo: &mut [Vec<Option<bool>>],
-    ) -> bool {
-        if let Some(result) = memo[pattern_index][value_index] {
-            return result;
-        }
-
-        let result = if pattern_index == pattern.len() {
-            value_index == value.len()
-        } else if pattern[pattern_index] == "**" {
-            matches_from(pattern, value, pattern_index + 1, value_index, memo)
-                || (value_index < value.len()
-                    && matches_from(pattern, value, pattern_index, value_index + 1, memo))
+    while value_index < value_segments.len() {
+        if pattern_index < pattern_segments.len()
+            && pattern_segments[pattern_index] != "**"
+            && segment_matches(pattern_segments[pattern_index], value_segments[value_index])
+        {
+            pattern_index += 1;
+            value_index += 1;
+        } else if pattern_index < pattern_segments.len() && pattern_segments[pattern_index] == "**"
+        {
+            wildcard_index = Some(pattern_index);
+            pattern_index += 1;
+            wildcard_value_index = value_index;
+        } else if let Some(wildcard) = wildcard_index {
+            wildcard_value_index += 1;
+            value_index = wildcard_value_index;
+            pattern_index = wildcard + 1;
         } else {
-            value_index < value.len()
-                && segment_matches(pattern[pattern_index], value[value_index])
-                && matches_from(pattern, value, pattern_index + 1, value_index + 1, memo)
-        };
-
-        memo[pattern_index][value_index] = Some(result);
-        result
+            return false;
+        }
     }
 
-    matches_from(&pattern_segments, &value_segments, 0, 0, &mut memo)
+    while pattern_segments.get(pattern_index) == Some(&"**") {
+        pattern_index += 1;
+    }
+    pattern_index == pattern_segments.len()
 }
 
 fn segment_matches(pattern: &str, value: &str) -> bool {
     let pattern: Vec<char> = pattern.chars().collect();
     let value: Vec<char> = value.chars().collect();
-    let mut memo = vec![vec![None; value.len() + 1]; pattern.len() + 1];
+    let mut pattern_index = 0;
+    let mut value_index = 0;
+    let mut wildcard_index = None;
+    let mut wildcard_value_index = 0;
 
-    fn matches_from(
-        pattern: &[char],
-        value: &[char],
-        pattern_index: usize,
-        value_index: usize,
-        memo: &mut [Vec<Option<bool>>],
-    ) -> bool {
-        if let Some(result) = memo[pattern_index][value_index] {
-            return result;
-        }
-
-        let result = match pattern.get(pattern_index) {
-            None => value_index == value.len(),
-            Some('*') => {
-                matches_from(pattern, value, pattern_index + 1, value_index, memo)
-                    || (value_index < value.len()
-                        && matches_from(pattern, value, pattern_index, value_index + 1, memo))
-            }
+    while value_index < value.len() {
+        match pattern.get(pattern_index) {
             Some('?') => {
-                value_index < value.len()
-                    && matches_from(pattern, value, pattern_index + 1, value_index + 1, memo)
+                pattern_index += 1;
+                value_index += 1;
             }
-            Some(expected) => {
-                value.get(value_index) == Some(expected)
-                    && matches_from(pattern, value, pattern_index + 1, value_index + 1, memo)
+            Some('*') => {
+                wildcard_index = Some(pattern_index);
+                pattern_index += 1;
+                wildcard_value_index = value_index;
             }
-        };
-
-        memo[pattern_index][value_index] = Some(result);
-        result
+            Some(expected) if value.get(value_index) == Some(expected) => {
+                pattern_index += 1;
+                value_index += 1;
+            }
+            _ => {
+                let Some(wildcard) = wildcard_index else {
+                    return false;
+                };
+                wildcard_value_index += 1;
+                value_index = wildcard_value_index;
+                pattern_index = wildcard + 1;
+            }
+        }
     }
 
-    matches_from(&pattern, &value, 0, 0, &mut memo)
+    while pattern.get(pattern_index) == Some(&'*') {
+        pattern_index += 1;
+    }
+    pattern_index == pattern.len()
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -546,10 +603,7 @@ mod tests {
 
     use super::*;
 
-    const TEST_BUNDLED: &str = r#"
-[constitution]
-text = "operating"
-"#;
+    const TEST_BUNDLED_TEXT: &str = "operating";
 
     struct TempTree {
         path: PathBuf,
@@ -606,7 +660,7 @@ text = "operating"
     #[test]
     fn constitution_is_byte_stable_ordered_and_has_one_trailing_newline() {
         let sources = ConstitutionSources {
-            bundled: TEST_BUNDLED,
+            bundled: Some(TEST_BUNDLED_TEXT.to_owned()),
             user_law_text: Some("user".to_owned()),
             repo_law_text: Some("project".to_owned()),
             agents_md: Some("agents".to_owned()),
@@ -630,7 +684,7 @@ text = "operating"
     #[test]
     fn constitution_omits_none_and_blank_sections_entirely() {
         let sources = ConstitutionSources {
-            bundled: TEST_BUNDLED,
+            bundled: Some(TEST_BUNDLED_TEXT.to_owned()),
             user_law_text: None,
             repo_law_text: Some(" \n\t".to_owned()),
             agents_md: Some("instructions".to_owned()),
@@ -678,6 +732,19 @@ text = "operating"
                 !glob_matches(pattern, value),
                 "{pattern:?} should not match {value:?}"
             );
+        }
+    }
+
+    #[test]
+    fn glob_matcher_handles_adversarial_depth_and_segment_length_without_recursion() {
+        let deep_path = std::iter::repeat_n("a", 60_000)
+            .collect::<Vec<_>>()
+            .join("/");
+        let long_segment = "a".repeat(200_000);
+
+        for value in [&deep_path, &long_segment] {
+            let _ = glob_matches("**/*.pem", value);
+            assert!(glob_matches("**", value));
         }
     }
 
@@ -749,6 +816,27 @@ block = ["git push*"]
         assert_eq!(policy.exec_verdict("echo ready"), Verdict::Ask);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn exec_verdict_blocks_case_folded_wrapped_and_chained_tokens() {
+        let policy = policy(Autonomy::Auto, &[], &[], &[], &["rm"]);
+        for command in [
+            "RM -rf build",
+            "cmd /c rm -rf x",
+            "cmd /k rm -rf x",
+            "sh -c 'rm -rf x'",
+            "bash -c \"rm -rf x\"",
+            "echo safe&&rm -rf x",
+            "echo safe; rm -rf x",
+            "echo safe | rm -rf x",
+        ] {
+            assert!(
+                matches!(policy.exec_verdict(command), Verdict::Block(_)),
+                "exec should block {command}"
+            );
+        }
+    }
+
     #[test]
     fn read_and_send_verdicts_are_two_tier_and_reuse_globs() {
         let configured = parse_law(
@@ -772,6 +860,14 @@ block = ["evil.example", "*.blocked.test"]
         assert_eq!(policy.read_verdict("src/lib.rs"), Verdict::Allow);
         assert!(matches!(
             policy.send_verdict("evil.example"),
+            Verdict::Block(_)
+        ));
+        assert!(matches!(
+            policy.send_verdict("EVIL.example"),
+            Verdict::Block(_)
+        ));
+        assert!(matches!(
+            policy.send_verdict("evil.example."),
             Verdict::Block(_)
         ));
         assert_eq!(policy.send_verdict("api.deepseek.com"), Verdict::Allow);
@@ -819,6 +915,30 @@ audience = ["evil.example"]
             ["api.deepseek.com"]
         );
         assert_eq!(law.warnings, vec![REPO_RESTRICTION_WARNING.to_owned()]);
+    }
+
+    #[test]
+    fn repo_ask_and_empty_auto_rules_do_not_warn() {
+        let repo = TempTree::new("repo-benign-policy");
+        let home = TempTree::new("repo-benign-policy-home");
+        repo.write(
+            ".nosis/law.toml",
+            r#"
+[autonomy]
+default = "ask"
+
+[write]
+auto = []
+"#,
+        );
+
+        let law = load_with_home(
+            repo.path(),
+            &LoadOptions { cli_autonomy: None },
+            Some(home.path()),
+        );
+        assert_eq!(law.policy.autonomy(), Autonomy::Ask);
+        assert!(law.warnings.is_empty(), "warnings: {:?}", law.warnings);
     }
 
     #[test]
