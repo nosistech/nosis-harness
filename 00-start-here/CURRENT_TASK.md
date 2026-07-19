@@ -1,6 +1,6 @@
 # Current Task
 
-## Immediate Goal — Slice D DONE (d6e2c7f). Fmt-normalize + gate.ps1 (bc2a1b1) + toolchain/EOL/deny (a71eb23) DONE. FULL Fable 5 audit IN FLIGHT. NEXT = audit triage + workspace.lints/forbid-unsafe + rest of Slice E.
+## Immediate Goal — Slice D + fmt/gate/toolchain DONE. FULL Fable 5 audit DONE (75 findings; report `d868f16`). Owner chose EVERYTHING ACTIONABLE → M5 "Slice F: HARDEN" remediation (waves W1–W5, Sol-implemented). NEXT = ground + brief W1 (security floor: nh-vault + nh-law).
 
 **IN FLIGHT (2026-07-18):** Slice D "LEVER" briefed to Sol (gpt-5.6 xhigh, `codex exec` background). Brief
 = `slice-d-brief-v1.txt` (+ `slice-d-preamble-v2.txt` for handoff #2). **Handoff #1 (`b123jcp3f`) STOPPED
@@ -39,21 +39,42 @@ nh-law:200-325); nh-core `resolve_effort` posture×dialect helper + receipt fiel
   drift recurrence at the root — a newer rustfmt can no longer silently reflow); `.gitattributes` EOL
   policy; `deny.toml` DORMANT cargo-deny policy (cargo-deny NOT installed — wire `cargo deny check` into
   gate.ps1 after `cargo install cargo-deny --locked`).
-- **Owner expanded scope → FULL Fable 5 high audit IN FLIGHT** (background workflow, run
-  `wf_72da5ecf-6f6`): 9 per-crate Fable-5-high finders → adversarial verify → confirmed findings.
-  Read-only. Grounded pre-scan: `unsafe` = **0**; `#[allow]` = 10 (all benign); ~668 unwrap/expect/panic
-  (mostly test code). The audit is the FULL semantic pass the owner chose over mechanical-only.
+- **FULL Fable 5 high audit DONE** (background workflow run `wf_72da5ecf-6f6`, 95 agents, ~3M tokens; report
+  committed `d868f16` = `04-research/AUDIT_2026-07_fable5-full.md`). **86 raw → 75 confirmed / 11 refuted:
+  0 critical, 7 high, 21 med, 30 low, 17 nit.** 3 highs orchestrator-confirmed vs source (#2 nh-routes
+  cross-currency compare, #3 nh-tools MCP egress unbounded/unscrubbed, #5 nh-vault backslash audience
+  bypass). Pre-scan: `unsafe` = **0**; `#[allow]` = 10 (benign).
 
-**⇒ NOW / NEXT:**
-1. **Triage the Fable 5 audit** when it lands: cluster confirmed findings by severity/crate; route fixes
-   (Sol implements milestone-code fixes per [[m2-m5-codex-sol-directive]]; orchestrator does trivial
-   hygiene). Present to the owner BEFORE any fix.
-2. **`[workspace.lints]` + `#![forbid(unsafe_code)]`** (held until the audit finishes reading the tree —
-   touches crate manifests): codify the unsafe-free property (grep = 0 today) at workspace level + inherit
-   per crate. Gate + commit.
-3. **Rest of Slice E "LOOP":** keyless CI (windows + ubuntu, mock tests), `codex exec --output-schema`
-   structured Sol handoff, cargo-nextest + AV canary preflight, gate.ps1 frozen-surface sensor. Then M5
-   is DONE → write the ≥5 launch posts ([[why-best-in-category-2026]]).
+**⇒ M5 "Slice F: HARDEN" — full audit remediation (owner chose EVERYTHING ACTIONABLE). Sol implements each
+wave; owner FEEL-approves every human-facing surface BEFORE commit; nh-fleet is M4-FROZEN → its fixes need
+a logged CONTRACTS amendment (A-M5-8). Ground each brief seam-by-seam w/ file:line + ASK owner before each
+Sol launch. Full finding detail in the audit report.**
+- **W1 SECURITY FLOOR — nh-vault + nh-law:** #5 backslash bypass; IPv6-audience-always-refused, `sk-`
+  no-left-boundary, bidi spoof; empty-audience fail-open, Scrubber/Zeroize contract, make `normalized_host`
+  pub (kill nh-cli `host_of` dup); law glob-recursion stack-overflow, `send_verdict` fail-open + host-norm,
+  `exec_block` first-token sidestep; BUNDLED_LAW parsed-twice, repo_tries_to_weaken false-warn.
+- **W2 TOOL EGRESS + EXEC — nh-tools + nh-mcp:** #3 MCP results through ToolResultEnvelope; #4 Windows exec
+  `raw_arg`; ExecShell timeout+stdin, tools/list timeout, envelope literal-scrub, Send-verdict unenforced,
+  OAuth refresh persist/race; nh-mcp CSPRNG token + constant-time compare + body cap + accept_loop signal,
+  fleet_status 'starting', scrubber-recompile / State-dup / loose-routing.
+- **W3 METER TRUTH — nh-core + nh-routes:** #1 compaction-dead (fold cost-check into candidate selection +
+  realistic test); #2 cross-currency (partition-by-currency / fx-normalize + honest trace); compaction
+  stale count, Anthropic wire drops resolved effort, deepseek think-low display; cache_hit_pct clamp,
+  receipt-append destroys outcome, HTTP-body→empty, tool_use missing id; read_optional_profiles error + nits.
+- **W4 SURFACES — nh-tui + nh-cli [FEEL-GATED]:** approval modifier-keys, wrapped_rows clip, failed-turn
+  metering; worker-abandoned-on-quit, panic-hook, input-dead-while-Working; Esc-interrupt legend lie,
+  heartbeat reset; usage-missing-as-fact `$0.00`, whole-run single-instant pricing, install_client scrub
+  drop, ANSI passthrough, catalog injection, session-total omits unpriced, host_of dup, max-turns 0.
+- **W5 FLEET RELIABILITY — nh-fleet [FROZEN → A-M5-8]:** #6 budget-halt hang, #7 ledger torn-read;
+  single-writer lock, resume hardcodes Native/drops offpeak, run_id unvalidated, receipts-without-usage
+  never trip budget, run() dup validation.
+- **Recommended order:** W1 (security) → W3 (the meter thesis) → W2 (egress) → W5 (fleet) → W4 (surfaces,
+  FEEL, last — consumes the fixed lower layers). Adjustable by owner.
+
+**Still queued (mechanical, no Sol — do opportunistically, e.g. while a Sol wave runs):**
+`[workspace.lints]` + `#![forbid(unsafe_code)]` (audit done reading → unblocked; codify `unsafe`=0);
+rest of Slice E "LOOP" (keyless CI, `codex exec --output-schema`, nextest+AV canary, gate.ps1
+frozen-surface sensor). Then M5 DONE → write the ≥5 launch posts ([[why-best-in-category-2026]]).
 
 **Slice C "VISIBLE" SHIPPED (E3 met — THE FEEL GATE PASSED).** Committed `a0a4036` on `e97ec1f`. Gate
 green: **339 pass / 0 fail / 1 ignored** `--release`, clippy `-D warnings` clean (319 → +20: Slice C +17,
@@ -212,16 +233,18 @@ review on every Slice-B item.
   Gemini CLI died as open delegate). Reposition: **"open-weight-first harness with a frontier review
   gate."** Keep the commented catalog delegate schema; don't build the full adapter class in v1.
 
-### ON RESUME ("continue") — Slice D DONE; fmt+gate+toolchain DONE; FULL Fable 5 audit IN FLIGHT.
+### ON RESUME ("continue") — Slices A–D + fmt/gate/toolchain DONE; audit DONE; NOW = Slice F HARDEN remediation.
 **State (2026-07-18):** M5 Slices A "TRUTH" (`9c96259`) + B "FLOOR" (`1a9d92a`) + C "VISIBLE" (`a0a4036`) +
-**D "LEVER" (`d6e2c7f`, FEEL-approved)** shipped. Then this session (owner "continue" + expanded scope):
-fmt-normalize + `gate.ps1` (`bc2a1b1`), toolchain pin + `.gitattributes` + `deny.toml` (`a71eb23`); HEAD
-at/after `a71eb23`; gate GREEN **357/0/1** `--release`, clippy clean. §8 amendments A-M5-1..**7** (+
-addendum). A **FULL Fable 5 high read-only audit** was launched (background workflow run `wf_72da5ecf-6f6`,
-9 per-crate finders → adversarial verify → confirmed findings). If the owner typed **"continue"**: do the
-**⇒ NOW / NEXT** block at the TOP — (1) triage the audit findings when they land (present to owner before
-any fix), (2) `[workspace.lints]` + `forbid(unsafe_code)`, (3) rest of Slice E "LOOP". Do NOT re-do Slice D
-or the fmt/hygiene commits. Read the top blocks first.
+**D "LEVER" (`d6e2c7f`)** shipped. This session (owner "continue" + expanded scope): fmt-normalize +
+`gate.ps1` (`bc2a1b1`), toolchain pin + `.gitattributes` + `deny.toml` (`a71eb23`), docs-close (`0c14743`),
++ a **FULL Fable 5 high audit** (report `d868f16`: 75 confirmed = 0 crit / 7 high / 21 med / 30 low / 17
+nit). Gate GREEN **357/0/1**, clippy clean. §8 amendments A-M5-1..**7** (A-M5-8 pending for W5 fleet fixes).
+**Owner chose "EVERYTHING ACTIONABLE" → M5 "Slice F: HARDEN"** = full remediation in 5 Sol-implemented waves
+(W1 security floor / W2 tool egress+exec / W3 meter truth / W4 surfaces [FEEL] / W5 fleet [frozen]). If the
+owner typed **"continue"**: do the **⇒ Slice F** block at the TOP — ground + write the W1 Sol brief
+(nh-vault + nh-law) seam-by-seam, **ask the owner before launching the Sol run**, gate + adversarially
+review, then W3→W2→W5→W4. Also queued (no Sol): `[workspace.lints]`+`forbid(unsafe_code)` + rest of Slice E.
+Do NOT re-do Slices A–D or the fmt/hygiene commits. Read the top blocks first.
 
 1. **Confirm clean:** `git log --oneline -1` = `a0a4036`; `git status` clean. Kill any `nh.exe` before builds.
 2. **Read the real seams FIRST** for Slice D: `nh-routes` (a NEW `Profiles` module + `EffectiveExecutionPolicy`
