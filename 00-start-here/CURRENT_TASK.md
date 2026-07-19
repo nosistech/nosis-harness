@@ -68,8 +68,9 @@ Sol launch. Full finding detail in the audit report.**
 - **W5 FLEET RELIABILITY — nh-fleet [FROZEN → A-M5-8]:** #6 budget-halt hang, #7 ledger torn-read;
   single-writer lock, resume hardcodes Native/drops offpeak, run_id unvalidated, receipts-without-usage
   never trip budget, run() dup validation.
-- **Recommended order:** W1 (security) → W3 (the meter thesis) → W2 (egress) → W5 (fleet) → W4 (surfaces,
-  FEEL, last — consumes the fixed lower layers). Adjustable by owner.
+- **Order — OWNER-RATIFIED 2026-07-18:** W1 (security) → W3 (the meter thesis) → W2 (egress) → W5 (fleet)
+  → W4 (surfaces, FEEL, last — consumes the fixed lower layers). A bare **"continue"** = ground + draft the
+  **W1** Sol brief (nh-vault + nh-law) seam-by-seam, then **ask the owner before launching the Sol run**.
 
 **Still queued (mechanical, no Sol — do opportunistically, e.g. while a Sol wave runs):**
 `[workspace.lints]` + `#![forbid(unsafe_code)]` (audit done reading → unblocked; codify `unsafe`=0);
