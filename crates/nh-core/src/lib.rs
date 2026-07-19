@@ -5,7 +5,7 @@ pub mod wire {
     //! Chat wire clients (M1): OpenAI-compatible + Anthropic Messages.
     //! `make_client` picks the client from the route's wire and captures per-route
     //! policy (thinking dialect, reasoning persistence, quirks) at construction.
-    use nh_routes::{ThinkingDialect, ThinkingPosture};
+    use nh_routes::{ThinkingDialect, ThinkingPosture, Wire};
     use std::time::Duration;
     use zeroize::Zeroizing;
 
@@ -101,10 +101,18 @@ pub mod wire {
         explicit: Option<ThinkingEffort>,
         posture: ThinkingPosture,
         dialect: ThinkingDialect,
+        wire: Wire,
     ) -> ThinkingEffort {
+        if wire == Wire::AnthropicMessages {
+            return ThinkingEffort::None;
+        }
         if let Some(effort) = explicit {
             return match dialect {
-                ThinkingDialect::DeepseekNhm | ThinkingDialect::KimiToggle => effort,
+                ThinkingDialect::DeepseekNhm => match effort {
+                    ThinkingEffort::Low => ThinkingEffort::None,
+                    _ => effort,
+                },
+                ThinkingDialect::KimiToggle => effort,
                 ThinkingDialect::AlwaysThinking => ThinkingEffort::High,
                 ThinkingDialect::GlmHm => match effort {
                     ThinkingEffort::High | ThinkingEffort::Max => effort,
@@ -148,12 +156,13 @@ pub mod wire {
     }
 
     /// Session cache-hit percentage from cumulative usage.
-    /// Returns `None` when there are no prompt tokens to divide by.
+    /// Returns `None` when there are no prompt tokens to divide by or cached
+    /// tokens cannot honestly be treated as a subset of prompt tokens.
     pub fn cache_hit_pct(prompt_tokens: u64, cached_tokens: u64) -> Option<f64> {
-        if prompt_tokens == 0 {
+        if prompt_tokens == 0 || cached_tokens > prompt_tokens {
             return None;
         }
-        Some((100.0 * cached_tokens as f64 / prompt_tokens as f64).clamp(0.0, 100.0))
+        Some(100.0 * cached_tokens as f64 / prompt_tokens as f64)
     }
 
     #[derive(Debug, Clone)]
@@ -249,7 +258,7 @@ pub mod wire {
                 .send()
                 .map_err(|e| send_error(&url, &e))?;
             let status = resp.status();
-            let body = resp.text().unwrap_or_default();
+            let body = resp.text().map_err(|e| send_error(&url, &e))?;
             if !status.is_success() {
                 return Err(provider_http_error(status, &body, self.api_key.as_str()));
             }
@@ -457,8 +466,6 @@ pub mod wire {
         prompt_tokens_details: Option<WirePromptDetails>,
         #[serde(default)]
         prompt_cache_hit_tokens: Option<u64>,
-        #[serde(default)]
-        prompt_cache_miss_tokens: Option<u64>,
     }
     #[derive(serde::Deserialize)]
     struct WirePromptDetails {
@@ -498,7 +505,6 @@ pub mod wire {
                     .prompt_tokens_details
                     .and_then(|details| details.cached_tokens)
                     .or(u.prompt_cache_hit_tokens);
-                let _cache_miss_tokens = u.prompt_cache_miss_tokens;
                 Usage {
                     prompt_tokens: u.prompt_tokens,
                     completion_tokens: u.completion_tokens,
@@ -542,7 +548,7 @@ pub mod wire {
                 .send()
                 .map_err(|e| send_error(&url, &e))?;
             let status = resp.status();
-            let body = resp.text().unwrap_or_default();
+            let body = resp.text().map_err(|e| send_error(&url, &e))?;
             if !status.is_success() {
                 return Err(provider_http_error(status, &body, self.api_key.as_str()));
             }
@@ -574,17 +580,7 @@ pub mod wire {
                         "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
                         "content": m.content.clone().unwrap_or_default(),
                     });
-                    match messages.last_mut() {
-                        Some(last) if prev_was_user => {
-                            last["content"]
-                                .as_array_mut()
-                                .expect("user content array")
-                                .push(block);
-                        }
-                        _ => {
-                            messages.push(serde_json::json!({ "role": "user", "content": [block] }))
-                        }
-                    }
+                    push_user_block(&mut messages, prev_was_user, block);
                     prev_was_user = true;
                 }
                 "assistant" => {
@@ -606,15 +602,7 @@ pub mod wire {
                 _ => {
                     let text = m.content.clone().unwrap_or_default();
                     let block = serde_json::json!({ "type": "text", "text": text });
-                    match messages.last_mut() {
-                        Some(last) if prev_was_user => last["content"]
-                            .as_array_mut()
-                            .expect("user content array")
-                            .push(block),
-                        _ => {
-                            messages.push(serde_json::json!({ "role": "user", "content": [block] }))
-                        }
-                    }
+                    push_user_block(&mut messages, prev_was_user, block);
                     prev_was_user = true;
                 }
             }
@@ -641,6 +629,20 @@ pub mod wire {
                 .collect();
         }
         body
+    }
+
+    fn push_user_block(
+        messages: &mut Vec<serde_json::Value>,
+        prev_was_user: bool,
+        block: serde_json::Value,
+    ) {
+        match messages.last_mut() {
+            Some(last) if prev_was_user => last["content"]
+                .as_array_mut()
+                .expect("user content array")
+                .push(block),
+            _ => messages.push(serde_json::json!({ "role": "user", "content": [block] })),
+        }
     }
 
     #[derive(serde::Deserialize)]
@@ -688,14 +690,23 @@ pub mod wire {
                     saw_text = true;
                     text.push_str(block.text.as_deref().unwrap_or_default());
                 }
-                "tool_use" => calls.push(ToolCallReq {
-                    id: block.id.unwrap_or_default(),
-                    name: block.name.unwrap_or_default(),
-                    arguments: serde_json::to_string(
-                        &block.input.unwrap_or_else(|| serde_json::json!({})),
-                    )
-                    .unwrap_or_else(|_| "{}".into()),
-                }),
+                "tool_use" => {
+                    let id = block.id.filter(|id| !id.is_empty());
+                    let name = block.name.filter(|name| !name.is_empty());
+                    let (Some(id), Some(name)) = (id, name) else {
+                        return Err(anyhow::anyhow!(
+                            "provider tool_use block missing id or name"
+                        ));
+                    };
+                    calls.push(ToolCallReq {
+                        id,
+                        name,
+                        arguments: serde_json::to_string(
+                            &block.input.unwrap_or_else(|| serde_json::json!({})),
+                        )
+                        .unwrap_or_else(|_| "{}".into()),
+                    });
+                }
                 _ => {}
             }
         }
@@ -741,10 +752,12 @@ pub mod wire {
         use super::*;
 
         #[test]
-        fn cache_hit_percentage_is_optional_and_clamped() {
+        fn cache_hit_percentage_is_optional_and_rejects_inconsistent_usage() {
             assert_eq!(cache_hit_pct(0, 10), None);
             assert_eq!(cache_hit_pct(20, 5), Some(25.0));
-            assert_eq!(cache_hit_pct(10, 20), Some(100.0));
+            assert_eq!(cache_hit_pct(10, 20), None);
+            assert_eq!(cache_hit_pct(20, 21), None);
+            assert_eq!(cache_hit_pct(20, 20), Some(100.0));
         }
 
         fn msg(role: &str, content: Option<&str>) -> ChatMessage {
@@ -1242,6 +1255,30 @@ pub mod wire {
         }
 
         #[test]
+        fn anthropic_tool_use_requires_nonempty_id_and_name() {
+            for body in [
+                r#"{"content":[{"type":"tool_use","name":"read_file","input":{}}]}"#,
+                r#"{"content":[{"type":"tool_use","id":"t1","input":{}}]}"#,
+                r#"{"content":[{"type":"tool_use","id":"","name":"read_file","input":{}}]}"#,
+                r#"{"content":[{"type":"tool_use","id":"t1","name":"","input":{}}]}"#,
+            ] {
+                let error = parse_anthropic_response(body).unwrap_err().to_string();
+                assert!(
+                    error.contains("tool_use block missing id or name"),
+                    "got: {error}"
+                );
+            }
+
+            let response = parse_anthropic_response(
+                r#"{"content":[{"type":"tool_use","id":"t1","name":"read_file","input":{}}]}"#,
+            )
+            .unwrap();
+            let call = &response.message.tool_calls.unwrap()[0];
+            assert_eq!(call.id, "t1");
+            assert_eq!(call.name, "read_file");
+        }
+
+        #[test]
         fn parses_message_finish_reason_and_usage() {
             let body = r#"{
                 "choices": [{
@@ -1359,7 +1396,7 @@ pub mod wire {
 
             for (posture, dialect, expected) in cases {
                 assert_eq!(
-                    resolve_effort(None, posture, dialect),
+                    resolve_effort(None, posture, dialect, Wire::OpenAi),
                     expected,
                     "{posture:?} × {dialect:?}"
                 );
@@ -1373,6 +1410,7 @@ pub mod wire {
                     Some(ThinkingEffort::Max),
                     ThinkingPosture::Floor,
                     ThinkingDialect::DeepseekNhm,
+                    Wire::OpenAi,
                 ),
                 ThinkingEffort::Max
             );
@@ -1381,6 +1419,7 @@ pub mod wire {
                     Some(ThinkingEffort::None),
                     ThinkingPosture::Ceiling,
                     ThinkingDialect::AlwaysThinking,
+                    Wire::OpenAi,
                 ),
                 ThinkingEffort::High
             );
@@ -1389,8 +1428,49 @@ pub mod wire {
                     Some(ThinkingEffort::Max),
                     ThinkingPosture::Ceiling,
                     ThinkingDialect::None,
+                    Wire::OpenAi,
                 ),
                 ThinkingEffort::None
+            );
+        }
+
+        #[test]
+        fn deepseek_explicit_low_resolves_to_the_disabled_wire_tier() {
+            let resolved = resolve_effort(
+                Some(ThinkingEffort::Low),
+                ThinkingPosture::Ceiling,
+                ThinkingDialect::DeepseekNhm,
+                Wire::OpenAi,
+            );
+            assert_eq!(resolved, ThinkingEffort::None);
+
+            let mut request = req(vec![msg("user", Some("hi"))]);
+            request.thinking = resolved;
+            let body = build_body(&request, policy(ThinkingDialect::DeepseekNhm, false, false));
+            assert_eq!(body["thinking"]["type"], "disabled");
+            assert!(body.get("reasoning_effort").is_none());
+        }
+
+        #[test]
+        fn anthropic_wire_resolves_to_provider_default_while_openai_keeps_high() {
+            let explicit = Some(ThinkingEffort::High);
+            assert_eq!(
+                resolve_effort(
+                    explicit,
+                    ThinkingPosture::Ceiling,
+                    ThinkingDialect::DeepseekNhm,
+                    Wire::AnthropicMessages,
+                ),
+                ThinkingEffort::None
+            );
+            assert_eq!(
+                resolve_effort(
+                    explicit,
+                    ThinkingPosture::Ceiling,
+                    ThinkingDialect::DeepseekNhm,
+                    Wire::OpenAi,
+                ),
+                ThinkingEffort::High
             );
         }
     }
@@ -1537,7 +1617,7 @@ pub mod agent {
     }
 
     impl AgentLoop {
-        /// Runs one task to completion. Always writes exactly one receipt, even on error.
+        /// Runs one task to completion. Always attempts one receipt, even on error.
         /// Returns the final assistant text. UX: progress surfaces via `on_event` —
         /// one short line per tool call (name + key arg), never a wall of JSON.
         pub fn run(&mut self, task: &str) -> anyhow::Result<(String, Receipt)> {
@@ -1549,7 +1629,7 @@ pub mod agent {
         /// Empty history gets the system message first; the user task and ALL
         /// produced messages (assistant + tool) are appended, so `history` holds
         /// the full session on return — even on the timeout path. Exactly one
-        /// receipt per call, same semantics as `run`.
+        /// receipt write is attempted per call, same semantics as `run`.
         pub fn run_with_history(
             &mut self,
             history: &mut Vec<ChatMessage>,
@@ -1583,8 +1663,8 @@ pub mod agent {
 
                 if let Some(limit) = self.context_limit {
                     let working_limit = effective_context(limit);
-                    let input_tokens = latest_prompt_tokens
-                        .unwrap_or_else(|| estimate_request_tokens(history, &specs, true));
+                    let estimated = estimate_request_tokens(history, &specs, true);
+                    let input_tokens = compaction_input_tokens(latest_prompt_tokens, estimated);
                     if input_tokens as f64 >= COMPACT_AT * working_limit as f64 {
                         if let Some(compaction) = compact_history(history, working_limit) {
                             if !compaction.prefix_held {
@@ -1620,7 +1700,7 @@ pub mod agent {
                             Some(FailureClass::Verification),
                             saw_usage.then(|| usage_total.clone()),
                         );
-                        self.receipts.append(&receipt)?;
+                        self.append_receipt(&receipt);
                         return Err(e);
                     }
                 };
@@ -1646,7 +1726,7 @@ pub mod agent {
                         None,
                         saw_usage.then(|| usage_total.clone()),
                     );
-                    self.receipts.append(&receipt)?;
+                    self.append_receipt(&receipt);
                     return Ok((text, receipt));
                 }
                 for call in &calls {
@@ -1675,7 +1755,7 @@ pub mod agent {
                 Some(FailureClass::Constraint),
                 saw_usage.then(|| usage_total.clone()),
             );
-            self.receipts.append(&receipt)?;
+            self.append_receipt(&receipt);
             Ok((
                 format!(
                     "stopped after {} turns without a final answer",
@@ -1722,6 +1802,12 @@ pub mod agent {
         fn emit(&self, line: &str) {
             if let Some(f) = &self.on_event {
                 f(line);
+            }
+        }
+
+        fn append_receipt(&self, receipt: &Receipt) {
+            if let Err(error) = self.receipts.append(receipt) {
+                self.emit(&format!("receipt not written: {error}"));
             }
         }
 
@@ -1801,6 +1887,10 @@ pub mod agent {
         estimate_message_tokens(messages, preserve_reasoning).saturating_add(tool_bytes.div_ceil(4))
     }
 
+    fn compaction_input_tokens(latest_prompt_tokens: Option<u64>, estimated: u64) -> u64 {
+        latest_prompt_tokens.map_or(estimated, |prompt_tokens| prompt_tokens.max(estimated))
+    }
+
     /// Drop the smallest earlier prefix that brings the retained history under
     /// target. The last two user turns win over the target when both cannot fit.
     fn compact_history(history: &mut Vec<ChatMessage>, limit: u64) -> Option<Compaction> {
@@ -1832,12 +1922,6 @@ pub mod agent {
 
         let messages = start - 1;
         let tokens = estimate_tokens(&history[1..start]);
-        let retained_tokens = estimate_tokens(&history[start..]);
-        // Rebuilding a larger retained suffix would cost more than this
-        // compaction saves, so keep the provider prefix cache warm instead.
-        if tokens <= retained_tokens {
-            return None;
-        }
         let retained_seal = PrefixSeal::new(&history[start..]);
         history.drain(1..start);
         history.insert(
@@ -1889,6 +1973,7 @@ pub mod agent {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::sync::{Arc, Mutex};
 
         fn message(role: &str, content: impl Into<String>) -> ChatMessage {
             plain_msg(role, content.into())
@@ -1932,6 +2017,159 @@ pub mod agent {
                 !seal.check(&drifted),
                 "release builds must detect prefix drift"
             );
+        }
+
+        #[test]
+        fn compaction_fires_for_realistic_uniform_turns_at_seventy_percent() {
+            let mut history = vec![message("system", "sealed constitution")];
+            for turn in 0..14 {
+                history.push(message("user", format!("user-{turn:02} ").repeat(10)));
+                history.push(message("assistant", format!("asst-{turn:02} ").repeat(10)));
+            }
+            let before_tokens = estimate_tokens(&history);
+            assert!(
+                (650..=750).contains(&before_tokens),
+                "history should resemble the 70% trigger: {before_tokens}"
+            );
+            let original: Vec<Vec<u8>> = history.iter().map(message_bytes).collect();
+            let seal = PrefixSeal::new(&history[..1]);
+
+            let compaction = compact_history(&mut history, 1_000).expect("compaction fires");
+            let retained_start = compaction.messages + 1;
+
+            assert!(compaction.prefix_held);
+            assert!(seal.check(&history));
+            assert_eq!(history[1].role, "system");
+            assert!(history[1]
+                .content
+                .as_deref()
+                .is_some_and(|text| text.starts_with("[nosis] earlier context compacted:")));
+            assert_eq!(
+                history[2..].iter().map(message_bytes).collect::<Vec<_>>(),
+                original[retained_start..]
+            );
+        }
+
+        #[test]
+        fn compaction_input_count_sees_a_new_large_tool_result() {
+            let mut history = vec![
+                message("system", "sealed constitution"),
+                message("user", "read the large file"),
+                ChatMessage {
+                    tool_calls: Some(vec![ToolCallReq {
+                        id: "c1".into(),
+                        name: "read_file".into(),
+                        arguments: r#"{"path":"large.txt"}"#.into(),
+                    }]),
+                    ..message("assistant", "")
+                },
+            ];
+            let stale_provider_count = estimate_request_tokens(&history, &[], true);
+            history.push(ChatMessage {
+                role: "tool".into(),
+                content: Some("x".repeat(4_000)),
+                tool_calls: None,
+                tool_call_id: Some("c1".into()),
+                reasoning_content: None,
+            });
+            let estimated = estimate_request_tokens(&history, &[], true);
+
+            assert!(stale_provider_count < 700);
+            assert!(estimated > 700);
+            assert_eq!(
+                compaction_input_tokens(Some(stale_provider_count), estimated),
+                estimated
+            );
+            assert_eq!(
+                compaction_input_tokens(Some(estimated + 50), estimated),
+                estimated + 50
+            );
+        }
+
+        struct FinalAnswerClient;
+
+        impl ChatClient for FinalAnswerClient {
+            fn complete(&self, _req: &ChatRequest) -> anyhow::Result<crate::wire::ChatResponse> {
+                Ok(crate::wire::ChatResponse {
+                    message: message("assistant", "paid answer"),
+                    finish_reason: "stop".into(),
+                    usage: None,
+                })
+            }
+        }
+
+        struct ProviderErrorClient;
+
+        impl ChatClient for ProviderErrorClient {
+            fn complete(&self, _req: &ChatRequest) -> anyhow::Result<crate::wire::ChatResponse> {
+                anyhow::bail!("provider returned HTTP 500: original failure")
+            }
+        }
+
+        fn agent_with_receipt_path(
+            dir: &std::path::Path,
+            receipt_path: std::path::PathBuf,
+            client: Box<dyn ChatClient>,
+            events: Arc<Mutex<Vec<String>>>,
+        ) -> AgentLoop {
+            AgentLoop {
+                client,
+                tools: Vec::new(),
+                ctx: ToolCtx::new(dir.to_path_buf(), Box::new(|_| false)),
+                receipts: ReceiptWriter {
+                    path: receipt_path,
+                    scrubber: nh_vault::Scrubber::new(Vec::new()),
+                },
+                model_id: "mock-model".into(),
+                max_turns: 1,
+                thinking: ThinkingEffort::None,
+                profile: None,
+                constitution: None,
+                context_limit: None,
+                on_event: Some(Box::new(move |line| {
+                    events.lock().unwrap().push(line.to_owned())
+                })),
+            }
+        }
+
+        #[test]
+        fn receipt_failure_never_discards_answer_or_shadows_provider_error() {
+            let dir = tempfile::tempdir().unwrap();
+
+            let success_path = dir.path().join("success-receipt-path");
+            std::fs::create_dir(&success_path).unwrap();
+            let success_events = Arc::new(Mutex::new(Vec::new()));
+            let mut success = agent_with_receipt_path(
+                dir.path(),
+                success_path,
+                Box::new(FinalAnswerClient),
+                Arc::clone(&success_events),
+            );
+            let (answer, receipt) = success.run("finish").expect("answer survives");
+            assert_eq!(answer, "paid answer");
+            assert_eq!(receipt.outcome, Outcome::Pass);
+            assert!(success_events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.starts_with("receipt not written:")));
+
+            let error_path = dir.path().join("error-receipt-path");
+            std::fs::create_dir(&error_path).unwrap();
+            let error_events = Arc::new(Mutex::new(Vec::new()));
+            let mut failing = agent_with_receipt_path(
+                dir.path(),
+                error_path,
+                Box::new(ProviderErrorClient),
+                Arc::clone(&error_events),
+            );
+            let error = failing.run("fail").unwrap_err().to_string();
+            assert_eq!(error, "provider returned HTTP 500: original failure");
+            assert!(error_events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.starts_with("receipt not written:")));
         }
 
         #[test]

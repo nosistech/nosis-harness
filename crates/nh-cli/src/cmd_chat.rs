@@ -166,7 +166,12 @@ pub fn run(model: &str, profile: &str) -> anyhow::Result<()> {
         },
         model_id: route.model_id.clone(),
         max_turns: 20,
-        thinking: effort_for(None, execution_policy.posture, route.thinking_dialect),
+        thinking: effort_for(
+            None,
+            execution_policy.posture,
+            route.thinking_dialect,
+            route.wire.clone(),
+        ),
         profile: Some(execution_policy.profile.clone()),
         // Honest identity: name the real route + forbid claiming to be Claude/GPT.
         constitution: Some(nh_tui::identity_constitution(&law_constitution, &route)),
@@ -368,7 +373,12 @@ fn switch_to(s: &mut ChatSession, route: ResolvedRoute, out: &mut dyn Write, err
         Ok((client, literal)) => {
             install_client(s, client, literal);
             s.agent.model_id = route.model_id.clone();
-            s.agent.thinking = effort_for(None, execution_policy.posture, route.thinking_dialect);
+            s.agent.thinking = effort_for(
+                None,
+                execution_policy.posture,
+                route.thinking_dialect,
+                route.wire.clone(),
+            );
             s.agent.profile = Some(execution_policy.profile.clone());
             s.active_profile = execution_policy.profile;
             // Refresh the identity prompt for the NEW route — both the agent's stored
@@ -577,7 +587,8 @@ fn print_err(s: &ChatSession, err: &mut dyn Write, msg: &str) {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use nh_core::wire::{ChatRequest, ChatResponse, Usage};
+    use nh_core::wire::{ChatRequest, ChatResponse, ThinkingEffort, Usage};
+    use nh_routes::{ThinkingDialect, ThinkingPosture, Wire};
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -739,7 +750,12 @@ mod tests {
             },
             model_id: route.model_id.clone(),
             max_turns: 20,
-            thinking: effort_for(None, execution_policy.posture, route.thinking_dialect),
+            thinking: effort_for(
+                None,
+                execution_policy.posture,
+                route.thinking_dialect,
+                route.wire.clone(),
+            ),
             profile: Some(execution_policy.profile.clone()),
             constitution: Some("test constitution\n".into()),
             context_limit: route.context,
@@ -767,6 +783,28 @@ mod tests {
             mcp_warnings: Vec::new(),
         };
         (session, calls)
+    }
+
+    #[test]
+    fn chat_effort_is_wire_aware() {
+        assert_eq!(
+            effort_for(
+                Some(crate::cmd_run::ThinkArg::High),
+                ThinkingPosture::Ceiling,
+                ThinkingDialect::DeepseekNhm,
+                Wire::AnthropicMessages,
+            ),
+            ThinkingEffort::None
+        );
+        assert_eq!(
+            effort_for(
+                Some(crate::cmd_run::ThinkArg::High),
+                ThinkingPosture::Ceiling,
+                ThinkingDialect::DeepseekNhm,
+                Wire::OpenAi,
+            ),
+            ThinkingEffort::High
+        );
     }
 
     /// Feed scripted lines, capture (stdout, stderr).

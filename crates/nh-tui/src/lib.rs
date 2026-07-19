@@ -30,7 +30,7 @@ use nh_core::wire::{
 use nh_law::{Autonomy, Law, PolicyView, Verdict};
 use nh_routes::{
     cost_of, money, money_with_gloss, saved_pct, Currency, PriceConfidence, Profiles,
-    ResolvedRoute, RouteClass, RouteResolver, ThinkingDialect, ThinkingPosture,
+    ResolvedRoute, RouteClass, RouteResolver, ThinkingDialect, ThinkingPosture, Wire,
 };
 use nh_tools::{
     builtin_tools, Access, Guard, McpAuth, McpServerConfig, McpToolset, McpTrust, ToolCtx,
@@ -329,7 +329,11 @@ impl App {
                 Status::Idle
             },
             working_since: None,
-            effort: effort_for(execution_policy.posture, route.thinking_dialect),
+            effort: effort_for(
+                execution_policy.posture,
+                route.thinking_dialect,
+                route.wire.clone(),
+            ),
             resolver,
             route,
             profiles,
@@ -418,7 +422,7 @@ impl App {
 
     fn switch_route(&mut self, route: ResolvedRoute) {
         let policy = self.profiles.effective(&self.active_profile, &route);
-        self.effort = effort_for(policy.posture, route.thinking_dialect);
+        self.effort = effort_for(policy.posture, route.thinking_dialect, route.wire.clone());
         self.active_profile = policy.profile;
         self.route = route;
         self.push_line(
@@ -1253,7 +1257,11 @@ fn worker_loop(
         },
         model_id: route.model_id.clone(),
         max_turns: 20,
-        thinking: effort_for(initial_policy.posture, route.thinking_dialect),
+        thinking: effort_for(
+            initial_policy.posture,
+            route.thinking_dialect,
+            route.wire.clone(),
+        ),
         profile: Some(active_profile.clone()),
         constitution: Some(identity_constitution(&law_constitution, &route)),
         context_limit: route.context,
@@ -1285,7 +1293,11 @@ fn worker_loop(
                     }
                 }
                 agent.model_id = next_route.model_id.clone();
-                agent.thinking = effort_for(execution_policy.posture, next_route.thinking_dialect);
+                agent.thinking = effort_for(
+                    execution_policy.posture,
+                    next_route.thinking_dialect,
+                    next_route.wire.clone(),
+                );
                 agent.profile = Some(execution_policy.profile.clone());
                 active_profile = execution_policy.profile;
                 let constitution = identity_constitution(&law_constitution, &next_route);
@@ -1316,7 +1328,11 @@ fn worker_loop(
                         connected = false;
                     }
                 }
-                agent.thinking = effort_for(execution_policy.posture, route.thinking_dialect);
+                agent.thinking = effort_for(
+                    execution_policy.posture,
+                    route.thinking_dialect,
+                    route.wire.clone(),
+                );
                 agent.profile = Some(execution_policy.profile.clone());
                 active_profile = execution_policy.profile;
                 continue;
@@ -1452,8 +1468,8 @@ fn verdict_to_guard(verdict: Verdict) -> Guard {
     }
 }
 
-fn effort_for(posture: ThinkingPosture, dialect: ThinkingDialect) -> ThinkingEffort {
-    resolve_effort(None, posture, dialect)
+fn effort_for(posture: ThinkingPosture, dialect: ThinkingDialect, wire: Wire) -> ThinkingEffort {
+    resolve_effort(None, posture, dialect, wire)
 }
 
 fn effort_name(effort: ThinkingEffort) -> &'static str {
@@ -1920,7 +1936,11 @@ fn set_profile(app: &mut App, name: &str) -> UiAction {
     }
     let policy = app.profiles.effective(name, &app.route);
     app.active_profile = policy.profile.clone();
-    app.effort = effort_for(policy.posture, app.route.thinking_dialect);
+    app.effort = effort_for(
+        policy.posture,
+        app.route.thinking_dialect,
+        app.route.wire.clone(),
+    );
     let cap = policy
         .output_cap
         .map_or_else(|| "route default".to_owned(), |cap| cap.to_string());
@@ -3031,11 +3051,11 @@ mod tests {
         price_confidence = "confirmed"
 
         [routes.usd-top]
-        provider = "test"
+        provider = "usd-test"
         model_id = "usd-top"
         base_url = "https://example.invalid"
         wire = "openai"
-        vault_entry = "test"
+        vault_entry = "usd-test"
         class = "api"
         context = 1000000
         [routes.usd-top.price]

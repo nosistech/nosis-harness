@@ -204,12 +204,7 @@ impl Profiles {
                 };
                 ("balanced", &SAFE_BALANCED)
             });
-        let output_cap = match (route.max_out, profile.max_output_tokens) {
-            (Some(route_cap), Some(profile_cap)) => Some(route_cap.min(profile_cap)),
-            (Some(route_cap), None) => Some(route_cap),
-            (None, Some(profile_cap)) => Some(profile_cap),
-            (None, None) => None,
-        };
+        let output_cap = min_cap(route.max_out, profile.max_output_tokens);
         EffectiveExecutionPolicy {
             profile: profile_name.to_owned(),
             output_cap,
@@ -246,11 +241,16 @@ impl EffectiveExecutionPolicy {
     /// factory. Route identity, capability, pricing, and law remain unchanged.
     pub fn clamp_route(&self, route: &ResolvedRoute) -> ResolvedRoute {
         let mut clamped = route.clone();
-        clamped.max_out = match self.output_cap {
-            Some(cap) => Some(route.max_out.map_or(cap, |route_cap| route_cap.min(cap))),
-            None => route.max_out,
-        };
+        clamped.max_out = min_cap(self.output_cap, route.max_out);
         clamped
+    }
+}
+
+fn min_cap(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(cap), None) | (None, Some(cap)) => Some(cap),
+        (None, None) => None,
     }
 }
 
@@ -281,15 +281,15 @@ fn read_optional_profiles(
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(_) => {
-            warnings.push(format!("could not read {label} — source skipped"));
+        Err(error) => {
+            warnings.push(format!("could not read {label}: {error} — source skipped"));
             return None;
         }
     };
     match ProfilesLayer::parse(&text) {
         Ok(layer) => Some(layer),
-        Err(_) => {
-            warnings.push(format!("could not parse {label} — defaults kept"));
+        Err(error) => {
+            warnings.push(format!("could not parse {label}: {error} — defaults kept"));
             None
         }
     }
@@ -388,6 +388,14 @@ mod tests {
     }
 
     #[test]
+    fn min_cap_covers_the_full_option_table() {
+        assert_eq!(min_cap(Some(20), Some(10)), Some(10));
+        assert_eq!(min_cap(Some(10), None), Some(10));
+        assert_eq!(min_cap(None, Some(10)), Some(10));
+        assert_eq!(min_cap(None, None), None);
+    }
+
+    #[test]
     fn unknown_posture_is_a_clear_error() {
         let error = ProfilesLayer::parse(
             r#"
@@ -399,6 +407,29 @@ mod tests {
         .to_string();
         assert!(error.contains("unknown thinking posture 'expensive'"));
         assert!(error.contains("floor, default, or ceiling"));
+    }
+
+    #[test]
+    fn optional_profile_warning_preserves_the_actionable_parse_error() {
+        let path = std::env::temp_dir().join(format!(
+            "nh-routes-profiles-warning-{}.toml",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            r#"
+            [profiles.frugal]
+            thinking = "expensive"
+            "#,
+        )
+        .unwrap();
+        let mut warnings = Vec::new();
+
+        assert!(read_optional_profiles(&path, "test profiles", &mut warnings).is_none());
+        fs::remove_file(&path).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("unknown thinking posture 'expensive'"));
+        assert!(warnings[0].contains("defaults kept"));
     }
 
     #[test]

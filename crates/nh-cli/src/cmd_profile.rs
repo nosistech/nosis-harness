@@ -28,7 +28,12 @@ pub(crate) fn render(profiles: &Profiles, route: &ResolvedRoute) -> Vec<String> 
         .into_iter()
         .map(|name| {
             let policy = profiles.effective(name, route);
-            let effort = cmd_run::effort_for(None, policy.posture, route.thinking_dialect);
+            let effort = cmd_run::effort_for(
+                None,
+                policy.posture,
+                route.thinking_dialect,
+                route.wire.clone(),
+            );
             let cap = policy
                 .output_cap
                 .map_or_else(|| "route default".to_owned(), |cap| cap.to_string());

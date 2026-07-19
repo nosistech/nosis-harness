@@ -14,7 +14,7 @@ use nh_core::wire::{cache_hit_pct, make_client, resolve_effort, ThinkingEffort, 
 use nh_law::{Autonomy, LoadOptions};
 use nh_routes::{
     cost_of, money, money_with_gloss, saved_pct, PriceConfidence, ResolvedRoute, RouteClass,
-    RouteResolver, ThinkingDialect, ThinkingPosture,
+    RouteResolver, ThinkingDialect, ThinkingPosture, Wire,
 };
 use nh_tools::{builtin_tools, Access, McpAuth, McpServerConfig, ToolCtx};
 use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber};
@@ -54,6 +54,7 @@ pub(crate) fn effort_for(
     think: Option<ThinkArg>,
     posture: ThinkingPosture,
     dialect: ThinkingDialect,
+    wire: Wire,
 ) -> ThinkingEffort {
     let explicit = think.map(|value| match value {
         ThinkArg::None => ThinkingEffort::None,
@@ -61,7 +62,7 @@ pub(crate) fn effort_for(
         ThinkArg::High => ThinkingEffort::High,
         ThinkArg::Max => ThinkingEffort::Max,
     });
-    resolve_effort(explicit, posture, dialect)
+    resolve_effort(explicit, posture, dialect, wire)
 }
 
 pub(crate) fn profile_fallback_warning(requested: &str, effective: &str) -> Option<String> {
@@ -145,7 +146,12 @@ pub fn run(
         receipts,
         model_id: route.model_id.clone(),
         max_turns,
-        thinking: effort_for(think, execution_policy.posture, route.thinking_dialect),
+        thinking: effort_for(
+            think,
+            execution_policy.posture,
+            route.thinking_dialect,
+            route.wire.clone(),
+        ),
         profile: Some(execution_policy.profile.clone()),
         // Honest identity: name the real route + forbid claiming to be Claude/GPT.
         constitution: Some(nh_tui::identity_constitution(&law.constitution, &route)),
@@ -417,10 +423,10 @@ mod tests {
     }
 
     #[test]
-    fn think_flag_wins_within_route_capability() {
+    fn think_flag_resolves_within_route_capability() {
         let cases = [
             (ThinkArg::None, ThinkingEffort::None),
-            (ThinkArg::Low, ThinkingEffort::Low),
+            (ThinkArg::Low, ThinkingEffort::None),
             (ThinkArg::High, ThinkingEffort::High),
             (ThinkArg::Max, ThinkingEffort::Max),
         ];
@@ -430,6 +436,7 @@ mod tests {
                     Some(arg),
                     ThinkingPosture::Default,
                     ThinkingDialect::DeepseekNhm,
+                    Wire::OpenAi,
                 ),
                 want
             );
@@ -438,10 +445,24 @@ mod tests {
                     Some(arg),
                     ThinkingPosture::Default,
                     ThinkingDialect::AlwaysThinking,
+                    Wire::OpenAi,
                 ),
                 ThinkingEffort::High
             );
         }
+    }
+
+    #[test]
+    fn anthropic_wire_effort_is_provider_default() {
+        assert_eq!(
+            effort_for(
+                Some(ThinkArg::High),
+                ThinkingPosture::Ceiling,
+                ThinkingDialect::DeepseekNhm,
+                Wire::AnthropicMessages,
+            ),
+            ThinkingEffort::None
+        );
     }
 
     #[test]
@@ -453,19 +474,35 @@ mod tests {
                 None,
                 ThinkingPosture::Default,
                 ThinkingDialect::AlwaysThinking,
+                Wire::OpenAi,
             ),
             ThinkingEffort::High
         );
         assert_eq!(
-            effort_for(None, ThinkingPosture::Default, ThinkingDialect::GlmHm),
+            effort_for(
+                None,
+                ThinkingPosture::Default,
+                ThinkingDialect::GlmHm,
+                Wire::OpenAi,
+            ),
             ThinkingEffort::High
         );
         assert_eq!(
-            effort_for(None, ThinkingPosture::Default, ThinkingDialect::DeepseekNhm,),
+            effort_for(
+                None,
+                ThinkingPosture::Default,
+                ThinkingDialect::DeepseekNhm,
+                Wire::OpenAi,
+            ),
             ThinkingEffort::None
         );
         assert_eq!(
-            effort_for(None, ThinkingPosture::Default, ThinkingDialect::None),
+            effort_for(
+                None,
+                ThinkingPosture::Default,
+                ThinkingDialect::None,
+                Wire::OpenAi,
+            ),
             ThinkingEffort::None
         );
     }

@@ -205,6 +205,18 @@ pub fn to_usd_approx(amount: f64, currency: Currency, fx: &Fx, at: DateTime<Utc>
     Some(amount * fx.usd_per_cny)
 }
 
+fn usd_compare_key(
+    cost: f64,
+    currency: Currency,
+    fx: Option<&Fx>,
+    at: DateTime<Utc>,
+) -> Option<f64> {
+    match currency {
+        Currency::Usd => Some(cost),
+        Currency::Cny => fx.and_then(|fx| to_usd_approx(cost, currency, fx, at)),
+    }
+}
+
 /// Format native currency money for terminal surfaces.
 pub fn money(amount: f64, currency: Currency) -> String {
     let (is_tiny, digits) = format_money_digits(amount);
@@ -632,6 +644,26 @@ pub struct RouteResolver {
     fx: Option<Fx>,
 }
 
+fn validate_provider_currencies(routes: &BTreeMap<String, ResolvedRoute>) -> anyhow::Result<()> {
+    let mut currencies: BTreeMap<&str, Currency> = BTreeMap::new();
+    for route in routes.values() {
+        let Some(price) = &route.price else { continue };
+        match currencies.get(route.provider.as_str()) {
+            Some(currency) if *currency != price.currency => {
+                return Err(anyhow!(
+                    "catalog provider '{}' mixes currencies (CNY and USD) — one provider must price in one currency",
+                    route.provider
+                ));
+            }
+            Some(_) => {}
+            None => {
+                currencies.insert(route.provider.as_str(), price.currency);
+            }
+        }
+    }
+    Ok(())
+}
+
 impl RouteResolver {
     /// Parse a catalog.toml string (see repo-root catalog.toml for the schema).
     /// M0-era minimal routes still parse: class defaults to "api", modality to
@@ -681,6 +713,7 @@ impl RouteResolver {
                 },
             );
         }
+        validate_provider_currencies(&routes)?;
         Ok(Self {
             routes,
             fx: raw.fx.map(parse_fx).transpose()?,
@@ -802,6 +835,8 @@ impl RouteResolver {
     /// Pick the cheapest priced API route that fits the estimated request.
     /// Unknown context is rejected when the request has a non-zero estimate:
     /// the honest meter never promises capacity the catalog does not establish.
+    /// Same-currency candidates compare native costs; mixed currencies compare
+    /// only through fresh catalog FX; otherwise non-normalizable routes are refused.
     pub fn resolve_capable(
         &self,
         estimated_prompt_tokens: u64,
@@ -809,6 +844,13 @@ impl RouteResolver {
         allowed: &[&str],
         at: DateTime<Utc>,
     ) -> anyhow::Result<(ResolvedRoute, RejectionTrace)> {
+        struct Candidate<'a> {
+            route: &'a ResolvedRoute,
+            native_cost: f64,
+            currency: Currency,
+            usd_cost: Option<f64>,
+        }
+
         let required = estimated_prompt_tokens.saturating_add(estimated_output_tokens);
         let allowed: BTreeSet<&str> = allowed.iter().copied().collect();
         let mut trace = RejectionTrace::default();
@@ -848,31 +890,69 @@ impl RouteResolver {
             let expected_cost = (price.cache_miss * estimated_prompt_tokens as f64
                 + price.output * estimated_output_tokens as f64)
                 / 1_000_000.0;
-            capable.push((route, expected_cost));
+            capable.push(Candidate {
+                route,
+                native_cost: expected_cost,
+                currency: price.currency,
+                usd_cost: usd_compare_key(expected_cost, price.currency, self.fx.as_ref(), at),
+            });
         }
 
-        capable.sort_by(|(left_route, left_cost), (right_route, right_cost)| {
-            left_cost
-                .total_cmp(right_cost)
-                .then_with(|| left_route.id.cmp(&right_route.id))
+        let single_currency = capable.first().is_none_or(|first| {
+            capable
+                .iter()
+                .all(|candidate| candidate.currency == first.currency)
         });
-        let Some((chosen, chosen_cost)) = capable.first().copied() else {
+        if single_currency {
+            capable.sort_by(|left, right| {
+                left.native_cost
+                    .total_cmp(&right.native_cost)
+                    .then_with(|| left.route.id.cmp(&right.route.id))
+            });
+        } else {
+            capable.retain(|candidate| {
+                if candidate.usd_cost.is_some() {
+                    true
+                } else {
+                    trace.push(candidate.route.id.clone(), "fx stale — ¥/$ not comparable");
+                    false
+                }
+            });
+            capable.sort_by(|left, right| {
+                left.usd_cost
+                    .expect("retained candidates have a USD comparison key")
+                    .total_cmp(
+                        &right
+                            .usd_cost
+                            .expect("retained candidates have a USD comparison key"),
+                    )
+                    .then_with(|| left.route.id.cmp(&right.route.id))
+            });
+        }
+        if capable.is_empty() {
             return Err(anyhow!(
                 "no capable priced api route fits {} estimated tokens",
                 required
             ));
-        };
-        for (route, cost) in capable.into_iter().skip(1) {
-            let reason = if cost == chosen_cost {
+        }
+        let chosen = capable.remove(0);
+        for candidate in capable {
+            let reason = if candidate.currency != chosen.currency {
+                format!(
+                    "{} vs chosen {} — different currency, not directly comparable",
+                    money(candidate.native_cost, candidate.currency),
+                    money(chosen.native_cost, chosen.currency)
+                )
+            } else if candidate.native_cost == chosen.native_cost {
                 "same price; route id tie-break".to_string()
-            } else if chosen_cost == 0.0 {
+            } else if chosen.native_cost == 0.0 {
                 "higher price".to_string()
             } else {
-                format!("{:.1}x price", cost / chosen_cost)
+                format!("{:.1}x price", candidate.native_cost / chosen.native_cost)
             };
-            trace.push(route.id.clone(), reason);
+            trace.push(candidate.route.id.clone(), reason);
         }
-        Ok((chosen.clone(), trace))
+        Ok((chosen.route.clone(), trace))
     }
 
     /// Route ids grouped by provider, both levels sorted; used for provider
@@ -1036,6 +1116,47 @@ mod tests {
         ]
         .join("\n");
         RouteResolver::from_toml(&catalog).unwrap()
+    }
+
+    fn mixed_currency_catalog(fx_valid_until: &str) -> String {
+        format!(
+            r#"
+            [fx]
+            usd_per_cny = 0.10
+            valid_until = "{fx_valid_until}"
+            price_confidence = "reported"
+
+            [routes.cny-route]
+            provider = "cny-provider"
+            model_id = "cny-route"
+            base_url = "https://example.invalid"
+            wire = "openai"
+            vault_entry = "cny-provider"
+            context = 2000000
+            [routes.cny-route.price]
+            currency = "CNY"
+            unit = "per_million_tokens"
+            cache_hit = 3.0
+            cache_miss = 3.0
+            output = 3.0
+            price_confidence = "reported"
+
+            [routes.usd-route]
+            provider = "usd-provider"
+            model_id = "usd-route"
+            base_url = "https://example.invalid"
+            wire = "openai"
+            vault_entry = "usd-provider"
+            context = 2000000
+            [routes.usd-route.price]
+            currency = "USD"
+            unit = "per_million_tokens"
+            cache_hit = 2.0
+            cache_miss = 2.0
+            output = 2.0
+            price_confidence = "reported"
+            "#
+        )
     }
 
     // ---------------------------------------------------------------- catalog shape
@@ -1366,11 +1487,11 @@ mod tests {
             price_confidence = "confirmed"
 
             [routes.usd-top]
-            provider = "p"
+            provider = "usd-provider"
             model_id = "usd-top"
             base_url = "https://example.invalid"
             wire = "openai"
-            vault_entry = "p"
+            vault_entry = "usd-provider"
             [routes.usd-top.price]
             currency = "USD"
             unit = "per_million_tokens"
@@ -1520,6 +1641,67 @@ mod tests {
             .iter()
             .all(|line| line.starts_with("skipped ")));
         assert_eq!(trace.to_string(), trace.lines().join("\n"));
+    }
+
+    #[test]
+    fn resolve_capable_normalizes_fresh_mixed_currencies_and_traces_native_money() {
+        let resolver = RouteResolver::from_toml(&mixed_currency_catalog("2026-07-24")).unwrap();
+        let (route, trace) = resolver
+            .resolve_capable(
+                1_000_000,
+                0,
+                &["cny-route", "usd-route"],
+                utc(2026, 7, 20, 0, 0, 0),
+            )
+            .unwrap();
+
+        assert_eq!(route.id, "cny-route", "¥3 normalizes to $0.30");
+        let usd_reason = trace
+            .rejections
+            .iter()
+            .find(|entry| entry.route_id == "usd-route")
+            .map(|entry| entry.reason.as_str())
+            .unwrap();
+        assert!(usd_reason.contains("$2.00"));
+        assert!(usd_reason.contains("¥3.00"));
+        assert!(usd_reason.contains("different currency"));
+        assert!(!usd_reason.contains("x price"));
+    }
+
+    #[test]
+    fn resolve_capable_refuses_noncomparable_currency_when_fx_is_stale() {
+        let resolver = RouteResolver::from_toml(&mixed_currency_catalog("2026-07-19")).unwrap();
+        let (route, trace) = resolver
+            .resolve_capable(
+                1_000_000,
+                0,
+                &["cny-route", "usd-route"],
+                utc(2026, 7, 20, 0, 0, 0),
+            )
+            .unwrap();
+
+        assert_eq!(route.id, "usd-route");
+        let cny_reason = trace
+            .rejections
+            .iter()
+            .find(|entry| entry.route_id == "cny-route")
+            .map(|entry| entry.reason.as_str())
+            .unwrap();
+        assert_eq!(cny_reason, "fx stale — ¥/$ not comparable");
+    }
+
+    #[test]
+    fn resolve_capable_same_currency_still_uses_a_price_ratio() {
+        let resolver = capable_resolver();
+        let (_, trace) = resolver
+            .resolve_capable(
+                1_000,
+                0,
+                &["fit-a", "fit-expensive"],
+                utc(2026, 7, 20, 0, 0, 0),
+            )
+            .unwrap();
+        assert_eq!(trace.rejections[0].reason, "4.0x price");
     }
 
     #[test]
@@ -1764,6 +1946,24 @@ mod tests {
             .to_string();
         assert!(msg.contains("smell"), "got: {msg}");
         assert!(msg.contains("text"), "must say valid values: {msg}");
+    }
+
+    #[test]
+    fn catalog_rejects_mixed_currencies_within_one_provider() {
+        let mixed_providers = mixed_currency_catalog("2026-07-24");
+        assert!(
+            RouteResolver::from_toml(&mixed_providers).is_ok(),
+            "different providers may use different currencies"
+        );
+
+        let one_provider = mixed_providers.replace("usd-provider", "cny-provider");
+        let error = RouteResolver::from_toml(&one_provider)
+            .err()
+            .expect("one provider mixing currencies must fail")
+            .to_string();
+        assert!(error.contains("provider 'cny-provider' mixes currencies"));
+        assert!(error.contains("CNY and USD"));
+        assert!(error.contains("one provider must price in one currency"));
     }
 
     #[test]
