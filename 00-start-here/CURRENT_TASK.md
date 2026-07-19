@@ -1,6 +1,36 @@
 # Current Task
 
-## Immediate Goal — Slice D + fmt/gate/toolchain DONE. FULL Fable 5 audit DONE (75 findings; report `d868f16`). Owner chose EVERYTHING ACTIONABLE → M5 "Slice F: HARDEN" remediation (waves W1–W5, Sol-implemented). NEXT = ground + brief W1 (security floor: nh-vault + nh-law).
+## Immediate Goal — **W1 IS BRIEFED + LAUNCH-READY.** Slice A–D + fmt/gate/toolchain DONE; FULL Fable 5 audit DONE (75 findings; report `d868f16`). Owner chose EVERYTHING ACTIONABLE → M5 "Slice F: HARDEN" (waves W1→W3→W2→W5→W4, Sol-implemented). **NEXT = LAUNCH Sol on W1** (or a bare "continue" = re-orient + offer launch; do NOT auto-launch without a go).
+
+**⇒⇒ W1 BRIEFED — LAUNCH-READY (2026-07-18, this session).** Grounded seam-by-seam (read nh-vault/src/lib.rs
++ nh-law/src/lib.rs in full + every cross-crate caller + the shipped catalog). **Brief written:
+`C:\Users\capv2\AppData\Local\Temp\slice-f-w1-brief-v1.txt`** (16.9 KB, 13 fixes W1-1..W1-13, each file:line +
+required adversarial tests). **Owner ratified 2 calls:** (Q1) host-parse uses the **`url` crate** (exact
+reqwest parity — closes the whole parser-differential exfil class, not just backslash; url 2.5.8 already
+transitive → zero build weight; §0.4 exception logged); (Q2) undeclared vault entries are **FAIL-CLOSED**
+(verified: all 4 bundled entries' hosts match declared audiences, so nothing shipping today is refused).
+**CLEAN WAVE — no frozen crate touched → NO A-M5-8** (that stays reserved for W5): W1 keeps
+`Scrubber::new(Vec<String>)` + `Policy::send_verdict(&self,&str)->Verdict` signatures byte-stable so
+nh-fleet's 10+ call sites don't ripple. **Contract pre-authorization committed** (CONTRACTS_M5.md §0.1-F seam
+table + §0.4 url exception). Files W1 may touch: nh-vault/src/lib.rs, nh-law/src/lib.rs, nh-cli
+cmd_run.rs+cmd_chat.rs (host_of delete + downcast glue), root Cargo.toml + nh-vault/Cargo.toml (one `url` dep
+line each). NOT FEEL-gated (security internals; W4 is the FEEL wave).
+- **W1 items:** nh-vault — W1-1 url-parse host+make pub+kill nh-cli host_of dup (high-5/low-15); W1-2 IPv6
+  audiences work (medium-8, falls out of W1-1); W1-3 `\b`-anchor sk-/csk- (medium-9); W1-4 escape bidi
+  (medium-10); W1-5 `Vec<Zeroizing<String>>` field, `new` sig unchanged (low-12); W1-6 empty-audience
+  REFUSE (low-14); W1-7 keep keyring error in miss msg (low-13); W1-8 typed `AudienceRefused` (low-29).
+  nh-law — W1-9 iterative glob rewrite kills stack-overflow DoS, drop-if-hard=clamp to fail-safe verdict
+  (medium-7); W1-10 send_verdict host-norm (low-10); W1-11 exec_block case/wrapper hardening (low-11);
+  W1-12 parse BUNDLED_LAW once (nit-6); W1-13 repo-weaken value-aware warn (nit-7).
+- **Held for W4 (NOT W1):** low-16 (from_vault skip-signal), medium-20 (install_client key-literal union).
+- **LAUNCH INVOCATION** (background, xhigh, single codex — never two nosis codexes at once):
+  `codex exec --skip-git-repo-check -s workspace-write -m gpt-5.6-sol -c model_reasoning_effort=xhigh "$(cat /c/Users/capv2/AppData/Local/Temp/slice-f-w1-brief-v1.txt)" < /dev/null`
+- **After Sol returns:** kill nh.exe → `git diff --stat` (scope) → authoritative gate `cargo test --workspace
+  --release` + `cargo clippy --workspace --all-targets --release -- -D warnings` (redirect to file + `echo $?`,
+  NEVER `| tail`) → adversarial security review (fail-closed holds, url parity, fail-safe verdicts, no leaked
+  signatures, nh-fleet untouched) → commit W1 → main → then **W3 (meter truth: nh-core + nh-routes)**.
+
+**PRIOR IN FLIGHT (Slice D — DONE, historical):**
 
 **IN FLIGHT (2026-07-18):** Slice D "LEVER" briefed to Sol (gpt-5.6 xhigh, `codex exec` background). Brief
 = `slice-d-brief-v1.txt` (+ `slice-d-preamble-v2.txt` for handoff #2). **Handoff #1 (`b123jcp3f`) STOPPED

@@ -115,6 +115,38 @@ wire changes; a new test pins the corrected behavior).
 M5's resolver is *initial* cheapest-capable selection, a different concern from fleet fallback); and
 every seam in any crate NOT enumerated above. Touching either → STOP, amend §8.
 
+### 0.1-F Slice F "HARDEN" — audit-remediation seams (2026-07-18, owner chose EVERYTHING ACTIONABLE)
+
+Slice F remediates the 75-finding Fable 5 audit (`04-research/AUDIT_2026-07_fable5-full.md`) in 5 waves,
+owner-ratified order **W1→W3→W2→W5→W4**. Each wave opens the seams below (in already-open crates unless a
+frozen-crate row is marked). Same discipline as §0.1: Sol implements these without stopping; anything not
+listed → STOP, amend §8. Full finding detail (why/fix/verifier) lives in the audit report; the wave here is
+the authorization + file:line index.
+
+**W1 — SECURITY FLOOR (nh-vault + nh-law + minimal nh-cli glue). No frozen crate touched → no §8 amendment.**
+Public signatures frozen `nh-fleet` depends on stay byte-stable (`Scrubber::new(Vec<String>)`,
+`Policy::send_verdict(&self,&str)->Verdict`). Two owner-ratified calls: **(Q1)** host-parse uses the `url`
+crate (§0.4 exception below), not a hand-rolled splitter; **(Q2)** undeclared vault entries are **fail-closed**.
+
+| # | Ref (audit) | Crate:seam | Tag | Change |
+|---|---|---|:--:|---|
+| W1-1 | high-5 + low-15 | nh-vault `normalized_host` L141 | Δ | parse host via `url::Url` (reqwest parity, kills the backslash exfil differential); make `pub`; delete nh-cli `host_of` dup (cmd_run.rs ~256 + test ~397) and rewire its 3 sites. |
+| W1-2 | medium-8 | nh-vault `get_scoped`/`audience_allows` L184 | Δ | fixed by W1-1 idempotent parser (IPv6 audiences approve). |
+| W1-3 | medium-9 | nh-vault `KEY_SHAPES` L93 | Δ | `\b`-anchor `sk-`/`csk-` (stop mangling "risk-…"). |
+| W1-4 | medium-10 | nh-vault `sanitize_line`/`sanitize_untrusted_text` L199,228 | Δ | escape bidi controls (U+202A-E, U+2066-9, U+061C). |
+| W1-5 | low-12 | nh-vault `Scrubber.literals` L103 | Δ | field → `Vec<Zeroizing<String>>`; **`new(Vec<String>)` signature unchanged** (wrap internally → no nh-fleet ripple). |
+| W1-6 | low-14 | nh-vault `audience_allows` L167 | Δ | empty approved list → **REFUSE** (fail-closed). |
+| W1-7 | low-13 | nh-vault `EnvFallbackVault::get` L56 | Δ | preserve the inner keyring error in the miss message. |
+| W1-8 | low-29 | nh-vault (new) `AudienceRefused` + nh-cli cmd_chat.rs L117 | + | typed error replaces the fragile `starts_with("refused:")` coupling. |
+| W1-9 | medium-7 | nh-law `glob_matches`/`segment_matches` L415,450 | Δ | iterative two-pointer rewrite (kill stack-overflow DoS); drop-if-hard: clamp oversized input to the fail-safe verdict. |
+| W1-10 | low-10 | nh-law `send_verdict` L119 | Δ | ASCII-lowercase + strip trailing dot before matching (signature unchanged — frozen nh-fleet calls it). |
+| W1-11 | low-11 | nh-law `exec_pattern_matches` L406 | Δ | case-fold first token + test common wrapper/chain prefixes (Ask default kept). |
+| W1-12 | nit-6 | nh-law `ConstitutionSources.bundled`/`assemble_constitution` L83,172 | Δ | carry pre-extracted text (`Option<String>`), parse once; nh-law-internal only. |
+| W1-13 | nit-7 | nh-law `repo_tries_to_weaken` L321 | Δ | warn only when a repo field would actually grant. |
+
+**Held for W4 (not W1):** low-16 (`from_vault` skip-signal) + medium-20 (install_client key-literal union) —
+both nh-cli display/rebuild surface. W2/W3/W5 seam tables to be appended when each wave is briefed.
+
 ### 0.2 THE LAW + UX-first
 - THE LAW (top authority): small, simple, secure, safe, lightweight, readable, auditable, modular,
   congruent, harmonic. **Reuse over duplication** — the resolver reuses `price_at`/`peak_status`; the
@@ -142,6 +174,11 @@ every seam in any crate NOT enumerated above. Touching either → STOP, amend §
   profiles, and law classes are all pure Rust over existing types.)
 - **Slice E tooling only:** `cargo-nextest` + `cargo-deny`/`cargo-audit` are dev/CI tools (not workspace
   deps); `deny.toml` + `rust-toolchain.toml` + `[workspace.lints]` are config. No runtime impact.
+- **Slice F exception (owner-ratified 2026-07-18):** `url` becomes a **direct** dep of `nh-vault` (W1-1)
+  so the credential broker parses hosts with the exact same parser as `reqwest` — closing the parser-
+  differential exfil class (high-5), not just the one backslash trick. `url` v2.5.8 is already compiled
+  (transitive via reqwest), so this is a dependency-*declaration* change with **zero build weight**. This
+  is a deliberate, scoped override of "no new runtime crates" for one security-critical seam.
 
 ### 0.5 M5 exit criteria (each maps to one slice + a real headless test)
 - **E1 — TRUTH (Slice A).** On a mock provider: a None/Low-effort turn's built body has thinking
