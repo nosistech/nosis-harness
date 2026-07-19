@@ -596,3 +596,14 @@ so the FROZEN crate takes NO ripple from this signature change. The real Anthrop
 deferred to a live-verify (report §7); until then None (provider-default) is the honest displayed tier. The
 matching display-honesty fix for the TUI `/effort low` direct-set path (medium-3's TUI caveat) is a separate
 W4 concern, not covered here.
+
+**A-M5-9 glue extension (2026-07-19, orchestrator Opus 4.8; owner-approved during the W3 gate).** After W3
+implementation + gate PASS, the wire-aware glue — ratified above as `nh run` (cmd_run) + TUI only — was found
+to leave two more effort-resolving surfaces wire-blind: `nh chat` (cmd_chat.rs:169/371 + a test fixture) and
+`nh profile` (cmd_profile.rs:31). Owner ratified extending the glue to both so every surface reports the
+effort identically. **Display-only:** `build_anthropic_body` never serializes the effort (nh-core lib.rs
+~519; `apply_thinking` runs only in the OpenAI `build_body`), so the wire bytes are unchanged — this corrects
+only the reported tier on those two surfaces. Implementation folded `cmd_run::effort_for` to take the trailing
+`Wire` and dropped the transient `effort_for_wire` wrapper (mirrors nh-tui's `effort_for`, leaves no
+test-only helper → no `clippy -D` dead-code trap). Delivered as the W3b addendum (Sol, xhigh;
+`Temp/slice-f-w3b-brief-v1.txt`; self-report `Temp/w3b-last-message.txt`). Committed with W3 in `2b68163`.

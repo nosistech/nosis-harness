@@ -1,6 +1,6 @@
 # Current Task
 
-## Immediate Goal — **W1 "SECURITY FLOOR" DONE + committed `d95a8d6`.** Slice A–D + fmt/gate/toolchain DONE; FULL Fable 5 audit DONE (75 findings; report `d868f16`). Owner chose EVERYTHING ACTIONABLE → M5 "Slice F: HARDEN" (waves W1→W3→W2→W5→W4, Sol-implemented). **NEXT = W3 "METER TRUTH" (nh-core + nh-routes)** — not yet briefed; ground the seams → draft a file:line brief → owner-approve → launch Sol (a bare "continue" = ground + draft the W3 brief, ask before Sol launch).
+## Immediate Goal — **W3 "METER TRUTH" DONE + committed `2b68163`** (feat, on `591544c`; docs-close follows). W1 SECURITY FLOOR done (`d95a8d6`); Slice A–D + fmt/gate/toolchain done; FULL Fable 5 audit done (75 findings; `d868f16`). M5 "Slice F: HARDEN" order W1✓→W3✓→**W2**→W5→W4. **NEXT = W2 "TOOL EGRESS + EXEC" (nh-tools + nh-mcp)** — not yet briefed; ground the seams → draft a file:line brief → owner-approve → launch Sol (a bare "continue" = ground + draft the W2 brief, ask before Sol launch).
 
 **⇒⇒ W1 DONE + committed `d95a8d6` (2026-07-19).** Sol (codex exec, xhigh) implemented all 13 items
 W1-1..W1-13 (14 audit findings: 1 high / 4 med / 7 low / 2 nit); orchestrator gated + adversarially reviewed
@@ -18,15 +18,34 @@ CLEAN once** on a real scope conflict (M2 exit test's undeclared synthetic entry
 the amendment resolved it. Full detail in BUILD_LOG 2026-07-19; brief archived
 `Temp/slice-f-w1-brief-v1.txt`, amendment prompt `Temp/w1-amend-prompt.txt`.
 
-**⇒⇒ NEXT: W3 "METER TRUTH" (nh-core + nh-routes)** — ratified order W1✓→**W3**→W2→W5→W4. NOT yet briefed.
-Same cycle W1 got: ground seam-by-seam (read the nh-core meter-math + nh-routes routing that W3 touches) →
-draft a file:line brief with adversarial tests → owner approves the design calls → launch Sol.
-- **W3 targets** (enumerate precisely when grounding): the meter-truth findings in nh-core + nh-routes
-  (cost/estimate honesty, cache accounting, routing-cost surfaces). Pull the exact finding IDs from
-  `04-research/AUDIT_2026-07_fable5-full.md` and the Slice F plan (below in this doc).
+**⇒⇒ W3 DONE + committed `2b68163` (2026-07-19).** Sol (codex exec, xhigh) implemented W3-1..W3-14 across
+nh-core (turn loop + wire math) + nh-routes (honest routing/cost); orchestrator gated + adversarially reviewed
++ committed to main. **Gate: 377/0/1 `--release`, clippy `-D` clean, `cargo fmt --all --check` clean** (orch
+ran the normalizing `cargo fmt` post-Sol to clear 3 hand-reflow drifts). 7 files: nh-core/lib.rs,
+nh-routes/lib.rs+profiles.rs, nh-cli/cmd_run+cmd_chat+cmd_profile, nh-tui/lib.rs. Key fixes: compaction
+cost-guard DROPPED (high-1 — now fires on a normal uniform history, counts `max(provider,estimate)`);
+cross-currency normalized only via FRESH fx, stale = REFUSE not raw ¥-vs-$ (high-2, trace prints native);
+`resolve_effort` wire-aware (A-M5-9, AnthropicMessages→None honest provider-default); receipt-append non-fatal
+(paid answer + real provider error both survive); `cache_hit_pct` honest None on inconsistent usage; both HTTP
+clients propagate body-read errors; anthropic `tool_use` requires nonempty id+name; +`push_user_block`/`min_cap`
+reuse. **Owner ratified 3 design calls** (high-1 drop compaction guard; med-2 A-M5-9 wire-aware effort; high-2
+USD-normalize via fresh fx, fail-safe REFUSE on stale). **+ owner-approved W3b addendum** (extend A-M5-9 glue
+to `nh chat` + `nh profile` — display-only, Anthropic wire never serializes effort; folded `effort_for` to take
+`Wire`, dropped `effort_for_wire`). **nh-fleet untouched → still NO A-M5-8** (reserved for W5). W3 + W3b both
+PASS (one self-corrected compile slip in W3b). Briefs archived `Temp/slice-f-w3-brief-v1.txt` +
+`slice-f-w3b-brief-v1.txt`; self-reports `Temp/w3-last-message.txt` + `w3b-last-message.txt`. Full detail in
+BUILD_LOG 2026-07-19 (W3). §8 amendment **A-M5-9** (+ glue-extension note) in CONTRACTS_M5.
+
+**⇒⇒ NEXT: W2 "TOOL EGRESS + EXEC" (nh-tools + nh-mcp)** — ratified order W1✓→W3✓→**W2**→W5→W4. NOT yet briefed.
+Same cycle: ground seam-by-seam (read the nh-tools egress + exec + nh-mcp server paths W2 touches) → draft a
+file:line brief with adversarial tests → owner approves the design calls → launch Sol.
+- **W2 targets** (§0.1 seam table / Slice F plan below): #3 MCP results through `ToolResultEnvelope`; #4
+  Windows exec `raw_arg`; ExecShell timeout+stdin, tools/list timeout, envelope literal-scrub, Send-verdict
+  unenforced, OAuth refresh persist/race; nh-mcp CSPRNG token + constant-time compare + body cap + accept_loop
+  signal, fleet_status 'starting', scrubber-recompile / State-dup / loose-routing.
 - **Held for W4 (NOT W3):** low-16 (from_vault skip-signal), medium-20 (install_client key-literal union).
 - **LAUNCH INVOCATION** (background, xhigh, single codex — never two nosis codexes at once):
-  `codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m gpt-5.6-sol -c model_reasoning_effort=xhigh -o <last-msg-file> - < <W3-brief-file>`
+  `codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m gpt-5.6-sol -c model_reasoning_effort=xhigh -o <last-msg-file> - < <brief-file>`
   (W1 used this form — brief piped via stdin `-`, `-o` captures Sol's machine-readable self-report; the older
   `-s workspace-write` sandbox form also works — pick per environment. Verify `19820`-style stray codex
   sessions are yours before launching a second codex; NEVER two *nosis* codexes at once.)

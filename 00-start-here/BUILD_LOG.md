@@ -2,6 +2,68 @@
 
 Record every meaningful session here.
 
+## 2026-07-19: M5 Slice F Wave 3 — METER TRUTH (audit W3-1..W3-14 + A-M5-9) — committed `2b68163`
+
+Builder:
+
+- Codex (GPT-5.6 Sol xhigh) — W3 executor from the seam-by-seam brief
+  (`Temp/slice-f-w3-brief-v1.txt`), plus a gated **W3b** addendum
+  (`Temp/slice-f-w3b-brief-v1.txt`) that extended the A-M5-9 glue to `nh chat` + `nh profile`.
+
+What changed (makes the meter — the numbers nosis shows and bills against — TRUE;
+"the meter must not lie, in EITHER direction"):
+
+- **nh-core (turn loop + wire math):** DROP the compaction cost guard that defeated the
+  0.70 trigger — compaction now fires on a normal uniform-turn history instead of only at
+  ~100% (post-overflow hard-fail) (W3-1, high); the trigger counts `max(provider prompt
+  count, fresh local estimate)` so a just-appended large tool result is seen (W3-2).
+  `resolve_effort` gains a trailing `Wire`: `AnthropicMessages` → `None` ("provider-default",
+  the only tier matching a wire that sends no thinking directive) (W3-4, A-M5-9); DeepSeek
+  explicit `Low` → disabled tier, matching the wire (W3-3). `cache_hit_pct` → `None` (not a
+  fabricated 100%) when `cached > prompt` (W3-5). Receipt-append failures warn via `emit`
+  without discarding a paid answer or shadowing the real provider error (W3-6). Both HTTP
+  clients propagate a response-body read failure through `send_error` instead of an empty
+  body (W3-7). Anthropic `tool_use` fails locally on a missing/empty id or name (W3-8).
+  Removed the unused `prompt_cache_miss_tokens` field (W3-9); extracted `push_user_block`
+  (W3-10).
+- **nh-routes (honest routing/cost):** `resolve_capable` compares native costs within one
+  currency and normalizes cross-currency only through FRESH catalog FX; stale FX → REFUSE
+  the non-comparable route (trace `"fx stale"`) rather than compare ¥ against $ — the
+  `"x price"` ratio is emitted only same-currency, and the trace prints native amounts
+  cross-currency (W3-11, high). Catalog parsing rejects a provider that mixes currencies
+  (W3-13). Optional-profile warnings carry the underlying read/parse error (W3-12); a shared
+  `min_cap` helper replaces two clamp match blocks (W3-14).
+- **nh-cli + nh-tui (A-M5-9 glue, incl. W3b):** wire-aware effort threaded through EVERY
+  surface that resolves it — `nh run`, TUI, `nh chat` (cmd_chat), `nh profile` (cmd_profile).
+  `cmd_run::effort_for` folded the `Wire` param in and dropped the transient
+  `effort_for_wire` wrapper (mirrors nh-tui's `effort_for`, no test-only helper). W3b is
+  display-only: the Anthropic wire body never serializes the effort, so the bytes are
+  unchanged.
+
+Frozen surfaces preserved byte-stable: **nh-fleet untouched → still NO A-M5-8** (it has its
+own `effort_for` and calls neither `resolve_effort` nor `cache_hit_pct`); `resolve_capable`
+and `cache_hit_pct` return types unchanged; the only public signature change is
+`resolve_effort`/`effort_for` gaining a trailing `Wire`.
+
+Owner ratified 3 design calls: (high-1) drop the compaction cost guard — avoiding a hard
+context overflow beats keeping the prefix cache warm; (med-2, A-M5-9) wire-aware
+`resolve_effort` returning `None` for AnthropicMessages; (high-2) normalize cross-currency to
+USD via FRESH fx, fail-safe REFUSE when fx is stale, trace in native amounts. Plus the
+owner-approved W3b glue extension (A-M5-9 → cmd_chat + cmd_profile).
+
+Process: first W3 gate FAILed on `fmt --check` only (3 hand-reflow drifts); orchestrator ran
+the normalizing `cargo fmt` under pinned 1.96.0 and re-gated PASS (Sol never runs fmt). W3b
+had one self-corrected compile slip (new test referenced `ThinkArg` at the crate root; fixed
+to `crate::cmd_run::ThinkArg`). 7 files, 676/107.
+
+Gate (W3 + W3b combined): **377 pass / 0 fail / 1 ignored** (`--release`), clippy `-D warnings`
+clean, `cargo fmt --all --check` clean. Adversarially reviewed by the orchestrator (Opus 4.8):
+compaction fires on a realistic uniform history, no raw ¥-vs-$ compare + fail-safe on stale fx,
+OpenAi effort cells unchanged / AnthropicMessages → None, receipt-append non-fatal (paid answer
++ real provider error both survive a directory-path append failure).
+
+Next: **W2 "TOOL EGRESS + EXEC" (nh-tools + nh-mcp)** per the ratified order W1→W3→**W2**→W5→W4.
+
 ## 2026-07-19: M5 Slice F Wave 1 — SECURITY FLOOR (audit W1-1..W1-13)
 
 Builder:
