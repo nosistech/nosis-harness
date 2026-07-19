@@ -1,6 +1,59 @@
 # Current Task
 
-## Immediate Goal — M5 Slices A + B + C DONE + committed. NEXT = brief Sol for Slice D (LEVER — profiles).
+## Immediate Goal — Slice D DONE (d6e2c7f). Fmt-normalize + gate.ps1 (bc2a1b1) + toolchain/EOL/deny (a71eb23) DONE. FULL Fable 5 audit IN FLIGHT. NEXT = audit triage + workspace.lints/forbid-unsafe + rest of Slice E.
+
+**IN FLIGHT (2026-07-18):** Slice D "LEVER" briefed to Sol (gpt-5.6 xhigh, `codex exec` background). Brief
+= `slice-d-brief-v1.txt` (+ `slice-d-preamble-v2.txt` for handoff #2). **Handoff #1 (`b123jcp3f`) STOPPED
+clean** at a real frozen boundary (the `Receipt.effective_profile` field forces `effective_profile: None`
+glue in FROZEN nh-fleet test literals slice_b.rs:405/490 that A-M5-7 hadn't authorized — Sol changed no
+files, good catch). Fixed via the **A-M5-7 addendum** (§8: authorizes the full `Receipt`-literal ripple —
+nh-fleet:405/490 + nh-tui:1373/3067 = `None`; make_receipt:1622 sets the real value; + a blanket clause so
+trivial glue for the two field-adds never stops Sol again). **Handoff #2 = `bfan4b9wi` DONE + GATED GREEN** (357 pass / 0 fail / 1 ignored `--release`, clippy `-D
+warnings` clean, verified independently; +18 tests over 339; scope exactly the surface — nh-fleet got its
+3 authorized glue lines; EOL-noise on cmd_init/cmd_key/m2_exit restored). Adversarial review passed:
+profiles.rs tighten-only correct, resolve_effort matrix honest (AlwaysThinking can't disable / None can't
+enable), clamp_route only touches max_out (audience gate preserved), balanced==today default path,
+all surfaces scrubbed. **FEEL gate:** owner ran `nh profile` demo + approved **resolve-thinking-to-route**
+(the honest display: show effective effort none/low/high/max per route, not the abstract posture — same
+"meter must not lie" principle as A-M5-6). **Handoff #3 = `b1dwlm8r2` DONE** (display-only FEEL refinement:
+resolved-effort display none/low/high/max, shared `effort_label`). Re-gated independently GREEN
+(**357/0/1** `--release`, clippy clean) + owner FEEL-approved the honest `nh profile` output. **SLICE D
+COMMITTED `d6e2c7f` on `3a5df91`** (feat; CURRENT_TASK.md deliberately held out for the docs-close).
+Amendment **A-M5-7** logged (§8: `Receipt.effective_profile` + `AgentLoop.profile` + frozen nh-fleet:1227
+`profile: None` ripple, + the Receipt-literal-ripple addendum). **Owner ratified 3 design calls:** (1) two levers only — thinking tier + output cap; NO route
+selection (M6), NO currency hard-stop; (2) frugal = route thinking floor + cap ≤16384 + off-peak pref;
+balanced = today byte-for-byte; max-quality = route thinking ceiling (High) + cap = route.max_out; (3)
+route capability immutable (AlwaysThinking always thinks, no-toggle never thinks; law never weakened).
+**Design:** apply at the caller (clone route w/ clamped `max_out` → existing `make_client`, NO sig change
+[5 callers incl frozen nh-fleet:1203]; set live `AgentLoop.thinking`); nh-routes new `profiles` module
+(Profiles + EffectiveExecutionPolicy + ThinkingPosture, layered bundled→user→repo tighten-only mirroring
+nh-law:200-325); nh-core `resolve_effort` posture×dialect helper + receipt field; nh-cli `--profile` +
+`nh profile`; nh-tui `/profile` + HUD chip + live re-apply (SetProfile worker cmd).
+
+**✓ DONE (2026-07-18, this session — the Slice E fmt piece pulled forward + more):**
+- **Fmt normalized + gated** (commit `bc2a1b1`): one-time `cargo fmt --all` cleared the 37-hunk / 7-file
+  backlog (behavior-preserving); added `gate.ps1` mechanizing fmt --check + clippy -D warnings + test
+  --release with per-step exit-code aggregation (never `| tail`, whose 0 masks a failure). Re-gate GREEN:
+  **357 pass / 0 fail / 1 ignored** `--release`, clippy clean.
+- **Build hygiene** (commit `a71eb23`): `rust-toolchain.toml` pins 1.96.0 + rustfmt/clippy (stops fmt
+  drift recurrence at the root — a newer rustfmt can no longer silently reflow); `.gitattributes` EOL
+  policy; `deny.toml` DORMANT cargo-deny policy (cargo-deny NOT installed — wire `cargo deny check` into
+  gate.ps1 after `cargo install cargo-deny --locked`).
+- **Owner expanded scope → FULL Fable 5 high audit IN FLIGHT** (background workflow, run
+  `wf_72da5ecf-6f6`): 9 per-crate Fable-5-high finders → adversarial verify → confirmed findings.
+  Read-only. Grounded pre-scan: `unsafe` = **0**; `#[allow]` = 10 (all benign); ~668 unwrap/expect/panic
+  (mostly test code). The audit is the FULL semantic pass the owner chose over mechanical-only.
+
+**⇒ NOW / NEXT:**
+1. **Triage the Fable 5 audit** when it lands: cluster confirmed findings by severity/crate; route fixes
+   (Sol implements milestone-code fixes per [[m2-m5-codex-sol-directive]]; orchestrator does trivial
+   hygiene). Present to the owner BEFORE any fix.
+2. **`[workspace.lints]` + `#![forbid(unsafe_code)]`** (held until the audit finishes reading the tree —
+   touches crate manifests): codify the unsafe-free property (grep = 0 today) at workspace level + inherit
+   per crate. Gate + commit.
+3. **Rest of Slice E "LOOP":** keyless CI (windows + ubuntu, mock tests), `codex exec --output-schema`
+   structured Sol handoff, cargo-nextest + AV canary preflight, gate.ps1 frozen-surface sensor. Then M5
+   is DONE → write the ≥5 launch posts ([[why-best-in-category-2026]]).
 
 **Slice C "VISIBLE" SHIPPED (E3 met — THE FEEL GATE PASSED).** Committed `a0a4036` on `e97ec1f`. Gate
 green: **339 pass / 0 fail / 1 ignored** `--release`, clippy `-D warnings` clean (319 → +20: Slice C +17,
@@ -159,13 +212,16 @@ review on every Slice-B item.
   Gemini CLI died as open delegate). Reposition: **"open-weight-first harness with a frontier review
   gate."** Keep the commented catalog delegate schema; don't build the full adapter class in v1.
 
-### ON RESUME ("continue") — Slices A + B + C DONE + committed. Next = brief Sol for Slice D (LEVER — profiles).
-**State (2026-07-18):** M5 Slices A "TRUTH" (`9c96259`) + B "FLOOR" (`1a9d92a`) + C "VISIBLE" (`a0a4036`,
-FEEL-approved) shipped; HEAD `a0a4036`; **339 pass / 0 fail / 1 ignored** `--release`, clippy clean. §8
-amendments A-M5-1..6 logged. If the owner typed **"continue"**, drive **Slice D "LEVER" (E4)** — the
-owner's toggle-per-provider-by-profile ask. Read `CONTRACTS_M5.md` (Slice D + §0.1 nh-routes `Profiles`/
-`EffectiveExecutionPolicy` row + nh-core `EffectiveExecutionPolicy application` row + nh-tui `/profile`
-chip) + this file's top blocks first.
+### ON RESUME ("continue") — Slice D DONE; fmt+gate+toolchain DONE; FULL Fable 5 audit IN FLIGHT.
+**State (2026-07-18):** M5 Slices A "TRUTH" (`9c96259`) + B "FLOOR" (`1a9d92a`) + C "VISIBLE" (`a0a4036`) +
+**D "LEVER" (`d6e2c7f`, FEEL-approved)** shipped. Then this session (owner "continue" + expanded scope):
+fmt-normalize + `gate.ps1` (`bc2a1b1`), toolchain pin + `.gitattributes` + `deny.toml` (`a71eb23`); HEAD
+at/after `a71eb23`; gate GREEN **357/0/1** `--release`, clippy clean. §8 amendments A-M5-1..**7** (+
+addendum). A **FULL Fable 5 high read-only audit** was launched (background workflow run `wf_72da5ecf-6f6`,
+9 per-crate finders → adversarial verify → confirmed findings). If the owner typed **"continue"**: do the
+**⇒ NOW / NEXT** block at the TOP — (1) triage the audit findings when they land (present to owner before
+any fix), (2) `[workspace.lints]` + `forbid(unsafe_code)`, (3) rest of Slice E "LOOP". Do NOT re-do Slice D
+or the fmt/hygiene commits. Read the top blocks first.
 
 1. **Confirm clean:** `git log --oneline -1` = `a0a4036`; `git status` clean. Kill any `nh.exe` before builds.
 2. **Read the real seams FIRST** for Slice D: `nh-routes` (a NEW `Profiles` module + `EffectiveExecutionPolicy`
@@ -206,6 +262,10 @@ codex exec --skip-git-repo-check -s workspace-write -m gpt-5.6-sol \
 Run in background (harness-tracked); verify empirically after (numstat = truth; EOL/CRLF flags = noise).
 Do NOT start a second codex on nosis while one writes nosis. Consider adding `--output-schema` for a
 machine-readable self-report (report Lens G finding 5).
+**STANDING RULE (2026-07-18): every Sol brief must say "do NOT run `cargo fmt`."** The workspace is now
+fmt-clean, toolchain-pinned (1.96.0), and gated (`gate.ps1` runs `cargo fmt --all --check`). Formatting is
+the orchestrator/gate's job; a Sol `fmt` run only risks re-reflowing whatever file it touches (this is what
+polluted the Slice A and Slice D diffs). Sol writes code; the gate formats + checks.
 
 ## UX is THE priority (see [[ux-first-and-the-law]])
 "Pretty but frustrating" = failure. Judge by FEEL first, tests second. Self-teaching, no handholding,
