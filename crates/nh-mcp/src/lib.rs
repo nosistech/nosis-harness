@@ -552,17 +552,30 @@ fn fleet_status(arguments: &Value, runtime: &Runtime) -> Value {
     }
     let status = nh_fleet::status_from_ledger(&events);
     let state_word = if status.finished {
-        "finished"
+        "finished".to_string()
+    } else if let Some(reason) = &status.failed_reason {
+        format!("failed: {reason}")
     } else if events.is_empty() {
-        "starting"
+        "starting".to_string()
     } else {
-        "running"
+        "running".to_string()
+    };
+    let unmetered_suffix = if status.unmetered > 0 {
+        format!(" · {} unmetered", status.unmetered)
+    } else {
+        String::new()
     };
     tool_text(
         runtime,
         &format!(
-            "{} · {} · {} done · {} failed · {} gated · {} pending",
-            args.run_id, state_word, status.done, status.failed, status.gated, status.pending
+            "{} · {} · {} done · {} failed · {} gated · {} pending{}",
+            args.run_id,
+            state_word,
+            status.done,
+            status.failed,
+            status.gated,
+            status.pending,
+            unmetered_suffix
         ),
         false,
     )
@@ -620,6 +633,7 @@ fn scrub_json(value: &mut Value, scrubber: &nh_vault::Scrubber) {
 mod tests {
     use std::io::{Read as _, Write as _};
     use std::net::{Shutdown, TcpStream};
+    use std::path::Path;
 
     use super::*;
 
@@ -690,6 +704,18 @@ mod tests {
             "method": "tools/call",
             "params": { "name": name, "arguments": arguments }
         })
+    }
+
+    fn write_fleet_ledger(root: &Path, run_id: &str, events: &[Value]) {
+        let run_dir = root.join(".nosis").join("fleet").join(run_id);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let mut text = events
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        text.push('\n');
+        std::fs::write(run_dir.join("ledger.jsonl"), text).unwrap();
     }
 
     #[test]
@@ -864,6 +890,112 @@ mod tests {
             starting.contains("known-empty-run · starting"),
             "{starting}"
         );
+        server.shutdown().unwrap();
+    }
+
+    #[test]
+    fn fleet_status_renders_failed_and_unmetered_without_changing_finished_shape() {
+        let (root, server) = test_server();
+        let addr = server.addr();
+        let host = addr.to_string();
+        let token = server.token().to_string();
+
+        write_fleet_ledger(
+            root.path(),
+            "failed-run",
+            &[json!({
+                "event": "run_failed",
+                "run_id": "failed-run",
+                "reason": "provider unavailable"
+            })],
+        );
+        let failed = raw_post(
+            addr,
+            &host,
+            None,
+            Some(&token),
+            &tools_call("fleet_status", json!({"run_id": "failed-run"})),
+        );
+        assert!(
+            failed.contains("failed-run · failed: provider unavailable"),
+            "{failed}"
+        );
+
+        write_fleet_ledger(
+            root.path(),
+            "unmetered-run",
+            &[
+                json!({
+                    "event": "run_started",
+                    "run_id": "unmetered-run",
+                    "created_utc": "2026-07-19T00:00:00Z",
+                    "task_count": 1,
+                    "max_workers": 1,
+                    "budget_tokens": 10
+                }),
+                json!({
+                    "event": "task_queued",
+                    "task_id": "one",
+                    "task": "work",
+                    "route_id": "fixture"
+                }),
+                json!({
+                    "event": "task_receipt",
+                    "task_id": "one",
+                    "attempt": 1,
+                    "receipt": {
+                        "ts_utc": "2026-07-19T00:00:00Z",
+                        "model_id": "fixture",
+                        "task": "work",
+                        "turns": 1,
+                        "tool_calls": 0,
+                        "outcome": "pass"
+                    }
+                }),
+            ],
+        );
+        let unmetered = raw_post(
+            addr,
+            &host,
+            None,
+            Some(&token),
+            &tools_call("fleet_status", json!({"run_id": "unmetered-run"})),
+        );
+        assert!(unmetered.contains("· 1 unmetered"), "{unmetered}");
+
+        write_fleet_ledger(
+            root.path(),
+            "finished-run",
+            &[
+                json!({
+                    "event": "run_started",
+                    "run_id": "finished-run",
+                    "created_utc": "2026-07-19T00:00:00Z",
+                    "task_count": 0,
+                    "max_workers": 1,
+                    "budget_tokens": null
+                }),
+                json!({
+                    "event": "run_finished",
+                    "run_id": "finished-run",
+                    "done": 0,
+                    "failed": 0,
+                    "gated": 0
+                }),
+            ],
+        );
+        let finished = raw_post(
+            addr,
+            &host,
+            None,
+            Some(&token),
+            &tools_call("fleet_status", json!({"run_id": "finished-run"})),
+        );
+        assert!(
+            finished.contains("finished-run · finished · 0 done · 0 failed · 0 gated · 0 pending"),
+            "{finished}"
+        );
+        assert!(!finished.contains("unmetered"), "{finished}");
         server.shutdown().unwrap();
     }
 

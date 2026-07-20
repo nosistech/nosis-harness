@@ -4,13 +4,13 @@
 //! event through one mutex-guarded append handle and fsyncs before continuing.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context as _};
 use chrono::{DateTime, FixedOffset, Local, SecondsFormat, Utc};
@@ -23,6 +23,7 @@ use nh_law::Law;
 use nh_routes::{RouteClass, RouteResolver, ThinkingDialect};
 use nh_tools::{builtin_tools, Access, Guard, ToolCtx};
 use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, Vault};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_MAX_WORKERS: usize = 4;
@@ -33,6 +34,11 @@ const TEST_EXECUTION_LOG_ENV: &str = "NH_FLEET_TEST_EXECUTION_LOG";
 const TEST_SLEEP_MS_ENV: &str = "NH_FLEET_TEST_SLEEP_MS";
 const TEST_OUTCOME_ENV: &str = "NH_FLEET_TEST_OUTCOME";
 const SCHEDULER_WAKE_INTERVAL: Duration = Duration::from_millis(100);
+const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+#[cfg(not(test))]
+const RESUME_LOCK_RETRY_WINDOW: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const RESUME_LOCK_RETRY_WINDOW: Duration = Duration::from_millis(150);
 
 static RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static TEST_LOG_LOCK: Mutex<()> = Mutex::new(());
@@ -56,6 +62,13 @@ pub enum Backend {
     Native,
     #[serde(rename = "kimi-swarm")]
     KimiSwarm,
+}
+
+#[allow(clippy::derivable_impls)]
+impl Default for Backend {
+    fn default() -> Self {
+        Self::Native
+    }
 }
 
 pub trait Clock: Send + Sync {
@@ -179,6 +192,8 @@ pub struct FleetStatus {
     pub gated: usize,
     pub pending: usize,
     pub finished: bool,
+    pub failed_reason: Option<String>,
+    pub unmetered: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -197,6 +212,10 @@ pub enum LedgerEvent {
         task_id: String,
         task: String,
         route_id: String,
+        #[serde(default)]
+        defer_offpeak: bool,
+        #[serde(default)]
+        backend: Backend,
     },
     TaskStarted {
         task_id: String,
@@ -238,6 +257,10 @@ pub enum LedgerEvent {
         failed: usize,
         gated: usize,
     },
+    RunFailed {
+        run_id: String,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,7 +285,9 @@ pub fn plan_from_ledger(events: &[LedgerEvent]) -> ResumePlan {
             | LedgerEvent::TaskGate { task_id, .. }
             | LedgerEvent::TaskFailed { task_id, .. }
             | LedgerEvent::TaskHeartbeat { task_id, .. } => Some(task_id),
-            LedgerEvent::RunStarted { .. } | LedgerEvent::RunFinished { .. } => None,
+            LedgerEvent::RunStarted { .. }
+            | LedgerEvent::RunFinished { .. }
+            | LedgerEvent::RunFailed { .. } => None,
         };
         if let Some(task_id) = task_id {
             if seen.insert(task_id.clone()) {
@@ -287,6 +312,17 @@ pub fn plan_from_ledger(events: &[LedgerEvent]) -> ResumePlan {
 
 /// Fold committed ledger events into run status. Pure: no I/O.
 pub fn status_from_ledger(events: &[LedgerEvent]) -> FleetStatus {
+    let finished = events
+        .iter()
+        .any(|event| matches!(event, LedgerEvent::RunFinished { .. }));
+    let failed_reason = if finished {
+        None
+    } else {
+        events.iter().rev().find_map(|event| match event {
+            LedgerEvent::RunFailed { reason, .. } => Some(reason.clone()),
+            _ => None,
+        })
+    };
     FleetStatus {
         done: events
             .iter()
@@ -301,9 +337,17 @@ pub fn status_from_ledger(events: &[LedgerEvent]) -> FleetStatus {
             .filter(|event| matches!(event, LedgerEvent::TaskGate { .. }))
             .count(),
         pending: plan_from_ledger(events).todo.len(),
-        finished: events
+        finished,
+        failed_reason,
+        unmetered: events
             .iter()
-            .any(|event| matches!(event, LedgerEvent::RunFinished { .. })),
+            .filter(|event| {
+                matches!(
+                    event,
+                    LedgerEvent::TaskReceipt { receipt, .. } if receipt.usage.is_none()
+                )
+            })
+            .count(),
     }
 }
 
@@ -334,18 +378,40 @@ pub fn ladder_position(events: &[LedgerEvent], task_id: &str) -> (usize, u32) {
 }
 
 pub fn run(config: FleetConfig) -> anyhow::Result<RunReport> {
-    if config.tasks.is_empty() {
-        bail!("tasks.json has no tasks — add at least one task");
-    }
-    if config.max_workers == 0 {
-        bail!("max_workers must be at least 1");
-    }
     run_with_id(new_run_id(), config)
 }
 
 /// Start a new fleet run with a caller-provided durable ledger handle.
 pub fn run_with_id(run_id: String, config: FleetConfig) -> anyhow::Result<RunReport> {
     validate_run_id(&run_id)?;
+    let fleet_root = fleet_root(&config.run_root);
+    let run_dir = fleet_root.join(&run_id);
+    let _run_lock = RunLock::acquire(&run_dir, Duration::ZERO)?;
+    let ledger_path = run_dir.join("ledger.jsonl");
+    let mut failure_literals = Vec::new();
+    let result = (|| {
+        repair_uncommitted_tail(&ledger_path)?;
+        run_with_id_inner(
+            run_id.clone(),
+            config,
+            &fleet_root,
+            &ledger_path,
+            &mut failure_literals,
+        )
+    })();
+    if let Err(error) = &result {
+        append_run_failed(&ledger_path, &run_id, error, &failure_literals);
+    }
+    result
+}
+
+fn run_with_id_inner(
+    run_id: String,
+    config: FleetConfig,
+    fleet_root: &Path,
+    ledger_path: &Path,
+    failure_literals: &mut Vec<String>,
+) -> anyhow::Result<RunReport> {
     if config.tasks.is_empty() {
         bail!("tasks.json has no tasks — add at least one task");
     }
@@ -369,12 +435,11 @@ pub fn run_with_id(run_id: String, config: FleetConfig) -> anyhow::Result<RunRep
         ladder.as_ref(),
         test_provider.is_some(),
     )?;
+    failure_literals.clone_from(&key_literals);
     scrub_prepared_tasks(&mut tasks, &Scrubber::new(key_literals.clone()))?;
 
     let created_utc = now_utc();
-    let fleet_root = fleet_root(&config.run_root);
-    let ledger_path = fleet_root.join(&run_id).join("ledger.jsonl");
-    let ledger = DurableWriter::open(&ledger_path, Scrubber::new(key_literals.clone()))?;
+    let ledger = DurableWriter::open(ledger_path, Scrubber::new(key_literals.clone()))?;
     ledger.append(&LedgerEvent::RunStarted {
         run_id: run_id.clone(),
         created_utc: created_utc.clone(),
@@ -388,6 +453,8 @@ pub fn run_with_id(run_id: String, config: FleetConfig) -> anyhow::Result<RunRep
             task_id: task.task_id.clone(),
             task: task.task.clone(),
             route_id: task.route_id.clone(),
+            defer_offpeak: task.defer_offpeak,
+            backend: task.backend,
         })?;
         emit(
             &config.on_event,
@@ -443,7 +510,7 @@ pub fn run_with_id(run_id: String, config: FleetConfig) -> anyhow::Result<RunRep
         HashMap::new(),
     )?;
     finish_index(
-        &fleet_root,
+        fleet_root,
         &created_utc,
         config.tasks.len(),
         &report,
@@ -465,9 +532,36 @@ pub fn resume(
         }
         None => latest_incomplete_run(&fleet_root.join("index.jsonl"))?,
     };
-    let ledger_path = fleet_root.join(&run_id).join("ledger.jsonl");
-    repair_uncommitted_tail(&ledger_path)?;
-    let events = read_ledger(&ledger_path)?;
+    let run_dir = fleet_root.join(&run_id);
+    let _run_lock = RunLock::acquire(&run_dir, RESUME_LOCK_RETRY_WINDOW)?;
+    let ledger_path = run_dir.join("ledger.jsonl");
+    let mut failure_literals = Vec::new();
+    let result = (|| {
+        repair_uncommitted_tail(&ledger_path)?;
+        resume_inner(
+            run_root,
+            run_id.clone(),
+            config,
+            &fleet_root,
+            &ledger_path,
+            &mut failure_literals,
+        )
+    })();
+    if let Err(error) = &result {
+        append_run_failed(&ledger_path, &run_id, error, &failure_literals);
+    }
+    result
+}
+
+fn resume_inner(
+    run_root: &Path,
+    run_id: String,
+    config: FleetConfig,
+    fleet_root: &Path,
+    ledger_path: &Path,
+    failure_literals: &mut Vec<String>,
+) -> anyhow::Result<RunReport> {
+    let events = read_ledger(ledger_path)?;
     let meta = run_meta(&events, &run_id)?;
     ensure_single_terminal(&events)?;
     let plan = plan_from_ledger(&events);
@@ -479,7 +573,7 @@ pub fn resume(
         .or_else(|| meta.escalate.then(Ladder::default_ladder));
     let mut tasks = Vec::with_capacity(plan.todo.len());
     for task_id in &plan.todo {
-        let (task, route_id) = queued.get(task_id).ok_or_else(|| {
+        let queued_task = queued.get(task_id).ok_or_else(|| {
             anyhow::anyhow!("ledger cannot resume task '{task_id}' — its queued event is missing")
         })?;
         let (route_id, tier_idx, effort, attempt) = match effective_ladder.as_ref() {
@@ -493,7 +587,7 @@ pub fn resume(
                 (tier.route_id.clone(), tier_idx, Some(tier.effort), attempt)
             }
             None => (
-                route_id.clone(),
+                queued_task.route_id.clone(),
                 0,
                 None,
                 attempts
@@ -505,13 +599,13 @@ pub fn resume(
         };
         tasks.push(PreparedTask {
             task_id: task_id.clone(),
-            task: task.clone(),
+            task: queued_task.task.clone(),
             route_id,
             attempt,
             tier_idx,
             effort,
-            defer_offpeak: config.defer_offpeak,
-            backend: Backend::Native,
+            defer_offpeak: queued_task.defer_offpeak,
+            backend: queued_task.backend,
         });
     }
 
@@ -524,13 +618,14 @@ pub fn resume(
         effective_ladder.as_ref(),
         test_provider.is_some(),
     )?;
-    let ledger = DurableWriter::open(&ledger_path, Scrubber::new(key_literals.clone()))?;
+    failure_literals.clone_from(&key_literals);
+    let ledger = DurableWriter::open(ledger_path, Scrubber::new(key_literals.clone()))?;
     let counts = terminal_counts(&events);
 
     if tasks.is_empty() && has_finished(&events) {
         let report = counts.report(run_id);
         finish_index(
-            &fleet_root,
+            fleet_root,
             &meta.created_utc,
             meta.task_count,
             &report,
@@ -576,7 +671,7 @@ pub fn resume(
         failed_attempts,
     )?;
     finish_index(
-        &fleet_root,
+        fleet_root,
         &meta.created_utc,
         meta.task_count,
         &report,
@@ -593,6 +688,14 @@ struct PreparedTask {
     attempt: u32,
     tier_idx: usize,
     effort: Option<ThinkingEffort>,
+    defer_offpeak: bool,
+    backend: Backend,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueuedTask {
+    task: String,
+    route_id: String,
     defer_offpeak: bool,
     backend: Backend,
 }
@@ -649,6 +752,70 @@ struct IndexRecord {
     status: String,
 }
 
+#[allow(dead_code)]
+struct RunLock {
+    file: File,
+    path: PathBuf,
+}
+
+impl RunLock {
+    fn acquire(run_dir: &Path, retry_window: Duration) -> anyhow::Result<Self> {
+        fs::create_dir_all(run_dir)
+            .with_context(|| format!("could not create {}", run_dir.display()))?;
+        let path = run_dir.join("coordinator.lock");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("could not open {}", path.display()))?;
+        let started = Instant::now();
+        loop {
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(TryLockError::WouldBlock) if started.elapsed() < retry_window => {
+                    thread::sleep(
+                        LOCK_RETRY_INTERVAL.min(retry_window.saturating_sub(started.elapsed())),
+                    );
+                }
+                Err(TryLockError::WouldBlock) => return Err(live_run_error(&path)),
+                Err(TryLockError::Error(error)) => {
+                    return Err(error).with_context(|| format!("could not lock {}", path.display()))
+                }
+            }
+        }
+
+        file.set_len(0)
+            .with_context(|| format!("could not update {}", path.display()))?;
+        writeln!(file, "pid={}", std::process::id())
+            .with_context(|| format!("could not update {}", path.display()))?;
+        writeln!(file, "started={}", now_utc())
+            .with_context(|| format!("could not update {}", path.display()))?;
+        file.flush()
+            .with_context(|| format!("could not flush {}", path.display()))?;
+        Ok(Self { file, path })
+    }
+}
+
+fn live_run_error(path: &Path) -> anyhow::Error {
+    let diagnostics = fs::read_to_string(path).ok();
+    let pid = diagnostics.as_deref().and_then(|text| {
+        text.lines()
+            .find_map(|line| line.strip_prefix("pid=").map(str::to_string))
+    });
+    let started = diagnostics.as_deref().and_then(|text| {
+        text.lines()
+            .find_map(|line| line.strip_prefix("started=").map(str::to_string))
+    });
+    match (pid, started) {
+        (Some(pid), Some(started)) => {
+            anyhow::anyhow!("run appears live (pid {pid}, started {started}) — refusing to resume")
+        }
+        _ => anyhow::anyhow!("run appears live — refusing to resume"),
+    }
+}
+
 struct DurableWriter {
     path: PathBuf,
     file: Mutex<File>,
@@ -689,6 +856,16 @@ impl DurableWriter {
             .with_context(|| format!("could not fsync {}", self.path.display()))?;
         Ok(())
     }
+}
+
+fn append_run_failed(path: &Path, run_id: &str, error: &anyhow::Error, literals: &[String]) {
+    let result = DurableWriter::open(path, Scrubber::new(literals.to_vec())).and_then(|ledger| {
+        ledger.append(&LedgerEvent::RunFailed {
+            run_id: run_id.to_string(),
+            reason: error.to_string(),
+        })
+    });
+    let _ = result;
 }
 
 enum WorkerEvent {
@@ -802,6 +979,13 @@ fn execute_tasks(
                 active = active.saturating_sub(1);
                 match result {
                     Ok(receipt) => {
+                        if budget_tokens.is_some() && receipt.usage.is_none() {
+                            emit(
+                                on_event,
+                                &display_scrubber,
+                                &format!("usage unreported — budget cannot count {}", job.task_id),
+                            );
+                        }
                         used_tokens = used_tokens.saturating_add(tokens_in(&receipt));
                         let outcome = receipt.outcome;
                         let reason = typed_receipt_reason(&receipt, job.attempt);
@@ -926,13 +1110,17 @@ fn execute_tasks(
                     }
                 }
 
-                if !budget_halted && budget_tokens.is_some_and(|limit| used_tokens >= limit) {
-                    budget_halted = true;
-                    emit(
-                        on_event,
-                        &display_scrubber,
-                        &format!("budget halted at {used_tokens} tokens — no new tasks will start"),
-                    );
+                if budget_tokens.is_some_and(|limit| used_tokens >= limit) {
+                    if !budget_halted {
+                        budget_halted = true;
+                        emit(
+                            on_event,
+                            &display_scrubber,
+                            &format!(
+                                "budget halted at {used_tokens} tokens — no new tasks will start"
+                            ),
+                        );
+                    }
                     halt_remaining_for_budget(
                         &mut remaining,
                         ledger,
@@ -1547,11 +1735,26 @@ pub fn read_run_ledger(run_root: &Path, run_id: &str) -> anyhow::Result<Vec<Ledg
     if !path.exists() {
         return Ok(Vec::new());
     }
-    repair_uncommitted_tail(&path)?;
     read_ledger(&path)
 }
 
 fn append_index(path: &Path, record: &IndexRecord, literals: &[String]) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("fleet index path has no parent directory"))?;
+    fs::create_dir_all(parent).with_context(|| format!("could not create {}", parent.display()))?;
+    let lock_path = parent.join("index.lock");
+    let index_lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("could not open {}", lock_path.display()))?;
+    index_lock
+        .lock()
+        .with_context(|| format!("could not lock {}", lock_path.display()))?;
+    repair_uncommitted_tail(path)?;
     DurableWriter::open(path, Scrubber::new(literals.to_vec()))?.append(record)
 }
 
@@ -1575,27 +1778,14 @@ fn finish_index(
 }
 
 fn latest_incomplete_run(index_path: &Path) -> anyhow::Result<String> {
-    repair_uncommitted_tail(index_path)?;
-    let text = fs::read_to_string(index_path)
+    let bytes = fs::read(index_path)
         .with_context(|| "no fleet index found — run `nh fleet run <tasks.json>` first")?;
-    let mut records = Vec::new();
-    for (line_index, line) in text.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let record: IndexRecord = serde_json::from_str(line).with_context(|| {
-            format!(
-                "fleet index line {} is invalid",
-                line_index.saturating_add(1)
-            )
-        })?;
-        records.push(record);
-    }
+    let records: Vec<IndexRecord> = parse_jsonl(&bytes, "fleet index")?;
     let mut latest_status = HashMap::new();
     for record in &records {
         latest_status.insert(record.run_id.clone(), record.status.clone());
     }
-    records
+    let run_id = records
         .iter()
         .rev()
         .find(|record| {
@@ -1604,22 +1794,41 @@ fn latest_incomplete_run(index_path: &Path) -> anyhow::Result<String> {
                 .is_some_and(|status| status != "finished")
         })
         .map(|record| record.run_id.clone())
-        .ok_or_else(|| anyhow::anyhow!("no incomplete fleet run found"))
+        .ok_or_else(|| anyhow::anyhow!("no incomplete fleet run found"))?;
+    validate_run_id(&run_id)?;
+    Ok(run_id)
 }
 
 fn read_ledger(path: &Path) -> anyhow::Result<Vec<LedgerEvent>> {
-    let text = fs::read_to_string(path)
+    let bytes = fs::read(path)
         .with_context(|| format!("could not read fleet ledger {}", path.display()))?;
-    let mut events = Vec::new();
-    for (index, line) in text.lines().enumerate() {
-        if line.trim().is_empty() {
+    parse_jsonl(&bytes, "fleet ledger")
+}
+
+fn parse_jsonl<T: DeserializeOwned>(bytes: &[u8], label: &str) -> anyhow::Result<Vec<T>> {
+    let ends_in_newline = bytes.last() == Some(&b'\n');
+    let lines: Vec<&[u8]> = bytes.split(|byte| *byte == b'\n').collect();
+    let last_non_empty = lines.iter().rposition(|line| !jsonl_line_is_empty(line));
+    let mut values = Vec::new();
+    for (index, line) in lines.into_iter().enumerate() {
+        if jsonl_line_is_empty(line) {
             continue;
         }
-        events.push(serde_json::from_str(line).with_context(|| {
-            format!("fleet ledger line {} is invalid", index.saturating_add(1))
-        })?);
+        match serde_json::from_slice(line) {
+            Ok(value) => values.push(value),
+            Err(_) if !ends_in_newline && Some(index) == last_non_empty => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("{label} line {} is invalid", index.saturating_add(1))
+                })
+            }
+        }
     }
-    Ok(events)
+    Ok(values)
+}
+
+fn jsonl_line_is_empty(line: &[u8]) -> bool {
+    std::str::from_utf8(line).is_ok_and(|text| text.trim().is_empty())
 }
 
 /// A process can die after writing part of an event but before its flush/fsync
@@ -1675,17 +1884,27 @@ fn run_meta(events: &[LedgerEvent], expected_run_id: &str) -> anyhow::Result<Run
         .ok_or_else(|| anyhow::anyhow!("fleet ledger has no matching run_started event"))
 }
 
-fn queued_tasks(events: &[LedgerEvent]) -> anyhow::Result<BTreeMap<String, (String, String)>> {
+fn queued_tasks(events: &[LedgerEvent]) -> anyhow::Result<BTreeMap<String, QueuedTask>> {
     let mut queued = BTreeMap::new();
     for event in events {
         if let LedgerEvent::TaskQueued {
             task_id,
             task,
             route_id,
+            defer_offpeak,
+            backend,
         } = event
         {
             if queued
-                .insert(task_id.clone(), (task.clone(), route_id.clone()))
+                .insert(
+                    task_id.clone(),
+                    QueuedTask {
+                        task: task.clone(),
+                        route_id: route_id.clone(),
+                        defer_offpeak: *defer_offpeak,
+                        backend: *backend,
+                    },
+                )
                 .is_some()
             {
                 bail!("fleet ledger has duplicate queued task ids");
@@ -1983,6 +2202,8 @@ mod tests {
                 gated: 1,
                 pending: 1,
                 finished: false,
+                failed_reason: None,
+                unmetered: 0,
             }
         );
 
@@ -2000,6 +2221,8 @@ mod tests {
                 gated: 1,
                 pending: 1,
                 finished: true,
+                failed_reason: None,
+                unmetered: 0,
             }
         );
     }
@@ -2110,11 +2333,374 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn live_run_lock_refuses_resume() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_id = "locked-run";
+        let run_dir = fleet_root(tmp.path()).join(run_id);
+        let _lock = RunLock::acquire(&run_dir, Duration::ZERO).unwrap();
+
+        let error = resume(tmp.path(), Some(run_id), config(tmp.path(), Vec::new())).unwrap_err();
+
+        assert!(error.to_string().contains("run appears live"), "{error}");
+    }
+
+    #[test]
+    fn ledger_reader_ignores_torn_tail_without_mutating_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_id = "torn-reader";
+        let path = fleet_root(tmp.path()).join(run_id).join("ledger.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let committed = serde_json::to_string(&queued("safe")).unwrap();
+        fs::write(&path, format!("{committed}\n{{\"event\":\"task_sta")).unwrap();
+        let before = fs::read(&path).unwrap();
+
+        let events = read_run_ledger(tmp.path(), run_id).unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn ledger_reader_rejects_mid_file_corruption() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_id = "bad-middle";
+        let path = fleet_root(tmp.path()).join(run_id).join("ledger.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let committed = serde_json::to_string(&queued("safe")).unwrap();
+        fs::write(&path, format!("{committed}\n{{bad\n{committed}\n")).unwrap();
+
+        let error = read_run_ledger(tmp.path(), run_id).unwrap_err();
+
+        assert!(
+            error.to_string().contains("fleet ledger line 2 is invalid"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn torn_index_tail_is_read_only_then_repaired_before_append() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fleet_root(tmp.path());
+        fs::create_dir_all(&root).unwrap();
+        let index_path = root.join("index.jsonl");
+        let first = IndexRecord {
+            run_id: "first-run".into(),
+            created_utc: "2026-07-19T00:00:00Z".into(),
+            task_count: 1,
+            status: "running".into(),
+        };
+        let first_line = serde_json::to_string(&first).unwrap();
+        fs::write(&index_path, format!("{first_line}\n{{\"run_id\":")).unwrap();
+        let before = fs::read(&index_path).unwrap();
+
+        assert_eq!(latest_incomplete_run(&index_path).unwrap(), "first-run");
+        assert_eq!(fs::read(&index_path).unwrap(), before);
+
+        append_index(
+            &index_path,
+            &IndexRecord {
+                run_id: "second-run".into(),
+                created_utc: "2026-07-19T00:01:00Z".into(),
+                task_count: 1,
+                status: "running".into(),
+            },
+            &[],
+        )
+        .unwrap();
+        let bytes = fs::read(&index_path).unwrap();
+        let records: Vec<IndexRecord> = parse_jsonl(&bytes, "fleet index").unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].run_id, "first-run");
+        assert_eq!(records[1].run_id, "second-run");
+    }
+
+    #[test]
+    fn latest_run_rejects_traversal_without_touching_out_of_root_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fleet_root(tmp.path());
+        fs::create_dir_all(&root).unwrap();
+        let index_path = root.join("index.jsonl");
+        let record = IndexRecord {
+            run_id: "../evil".into(),
+            created_utc: "2026-07-19T00:00:00Z".into(),
+            task_count: 1,
+            status: "running".into(),
+        };
+        fs::write(
+            &index_path,
+            format!("{}\n", serde_json::to_string(&record).unwrap()),
+        )
+        .unwrap();
+        let outside = root.parent().unwrap().join("evil").join("ledger.jsonl");
+        fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        fs::write(&outside, b"must stay byte-identical").unwrap();
+        let before = fs::read(&outside).unwrap();
+
+        let error = resume(tmp.path(), None, config(tmp.path(), Vec::new())).unwrap_err();
+
+        assert_eq!(error.to_string(), "invalid fleet run id");
+        assert_eq!(fs::read(&outside).unwrap(), before);
+    }
+
+    #[test]
+    fn task_queued_defaults_old_ledgers_and_round_trips_resume_fields() {
+        let old: LedgerEvent = serde_json::from_str(
+            r#"{"event":"task_queued","task_id":"old","task":"work","route_id":"echo"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            old,
+            LedgerEvent::TaskQueued {
+                defer_offpeak: false,
+                backend: Backend::Native,
+                ..
+            }
+        ));
+
+        let current = LedgerEvent::TaskQueued {
+            task_id: "current".into(),
+            task: "work".into(),
+            route_id: "echo".into(),
+            defer_offpeak: true,
+            backend: Backend::KimiSwarm,
+        };
+        let encoded = serde_json::to_string(&current).unwrap();
+        let decoded: LedgerEvent = serde_json::from_str(&encoded).unwrap();
+        let queued = queued_tasks(&[decoded]).unwrap();
+        assert_eq!(
+            queued.get("current"),
+            Some(&QueuedTask {
+                task: "work".into(),
+                route_id: "echo".into(),
+                defer_offpeak: true,
+                backend: Backend::KimiSwarm,
+            })
+        );
+    }
+
+    struct PeakThenOffPeakClock {
+        calls: AtomicU64,
+    }
+
+    impl Clock for PeakThenOffPeakClock {
+        fn now(&self) -> DateTime<Utc> {
+            use chrono::TimeZone as _;
+
+            if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                Utc.with_ymd_and_hms(2026, 7, 15, 2, 0, 0).unwrap()
+            } else {
+                Utc.with_ymd_and_hms(2026, 7, 15, 10, 30, 0).unwrap()
+            }
+        }
+    }
+
+    #[test]
+    fn resume_restores_defer_offpeak_and_parks_at_peak() {
+        let _env = TestEnv::echo();
+        let tmp = tempfile::tempdir().unwrap();
+        let run_id = "resume-deferred";
+        let path = fleet_root(tmp.path()).join(run_id).join("ledger.jsonl");
+        let ledger = DurableWriter::open(&path, Scrubber::new(Vec::new())).unwrap();
+        ledger
+            .append(&LedgerEvent::RunStarted {
+                run_id: run_id.into(),
+                created_utc: "2026-07-19T00:00:00Z".into(),
+                task_count: 1,
+                max_workers: 1,
+                budget_tokens: None,
+                escalate: false,
+            })
+            .unwrap();
+        ledger
+            .append(&LedgerEvent::TaskQueued {
+                task_id: "deferred".into(),
+                task: "wait for the cheap window".into(),
+                route_id: "deepseek-v4-flash".into(),
+                defer_offpeak: true,
+                backend: Backend::Native,
+            })
+            .unwrap();
+        drop(ledger);
+
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&lines);
+        let mut fleet = config(tmp.path(), Vec::new());
+        fleet.resolver = RouteResolver::from_toml(include_str!("../../../catalog.toml")).unwrap();
+        fleet.defer_offpeak = false;
+        fleet.clock = Some(Arc::new(PeakThenOffPeakClock {
+            calls: AtomicU64::new(0),
+        }));
+        fleet.on_event = Some(Arc::new(move |line| {
+            captured.lock().unwrap().push(line.to_string());
+        }));
+
+        let report = resume(tmp.path(), Some(run_id), fleet).unwrap();
+
+        assert_eq!(report.done, 1);
+        let parked = lines
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains("deferred deferred") && line.contains("parked"));
+        assert!(parked);
+    }
+
+    #[test]
+    fn preledger_run_error_is_recorded_as_run_failed() {
+        let _env = TestEnv::echo();
+        let tmp = tempfile::tempdir().unwrap();
+        let run_id = "preledger-failure";
+        let mut missing = task("missing", "cannot resolve");
+        missing.model = Some("not-a-route".into());
+
+        let original = run_with_id(run_id.into(), config(tmp.path(), vec![missing])).unwrap_err();
+        let events = read_run_ledger(tmp.path(), run_id).unwrap();
+
+        assert_eq!(events.len(), 1);
+        let reason = match &events[0] {
+            LedgerEvent::RunFailed {
+                run_id: failed_id,
+                reason,
+            } => {
+                assert_eq!(failed_id, run_id);
+                reason
+            }
+            _ => panic!("expected one run_failed event"),
+        };
+        assert_eq!(reason, &original.to_string());
+        assert_eq!(
+            status_from_ledger(&events).failed_reason.as_deref(),
+            Some(reason.as_str())
+        );
+    }
+
+    #[test]
+    fn run_finished_supersedes_the_last_run_failed_reason() {
+        let mut events = vec![
+            LedgerEvent::RunFailed {
+                run_id: "fold-run".into(),
+                reason: "first failure".into(),
+            },
+            LedgerEvent::RunFailed {
+                run_id: "fold-run".into(),
+                reason: "last failure".into(),
+            },
+        ];
+        let failed = status_from_ledger(&events);
+        assert!(!failed.finished);
+        assert_eq!(failed.failed_reason.as_deref(), Some("last failure"));
+
+        events.push(LedgerEvent::RunFinished {
+            run_id: "fold-run".into(),
+            done: 0,
+            failed: 0,
+            gated: 0,
+        });
+        let finished = status_from_ledger(&events);
+        assert!(finished.finished);
+        assert_eq!(finished.failed_reason, None);
+    }
+
+    #[test]
+    fn budget_halt_drains_requeued_inflight_failures() {
+        let _env = TestEnv::echo();
+        std::env::set_var(TEST_SLEEP_MS_ENV, "50");
+        std::env::set_var(TEST_OUTCOME_ENV, "fail");
+        let tmp = tempfile::tempdir().unwrap();
+        let mut fleet = config(
+            tmp.path(),
+            vec![task("first", "fail first"), task("second", "fail second")],
+        );
+        fleet.max_workers = 2;
+        fleet.budget_tokens = Some(2);
+        fleet.ladder = Some(Ladder {
+            tiers: vec![
+                Tier {
+                    route_id: "echo".into(),
+                    effort: ThinkingEffort::None,
+                },
+                Tier {
+                    route_id: "echo".into(),
+                    effort: ThinkingEffort::High,
+                },
+            ],
+        });
+        let (tx, rx) = mpsc::channel();
+        let runner = thread::spawn(move || {
+            let result = run(fleet).map_err(|error| error.to_string());
+            let _ = tx.send(result);
+        });
+
+        let report = rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("budget-halted fleet hung with re-queued work")
+            .unwrap();
+        runner.join().unwrap();
+
+        assert_eq!(report.failed, 2);
+        let events = read_run_ledger(tmp.path(), &report.run_id).unwrap();
+        ensure_single_terminal(&events).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    LedgerEvent::TaskFailed { reason, .. }
+                        if reason == "budget halted before dispatch"
+                ))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn status_fold_counts_unmetered_receipts_without_fabricating_tokens() {
+        let unmetered = receipt(None);
+        let metered = receipt(Some(Usage {
+            prompt_tokens: 3,
+            completion_tokens: 2,
+            cached_tokens: None,
+        }));
+        assert_eq!(tokens_in(&unmetered), 0);
+        let events = vec![
+            LedgerEvent::TaskReceipt {
+                task_id: "unknown".into(),
+                attempt: 1,
+                receipt: unmetered,
+            },
+            LedgerEvent::TaskReceipt {
+                task_id: "known".into(),
+                attempt: 1,
+                receipt: metered,
+            },
+        ];
+
+        assert_eq!(status_from_ledger(&events).unmetered, 1);
+        assert_eq!(receipt_tokens(&events), 5);
+    }
+
+    fn receipt(usage: Option<Usage>) -> Receipt {
+        Receipt {
+            ts_utc: "2026-07-19T00:00:00Z".into(),
+            model_id: "echo-model".into(),
+            task: "fixture".into(),
+            turns: 1,
+            tool_calls: 0,
+            outcome: Outcome::Pass,
+            failure_class: None,
+            usage,
+            effective_profile: None,
+        }
+    }
+
     fn queued(id: &str) -> LedgerEvent {
         LedgerEvent::TaskQueued {
             task_id: id.into(),
             task: id.into(),
             route_id: "echo".into(),
+            defer_offpeak: false,
+            backend: Backend::Native,
         }
     }
 
