@@ -22,6 +22,11 @@ const DEFAULT_TTL_MS: u64 = 60_000;
 /// reqwest's blocking default would kill them at 30 s. Generous total cap -
 /// a dead server still fails fast on connect.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+/// Startup discovery must not hold session initialization hostage to a hung server.
+#[cfg(not(test))]
+const STARTUP_LIST_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const STARTUP_LIST_TIMEOUT: Duration = Duration::from_millis(250);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const OAUTH_EXPIRY_SKEW: Duration = Duration::from_secs(30);
 const OAUTH_DEFAULT_EXPIRES_IN: u64 = 3_600;
@@ -200,9 +205,11 @@ struct OAuthTokenResponse {
 pub struct McpClient {
     config: McpServerConfig,
     http: reqwest::blocking::Client,
+    startup_http: reqwest::blocking::Client,
     next_id: AtomicU64,
     cache: Mutex<Option<ToolCache>>,
     oauth: Mutex<OAuthState>,
+    refresh_lock: Mutex<()>,
 }
 
 impl McpClient {
@@ -216,9 +223,15 @@ impl McpClient {
                 .connect_timeout(CONNECT_TIMEOUT)
                 .build()
                 .expect("HTTP client"),
+            startup_http: reqwest::blocking::Client::builder()
+                .timeout(STARTUP_LIST_TIMEOUT)
+                .connect_timeout(CONNECT_TIMEOUT)
+                .build()
+                .expect("startup HTTP client"),
             next_id: AtomicU64::new(1),
             cache: Mutex::new(None),
             oauth: Mutex::new(OAuthState::default()),
+            refresh_lock: Mutex::new(()),
         }
     }
 
@@ -238,7 +251,7 @@ impl McpClient {
                 return Ok(cache.entries.clone());
             }
         }
-        let result = self.rpc("tools/list", json!({}))?;
+        let result = self.rpc_with(&self.startup_http, "tools/list", json!({}))?;
         let entries: Vec<ToolEntry> = result
             .get("tools")
             .and_then(Value::as_array)
@@ -278,11 +291,11 @@ impl McpClient {
     /// Server business card: GET `<url>/.well-known/mcp.json`, falling back to
     /// JSON-RPC `server/discover`. Both failing → one friendly error.
     pub fn discover(&self) -> anyhow::Result<Value> {
-        let headers = self.request_headers()?;
+        let headers = self.request_headers_with(&self.startup_http)?;
         if let Ok(card) = self.get_well_known(&headers) {
             return Ok(card);
         }
-        match self.rpc("server/discover", json!({})) {
+        match self.rpc_with(&self.startup_http, "server/discover", json!({})) {
             Ok(card) => Ok(card),
             Err(_) => bail!(
                 "mcp server \"{}\" unreachable - check the url in .nosis/mcp.toml",
@@ -296,7 +309,7 @@ impl McpClient {
             "{}/.well-known/mcp.json",
             self.config.url.trim_end_matches('/')
         );
-        let mut request = self.http.get(&url);
+        let mut request = self.startup_http.get(&url);
         for (name, value) in headers {
             request = request.header(name.as_str(), value.as_str());
         }
@@ -312,7 +325,16 @@ impl McpClient {
 
     /// One JSON-RPC 2.0 call. Every request's params carries `_meta` - the
     /// stateless core sends full context per call and never pins an instance.
-    fn rpc(&self, method: &str, mut params: Value) -> anyhow::Result<Value> {
+    fn rpc(&self, method: &str, params: Value) -> anyhow::Result<Value> {
+        self.rpc_with(&self.http, method, params)
+    }
+
+    fn rpc_with(
+        &self,
+        http: &reqwest::blocking::Client,
+        method: &str,
+        mut params: Value,
+    ) -> anyhow::Result<Value> {
         params["_meta"] = json!({
             "protocolVersion": self.config.spec,
             "clientInfo": { "name": "nosis-harness", "version": env!("CARGO_PKG_VERSION") },
@@ -327,8 +349,8 @@ impl McpClient {
         let url = &self.config.url;
         let mut retried_oauth = false;
         loop {
-            let headers = self.request_headers()?;
-            let mut request = self.http.post(url).json(&body);
+            let headers = self.request_headers_with(http)?;
+            let mut request = http.post(url).json(&body);
             for (name, value) in &headers {
                 request = request.header(name.as_str(), value.as_str());
             }
@@ -340,7 +362,12 @@ impl McpClient {
                 && matches!(self.config.auth, McpAuth::OAuth2 { .. })
                 && !retried_oauth
             {
-                self.refresh_oauth()?;
+                let rejected_access = headers.iter().find_map(|(name, value)| {
+                    name.eq_ignore_ascii_case("authorization")
+                        .then(|| value.strip_prefix("Bearer "))
+                        .flatten()
+                });
+                self.refresh_oauth(http, rejected_access)?;
                 retried_oauth = true;
                 continue;
             }
@@ -368,12 +395,15 @@ impl McpClient {
 
     /// Auth (§3.4) + outbound header lint (§3.5) - the single choke point every
     /// send passes through. The key is fetched per call, zeroized, never logged.
-    fn request_headers(&self) -> anyhow::Result<Vec<(String, String)>> {
+    fn request_headers_with(
+        &self,
+        http: &reqwest::blocking::Client,
+    ) -> anyhow::Result<Vec<(String, String)>> {
         let mut headers = Vec::new();
         match &self.config.auth {
             McpAuth::None => {}
             McpAuth::OAuth2 { .. } => {
-                let access = self.oauth_access_token()?;
+                let access = self.oauth_access_token_with(http)?;
                 headers.push(("authorization".to_string(), format!("Bearer {access}")));
             }
             McpAuth::ApiKey { vault_entry } => {
@@ -391,7 +421,7 @@ impl McpClient {
         Ok(headers)
     }
 
-    fn oauth_access_token(&self) -> anyhow::Result<String> {
+    fn oauth_access_token_with(&self, http: &reqwest::blocking::Client) -> anyhow::Result<String> {
         let valid = {
             let state = self.oauth.lock().expect("mcp oauth lock");
             state.access.is_some()
@@ -401,7 +431,7 @@ impl McpClient {
                     .is_some_and(|remaining| remaining > OAUTH_EXPIRY_SKEW)
         };
         if !valid {
-            self.refresh_oauth()?;
+            self.refresh_oauth(http, None)?;
         }
         self.oauth
             .lock()
@@ -411,7 +441,11 @@ impl McpClient {
             .ok_or_else(|| anyhow::anyhow!("mcp oauth refresh completed without an access token"))
     }
 
-    fn refresh_oauth(&self) -> anyhow::Result<()> {
+    fn refresh_oauth(
+        &self,
+        http: &reqwest::blocking::Client,
+        rejected_access: Option<&str>,
+    ) -> anyhow::Result<()> {
         let McpAuth::OAuth2 {
             token_url,
             client_id,
@@ -420,6 +454,22 @@ impl McpClient {
         else {
             return Ok(());
         };
+        let _refresh = self.refresh_lock.lock().expect("mcp oauth refresh lock");
+        let already_refreshed = {
+            let state = self.oauth.lock().expect("mcp oauth lock");
+            let valid = state.access.is_some()
+                && state
+                    .expires_at
+                    .and_then(|expires_at| expires_at.checked_duration_since(Instant::now()))
+                    .is_some_and(|remaining| remaining > OAUTH_EXPIRY_SKEW);
+            match rejected_access {
+                Some(rejected) => valid && state.access.as_deref() != Some(rejected),
+                None => valid,
+            }
+        };
+        if already_refreshed {
+            return Ok(());
+        }
         let failure = || {
             anyhow::anyhow!(
                 "mcp server \"{}\": oauth refresh failed - re-authorize with `nh key add {}-refresh` and `nh key add {}-secret` (or check token_url in .nosis/mcp.toml)",
@@ -456,8 +506,7 @@ impl McpClient {
         }
         form.push(("resource", self.config.url.trim_end_matches('/')));
 
-        let response = self
-            .http
+        let response = http
             .post(token_url)
             .form(&form)
             .send()
@@ -481,7 +530,15 @@ impl McpClient {
         state.access = Some(access);
         state.expires_at = Some(expires_at);
         if let Some(refresh) = token.refresh_token.filter(|value| !value.is_empty()) {
-            let _ = vault.set(&refresh_entry, &refresh);
+            if vault.set(&refresh_entry, &refresh).is_err() {
+                let scrubber = nh_vault::Scrubber::new(vec![refresh.clone()]);
+                eprintln!(
+                    "warning: {}",
+                    scrubber.scrub(&format!(
+                        "could not persist rotated refresh token for {vault_entry} - re-auth may be needed next session"
+                    ))
+                );
+            }
             state.refresh = Some(refresh);
         }
         Ok(())
@@ -490,6 +547,11 @@ impl McpClient {
     #[cfg(test)]
     fn expire_oauth_for_test(&self) {
         self.oauth.lock().expect("mcp oauth lock").expires_at = Some(Instant::now());
+    }
+
+    #[cfg(test)]
+    fn oauth_access_token(&self) -> anyhow::Result<String> {
+        self.oauth_access_token_with(&self.http)
     }
 }
 
@@ -639,8 +701,11 @@ impl Tool for McpToolAdapter {
     }
 
     fn execute(&self, args: Value, ctx: &ToolCtx) -> anyhow::Result<String> {
-        // MCP adapters keep their M1 trust policy and intentionally do not
-        // consult ToolCtx.guard; state-mutating calls still use ctx.approve.
+        let send_asks = match (ctx.guard)(&crate::Access::Send(&self.client.config.url)) {
+            crate::Guard::Block(reason) => return Ok(format!("blocked by law: {reason}")),
+            crate::Guard::Ask => true,
+            crate::Guard::Allow => false,
+        };
         let tool = &self.entry.info.name;
         match self.trust {
             McpTrust::Block => {
@@ -650,7 +715,7 @@ impl Tool for McpToolAdapter {
                 );
             }
             // Only server-annotated read-only tools skip the gate on auto.
-            McpTrust::Auto if self.entry.read_only => {}
+            McpTrust::Auto if self.entry.read_only && !send_asks => {}
             // Ask, and every possibly state-mutating call at any autonomy level.
             _ => {
                 let ask = format!("mcp {} {} {}", self.server, tool, args_one_line(&args));
@@ -660,7 +725,8 @@ impl Tool for McpToolAdapter {
                 }
             }
         }
-        self.client.call_tool(tool, args)
+        let raw = self.client.call_tool(tool, args)?;
+        Ok(crate::ToolResultEnvelope::new(raw, &ctx.scrubber).render())
     }
 }
 
@@ -1438,6 +1504,59 @@ vault_entry = "korvin-oauth"
     }
 
     #[test]
+    fn concurrent_oauth_refreshes_coalesce_to_one_token_post() {
+        const REFRESH_ENV: &str = "NH_COALESCED_OAUTH_REFRESH_KEY";
+        const SECRET_ENV: &str = "NH_COALESCED_OAUTH_SECRET_KEY";
+        std::env::set_var(REFRESH_ENV, "refresh-token-coalesced-fake");
+        std::env::set_var(SECRET_ENV, "csk-secret-coalesced-fake");
+
+        let mint_count = Arc::new(AtomicU64::new(0));
+        let token_count = Arc::clone(&mint_count);
+        let token_server = start_mock(move |_| {
+            token_count.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(50));
+            (
+                200,
+                json!({
+                    "access_token": "fresh-access-coalesced",
+                    "expires_in": 3_600
+                })
+                .to_string(),
+            )
+        });
+        let mcp_server = start_mock(|request| rpc_result(request, Value::Null));
+        let mut cfg = config(&mcp_server.url, McpTrust::Ask);
+        cfg.auth = McpAuth::OAuth2 {
+            token_url: token_server.url.clone(),
+            client_id: "cid-coalesced-test".into(),
+            vault_entry: "coalesced-oauth".into(),
+        };
+        let client = Arc::new(McpClient::new(cfg));
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let client = Arc::clone(&client);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                client.oauth_access_token()
+            }));
+        }
+        barrier.wait();
+        for handle in handles {
+            assert_eq!(handle.join().unwrap().unwrap(), "fresh-access-coalesced");
+        }
+        std::env::remove_var(REFRESH_ENV);
+        std::env::remove_var(SECRET_ENV);
+
+        assert_eq!(
+            mint_count.load(Ordering::SeqCst),
+            1,
+            "concurrent refreshes must share the first minted token"
+        );
+    }
+
+    #[test]
     fn oauth2_refresh_failure_is_one_secret_free_actionable_line() {
         const REFRESH_ENV: &str = "NH_MOCK_OAUTH_FAIL_REFRESH_KEY";
         const SECRET_ENV: &str = "NH_MOCK_OAUTH_FAIL_SECRET_KEY";
@@ -1579,6 +1698,88 @@ vault_entry = "korvin-oauth"
     }
 
     #[test]
+    fn adapter_result_is_bounded_and_scrubbed_at_the_egress_choke_point() {
+        const LITERAL: &str = "mcp-literal-fixture-abc123";
+        let payload = format!("{LITERAL}\n{}\nsk-fixture-abc123", "x".repeat(40_000));
+        let mock = start_mock(move |request| match request.body["method"].as_str() {
+            Some("tools/list") => rpc_result(request, mock_tools_result(None)),
+            Some("tools/call") => rpc_result(
+                request,
+                json!({ "content": [{ "type": "text", "text": payload }] }),
+            ),
+            _ => rpc_result(request, Value::Null),
+        });
+        let set = mcp_tools(&[config(&mock.url, McpTrust::Auto)]);
+        let peek = set
+            .tools
+            .iter()
+            .find(|tool| tool.spec().name == "mcp__mock__peek")
+            .unwrap();
+        let (ctx, _) = approving_ctx(true);
+        let ctx = ctx.with_scrubber(nh_vault::Scrubber::new(vec![LITERAL.to_string()]));
+
+        let result = peek.execute(json!({}), &ctx).unwrap();
+
+        assert!(result.contains("chars elided; digest "), "got: {result}");
+        assert!(!result.contains(LITERAL), "literal leaked: {result}");
+        assert!(
+            !result.contains("sk-fixture-abc123"),
+            "shape leaked: {result}"
+        );
+        assert!(result.matches("[REDACTED]").count() >= 2, "got: {result}");
+        assert!(result.chars().count() <= crate::MAX_TOOL_RESULT_CHARS + 100);
+    }
+
+    #[test]
+    fn send_law_block_stops_mcp_egress_before_trust_or_approval() {
+        let mock = start_mock(full_responder);
+        let set = mcp_tools(&[config(&mock.url, McpTrust::Auto)]);
+        let peek = set
+            .tools
+            .iter()
+            .find(|tool| tool.spec().name == "mcp__mock__peek")
+            .unwrap();
+        let (ctx, approvals) = approving_ctx(true);
+        let expected_url = mock.url.clone();
+        let seen_targets = Arc::new(Mutex::new(Vec::new()));
+        let targets = Arc::clone(&seen_targets);
+        let ctx = ctx.with_guard(Box::new(move |access| match access {
+            crate::Access::Send(target) => {
+                targets.lock().unwrap().push((*target).to_string());
+                crate::Guard::Block("egress denied".into())
+            }
+            _ => crate::Guard::Allow,
+        }));
+
+        let result = peek.execute(json!({}), &ctx).unwrap();
+
+        assert_eq!(result, "blocked by law: egress denied");
+        assert_eq!(seen_targets.lock().unwrap().as_slice(), [expected_url]);
+        assert!(approvals.lock().unwrap().is_empty());
+        assert_eq!(count_method(&mock, "tools/call"), 0);
+    }
+
+    #[test]
+    fn send_law_ask_reuses_the_existing_approval_for_auto_read_only() {
+        let mock = start_mock(full_responder);
+        let set = mcp_tools(&[config(&mock.url, McpTrust::Auto)]);
+        let peek = set
+            .tools
+            .iter()
+            .find(|tool| tool.spec().name == "mcp__mock__peek")
+            .unwrap();
+        let (ctx, approvals) = approving_ctx(true);
+        let ctx = ctx.with_guard(Box::new(|access| match access {
+            crate::Access::Send(_) => crate::Guard::Ask,
+            _ => crate::Guard::Allow,
+        }));
+
+        assert_eq!(peek.execute(json!({}), &ctx).unwrap(), "peeked");
+        assert_eq!(approvals.lock().unwrap().len(), 1);
+        assert_eq!(count_method(&mock, "tools/call"), 1);
+    }
+
+    #[test]
     fn trust_auto_read_only_skips_gate_mutating_still_asks() {
         let mock = start_mock(full_responder);
         let set = mcp_tools(&[config(&mock.url, McpTrust::Auto)]);
@@ -1659,6 +1860,24 @@ vault_entry = "korvin-oauth"
             set.warnings[0].contains("mcp server \"downbeat\""),
             "got: {}",
             set.warnings[0]
+        );
+    }
+
+    #[test]
+    fn startup_tools_list_uses_the_short_discovery_deadline() {
+        let mock = start_mock(|request| {
+            std::thread::sleep(Duration::from_secs(1));
+            rpc_result(request, mock_tools_result(None))
+        });
+        let started = Instant::now();
+
+        let set = mcp_tools(&[config(&mock.url, McpTrust::Ask)]);
+
+        assert!(set.tools.is_empty());
+        assert_eq!(set.warnings.len(), 1);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "startup discovery used the live-call timeout"
         );
     }
 

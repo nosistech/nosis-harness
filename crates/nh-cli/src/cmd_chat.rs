@@ -154,6 +154,7 @@ pub fn run(model: &str, profile: &str) -> anyhow::Result<()> {
                 cmd_run::approve_on_stdin(&scrub_line(&approve_scrubber, action))
             }),
         )
+        .with_scrubber(registry_scrubber.clone())
         .with_guard(Box::new(move |access| match access {
             Access::Read(path) => guard_from(policy.read_verdict(path)),
             Access::Write(path) => guard_from(policy.write_verdict(path)),

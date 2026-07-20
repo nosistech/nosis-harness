@@ -4,7 +4,16 @@
 use anyhow::{bail, Context};
 use serde_json::json;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::process::{Child, ChildStderr, ChildStdout, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 pub mod mcp;
 
@@ -47,6 +56,7 @@ pub struct ToolCtx {
     /// short, concrete, and scannable (the command itself, not prose around it).
     pub approve: Box<dyn Fn(&str) -> bool + Send + Sync>,
     pub guard: GuardFn,
+    pub scrubber: nh_vault::Scrubber,
 }
 
 impl ToolCtx {
@@ -61,12 +71,19 @@ impl ToolCtx {
                 Access::Exec(_) => Guard::Ask,
                 Access::Send(_) => Guard::Allow,
             }),
+            scrubber: nh_vault::Scrubber::new(Vec::new()),
         }
     }
 
     /// Install a policy-backed guard.
     pub fn with_guard(mut self, guard: GuardFn) -> Self {
         self.guard = guard;
+        self
+    }
+
+    /// Install the session scrubber so literal vault keys cannot leave through tools.
+    pub fn with_scrubber(mut self, scrubber: nh_vault::Scrubber) -> Self {
+        self.scrubber = scrubber;
         self
     }
 }
@@ -90,20 +107,24 @@ pub struct ExecShell;
 
 /// Maximum returned tool-result excerpt before head/tail elision.
 const MAX_TOOL_RESULT_CHARS: usize = 32_000;
+/// Maximum bytes retained from any one file or child-process stream before elision.
+const MAX_TOOL_READ_BYTES: usize = 2 * 1024 * 1024;
+const TOOL_BUFFER_BYTES: usize = 8 * 1024;
+const EXEC_TIMEOUT: Duration = Duration::from_secs(300);
 
-struct ToolResultEnvelope {
+pub(crate) struct ToolResultEnvelope {
     excerpt: String,
     digest: String,
     bytes: usize,
 }
 
 impl ToolResultEnvelope {
-    fn new(content: String) -> Self {
+    pub(crate) fn new(content: String, scrubber: &nh_vault::Scrubber) -> Self {
         let bytes = content.len();
         let mut hasher = DefaultHasher::new();
         content.hash(&mut hasher);
         let digest = format!("{:016x}", hasher.finish());
-        let scrubbed = nh_vault::Scrubber::new(Vec::new()).scrub(&content);
+        let scrubbed = scrubber.scrub(&content);
         let chars = scrubbed.chars().count();
         let excerpt = if chars <= MAX_TOOL_RESULT_CHARS {
             scrubbed
@@ -126,7 +147,7 @@ impl ToolResultEnvelope {
         }
     }
 
-    fn render(&self) -> String {
+    pub(crate) fn render(&self) -> String {
         let _metadata = (&self.digest, self.bytes);
         self.excerpt.clone()
     }
@@ -262,9 +283,21 @@ impl Tool for ReadFile {
         if !resolved.is_file() {
             bail!("file not found: {path} - check the path against the working directory");
         }
-        let content = std::fs::read_to_string(&resolved)
-            .with_context(|| format!("could not read {path} - is it UTF-8 text?"))?;
-        Ok(ToolResultEnvelope::new(content).render())
+        let file =
+            std::fs::File::open(&resolved).with_context(|| format!("could not read {path}"))?;
+        let mut bytes = Vec::with_capacity(TOOL_BUFFER_BYTES);
+        file.take((MAX_TOOL_READ_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("could not read {path}"))?;
+        let truncated = bytes.len() > MAX_TOOL_READ_BYTES;
+        bytes.truncate(MAX_TOOL_READ_BYTES);
+        let mut content = String::from_utf8_lossy(&bytes).into_owned();
+        if truncated {
+            content.push_str(&format!(
+                "\n…[input truncated at {MAX_TOOL_READ_BYTES} bytes]"
+            ));
+        }
+        Ok(ToolResultEnvelope::new(content, &ctx.scrubber).render())
     }
 }
 
@@ -349,6 +382,100 @@ impl Tool for ExecShell {
     }
 
     fn execute(&self, args: serde_json::Value, ctx: &ToolCtx) -> anyhow::Result<String> {
+        self.execute_with_timeout(args, ctx, EXEC_TIMEOUT)
+    }
+}
+
+struct BoundedOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+fn drain_bounded<R: Read>(mut reader: R) -> std::io::Result<BoundedOutput> {
+    let mut bytes = Vec::with_capacity(TOOL_BUFFER_BYTES);
+    let mut truncated = false;
+    let mut chunk = [0u8; TOOL_BUFFER_BYTES];
+    loop {
+        let read = reader.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        let remaining = MAX_TOOL_READ_BYTES.saturating_sub(bytes.len());
+        let keep = remaining.min(read);
+        bytes.extend_from_slice(&chunk[..keep]);
+        truncated |= keep < read;
+    }
+    Ok(BoundedOutput { bytes, truncated })
+}
+
+fn join_output(
+    handle: thread::JoinHandle<std::io::Result<BoundedOutput>>,
+    stream: &str,
+) -> anyhow::Result<BoundedOutput> {
+    handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("could not capture command {stream}: drain thread panicked"))?
+        .with_context(|| format!("could not capture command {stream}"))
+}
+
+fn render_bounded_output(output: BoundedOutput, stream: &str) -> String {
+    let mut rendered = String::from_utf8_lossy(&output.bytes).into_owned();
+    if output.truncated {
+        rendered.push_str(&format!(
+            "\n…[{stream} truncated at {MAX_TOOL_READ_BYTES} bytes]"
+        ));
+    }
+    rendered
+}
+
+fn timeout_label(timeout: Duration) -> String {
+    if timeout.subsec_nanos() == 0 {
+        format!("{}s", timeout.as_secs())
+    } else {
+        format!("{}ms", timeout.as_millis())
+    }
+}
+
+fn terminate_child_tree(child: &mut Child, command: &str) -> anyhow::Result<ExitStatus> {
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", &format!("-{}", child.id())])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    if let Some(status) = child
+        .try_wait()
+        .with_context(|| format!("could not reap timed-out command: {command}"))?
+    {
+        return Ok(status);
+    }
+    child
+        .kill()
+        .with_context(|| format!("could not kill timed-out command: {command}"))?;
+    child
+        .wait()
+        .with_context(|| format!("could not reap timed-out command: {command}"))
+}
+
+impl ExecShell {
+    fn execute_with_timeout(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolCtx,
+        timeout: Duration,
+    ) -> anyhow::Result<String> {
         let command = str_arg(&args, "command")?;
         match (ctx.guard)(&Access::Exec(command)) {
             Guard::Block(reason) => return Ok(format!("blocked by law: {reason}")),
@@ -361,16 +488,24 @@ impl Tool for ExecShell {
             }
             Guard::Allow => {}
         }
-        let mut cmd = if cfg!(windows) {
+        #[cfg(windows)]
+        let mut cmd = {
             let mut c = std::process::Command::new("cmd");
-            c.args(["/C", command]);
+            c.arg("/C");
+            c.raw_arg(command);
             c
-        } else {
+        };
+        #[cfg(not(windows))]
+        let mut cmd = {
             let mut c = std::process::Command::new("sh");
             c.args(["-c", command]);
+            c.process_group(0);
             c
         };
         cmd.current_dir(&ctx.workdir);
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
         // SECURITY INVARIANT: approved commands get only the minimum environment required
         // for shells and normal build tools, never ambient credentials.
         cmd.env_clear();
@@ -379,20 +514,45 @@ impl Tool for ExecShell {
                 cmd.env(&name, value);
             }
         }
-        let output = cmd
-            .output()
+        let mut child = cmd
+            .spawn()
             .with_context(|| format!("could not run command: {command}"))?;
-        let code = output
-            .status
-            .code()
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "killed by signal".into());
-        let content = format!(
-            "exit code: {code}\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        Ok(ToolResultEnvelope::new(content).render())
+        let stdout: ChildStdout = child.stdout.take().expect("stdout configured as piped");
+        let stderr: ChildStderr = child.stderr.take().expect("stderr configured as piped");
+        let stdout_thread = thread::spawn(move || drain_bounded(stdout));
+        let stderr_thread = thread::spawn(move || drain_bounded(stderr));
+
+        let deadline = Instant::now() + timeout;
+        let mut timed_out = false;
+        let status = loop {
+            if let Some(status) = child
+                .try_wait()
+                .with_context(|| format!("could not wait for command: {command}"))?
+            {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                timed_out = true;
+                break terminate_child_tree(&mut child, command)?;
+            }
+            thread::sleep(Duration::from_millis(50));
+        };
+
+        let stdout = render_bounded_output(join_output(stdout_thread, "stdout")?, "stdout");
+        let stderr = render_bounded_output(join_output(stderr_thread, "stderr")?, "stderr");
+        let content = if timed_out {
+            format!(
+                "command timed out after {} - killed\nstdout:\n{stdout}\nstderr:\n{stderr}",
+                timeout_label(timeout)
+            )
+        } else {
+            let code = status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "killed by signal".into());
+            format!("exit code: {code}\nstdout:\n{stdout}\nstderr:\n{stderr}")
+        };
+        Ok(ToolResultEnvelope::new(content, &ctx.scrubber).render())
     }
 }
 
@@ -447,6 +607,57 @@ mod tests {
 
         let text = ReadFile.execute(json!({"path": "note.txt"}), &ctx).unwrap();
         assert_eq!(text, "hello new world");
+    }
+
+    #[test]
+    fn read_uses_session_scrubber_for_literal_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        const LITERAL: &str = "fixture-literal-abc123";
+        std::fs::write(dir.path().join("secret.txt"), LITERAL).unwrap();
+        let ctx = ctx_with(dir.path(), true)
+            .with_scrubber(nh_vault::Scrubber::new(vec![LITERAL.to_string()]));
+
+        let result = ReadFile
+            .execute(json!({"path": "secret.txt"}), &ctx)
+            .unwrap();
+
+        assert_eq!(result, "[REDACTED]");
+        assert!(!result.contains(LITERAL));
+    }
+
+    #[test]
+    fn default_tool_context_still_scrubs_shapes_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let shaped = "sk-fixture-abc123";
+        let plain = "fixture-literal-abc123";
+        std::fs::write(dir.path().join("output.txt"), format!("{shaped}\n{plain}")).unwrap();
+
+        let result = ReadFile
+            .execute(json!({"path": "output.txt"}), &ctx_with(dir.path(), true))
+            .unwrap();
+
+        assert_eq!(result, format!("[REDACTED]\n{plain}"));
+    }
+
+    #[test]
+    fn oversized_read_is_bounded_before_envelope_elision() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("large.txt"),
+            vec![b'x'; MAX_TOOL_READ_BYTES + 100_000],
+        )
+        .unwrap();
+
+        let result = ReadFile
+            .execute(json!({"path": "large.txt"}), &ctx_with(dir.path(), true))
+            .unwrap();
+
+        assert!(result.contains("chars elided; digest "), "got: {result}");
+        assert!(
+            result.contains("input truncated at 2097152 bytes"),
+            "got: {result}"
+        );
+        assert!(result.chars().count() <= MAX_TOOL_RESULT_CHARS + 100);
     }
 
     #[test]
@@ -573,6 +784,55 @@ mod tests {
         assert!(result.contains("hello"), "got: {result}");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn exec_windows_preserves_approved_embedded_quotes_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_with(dir.path(), true);
+        let command = r#"echo a "b c" d"#;
+
+        let result = ExecShell
+            .execute(json!({"command": command}), &ctx)
+            .unwrap();
+
+        assert!(result.contains("a \"b c\" d"), "got: {result}");
+    }
+
+    #[test]
+    fn exec_timeout_kills_child_and_prevents_late_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_with(dir.path(), true);
+        let command = if cfg!(windows) {
+            "ping -n 6 127.0.0.1 > nul && echo late > marker.txt"
+        } else {
+            "sleep 5; echo late > marker.txt"
+        };
+
+        let started = Instant::now();
+        let result = ExecShell
+            .execute_with_timeout(
+                json!({"command": command}),
+                &ctx,
+                Duration::from_millis(100),
+            )
+            .unwrap();
+        let elapsed = started.elapsed();
+        thread::sleep(Duration::from_millis(1_200));
+
+        assert!(
+            result.contains("command timed out after 100ms - killed"),
+            "got: {result}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "timeout waited for a descendant instead of killing its process tree: {elapsed:?}"
+        );
+        assert!(
+            !dir.path().join("marker.txt").exists(),
+            "timed-out command continued after its shell was killed"
+        );
+    }
+
     #[test]
     fn child_env_allowlist_is_case_insensitive_and_minimal() {
         assert!(is_allowed_env_var("PATH"));
@@ -643,6 +903,28 @@ mod tests {
             .unwrap();
         assert!(result.contains("chars elided; digest "), "got: {result}");
         assert!(result.chars().count() < raw_chars);
+        assert!(result.chars().count() <= MAX_TOOL_RESULT_CHARS + 100);
+    }
+
+    #[test]
+    fn exec_stream_is_bounded_before_envelope_elision() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_with(dir.path(), true);
+        let command = if cfg!(windows) {
+            "powershell -NoProfile -Command \"[Console]::Out.Write('x' * 2200000)\""
+        } else {
+            "yes x | head -c 2200000"
+        };
+
+        let result = ExecShell
+            .execute(json!({"command": command}), &ctx)
+            .unwrap();
+
+        assert!(result.contains("chars elided; digest "), "got: {result}");
+        assert!(
+            result.contains("stdout truncated at 2097152 bytes"),
+            "got: {result}"
+        );
         assert!(result.chars().count() <= MAX_TOOL_RESULT_CHARS + 100);
     }
 
