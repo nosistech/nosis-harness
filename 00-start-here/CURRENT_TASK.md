@@ -1,6 +1,6 @@
 # Current Task
 
-## Immediate Goal — **W2 "TOOL EGRESS + EXEC" BRIEFED + LAUNCH-READY** (4 design calls ratified 2026-07-19; brief `Temp/slice-f-w2-brief-v1.txt`; contract pre-auth in CONTRACTS_M5 §0.1-F W2 table + §0.4 deps). W3 done (`2b68163`), W1 done (`d95a8d6`); Slice A–D + fmt/gate/toolchain done; FULL Fable 5 audit done (75 findings; `d868f16`). Order W1✓→W3✓→**W2 (launch next)**→W5→W4. **NEXT = LAUNCH Sol on the W2 brief** (single nosis codex, xhigh) → post-Sol cycle (gate → adversarial review → owner → commit) → W5. A bare "continue" = launch the W2 Sol run.
+## Immediate Goal — **W2 "TOOL EGRESS + EXEC" DONE + committed `e903ef0`** (2026-07-19). W3 done (`2b68163`), W1 done (`d95a8d6`); Slice A–D + fmt/gate/toolchain done; FULL Fable 5 audit done (75 findings; `d868f16`). M5 "Slice F: HARDEN" order W1✓→W3✓→W2✓→**W5**→W4. **NEXT = W5 "FLEET RELIABILITY" (nh-fleet)** — the one wave that REQUIRES amendment **A-M5-8** (nh-fleet is frozen). Not yet briefed. Sequence: (1) draft + ratify the A-M5-8 CONTRACTS_M5 §8 amendment defining nh-fleet's mutable surface (incl. the RunFailed ledger event W2 deferred to it) → (2) write the W5 brief seam-by-seam → (3) owner GO → (4) launch the single nosis Sol run → (5) post-Sol cycle (gate → adversarial review → owner → commit). A bare "continue" = ground the nh-fleet seams + draft the A-M5-8 amendment, then ask before the Sol launch.
 
 **⇒⇒ W1 DONE + committed `d95a8d6` (2026-07-19).** Sol (codex exec, xhigh) implemented all 13 items
 W1-1..W1-13 (14 audit findings: 1 high / 4 med / 7 low / 2 nit); orchestrator gated + adversarially reviewed
@@ -36,34 +36,52 @@ PASS (one self-corrected compile slip in W3b). Briefs archived `Temp/slice-f-w3-
 `slice-f-w3b-brief-v1.txt`; self-reports `Temp/w3-last-message.txt` + `w3b-last-message.txt`. Full detail in
 BUILD_LOG 2026-07-19 (W3). §8 amendment **A-M5-9** (+ glue-extension note) in CONTRACTS_M5.
 
-**⇒⇒ W2 "TOOL EGRESS + EXEC" (nh-tools + nh-mcp) — BRIEFED + LAUNCH-READY (2026-07-19).** 18 items W2-1..W2-18
-(2 high / 3 med / 8 low / 5 nit incl. the nh-mcp refactor). Brief `Temp/slice-f-w2-brief-v1.txt`; contract
-pre-auth = CONTRACTS_M5 §0.1-F **W2 seam table** + §0.4 **getrandom/subtle** dep exception (both already
-transitive → zero build weight). Grounded seam-by-seam; **frozen-safe verified**: `ToolCtx` is built only via
-`ToolCtx::new(...).with_guard(...)` everywhere (incl. nh-fleet:1207) so W2-4's `scrubber` field adds without
-touching `ToolCtx::new`; every guard closure already maps `Access::Send`→`send_verdict` so W2-6 just constructs
-`Access::Send`. **Owner ratified 4 design calls:** (1) low-6 GATE MCP egress with `[send]` (default Allow →
-unchanged); (2) low-17/low-19 `getrandom` + `subtle`; (3) nit-8/nit-9 INCLUDE the nh-mcp `State`→`Arc<ServeConfig>`
-refactor + scrubber-once; (4) medium-4 dep-free exec timeout, 300s, null stdin.
-- **Mutable surface (brief §1):** nh-tools/src/{lib.rs,mcp.rs}, nh-mcp/src/lib.rs, nh-mcp/Cargo.toml
-  (+getrandom,+subtle), + 3 one-line `with_scrubber` glue (cmd_run:126, cmd_chat:151, nh-tui:1243), Cargo.lock.
-  **nh-fleet FROZEN** — W2-10 (fleet_run preflight) calls ONLY existing nh-fleet public APIs; if a clean fix
-  needs a nh-fleet change, Sol STOPS CLEAN (→ A-M5-8/W5). W2-9 read_file bound is DROP-IF-HARD.
-- **LAUNCH the W2 Sol run (single nosis codex — verify no other *nosis* codex first; 19820 + any of Carlos's
-  are HIS, leave them). Run `run_in_background`:**
-  `Get-Content -Raw Temp\slice-f-w2-brief-v1.txt | codex exec -m gpt-5.6-sol -c model_reasoning_effort="xhigh" --dangerously-bypass-approvals-and-sandbox - *> Temp\w2-run.log`
-  (Sol writes its machine-readable self-report to `Temp\w2-last-message.txt` per brief §4 when done.)
-- **Held for W4 (NOT W3):** low-16 (from_vault skip-signal), medium-20 (install_client key-literal union).
+**⇒⇒ W2 DONE + committed `e903ef0` (2026-07-19).** Sol (codex exec, xhigh) implemented all 18 items W2-1..W2-18
+across nh-tools + nh-mcp in ONE run (2 high / 3 med / 8 low / 5 nit), no deferrals; orchestrator gated +
+adversarially reviewed + committed to main. **Gate: 395/0/1 `--release`, clippy `-D` clean, `cargo fmt --all
+--check` clean** (Sol ran no fmt; no drift this wave). +18 tests over 377. 8 files, +981/−175: nh-tools/{lib.rs,
+mcp.rs}, nh-mcp/{lib.rs,Cargo.toml}, cmd_run+cmd_chat (1-line `with_scrubber` glue), nh-tui/lib.rs, Cargo.lock.
+Key fixes: high-3 ALL tool egress through `ToolResultEnvelope`(+ctx scrubber) at the single MCP-adapter choke
+point; high-4 Windows exec `raw_arg` verbatim; medium-4 dep-free exec 300s timeout + null stdin + whole-tree
+kill; medium-11 synchronous `fleet_run` preflight rejected to caller before spawn; low-6 MCP egress gated on
+`Access::Send` (**Block stops egress before trust; default Allow byte-identical**); getrandom CSPRNG token +
+subtle constant-time bearer; nh-mcp `State`→`Runtime` refactor; exact-route-only (404 else) + 1 MiB body cap
+(413); OAuth refresh persist-warn + coalescing mutex. **Owner ratified 4 design calls** (low-6 `[send]` gate
+Block-stops / getrandom+subtle vetted primitives / nit-8/9 State→Runtime refactor / medium-4 dep-free timeout).
+**Two sound deviations** (both improvements, in the commit): (a) W2-17 `ServeConfig.token` stays
+`Option<String>` (caller input = "mint one if absent"; the guaranteed-`Some` bound token lives on the new
+`Runtime` struct → public config type unchanged for scoped callers); (b) W2-12/W2-10 use nh_fleet's REAL
+`.nosis/fleet/{run_id}` ledger path, not the brief's approximate `run_root.join(run_id)`. **nh-fleet untouched
+→ still NO A-M5-8** (built via `ToolCtx::new(...).with_guard(...)`, takes default scrubber). New deps getrandom
+0.2.17 + subtle 2.6.1 (nh-mcp direct edges; already transitive → zero build weight, §0.4 W2 exception).
+Adversarial review: **zero blocking issues**. Brief archived `Temp/slice-f-w2-brief-v1.txt`; self-report
+`Temp/w2-last-message.txt`. Full detail in BUILD_LOG 2026-07-19 (W2).
+- **Deferred to W5/A-M5-8** (owner-authorized frozen-boundary stop): a `fleet_run` that fails AFTER the
+  synchronous preflight now emits a scrubbed warning, but cannot be returned to the original caller without an
+  nh-fleet **RunFailed ledger event** — nh-fleet is frozen, so that surfacing is now formally W5 work.
+
+**⇒⇒ NEXT: W5 "FLEET RELIABILITY" (nh-fleet)** — ratified order W1✓→W3✓→W2✓→**W5**→W4. NOT yet briefed. This is
+the ONE wave that requires an amendment first: nh-fleet is M4-FROZEN, so W5 needs **A-M5-8** to define its
+mutable surface before any Sol code. Sequence:
+1. **Draft + ratify A-M5-8** (CONTRACTS_M5 §8): define nh-fleet's exact mutable surface for W5, INCLUDING the
+   **RunFailed ledger event** contract W2 deferred (so a post-preflight fleet-run failure can reach the caller).
+2. **Ground the seams + write the W5 brief** seam-by-seam (file:line) with adversarial tests — same cycle W1/W3/W2
+   got. W5 targets (§0.1 Slice F plan): #6 budget-halt hang; #7 ledger torn-read; single-writer lock; resume
+   hardcodes Native/drops offpeak; run_id unvalidated; receipts-without-usage never trip budget; run() dup
+   validation. Pull exact finding IDs from `04-research/AUDIT_2026-07_fable5-full.md`.
+3. **Owner GO** on the design calls (recommendation + why on each, per [[decisions-explain-rec-then-owner-decides]]),
+   then **ask before launching** the Sol run.
+- **Held for W4 (NOT W5):** low-16 (from_vault skip-signal), medium-20 (install_client key-literal union).
 - **LAUNCH INVOCATION** (background, xhigh, single codex — never two nosis codexes at once):
   `codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m gpt-5.6-sol -c model_reasoning_effort=xhigh -o <last-msg-file> - < <brief-file>`
-  (W1 used this form — brief piped via stdin `-`, `-o` captures Sol's machine-readable self-report; the older
+  (W1/W2 used this form — brief piped via stdin `-`, `-o` captures Sol's machine-readable self-report; the older
   `-s workspace-write` sandbox form also works — pick per environment. Verify `19820`-style stray codex
   sessions are yours before launching a second codex; NEVER two *nosis* codexes at once.)
 - **After Sol returns:** kill nh.exe → `git diff --stat` (scope) → authoritative gate via `gate.ps1`
   (fmt --check + clippy + test --release; redirect + `echo $?`, NEVER `| tail`; **note the gate's real
   verdict is its `GATE: PASS/FAIL` summary line, NOT the background wrapper's exit code**; if `fmt --check`
   flags Sol's hand-written reflow drift, orch runs the normalizing `cargo fmt` under pinned 1.96.0 then
-  re-gates) → adversarial security review → commit → next wave.
+  re-gates) → adversarial security review → commit → next wave (W4, the last).
 
 **PRIOR IN FLIGHT (Slice D — DONE, historical):**
 
@@ -306,11 +324,13 @@ review on every Slice-B item.
 + a **FULL Fable 5 high audit** (report `d868f16`: 75 confirmed = 0 crit / 7 high / 21 med / 30 low / 17
 nit). Gate GREEN **357/0/1**, clippy clean. §8 amendments A-M5-1..**7** (A-M5-8 pending for W5 fleet fixes).
 **Owner chose "EVERYTHING ACTIONABLE" → M5 "Slice F: HARDEN"** = full remediation in 5 Sol-implemented waves
-(W1 security floor / W2 tool egress+exec / W3 meter truth / W4 surfaces [FEEL] / W5 fleet [frozen]). If the
-owner typed **"continue"**: do the **⇒ Slice F** block at the TOP — ground + write the W1 Sol brief
-(nh-vault + nh-law) seam-by-seam, **ask the owner before launching the Sol run**, gate + adversarially
-review, then W3→W2→W5→W4. Also queued (no Sol): `[workspace.lints]`+`forbid(unsafe_code)` + rest of Slice E.
-Do NOT re-do Slices A–D or the fmt/hygiene commits. Read the top blocks first.
+(W1 security floor / W2 tool egress+exec / W3 meter truth / W4 surfaces [FEEL] / W5 fleet [frozen]). **W1
+(`d95a8d6`), W3 (`2b68163`), W2 (`e903ef0`) are DONE** — order now W1✓→W3✓→W2✓→**W5**→W4. If the owner typed
+**"continue"**: do the **⇒⇒ NEXT: W5** block at the TOP — ground the nh-fleet seams + draft the **A-M5-8**
+amendment (nh-fleet is frozen; W5 needs it FIRST) incl. the RunFailed ledger event W2 deferred, then write the
+W5 brief seam-by-seam, **ask the owner before launching the Sol run**, gate + adversarially review, then W4
+(the last, FEEL-gated). Also queued (no Sol): `[workspace.lints]`+`forbid(unsafe_code)` + rest of Slice E.
+Do NOT re-do Slices A–D, W1/W3/W2, or the fmt/hygiene commits. Read the top blocks first.
 
 1. **Confirm clean:** `git log --oneline -1` = `a0a4036`; `git status` clean. Kill any `nh.exe` before builds.
 2. **Read the real seams FIRST** for Slice D: `nh-routes` (a NEW `Profiles` module + `EffectiveExecutionPolicy`

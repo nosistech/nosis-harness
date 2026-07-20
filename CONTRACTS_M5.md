@@ -145,7 +145,7 @@ crate (§0.4 exception below), not a hand-rolled splitter; **(Q2)** undeclared v
 | W1-13 | nit-7 | nh-law `repo_tries_to_weaken` L321 | Δ | warn only when a repo field would actually grant. |
 
 **Held for W4 (not W1):** low-16 (`from_vault` skip-signal) + medium-20 (install_client key-literal union) —
-both nh-cli display/rebuild surface. **W2 seam table appended below (briefed 2026-07-19);** W5 table to be appended when that wave is briefed.
+both nh-cli display/rebuild surface. **W2 seam table appended below — SHIPPED `e903ef0` (2026-07-19), all 18 items;** W5 table to be appended when that wave is briefed.
 
 **W3 — METER TRUTH (nh-core + nh-routes; +2-line resolve_effort glue in nh-cli/nh-tui). Owner-ratified three
 design calls 2026-07-19: (Q1) med-2 fixed via wire-aware `resolve_effort` → §8 amendment A-M5-9; (Q2) high-1
@@ -199,6 +199,20 @@ nh-fleet:1207), so W2-4's `scrubber` field is added WITHOUT touching `ToolCtx::n
 | W2-16 | nit-8 | nh-mcp `scrubber` L508 | Δ | build the `Scrubber` once at bind, store it. |
 | W2-17 | nit-9 | nh-mcp `State`/`From` L34 | Δ | **ratified**: drop `State`, `Arc<ServeConfig>`, token plain `String` (deletes 2 `.expect()` + dead branch). |
 | W2-18 | nit-10 | nh-mcp `handle` routing L179 | Δ | exact-match GET `/.well-known/mcp.json` + POST `/mcp`; else 404. |
+
+**W2 SHIPPED `e903ef0` (2026-07-19)** — all 18 items W2-1..W2-18 in one Sol run; gate 395/0/1 `--release`,
+clippy `-D` clean, fmt --check clean; +18 tests; 8 files +981/−175. **nh-fleet untouched → still NO A-M5-8.**
+Public surface additive only: `ToolCtx` gained a `scrubber` field + `with_scrubber` builder (`ToolCtx::new`
+signature UNCHANGED). **Two sound deviations from the seam table (both improvements, in the commit):**
+(a) **W2-17** — `ServeConfig.token` STAYS `Option<String>` (not replaced by a plain `String`): the caller's
+input means "mint one if absent", so the guaranteed-`Some` bound token lives on the new `Runtime` struct
+instead, leaving the public config type unchanged for scoped callers; the `State`/`From` refactor + scrubber-once
+otherwise landed as specified. (b) **W2-12 / W2-10** — the run-directory checks use nh_fleet's REAL
+`.nosis/fleet/{run_id}` ledger path, not the table's approximate `run_root.join(run_id)`.
+**Formally deferred to W5 / A-M5-8:** W2-10's preflight rejects a bad config to the caller synchronously, but a
+`fleet_run` that fails AFTER preflight now only emits a scrubbed warning — it cannot be returned to the original
+caller without an nh-fleet **RunFailed ledger event**. nh-fleet is frozen, so that surfacing is now W5 work
+under amendment A-M5-8 (owner-authorized frozen-boundary stop).
 
 ### 0.2 THE LAW + UX-first
 - THE LAW (top authority): small, simple, secure, safe, lightweight, readable, auditable, modular,
