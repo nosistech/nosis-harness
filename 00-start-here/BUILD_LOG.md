@@ -2,6 +2,63 @@
 
 Record every meaningful session here.
 
+## 2026-07-20: M5 Slice F Wave 5 — FLEET RELIABILITY (audit W5-1..W5-11) — committed `eaadfb2`
+
+Builder:
+
+- Codex (GPT-5.6 Sol xhigh) — W5 executor from the seam-by-seam brief
+  (`Temp/slice-f-w5-brief-v1.txt`). All 11 items W5-1..W5-11 landed in **one** Sol run, no
+  deferrals. Machine-readable self-report `Temp/w5-last-message.txt` (`-o` capture). Lock
+  strategy shipped = std `File::try_lock` (the PRIMARY, not the heartbeat fallback).
+
+What changed (makes the fleet layer crash-safe and honest: two coordinators can't corrupt one
+ledger, a killed run auto-recovers, torn writes are read-tolerant without mutation, a
+budget-halted fleet can't hang, and a dead run is a first-class failure the caller sees). First
+substantive reopening of the M4-frozen nh-fleet crate, under amendment A-M5-8:
+
+- **Single-writer lock (W5-1/W5-3):** OS advisory lock on `<run_dir>/coordinator.lock` via std
+  `File::try_lock`. `run`/`run_with_id` fail-fast; `resume` bounded-retries ~2s then errors
+  "run appears live (pid N, started …)". `truncate(false)` + `set_len(0)` only AFTER acquisition
+  (never clobbers a live coordinator's diagnostics); RAII drop + OS-release-on-kill = auto
+  recovery. Index appends serialized under a separate blocking `index.lock`.
+- **Readers never mutate (W5-2):** `read_ledger`/`read_run_ledger`/`latest_incomplete_run` now
+  `fs::read` + pure `parse_jsonl`; `repair_uncommitted_tail` confined to write paths under the
+  lock. Torn final line (unparseable + no trailing `\n`) skipped read-only; mid-file /
+  committed-invalid lines stay hard errors.
+- **RunFailed ledger event (W5-7):** `run_with_id`/`resume` split into a lock-acquiring outer +
+  inner; on Err the inner best-effort appends `LedgerEvent::RunFailed{run_id,reason}` (scrubbed).
+  Closes the surfacing W2 deferred (CLI + MCP). `status_from_ledger`: a later `RunFinished`
+  supersedes it (`failed_reason` = None once complete).
+- **Budget drain + honesty (W5-8/W5-9):** `halt_remaining_for_budget` fires every over-budget
+  iteration (drains re-queued in-flight failures that hung the run — high-6). A `usage=None`
+  receipt adds zero tokens (never fabricated), warns "usage unreported — budget cannot count …",
+  and surfaces a derived `FleetStatus.unmetered` count (low-25).
+- **Resume fidelity + path safety (W5-4/W5-5/W5-6):** `TaskQueued` gains `#[serde(default)]`
+  `defer_offpeak`/`backend` + a `QueuedTask` carrier → resume restores the real backend + off-peak
+  intent (was hardcoded Native/config). `latest_incomplete_run` validates the run_id it reads
+  (rejects `../evil`). `run()`'s duplicate validation deleted — `run_with_id` is the single check
+  (so an empty / `max_workers==0` run now records a RunFailed under the lock; intended).
+- **Surfaces (W5-10/W5-11):** nh-cli `--escalate`/`--defer-offpeak` → `Option<bool>`
+  (`flag_or_file` = CLI-over-file; `--defer-offpeak=false` now overrides a file `true`). nh-mcp
+  `fleet_status` renders `failed: <reason>` + `· N unmetered`; finished line byte-identical.
+
+Orchestrator (Opus 4.8): briefed the wave (A-M5-8), launched the single background Sol run,
+ran the authoritative `gate.ps1` (fmt drift → normalizing `cargo fmt` under pinned 1.96.0 →
+re-gate; Sol ran no fmt), adversarially reviewed (ZERO blocking issues — all six focus areas
+verified vs code + a dedicated test: lock blocks a 2nd coordinator + auto-recovers on kill; the
+high-6 drain ends the hang via a 30s `recv_timeout` test; readers never mutate the ledger;
+`RunFinished` supersedes `RunFailed`; `tokens_in(usage=None)==0`; finished-status shape
+byte-identical), and committed. **Public surface additive:** `LedgerEvent += RunFailed`;
+`FleetStatus += failed_reason/unmetered`; `TaskQueued += defer_offpeak/backend` (serde-default,
+old ledgers still decode). `fleet_kill_resume.rs` untouched; no Cargo.toml; no new deps.
+
+Gate: **410 pass / 0 fail / 1 ignored** (`--release`), clippy `-D warnings` clean,
+`cargo fmt --all --check` clean; +15 tests; 6 files +976/−76. nh-fleet is now REOPENED under
+A-M5-8 — the last frozen crate touched by Slice F. Order W1✓→W3✓→W2✓→W5✓→**W4** (surfaces,
+FEEL), now folded into the owner-directed Release Slice.
+
+---
+
 ## 2026-07-19: M5 Slice F Wave 2 — TOOL EGRESS + EXEC (audit W2-1..W2-18) — committed `e903ef0`
 
 Builder:
