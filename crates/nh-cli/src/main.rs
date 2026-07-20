@@ -119,10 +119,10 @@ enum FleetAction {
         max_workers: Option<usize>,
         #[arg(long)]
         budget: Option<u64>,
-        #[arg(long)]
-        escalate: bool,
-        #[arg(long)]
-        defer_offpeak: bool,
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        escalate: Option<bool>,
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        defer_offpeak: Option<bool>,
     },
     /// Resume the latest incomplete run, or a specific run id
     Resume {
@@ -474,8 +474,35 @@ mod tests {
                 assert_eq!(tasks, std::path::PathBuf::from("tasks.json"));
                 assert_eq!(max_workers, Some(3));
                 assert_eq!(budget, Some(900));
-                assert!(escalate);
-                assert!(defer_offpeak);
+                assert_eq!(escalate, Some(true));
+                assert_eq!(defer_offpeak, Some(true));
+            }
+            _ => panic!("expected fleet run"),
+        }
+    }
+
+    #[test]
+    fn parses_fleet_run_false_flag_overrides() {
+        let cli = Cli::try_parse_from([
+            "nh",
+            "fleet",
+            "run",
+            "tasks.json",
+            "--escalate=false",
+            "--defer-offpeak=false",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Cmd::Fleet {
+                action:
+                    FleetAction::Run {
+                        escalate,
+                        defer_offpeak,
+                        ..
+                    },
+            } => {
+                assert_eq!(escalate, Some(false));
+                assert_eq!(defer_offpeak, Some(false));
             }
             _ => panic!("expected fleet run"),
         }

@@ -302,6 +302,8 @@ fn resume_continues_escalation_from_the_ledger_ladder_position() {
             task_id: "climb".into(),
             task: "execute climb".into(),
             route_id: "deepseek-v4-flash".into(),
+            defer_offpeak: false,
+            backend: Backend::Native,
         },
         LedgerEvent::TaskStarted {
             task_id: "climb".into(),
