@@ -9,6 +9,8 @@ serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 tiny_http.workspace = true
+getrandom = "0.2"
+subtle = "2.6"
 nh-fleet = { path = "../nh-fleet" }
 nh-law = { path = "../nh-law" }
 nh-routes = { path = "../nh-routes" }
