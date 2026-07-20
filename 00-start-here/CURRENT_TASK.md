@@ -1,6 +1,6 @@
 # Current Task
 
-## Immediate Goal — **W3 "METER TRUTH" DONE + committed `2b68163`** (feat, on `591544c`; docs-close follows). W1 SECURITY FLOOR done (`d95a8d6`); Slice A–D + fmt/gate/toolchain done; FULL Fable 5 audit done (75 findings; `d868f16`). M5 "Slice F: HARDEN" order W1✓→W3✓→**W2**→W5→W4. **NEXT = W2 "TOOL EGRESS + EXEC" (nh-tools + nh-mcp)** — not yet briefed; ground the seams → draft a file:line brief → owner-approve → launch Sol (a bare "continue" = ground + draft the W2 brief, ask before Sol launch).
+## Immediate Goal — **W2 "TOOL EGRESS + EXEC" BRIEFED + LAUNCH-READY** (4 design calls ratified 2026-07-19; brief `Temp/slice-f-w2-brief-v1.txt`; contract pre-auth in CONTRACTS_M5 §0.1-F W2 table + §0.4 deps). W3 done (`2b68163`), W1 done (`d95a8d6`); Slice A–D + fmt/gate/toolchain done; FULL Fable 5 audit done (75 findings; `d868f16`). Order W1✓→W3✓→**W2 (launch next)**→W5→W4. **NEXT = LAUNCH Sol on the W2 brief** (single nosis codex, xhigh) → post-Sol cycle (gate → adversarial review → owner → commit) → W5. A bare "continue" = launch the W2 Sol run.
 
 **⇒⇒ W1 DONE + committed `d95a8d6` (2026-07-19).** Sol (codex exec, xhigh) implemented all 13 items
 W1-1..W1-13 (14 audit findings: 1 high / 4 med / 7 low / 2 nit); orchestrator gated + adversarially reviewed
@@ -36,13 +36,23 @@ PASS (one self-corrected compile slip in W3b). Briefs archived `Temp/slice-f-w3-
 `slice-f-w3b-brief-v1.txt`; self-reports `Temp/w3-last-message.txt` + `w3b-last-message.txt`. Full detail in
 BUILD_LOG 2026-07-19 (W3). §8 amendment **A-M5-9** (+ glue-extension note) in CONTRACTS_M5.
 
-**⇒⇒ NEXT: W2 "TOOL EGRESS + EXEC" (nh-tools + nh-mcp)** — ratified order W1✓→W3✓→**W2**→W5→W4. NOT yet briefed.
-Same cycle: ground seam-by-seam (read the nh-tools egress + exec + nh-mcp server paths W2 touches) → draft a
-file:line brief with adversarial tests → owner approves the design calls → launch Sol.
-- **W2 targets** (§0.1 seam table / Slice F plan below): #3 MCP results through `ToolResultEnvelope`; #4
-  Windows exec `raw_arg`; ExecShell timeout+stdin, tools/list timeout, envelope literal-scrub, Send-verdict
-  unenforced, OAuth refresh persist/race; nh-mcp CSPRNG token + constant-time compare + body cap + accept_loop
-  signal, fleet_status 'starting', scrubber-recompile / State-dup / loose-routing.
+**⇒⇒ W2 "TOOL EGRESS + EXEC" (nh-tools + nh-mcp) — BRIEFED + LAUNCH-READY (2026-07-19).** 18 items W2-1..W2-18
+(2 high / 3 med / 8 low / 5 nit incl. the nh-mcp refactor). Brief `Temp/slice-f-w2-brief-v1.txt`; contract
+pre-auth = CONTRACTS_M5 §0.1-F **W2 seam table** + §0.4 **getrandom/subtle** dep exception (both already
+transitive → zero build weight). Grounded seam-by-seam; **frozen-safe verified**: `ToolCtx` is built only via
+`ToolCtx::new(...).with_guard(...)` everywhere (incl. nh-fleet:1207) so W2-4's `scrubber` field adds without
+touching `ToolCtx::new`; every guard closure already maps `Access::Send`→`send_verdict` so W2-6 just constructs
+`Access::Send`. **Owner ratified 4 design calls:** (1) low-6 GATE MCP egress with `[send]` (default Allow →
+unchanged); (2) low-17/low-19 `getrandom` + `subtle`; (3) nit-8/nit-9 INCLUDE the nh-mcp `State`→`Arc<ServeConfig>`
+refactor + scrubber-once; (4) medium-4 dep-free exec timeout, 300s, null stdin.
+- **Mutable surface (brief §1):** nh-tools/src/{lib.rs,mcp.rs}, nh-mcp/src/lib.rs, nh-mcp/Cargo.toml
+  (+getrandom,+subtle), + 3 one-line `with_scrubber` glue (cmd_run:126, cmd_chat:151, nh-tui:1243), Cargo.lock.
+  **nh-fleet FROZEN** — W2-10 (fleet_run preflight) calls ONLY existing nh-fleet public APIs; if a clean fix
+  needs a nh-fleet change, Sol STOPS CLEAN (→ A-M5-8/W5). W2-9 read_file bound is DROP-IF-HARD.
+- **LAUNCH the W2 Sol run (single nosis codex — verify no other *nosis* codex first; 19820 + any of Carlos's
+  are HIS, leave them). Run `run_in_background`:**
+  `Get-Content -Raw Temp\slice-f-w2-brief-v1.txt | codex exec -m gpt-5.6-sol -c model_reasoning_effort="xhigh" --dangerously-bypass-approvals-and-sandbox - *> Temp\w2-run.log`
+  (Sol writes its machine-readable self-report to `Temp\w2-last-message.txt` per brief §4 when done.)
 - **Held for W4 (NOT W3):** low-16 (from_vault skip-signal), medium-20 (install_client key-literal union).
 - **LAUNCH INVOCATION** (background, xhigh, single codex — never two nosis codexes at once):
   `codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m gpt-5.6-sol -c model_reasoning_effort=xhigh -o <last-msg-file> - < <brief-file>`
