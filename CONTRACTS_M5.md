@@ -145,7 +145,7 @@ crate (§0.4 exception below), not a hand-rolled splitter; **(Q2)** undeclared v
 | W1-13 | nit-7 | nh-law `repo_tries_to_weaken` L321 | Δ | warn only when a repo field would actually grant. |
 
 **Held for W4 (not W1):** low-16 (`from_vault` skip-signal) + medium-20 (install_client key-literal union) —
-both nh-cli display/rebuild surface. W2/W5 seam tables to be appended when each wave is briefed.
+both nh-cli display/rebuild surface. **W2 seam table appended below (briefed 2026-07-19);** W5 table to be appended when that wave is briefed.
 
 **W3 — METER TRUTH (nh-core + nh-routes; +2-line resolve_effort glue in nh-cli/nh-tui). Owner-ratified three
 design calls 2026-07-19: (Q1) med-2 fixed via wire-aware `resolve_effort` → §8 amendment A-M5-9; (Q2) high-1
@@ -169,6 +169,36 @@ Brief: `Temp/slice-f-w3-brief-v1.txt`.
 | W3-12 | low-5 | nh-routes `read_optional_profiles` L285,292 | Δ | include the io/parse error in the warning (surface the actionable ThinkingPosture message). |
 | W3-13 | nit-3 | nh-routes `from_toml` L639 | Δ | validate one-currency-per-provider at parse (fail-closed; shipped catalog is clean). |
 | W3-14 | nit-4 | nh-routes `Profiles::effective`/`clamp_route` profiles.rs L207,247 | Δ | one shared `min_cap` helper (one truth; defensive re-min preserved). |
+
+**W2 — TOOL EGRESS + EXEC (nh-tools + nh-mcp; + 3 one-line `with_scrubber` glue in nh-cli/nh-tui). Owner-ratified
+four design calls 2026-07-19: (1) low-6 GATE MCP egress with the `[send]` verdict — make the dead class real
+(default Allow → unchanged; frozen-safe, every guard closure already maps `Access::Send`→`send_verdict`); (2)
+low-17/low-19 use `getrandom` + `subtle` (both already transitive → §0.4); (3) nit-8/nit-9 INCLUDE the nh-mcp
+`State`→`Arc<ServeConfig>` refactor + scrubber-once; (4) medium-4 dep-free exec timeout, 300s, null stdin.**
+Frozen-safe verified: `ToolCtx` is built only via `ToolCtx::new(...).with_guard(...)` everywhere (incl.
+nh-fleet:1207), so W2-4's `scrubber` field is added WITHOUT touching `ToolCtx::new`'s signature. Brief:
+`Temp/slice-f-w2-brief-v1.txt`.
+
+| # | Ref (audit) | Crate:seam | Tag | Change |
+|---|---|---|:--:|---|
+| W2-1 | high-3 | nh-tools mcp.rs `McpToolAdapter::execute` L663 | Δ | wrap MCP result in `ToolResultEnvelope::new(_, &ctx.scrubber).render()` — the SINGLE egress cap+scrub choke point for all tools. |
+| W2-2 | high-4 | nh-tools `ExecShell::execute` L364 | Δ | Windows `cmd.arg("/C"); cmd.raw_arg(command)` (approved bytes run verbatim); Unix `sh -c` unchanged. |
+| W2-3 | medium-4 | nh-tools `ExecShell::execute` L382 | Δ | null stdin + dep-free 300s timeout (piped drain threads + kill on deadline); timeout → Ok-shaped result. |
+| W2-4 | medium-5 | nh-tools `ToolCtx`/`ToolResultEnvelope::new` L43,106 (+ glue cmd_run:126, cmd_chat:151, nh-tui:1243) | Δ+ | add `scrubber` field (default empty, `with_scrubber` builder, `new` sig UNCHANGED); envelope scrubs real vault literals; nh-fleet keeps default. |
+| W2-5 | medium-6 | nh-tools mcp.rs startup `list_tools_full` L24,598 | Δ | separate short discovery timeout (~10s), not the 600s live-call timeout. |
+| W2-6 | low-6 | nh-tools mcp.rs `McpToolAdapter::execute` L641 | Δ | **ratified**: construct `Access::Send(server_url)` → guard before egress (activates the dead `[send]` class; default Allow → unchanged). |
+| W2-7 | low-7 | nh-tools mcp.rs OAuth refresh L484 | Δ | surface the rotated-refresh persist failure (one scrubbed warning), don't swallow. |
+| W2-8 | low-8 | nh-tools mcp.rs OAuth refresh L434,480 | Δ | dedicated refresh `Mutex` across the whole refresh + re-check inside; coalesce concurrent 401s. |
+| W2-9 | low-9 | nh-tools `ReadFile`/exec buffering L265,382 | Δ | bound the read (2 MiB) before elision (OOM guard). DROP-IF-HARD on read_file. |
+| W2-10 | medium-11 | nh-mcp `fleet_run` L453 | Δ | synchronous preflight (route-resolve + key-presence) before spawn → reject bad configs to caller; nh-mcp side ONLY — STOP if it needs a frozen nh-fleet change (→ A-M5-8/W5). |
+| W2-11 | low-17 | nh-mcp `mint_token` L131 | Δ | **ratified**: `getrandom` 32 bytes → 64 hex (CSPRNG). |
+| W2-12 | low-18 | nh-mcp `fleet_status` L479 | Δ | unknown run_id → "unknown run" (check run dir), not "starting". |
+| W2-13 | low-19 | nh-mcp `authorized` L270 | Δ | **ratified**: `subtle::ConstantTimeEq` bearer compare. |
+| W2-14 | low-20 | nh-mcp `handle` body read L193 | Δ | cap body at 1 MiB (`take`), 413 on overflow. |
+| W2-15 | low-21 | nh-mcp `accept_loop` L159 | Δ | warn on a real recv error before break (distinguish clean shutdown). |
+| W2-16 | nit-8 | nh-mcp `scrubber` L508 | Δ | build the `Scrubber` once at bind, store it. |
+| W2-17 | nit-9 | nh-mcp `State`/`From` L34 | Δ | **ratified**: drop `State`, `Arc<ServeConfig>`, token plain `String` (deletes 2 `.expect()` + dead branch). |
+| W2-18 | nit-10 | nh-mcp `handle` routing L179 | Δ | exact-match GET `/.well-known/mcp.json` + POST `/mcp`; else 404. |
 
 ### 0.2 THE LAW + UX-first
 - THE LAW (top authority): small, simple, secure, safe, lightweight, readable, auditable, modular,
@@ -202,6 +232,11 @@ Brief: `Temp/slice-f-w3-brief-v1.txt`.
   differential exfil class (high-5), not just the one backslash trick. `url` v2.5.8 is already compiled
   (transitive via reqwest), so this is a dependency-*declaration* change with **zero build weight**. This
   is a deliberate, scoped override of "no new runtime crates" for one security-critical seam.
+- **Slice F W2 exception (owner-ratified 2026-07-19):** `getrandom` (W2-11 CSPRNG token) and `subtle` (W2-13
+  constant-time bearer compare) become **direct** deps of `nh-mcp`. Both are already compiled transitively
+  (present in `Cargo.lock`), so this is a dependency-*declaration* change with **zero build weight** — chosen
+  over hand-rolled crypto (THE LAW: auditable; vetted primitives beat home-grown). No other W2 deps: the exec
+  timeout (W2-3) is dep-free by ratified choice (no `wait-timeout`); raw_arg (W2-2) is std.
 
 ### 0.5 M5 exit criteria (each maps to one slice + a real headless test)
 - **E1 — TRUTH (Slice A).** On a mock provider: a None/Low-effort turn's built body has thinking
