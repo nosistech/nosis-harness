@@ -2,6 +2,80 @@
 
 Record every meaningful session here.
 
+## 2026-07-19: M5 Slice F Wave 2 — TOOL EGRESS + EXEC (audit W2-1..W2-18) — committed `e903ef0`
+
+Builder:
+
+- Codex (GPT-5.6 Sol xhigh) — W2 executor from the seam-by-seam brief
+  (`Temp/slice-f-w2-brief-v1.txt`). All 18 items W2-1..W2-18 landed in **one** Sol run, no
+  deferrals, one self-corrected compile slip. Self-report `Temp/w2-last-message.txt`.
+
+What changed (makes tool egress + local exec SAFE: every byte a tool sends outbound goes
+through one capped, scrubbed choke point; every command runs bounded and killable):
+
+- **nh-tools (egress + exec):** ALL tool results now pass through `ToolResultEnvelope`
+  (bound + shape-scrub) at the single MCP-adapter egress choke point, using the session
+  `ToolCtx` scrubber (W2-1, high-3). Windows `ExecShell` runs the approved command via
+  `cmd /C` + `raw_arg` verbatim — no re-quoting differential (W2-2, high-4). Exec gets null
+  stdin, concurrent pipe drains, a dep-free 300s timeout, and whole-tree kill+reap on
+  deadline (W2-3, medium-4). `ToolCtx` gains a `scrubber` field + `with_scrubber` builder
+  (`ToolCtx::new` signature UNCHANGED so nh-fleet is untouched); the three interactive
+  callers (cmd_run, cmd_chat, nh-tui) install key-literal scrubbers, nh-fleet keeps the
+  default shape-only scrubber (W2-4, medium-5). Startup `tools/list`/discover uses a distinct
+  10s HTTP client, not the 600s live-call timeout (W2-5). MCP egress consults
+  `Access::Send(url)`: **Block stops the call before trust; default Allow is byte-identical**
+  to before, and Ask reuses the existing approval (W2-6, low-6). Rotated refresh-token
+  persist failure emits one secret-free scrubbed warning instead of swallowing (W2-7); a
+  dedicated refresh `Mutex` coalesces concurrent 401 refreshes to a single token POST (W2-8).
+  read_file and each exec stream retain at most 2 MiB before the 32k envelope elision (W2-9).
+- **nh-mcp (inbound server):** `fleet_run` runs a **synchronous** route/task/key/run-directory
+  preflight and rejects a bad config to the caller before spawning (W2-10, medium-11). The
+  bearer token is 32 `getrandom` CSPRNG bytes → 64 hex (W2-11, low-17), compared with
+  `subtle::ConstantTimeEq` on equal-length input (W2-13, low-19). `fleet_status` distinguishes
+  an unknown run (no directory) from an existing-but-empty run = starting (W2-12, low-18).
+  Request bodies are capped at 1 MiB → 413 on overflow (W2-14); a non-shutdown accept error
+  emits one scrubbed warning before exit (W2-15); one `Scrubber` is built at bind and reused
+  (W2-16). The `State`/`From` duplication is replaced by a `Runtime` holding
+  `Arc<ServeConfig>`, a plain bound token `String`, and the shared scrubber (W2-17, nit-9);
+  routing accepts ONLY exact `GET /.well-known/mcp.json` + `POST /mcp`, else 404 (W2-18).
+
+Frozen surfaces preserved byte-stable: **nh-fleet untouched → still NO A-M5-8** (it builds
+`ToolCtx` via `ToolCtx::new(...).with_guard(...)` and takes the default scrubber);
+`ToolCtx::new`'s signature is unchanged. New public surface is additive only:
+`ToolCtx.scrubber` field + `ToolCtx::with_scrubber` builder.
+
+Owner ratified 4 design calls: (1) low-6 GATE MCP egress with `[send]` — a `Block` verdict
+stops egress before trust; a default/`Allow` path is byte-identical to pre-W2; (2) low-17/-19
+use `getrandom` (CSPRNG token) + `subtle` (constant-time bearer) — vetted primitives over
+hand-rolled crypto; (3) nit-8/-9 INCLUDE the nh-mcp `State`→`Runtime` refactor + scrubber-once;
+(4) medium-4 dep-free exec timeout (300s), null stdin, whole-tree kill.
+
+Two sound deviations from the brief (both improvements, both in the commit): (a) W2-17 keeps
+`ServeConfig.token` as `Option<String>` — the caller's input means "mint one if absent"; the
+guaranteed-`Some` bound token lives on the new `Runtime` struct instead, so the public config
+type is unchanged for scoped callers; (b) W2-12/W2-10 use nh_fleet's REAL `.nosis/fleet/{run_id}`
+ledger path rather than the brief's approximate `run_root.join(run_id)`.
+
+Deferred to W5/A-M5-8 (owner-authorized frozen-boundary stop): a `fleet_run` that fails AFTER
+the synchronous preflight now emits a scrubbed warning, but cannot be returned to the original
+caller without an nh-fleet **RunFailed ledger event** — nh-fleet is frozen, so that surfacing
+is now formally W5 work under amendment A-M5-8.
+
+New deps (nh-mcp direct edges only): `getrandom` 0.2.17 + `subtle` 2.6.1 — both already
+transitive, so zero added build weight (§0.4 W2 exception). Cargo.lock change is exactly those
+two edges.
+
+Gate: **395 pass / 0 fail / 1 ignored** (`--release`), clippy `-D warnings` clean,
+`cargo fmt --all --check` clean (Sol did not run fmt; no drift to normalize this wave). +18 new
+tests over 377. 8 files, +981/−175. Adversarially reviewed by the orchestrator (Opus 4.8):
+**zero blocking issues** — the egress choke point is the only path to `render()`, `[send]` Block
+provably stops the call before trust, timeout kills the whole tree + prevents a late marker,
+constant-time compare only on equal-length input, exact-route matching rejects everything else.
+
+Next: **W5 "FLEET RELIABILITY" (nh-fleet)** — the one wave that REQUIRES amendment **A-M5-8**
+(nh-fleet is frozen), including the RunFailed ledger contract W2 deferred above. Order now
+W1✓→W3✓→W2✓→**W5**→W4.
+
 ## 2026-07-19: M5 Slice F Wave 3 — METER TRUTH (audit W3-1..W3-14 + A-M5-9) — committed `2b68163`
 
 Builder:
