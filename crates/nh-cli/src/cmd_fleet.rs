@@ -16,6 +16,10 @@ use crate::cmd_run;
 const DEFAULT_ROUTE: &str = "deepseek-v4-flash";
 const DEFAULT_MAX_WORKERS: usize = 4;
 
+fn flag_or_file(cli: Option<bool>, file: Option<bool>) -> bool {
+    cli.or(file).unwrap_or(false)
+}
+
 #[derive(Deserialize)]
 struct TaskFile {
     tasks: Vec<TaskSpec>,
@@ -33,8 +37,8 @@ pub fn run_tasks(
     tasks_path: &Path,
     max_workers: Option<usize>,
     budget: Option<u64>,
-    escalate: bool,
-    defer_offpeak: bool,
+    escalate: Option<bool>,
+    defer_offpeak: Option<bool>,
 ) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let (root, catalog) = cmd_run::find_catalog(&cwd)?;
@@ -44,8 +48,8 @@ pub fn run_tasks(
         .with_context(|| format!("could not read {}", tasks_path.display()))?;
     let task_file: TaskFile = serde_json::from_str(&input)
         .with_context(|| format!("{} is not a valid fleet task file", tasks_path.display()))?;
-    let defer_offpeak = defer_offpeak || task_file.defer_offpeak.unwrap_or(false);
-    let escalate = escalate || task_file.escalate.unwrap_or(false);
+    let defer_offpeak = flag_or_file(defer_offpeak, task_file.defer_offpeak);
+    let escalate = flag_or_file(escalate, task_file.escalate);
     let resolver = RouteResolver::from_toml(&catalog)?;
     let report = nh_fleet::run(FleetConfig {
         resolver,
@@ -147,5 +151,11 @@ mod tests {
         assert_eq!(file.budget_tokens, Some(99));
         assert_eq!(file.defer_offpeak, Some(false));
         assert_eq!(file.escalate, Some(true));
+    }
+
+    #[test]
+    fn cli_false_overrides_true_task_file_flag() {
+        assert!(!flag_or_file(Some(false), Some(true)));
+        assert!(flag_or_file(None, Some(true)));
     }
 }
