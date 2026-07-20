@@ -145,7 +145,7 @@ crate (§0.4 exception below), not a hand-rolled splitter; **(Q2)** undeclared v
 | W1-13 | nit-7 | nh-law `repo_tries_to_weaken` L321 | Δ | warn only when a repo field would actually grant. |
 
 **Held for W4 (not W1):** low-16 (`from_vault` skip-signal) + medium-20 (install_client key-literal union) —
-both nh-cli display/rebuild surface. **W2 seam table appended below — SHIPPED `e903ef0` (2026-07-19), all 18 items;** W5 table to be appended when that wave is briefed.
+both nh-cli display/rebuild surface. **W2 seam table appended below — SHIPPED `e903ef0` (2026-07-19), all 18 items; W5 seam table appended below (briefed 2026-07-19) — see §8 A-M5-8.**
 
 **W3 — METER TRUTH (nh-core + nh-routes; +2-line resolve_effort glue in nh-cli/nh-tui). Owner-ratified three
 design calls 2026-07-19: (Q1) med-2 fixed via wire-aware `resolve_effort` → §8 amendment A-M5-9; (Q2) high-1
@@ -213,6 +213,28 @@ otherwise landed as specified. (b) **W2-12 / W2-10** — the run-directory check
 `fleet_run` that fails AFTER preflight now only emits a scrubbed warning — it cannot be returned to the original
 caller without an nh-fleet **RunFailed ledger event**. nh-fleet is frozen, so that surfacing is now W5 work
 under amendment A-M5-8 (owner-authorized frozen-boundary stop).
+
+**W5 — FLEET RELIABILITY (nh-fleet [FROZEN → A-M5-8]; + nh-mcp fleet_status render + nh-cli fleet flags, both
+non-frozen). The FIRST substantive reopening of frozen nh-fleet** (scheduler loop / ledger read+schema / budget
+accounting — not compile-glue). Full rationale, the four owner-ratified design calls (std `File::try_lock` lock,
+nh-fleet writes RunFailed, never-fabricate budget honesty, nit-17 folded in), the verbatim frozen-crate ripple,
+the fallback contingency, and the frozen/mandatory-gate list are in §8 **A-M5-8**. Brief:
+`Temp/slice-f-w5-brief-v1.txt`. Order W1✓→W3✓→W2✓→**W5**→W4. Implement in the sequence below (lock is the
+foundation; high-7 repair-under-lock depends on it):
+
+| # | Ref (audit) | Crate:seam | Tag | Change |
+|---|---|---|:--:|---|
+| W5-1 | medium-15 | nh-fleet `run_with_id` L376 / `resume` L469 (+ new `RunLock`) | Δ+ | acquire a std `File::try_lock` on `<run_id>/coordinator.lock` before any ledger write, held for the run; resume bounded-retries ~2s on `WouldBlock` then errors "run appears live". Foundation for W5-2. |
+| W5-2 | high-7 | nh-fleet `read_run_ledger` L1550 / `latest_incomplete_run` L1578 / `read_ledger` L1610 | Δ | readers never mutate: drop the read-path `repair_uncommitted_tail`; tolerate a torn final line **in memory** (last line unparseable AND no trailing `\n`); other bad lines stay hard errors. `set_len` repair runs only in run/resume under the W5-1 lock. |
+| W5-3 | high-7 (index) | nh-fleet `append_index` L1554 | Δ | lock a sibling `index.lock` (std `File::lock`), repair-then-append under it; never lock `index.jsonl` itself. |
+| W5-4 | medium-17 | nh-fleet `latest_incomplete_run` L1606 | Δ | `validate_run_id` the returned id inside the producer; fail loud (tamper evidence). |
+| W5-5 | nit-14 | nh-fleet `run` L336-344 | Δ | delete the duplicate validation; `run_with_id` is the single check. |
+| W5-6 | medium-16 | nh-fleet `TaskQueued` L196 / `queued_tasks` L1678 / `resume` L513 (+ `impl Default for Backend`, `QueuedTask`) | Δ+ | persist `defer_offpeak`+`backend` in `TaskQueued` (`#[serde(default)]`→Native/false); restore on resume instead of the Native/`config` hardcode. |
+| W5-7 | medium-11 (deferred) | nh-fleet `LedgerEvent` L235 / `run_with_id`+`resume` Err path / `status_from_ledger` L289 / `plan_from_ledger` L265 / `FleetStatus` L176 | Δ+ | add `RunFailed{run_id,reason}`; run bodies best-effort append it on Err (under lock); `finished` supersedes it; `FleetStatus.failed_reason`. |
+| W5-8 | high-6 | nh-fleet `execute_tasks` L929-943 | Δ | one unconditional drain choke point: whenever `used_tokens >= limit`, set halted + `halt_remaining_for_budget` (drains re-queued Retry/Escalate jobs that today spin forever). |
+| W5-9 | low-25 | nh-fleet `execute_tasks` L805 / `status_from_ledger` (+`FleetStatus.unmetered`) | Δ+ | emit a per-receipt "usage unreported — budget cannot count this task" warning when budget is set; surface a derived `unmetered` count; never fabricate tokens into `used_tokens`. |
+| W5-10 | nit-17 | nh-cli `main.rs` L122-125 (+ tests L449-480) / `cmd_fleet.rs` L47-48 | Δ | `escalate`/`defer_offpeak` → `Option<bool>` (`--flag[=true|false]`), resolve `cli.or(file).unwrap_or(false)`. |
+| W5-11 | medium-11 (surface) | nh-mcp `fleet_status` L553-568 | Δ | render `failed: <reason>` + `· N unmetered` (>0 only); byte-identical otherwise. |
 
 ### 0.2 THE LAW + UX-first
 - THE LAW (top authority): small, simple, secure, safe, lightweight, readable, auditable, modular,
@@ -656,3 +678,75 @@ only the reported tier on those two surfaces. Implementation folded `cmd_run::ef
 `Wire` and dropped the transient `effort_for_wire` wrapper (mirrors nh-tui's `effort_for`, leaves no
 test-only helper → no `clippy -D` dead-code trap). Delivered as the W3b addendum (Sol, xhigh;
 `Temp/slice-f-w3b-brief-v1.txt`; self-report `Temp/w3b-last-message.txt`). Committed with W3 in `2b68163`.
+
+**A-M5-8 (2026-07-19, orchestrator Opus 4.8; owner-ratified — Fable 5 design direction) — Slice F W5 FLEET
+RELIABILITY: the first SUBSTANTIVE reopening of frozen nh-fleet.** Every prior nh-fleet amendment (A-M5-2/-4/-7)
+touched the crate only as *compile-glue* (one match arm, one `None` struct field) and left all logic frozen.
+W5 is categorically different: it reopens nh-fleet's scheduler loop, ledger read/concurrency model, ledger event
+schema, and budget accounting to fix the audit's fleet findings (high-6, high-7, medium-15/-16/-17, low-25,
+nit-14) plus the RunFailed surfacing W2 deferred (medium-11 ledger tail). The M4 freeze existed to protect the
+proven fleet core, so this amendment enumerates the mutable surface **verbatim** (below) and the adversarial
+review + a live Windows kill/resume + lock-contention gate are mandatory before commit. Everything in nh-fleet
+NOT listed stays frozen and byte-stable.
+
+**Owner-ratified four design calls (Fable 5 direction, orchestrator-verified):**
+1. **Single-writer lock = std `File::try_lock`** on a dedicated `<fleet_root>/<run_id>/coordinator.lock`, held
+   open for the coordinator's lifetime (RAII `RunLock`). Chosen over a dep-free heartbeat-lockfile, an `fs2`
+   dep, and a no-steal lockfile because it is dep-free (std file locking stabilized Rust 1.89; the workspace is
+   pinned 1.96.0 — **orchestrator-verified**: `rustc 1.96.0` compiles `File::lock`/`try_lock`/`unlock`, sig
+   `fn(&File)->io::Result<()>`), OS-enforced (no staleness heuristic), and auto-releases when a dead process's
+   handles close. Decisive tie-breaker: **any heartbeat design breaks the E1 `fleet_kill_resume` contract** —
+   that test resumes within ~1s of `kill()`, before any sane staleness threshold (6-12x the ~5s refresh) would
+   permit the steal. `resume` acquires with a **bounded ~2s / 50ms-interval retry on `WouldBlock`** to absorb
+   Windows' documented post-termination lock-release lag; on a genuinely live run it errors "run appears live
+   (pid N, started T)" (PID + start-time stored in the lockfile as diagnostics only). Lock the dedicated file,
+   **never** `ledger.jsonl` (Windows mandatory-lock semantics would break concurrent status readers). Leave the
+   lockfile in place on drop (unlock is implicit; deleting invites delete/create races). **Fallback contingency
+   (pre-authorized so Sol never stops):** if the pinned std lock API behaves unexpectedly on Windows, Sol may
+   fall back to the dep-free heartbeat-lockfile — create_new + PID + mtime refreshed from the `recv_timeout`
+   Timeout arm (execute_tasks:945, ~5s cadence — NOT ledger appends, which go silent for hours under offpeak
+   parking) + a 30s (6x) staleness steal-by-rename — and must **report which path shipped** in the self-report.
+2. **RunFailed written by nh-fleet** (not nh-mcp): `run_with_id`/`resume` thread their body into a private inner,
+   and the public fn (holding the `RunLock`) best-effort appends `LedgerEvent::RunFailed{run_id,reason}` on the
+   `Err` path before propagating the original error. Covers BOTH the MCP path and a `nh fleet run`/`resume` CLI
+   that dies mid-run, and writes under the lock. Rejected: an nh-mcp-only helper (leaves CLI failures invisible;
+   writes without the lock — re-importing medium-15 into the medium-11 fix).
+3. **Budget honesty on `usage=None` = never fabricate** (low-25): `emit` a per-receipt "usage unreported —
+   budget cannot count this task" warning when `budget_tokens` is set, AND surface a derived `unmetered` count
+   in `FleetStatus`/nh-mcp `fleet_status` (durable + poll-visible, since fleet runs are unattended and nh-mcp
+   passes `on_event: None`). No estimate is ever added to `used_tokens` — inventing un-billed tokens is the
+   meter lying upward, exactly what W3 refused (a real currency hard-stop is M6). Rejected: warn + estimate.
+4. **nit-17 folded into W5** (nh-cli, non-frozen): `nh fleet` `--escalate`/`--defer-offpeak` become `Option<bool>`
+   resolving `cli.or(file).unwrap_or(false)` — CLI-overrides-file, congruent with the sibling
+   `max_workers.or(...)`/`budget.or(...)`. Completes the "defer_offpeak/escalate mean what you said, everywhere"
+   story with medium-16's shared fixtures; keeps W4 purely FEEL; touches zero frozen lines.
+
+**Pre-authorized mutable surface (the W5 seam table lives in §0.1-F; this enumerates the frozen-crate ripple so
+Sol never faces a break-scope-or-duplicate choice — the A-M5-2/-4/-7 precedent):**
+
+| Crate | Seam | Ref | Tag | Change |
+|---|---|---|:--:|---|
+| `nh-fleet` | `LedgerEvent` enum | lib.rs 184-241 | + | add terminal variant `RunFailed { run_id: String, reason: String }` (scrubbed by `DurableWriter` like every event). |
+| `nh-fleet` | `plan_from_ledger` exhaustive match | lib.rs 265 | Δ | add `| LedgerEvent::RunFailed { .. }` to the run-level `=> None` arm (the ONLY exhaustive `LedgerEvent` match in the workspace — nh-mcp/nh-cli/slice_b use calls or wildcard/`{..}` matches). |
+| `nh-fleet` | `status_from_ledger` + `FleetStatus` | lib.rs 176-182, 289-308 | Δ+ | `FleetStatus` gains `failed_reason: Option<String>` (last `RunFailed`, superseded by any `RunFinished`) + `unmetered: usize` (fold of `TaskReceipt` with `usage: None`). |
+| `nh-fleet` | `TaskQueued` variant | lib.rs 196-200 | + | add `#[serde(default)] defer_offpeak: bool` + `#[serde(default)] backend: Backend`; `impl Default for Backend` = `Native` (old ledgers → Native/false = today's hardcode). |
+| `nh-fleet` | `run` | lib.rs 336-344 | Δ | delete the duplicate empty-tasks / `max_workers==0` checks (nit-14); `run_with_id` stays the single validation point. |
+| `nh-fleet` | `run_with_id` | lib.rs 347-453 | Δ | acquire `RunLock` before ledger open (~376); write the 2 new `TaskQueued` fields (387-391); thread body into inner + RunFailed-on-Err wrapper. |
+| `nh-fleet` | `resume` | lib.rs 455-586 | Δ | acquire `RunLock` **before** the tail repair (469); restore `defer_offpeak`/`backend` from the queued event (replace the 513-514 hardcode); RunFailed-on-Err wrapper. |
+| `nh-fleet` | `execute_tasks` budget block + Ok-receipt arm | lib.rs 805-812, 929-943 | Δ | high-6: one unconditional drain choke point (drain `remaining` whenever `used_tokens >= limit`); low-25: emit the unmetered warning in the `Ok(receipt)` arm. |
+| `nh-fleet` | `read_run_ledger` / `read_ledger` / `latest_incomplete_run` | lib.rs 1544-1552, 1577-1608, 1610-1623 | Δ | high-7: drop the read-path `repair_uncommitted_tail` calls (1550, 1578); readers tolerate a torn final line **narrowly in memory** (last line fails to parse AND file did not end in `\n`); any other bad line stays a hard error. `latest_incomplete_run` also calls `validate_run_id` on its returned id (medium-17). |
+| `nh-fleet` | `append_index` | lib.rs 1554-1556 | Δ | high-7 (index): take a short-lived exclusive lock on a sibling `index.lock` (std `File::lock`), `repair_uncommitted_tail` then append under it (append-mode would otherwise glue a record onto a torn tail). Never lock `index.jsonl` itself. |
+| `nh-fleet` | `queued_tasks` return type | lib.rs 1678-1696 | Δ | return `BTreeMap<String, QueuedTask>` (new private struct `{ task, route_id, defer_offpeak, backend }`) instead of a 3-tuple; private fn, zero public surface. |
+| `nh-fleet` | new private items | lib.rs (new) | + | `RunLock` (RAII std-lock guard) · `QueuedTask` struct · RunFailed-append helper (or inline in the wrappers). |
+| `nh-fleet` | `repair_uncommitted_tail` body | lib.rs 1629-1653 | — | **UNCHANGED** — only its call sites move (now under lock). Kept for `run`/`resume` repair + the existing `recovery_discards_only_a_torn_uncommitted_tail` test. |
+| `nh-fleet` | test-literal ripple | lib.rs 1980, 1997 (`FleetStatus`), 2113-2117 (`queued()` helper → `TaskQueued`); tests/slice_b.rs:301 (`TaskQueued`) | Δ | add the new fields (`failed_reason: None, unmetered: 0` / `defer_offpeak: false, backend: Backend::Native`) — behavior-preserving compile glue; enumerated so Sol does not stop. |
+| `nh-mcp` (open) | `fleet_status` | lib.rs 553-568 | Δ | add a `failed: <reason>` state word + a `· N unmetered` suffix only when `>0` (byte-identical output otherwise, per W2 discipline). |
+| `nh-cli` (open) | fleet flags + precedence | main.rs 122-125 (+ parse tests 449-480), cmd_fleet.rs 47-48 | Δ | nit-17: `escalate`/`defer_offpeak` → `Option<bool>` (`--flag[=true|false]`), resolve `cli.or(file).unwrap_or(false)`. |
+
+**Stays frozen + byte-stable:** `worker_loop`, `run_one_task`, `dispatch_ready_tasks`, `halt_remaining_for_budget`
+(unchanged body — now called unconditionally in the drain), `DurableWriter::append`, ladder logic (`next_step`,
+`Ladder`), heartbeats, `SCHEDULER_WAKE_INTERVAL`, `repair_uncommitted_tail`'s body, `tokens_in`'s body. No new
+runtime dependency (§0.4 unchanged — std file locking only). The `fleet_kill_resume` contract file
+(`nh-cli/tests/fleet_kill_resume.rs`) is **not edited** and must gate green on Windows. New adversarial tests
+(deterministic high-6 hang repro; a `fleet_lock.rs` two-coordinator contention + kill/recover test; torn-tail
+anti-mutation; medium-16 restore; RunFailed folding; low-25 fold; nit-17 precedence) are additive.
