@@ -129,6 +129,7 @@ pub fn run(
         // so the approval gate always shows one faithful line.
         Box::new(move |action| approve_on_stdin(&safe_line(&approve_scrubber, action))),
     )
+    .with_scrubber(session_scrubber.clone())
     .with_guard(Box::new(move |access| match access {
         Access::Read(path) => guard_from(policy.read_verdict(path)),
         Access::Write(path) => guard_from(policy.write_verdict(path)),

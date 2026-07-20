@@ -3,8 +3,8 @@
 //! The server mirrors `nh_tools::mcp::McpClient`: blocking JSON-RPC over HTTP,
 //! no initialize handshake, no sessions, and durable run IDs as ordinary handles.
 
-use std::collections::hash_map::RandomState;
-use std::hash::BuildHasher;
+use std::collections::{BTreeSet, HashSet};
+use std::io::Read as _;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,12 +14,15 @@ use std::time::Duration;
 
 use anyhow::{bail, Context as _};
 use chrono::{Local, Utc};
+use nh_vault::Vault as _;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use subtle::ConstantTimeEq;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 const PREVIEW_NOTICE: &str =
     "nh-mcp preview — local only; do not expose publicly before the MCP final spec (2026-07-28).";
+const MAX_BODY_BYTES: usize = 1024 * 1024;
 
 pub struct ServeConfig {
     pub addr: SocketAddr,
@@ -31,28 +34,10 @@ pub struct ServeConfig {
     pub max_workers: usize,
 }
 
-struct State {
-    addr: SocketAddr,
-    catalog: String,
-    law: nh_law::Law,
-    default_route: String,
-    run_root: PathBuf,
-    token: Option<String>,
-    max_workers: usize,
-}
-
-impl From<ServeConfig> for State {
-    fn from(config: ServeConfig) -> Self {
-        Self {
-            addr: config.addr,
-            catalog: config.catalog,
-            law: config.law,
-            default_route: config.default_route,
-            run_root: config.run_root,
-            token: config.token,
-            max_workers: config.max_workers,
-        }
-    }
+struct Runtime {
+    config: Arc<ServeConfig>,
+    token: String,
+    scrubber: nh_vault::Scrubber,
 }
 
 pub struct McpServer {
@@ -65,16 +50,13 @@ pub struct McpServer {
 impl McpServer {
     /// Bind first, then run the blocking accept loop on a background thread.
     pub fn start(config: ServeConfig) -> anyhow::Result<McpServer> {
-        let (server, addr, state) = bind(config)?;
-        let token = state
-            .token
-            .clone()
-            .expect("bind always installs an nh-mcp token");
+        let (server, addr, runtime) = bind(config)?;
+        let token = runtime.token.clone();
         let shutdown = Arc::new(AtomicBool::new(false));
         let loop_shutdown = Arc::clone(&shutdown);
         let handle = thread::Builder::new()
             .name("nh-mcp".into())
-            .spawn(move || accept_loop(server, state, loop_shutdown))
+            .spawn(move || accept_loop(server, runtime, loop_shutdown))
             .context("could not start the nh-mcp server thread")?;
         Ok(Self {
             addr,
@@ -102,13 +84,13 @@ impl McpServer {
 
 /// Bind, print the two-line preview banner, and serve on the current thread.
 pub fn serve(config: ServeConfig) -> anyhow::Result<()> {
-    let (server, addr, state) = bind(config)?;
-    print_banner(addr, &state);
-    accept_loop(server, state, Arc::new(AtomicBool::new(false)));
+    let (server, addr, runtime) = bind(config)?;
+    print_banner(addr, &runtime);
+    accept_loop(server, runtime, Arc::new(AtomicBool::new(false)));
     Ok(())
 }
 
-fn bind(mut config: ServeConfig) -> anyhow::Result<(Server, SocketAddr, Arc<State>)> {
+fn bind(mut config: ServeConfig) -> anyhow::Result<(Server, SocketAddr, Arc<Runtime>)> {
     if config.addr.ip() != IpAddr::V4(Ipv4Addr::LOCALHOST) {
         bail!("nh-mcp only binds 127.0.0.1 — use 127.0.0.1:PORT");
     }
@@ -119,93 +101,114 @@ fn bind(mut config: ServeConfig) -> anyhow::Result<(Server, SocketAddr, Arc<Stat
         .server_addr()
         .to_ip()
         .ok_or_else(|| anyhow::anyhow!("nh-mcp did not bind a TCP address"))?;
-    if config.token.is_none() {
-        config.token = Some(mint_token());
-    }
-    let mut state = State::from(config);
-    state.addr = addr;
-    Ok((server, addr, Arc::new(state)))
+    config.addr = addr;
+    let token = config.token.take().unwrap_or_else(mint_token);
+    let scrubber = nh_vault::Scrubber::new(vec![token.clone()]);
+    let runtime = Runtime {
+        config: Arc::new(config),
+        token,
+        scrubber,
+    };
+    Ok((server, addr, Arc::new(runtime)))
 }
 
-/// Loopback preview token, OS-seeded; not a long-term credential.
+/// Loopback preview token from the operating system CSPRNG; not a long-term credential.
 fn mint_token() -> String {
-    (0_u8..4)
-        .map(|part| {
-            let state = RandomState::new();
-            format!("{:016x}", state.hash_one(part))
-        })
-        .collect()
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes).expect("OS CSPRNG");
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn print_banner(addr: SocketAddr, state: &State) {
-    let scrubber = scrubber(state);
-    println!("{}", nh_vault::safe_line(&scrubber, PREVIEW_NOTICE));
+fn print_banner(addr: SocketAddr, runtime: &Runtime) {
+    println!("{}", nh_vault::safe_line(&runtime.scrubber, PREVIEW_NOTICE));
     let connect_scrubber = nh_vault::Scrubber::new(Vec::new());
-    let token = state
-        .token
-        .as_deref()
-        .expect("bind always installs an nh-mcp token");
     println!(
         "{}",
         nh_vault::safe_line(
             &connect_scrubber,
             &format!(
-                "connect http://{addr}/mcp with Bearer {token}   (tools: route_resolve, fleet_run, fleet_status)"
+                "connect http://{addr}/mcp with Bearer {}   (tools: route_resolve, fleet_run, fleet_status)",
+                runtime.token
             ),
         )
     );
 }
 
-fn accept_loop(server: Server, state: Arc<State>, shutdown: Arc<AtomicBool>) {
+fn accept_loop(server: Server, runtime: Arc<Runtime>, shutdown: Arc<AtomicBool>) {
     while !shutdown.load(Ordering::Relaxed) {
         match server.recv_timeout(Duration::from_millis(100)) {
-            Ok(Some(request)) => handle(request, &state),
+            Ok(Some(request)) => handle(request, &runtime),
             Ok(None) => continue,
-            Err(_) => break,
+            Err(error) => {
+                if !shutdown.load(Ordering::Relaxed) {
+                    eprintln!(
+                        "warning: {}",
+                        nh_vault::safe_line(
+                            &runtime.scrubber,
+                            &format!("nh-mcp server stopped after receive error: {error}"),
+                        )
+                    );
+                }
+                break;
+            }
         }
     }
 }
 
-fn handle(mut request: Request, state: &State) {
-    if !loopback_headers(&request, state.addr.port()) {
-        respond_json(request, state, 403, &json!({}));
+fn handle(mut request: Request, runtime: &Runtime) {
+    if !loopback_headers(&request, runtime.config.addr.port()) {
+        respond_json(request, runtime, 403, &json!({}));
         return;
     }
-    if !authorized(&request, state) {
-        respond_json(request, state, 401, &json!({}));
+    if !authorized(&request, runtime) {
+        respond_json(request, runtime, 401, &json!({}));
         return;
     }
 
     if request.method() == &Method::Get {
-        if request.url().ends_with("/.well-known/mcp.json") {
-            respond_json(request, state, 200, &business_card());
+        if request.url() == "/.well-known/mcp.json" {
+            respond_json(request, runtime, 200, &business_card());
         } else {
-            respond_json(request, state, 404, &json!({}));
+            respond_json(request, runtime, 404, &json!({}));
         }
         return;
     }
 
-    if request.method() != &Method::Post {
-        respond_json(request, state, 404, &json!({}));
+    if request.method() != &Method::Post || request.url() != "/mcp" {
+        respond_json(request, runtime, 404, &json!({}));
         return;
     }
 
-    let mut body = String::new();
-    if request.as_reader().read_to_string(&mut body).is_err() {
+    let mut body = Vec::with_capacity(8 * 1024);
+    if request
+        .as_reader()
+        .take((MAX_BODY_BYTES + 1) as u64)
+        .read_to_end(&mut body)
+        .is_err()
+    {
         respond_json(
             request,
-            state,
+            runtime,
             200,
             &rpc_error(Value::Null, -32700, "parse error"),
         );
         return;
     }
-    let message: Value = match serde_json::from_str(&body) {
+    if body.len() > MAX_BODY_BYTES {
+        respond_json(
+            request,
+            runtime,
+            413,
+            &rpc_error(Value::Null, -32700, "request too large"),
+        );
+        return;
+    }
+    let message: Value = match serde_json::from_slice(&body) {
         Ok(message) => message,
         Err(_) => {
             respond_json(
                 request,
-                state,
+                runtime,
                 200,
                 &rpc_error(Value::Null, -32700, "parse error"),
             );
@@ -217,11 +220,11 @@ fn handle(mut request: Request, state: &State) {
         Some("tools/list") => rpc_success(id, tools_list()),
         Some("tools/call") => rpc_success(
             id,
-            tools_call(message.get("params").unwrap_or(&Value::Null), state),
+            tools_call(message.get("params").unwrap_or(&Value::Null), runtime),
         ),
         _ => rpc_error(id, -32601, "method not found"),
     };
-    respond_json(request, state, 200, &response);
+    respond_json(request, runtime, 200, &response);
 }
 
 fn loopback_headers(request: &Request, port: u16) -> bool {
@@ -263,15 +266,17 @@ fn localhost_origin(origin: &str) -> bool {
     })
 }
 
-fn authorized(request: &Request, state: &State) -> bool {
-    let Some(token) = state.token.as_deref() else {
-        return false;
-    };
-    let expected = format!("Bearer {token}");
+fn authorized(request: &Request, runtime: &Runtime) -> bool {
+    let expected = format!("Bearer {}", runtime.token);
     request
         .headers()
         .iter()
-        .any(|header| header.field.equiv("Authorization") && header.value.as_str() == expected)
+        .filter(|header| header.field.equiv("Authorization"))
+        .any(|header| {
+            let provided = header.value.as_str();
+            provided.len() == expected.len()
+                && bool::from(provided.as_bytes().ct_eq(expected.as_bytes()))
+        })
 }
 
 fn business_card() -> Value {
@@ -353,17 +358,17 @@ fn tools_list() -> Value {
     })
 }
 
-fn tools_call(params: &Value, state: &State) -> Value {
+fn tools_call(params: &Value, runtime: &Runtime) -> Value {
     let Some(name) = params.get("name").and_then(Value::as_str) else {
-        return tool_error(state, "tools/call needs a tool name");
+        return tool_error(runtime, "tools/call needs a tool name");
     };
     let empty_arguments = json!({});
     let arguments = params.get("arguments").unwrap_or(&empty_arguments);
     match name {
-        "route_resolve" => route_resolve(arguments, state),
-        "fleet_run" => fleet_run(arguments, state),
-        "fleet_status" => fleet_status(arguments, state),
-        other => tool_error(state, &format!("unknown tool '{other}' — use tools/list")),
+        "route_resolve" => route_resolve(arguments, runtime),
+        "fleet_run" => fleet_run(arguments, runtime),
+        "fleet_status" => fleet_status(arguments, runtime),
+        other => tool_error(runtime, &format!("unknown tool '{other}' — use tools/list")),
     }
 }
 
@@ -375,18 +380,22 @@ struct RouteResolveArgs {
     prefer_offpeak: Option<bool>,
 }
 
-fn route_resolve(arguments: &Value, state: &State) -> Value {
+fn route_resolve(arguments: &Value, runtime: &Runtime) -> Value {
     let args: RouteResolveArgs = match serde_json::from_value(arguments.clone()) {
         Ok(args) => args,
-        Err(error) => return tool_error(state, &error.to_string()),
+        Err(error) => return tool_error(runtime, &error.to_string()),
     };
-    let resolver = match nh_routes::RouteResolver::from_toml(&state.catalog) {
+    let resolver = match nh_routes::RouteResolver::from_toml(&runtime.config.catalog) {
         Ok(resolver) => resolver,
-        Err(error) => return tool_error(state, &error.to_string()),
+        Err(error) => return tool_error(runtime, &error.to_string()),
     };
-    let route = match resolver.resolve(args.model.as_deref().unwrap_or(&state.default_route)) {
+    let route = match resolver.resolve(
+        args.model
+            .as_deref()
+            .unwrap_or(&runtime.config.default_route),
+    ) {
         Ok(route) => route,
-        Err(error) => return tool_error(state, &error.to_string()),
+        Err(error) => return tool_error(runtime, &error.to_string()),
     };
     let now = Utc::now();
     let local = *Local::now().offset();
@@ -402,7 +411,7 @@ fn route_resolve(arguments: &Value, state: &State) -> Value {
     {
         text.push_str(" · would park until off-peak");
     }
-    tool_text(state, &text, false)
+    tool_text(runtime, &text, false)
 }
 
 #[derive(Deserialize)]
@@ -417,28 +426,39 @@ struct FleetRunArgs {
     defer_offpeak: Option<bool>,
 }
 
-fn fleet_run(arguments: &Value, state: &State) -> Value {
+fn fleet_run(arguments: &Value, runtime: &Runtime) -> Value {
     let args: FleetRunArgs = match serde_json::from_value(arguments.clone()) {
         Ok(args) => args,
-        Err(error) => return tool_error(state, &error.to_string()),
+        Err(error) => return tool_error(runtime, &error.to_string()),
     };
     if args.tasks.is_empty() {
-        return tool_error(state, "fleet_run needs a non-empty tasks array");
+        return tool_error(runtime, "fleet_run needs a non-empty tasks array");
     }
-    let max_workers = args.max_workers.unwrap_or(state.max_workers);
+    let max_workers = args.max_workers.unwrap_or(runtime.config.max_workers);
     if max_workers == 0 {
-        return tool_error(state, "fleet_run max_workers must be at least 1");
+        return tool_error(runtime, "fleet_run max_workers must be at least 1");
     }
-    let resolver = match nh_routes::RouteResolver::from_toml(&state.catalog) {
+    let resolver = match nh_routes::RouteResolver::from_toml(&runtime.config.catalog) {
         Ok(resolver) => resolver,
-        Err(error) => return tool_error(state, &error.to_string()),
+        Err(error) => {
+            return tool_error(runtime, &format!("fleet run rejected: {error}"));
+        }
     };
+    if let Err(error) = preflight_fleet_run(&resolver, &runtime.config.default_route, &args.tasks) {
+        return tool_error(runtime, &format!("fleet run rejected: {error}"));
+    }
     let task_count = args.tasks.len();
     let run_id = nh_fleet::new_run_id();
+    if let Err(error) = std::fs::create_dir_all(fleet_run_dir(&runtime.config, &run_id)) {
+        return tool_error(
+            runtime,
+            &format!("fleet run rejected: could not create run directory: {error}"),
+        );
+    }
     let config = nh_fleet::FleetConfig {
         resolver,
-        law: state.law.clone(),
-        default_route: state.default_route.clone(),
+        law: runtime.config.law.clone(),
+        default_route: runtime.config.default_route.clone(),
         tasks: args.tasks,
         max_workers,
         budget_tokens: args.budget,
@@ -447,18 +467,70 @@ fn fleet_run(arguments: &Value, state: &State) -> Value {
         ladder: None,
         escalate_on_partial: false,
         swarm: None,
-        run_root: state.run_root.clone(),
+        run_root: runtime.config.run_root.clone(),
         on_event: None,
     };
     let id = run_id.clone();
-    thread::spawn(move || {
-        let _ = nh_fleet::run_with_id(id, config);
-    });
+    let warning_scrubber = runtime.scrubber.clone();
+    let spawn = thread::Builder::new()
+        .name(format!("nh-mcp-fleet-{id}"))
+        .spawn(move || {
+            if let Err(error) = nh_fleet::run_with_id(id, config) {
+                eprintln!(
+                    "warning: {}",
+                    nh_vault::safe_line(
+                        &warning_scrubber,
+                        &format!("nh-mcp fleet run failed after startup: {error}"),
+                    )
+                );
+            }
+        });
+    if let Err(error) = spawn {
+        return tool_error(
+            runtime,
+            &format!("fleet run rejected: could not start worker thread: {error}"),
+        );
+    }
     tool_text(
-        state,
+        runtime,
         &format!("fleet run started · run_id={run_id} · {task_count} tasks"),
         false,
     )
+}
+
+fn preflight_fleet_run(
+    resolver: &nh_routes::RouteResolver,
+    default_route: &str,
+    tasks: &[nh_fleet::TaskSpec],
+) -> anyhow::Result<()> {
+    let using_test_provider = std::env::var("NH_FLEET_TEST_PROVIDER").as_deref() == Ok("echo");
+    let vault = nh_vault::EnvFallbackVault {
+        inner: nh_vault::KeyringVault,
+    };
+    let mut ids = HashSet::new();
+    let mut entries = BTreeSet::new();
+    for (index, task) in tasks.iter().enumerate() {
+        if task.task.trim().is_empty() {
+            bail!("task {} is empty — add a task description", index + 1);
+        }
+        if let Some(id) = task.id.as_deref() {
+            if id.trim().is_empty() {
+                bail!("task ids cannot be empty");
+            }
+            if !ids.insert(id) {
+                bail!("task id collision — choose unique ids");
+            }
+        }
+        let route = resolver.resolve(task.model.as_deref().unwrap_or(default_route))?;
+        if route.class == nh_routes::RouteClass::Delegate {
+            bail!("delegate routes are not available to fleet workers — pick an api route");
+        }
+        let native = task.backend.unwrap_or(nh_fleet::Backend::Native) == nh_fleet::Backend::Native;
+        if native && !using_test_provider && entries.insert(route.vault_entry.clone()) {
+            vault.get(&route.vault_entry)?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -466,15 +538,18 @@ struct FleetStatusArgs {
     run_id: String,
 }
 
-fn fleet_status(arguments: &Value, state: &State) -> Value {
+fn fleet_status(arguments: &Value, runtime: &Runtime) -> Value {
     let args: FleetStatusArgs = match serde_json::from_value(arguments.clone()) {
         Ok(args) => args,
-        Err(_) => return tool_error(state, "fleet_status needs a run_id"),
+        Err(_) => return tool_error(runtime, "fleet_status needs a run_id"),
     };
-    let events = match nh_fleet::read_run_ledger(&state.run_root, &args.run_id) {
+    let events = match nh_fleet::read_run_ledger(&runtime.config.run_root, &args.run_id) {
         Ok(events) => events,
-        Err(error) => return tool_error(state, &error.to_string()),
+        Err(error) => return tool_error(runtime, &error.to_string()),
     };
+    if !fleet_run_dir(&runtime.config, &args.run_id).is_dir() {
+        return tool_error(runtime, &format!("unknown run: {}", args.run_id));
+    }
     let status = nh_fleet::status_from_ledger(&events);
     let state_word = if status.finished {
         "finished"
@@ -484,7 +559,7 @@ fn fleet_status(arguments: &Value, state: &State) -> Value {
         "running"
     };
     tool_text(
-        state,
+        runtime,
         &format!(
             "{} · {} · {} done · {} failed · {} gated · {} pending",
             args.run_id, state_word, status.done, status.failed, status.gated, status.pending
@@ -493,28 +568,27 @@ fn fleet_status(arguments: &Value, state: &State) -> Value {
     )
 }
 
-fn tool_error(state: &State, message: &str) -> Value {
-    tool_text(state, message, true)
+fn fleet_run_dir(config: &ServeConfig, run_id: &str) -> PathBuf {
+    config.run_root.join(".nosis").join("fleet").join(run_id)
 }
 
-fn tool_text(state: &State, text: &str, is_error: bool) -> Value {
-    let text = nh_vault::safe_line(&scrubber(state), text);
+fn tool_error(runtime: &Runtime, message: &str) -> Value {
+    tool_text(runtime, message, true)
+}
+
+fn tool_text(runtime: &Runtime, text: &str, is_error: bool) -> Value {
+    let text = nh_vault::safe_line(&runtime.scrubber, text);
     json!({
         "content": [{ "type": "text", "text": text }],
         "isError": is_error
     })
 }
 
-fn scrubber(state: &State) -> nh_vault::Scrubber {
-    nh_vault::Scrubber::new(state.token.iter().cloned().collect())
-}
-
-fn respond_json(request: Request, state: &State, status: u16, value: &Value) {
-    let scrubber = scrubber(state);
+fn respond_json(request: Request, runtime: &Runtime, status: u16, value: &Value) {
     let mut value = value.clone();
-    scrub_json(&mut value, &scrubber);
+    scrub_json(&mut value, &runtime.scrubber);
     let body = serde_json::to_string(&value).unwrap_or_else(|_| "{}".into());
-    let body = scrubber.scrub(&body);
+    let body = runtime.scrubber.scrub(&body);
     let content_type =
         Header::from_bytes("Content-Type", "application/json").expect("static content-type header");
     let response = Response::from_string(body)
@@ -575,8 +649,20 @@ mod tests {
         body: &Value,
     ) -> String {
         let body = body.to_string();
+        raw_request(addr, "POST", "/mcp", host, origin, token, &body)
+    }
+
+    fn raw_request(
+        addr: SocketAddr,
+        method: &str,
+        path: &str,
+        host: &str,
+        origin: Option<&str>,
+        token: Option<&str>,
+        body: &str,
+    ) -> String {
         let mut headers = format!(
-            "POST /mcp HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+            "{method} {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
             body.len()
         );
         if let Some(origin) = origin {
@@ -595,6 +681,15 @@ mod tests {
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
         response
+    }
+
+    fn tools_call(name: &str, arguments: Value) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": arguments }
+        })
     }
 
     #[test]
@@ -645,6 +740,208 @@ mod tests {
         assert!(allowed.starts_with("HTTP/1.1 200"), "{allowed}");
         assert!(allowed.contains("\"fleet_run\""), "{allowed}");
 
+        server.shutdown().unwrap();
+    }
+
+    #[test]
+    fn minted_tokens_are_independent_csprng_values() {
+        let first = mint_token();
+        let second = mint_token();
+
+        assert_eq!(first.len(), 64);
+        assert_eq!(second.len(), 64);
+        assert!(first.chars().all(|character| character.is_ascii_hexdigit()));
+        assert!(second
+            .chars()
+            .all(|character| character.is_ascii_hexdigit()));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn exact_routes_accept_only_well_known_get_and_mcp_post() {
+        let (_root, server) = test_server();
+        let addr = server.addr();
+        let host = addr.to_string();
+        let token = server.token().to_string();
+        let list = json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}});
+
+        let exact_get = raw_request(
+            addr,
+            "GET",
+            "/.well-known/mcp.json",
+            &host,
+            None,
+            Some(&token),
+            "",
+        );
+        let loose_get = raw_request(
+            addr,
+            "GET",
+            "/x/.well-known/mcp.json",
+            &host,
+            None,
+            Some(&token),
+            "",
+        );
+        let loose_post = raw_request(
+            addr,
+            "POST",
+            "/nope",
+            &host,
+            None,
+            Some(&token),
+            &list.to_string(),
+        );
+        let exact_post = raw_post(addr, &host, None, Some(&token), &list);
+
+        assert!(exact_get.starts_with("HTTP/1.1 200"), "{exact_get}");
+        assert!(loose_get.starts_with("HTTP/1.1 404"), "{loose_get}");
+        assert!(loose_post.starts_with("HTTP/1.1 404"), "{loose_post}");
+        assert!(exact_post.starts_with("HTTP/1.1 200"), "{exact_post}");
+        server.shutdown().unwrap();
+    }
+
+    #[test]
+    fn oversized_request_body_is_rejected_with_413() {
+        let (_root, server) = test_server();
+        let addr = server.addr();
+        let host = addr.to_string();
+        let token = server.token().to_string();
+        let body = "x".repeat(MAX_BODY_BYTES + 1);
+
+        let response = raw_request(addr, "POST", "/mcp", &host, None, Some(&token), &body);
+
+        assert!(response.starts_with("HTTP/1.1 413"), "{response}");
+        assert!(response.contains("request too large"), "{response}");
+        server.shutdown().unwrap();
+    }
+
+    #[test]
+    fn same_length_wrong_bearer_is_rejected_and_exact_bearer_works() {
+        let (_root, server) = test_server();
+        let addr = server.addr();
+        let host = addr.to_string();
+        let token = server.token().to_string();
+        let wrong = "0".repeat(token.len());
+        let list = json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}});
+
+        let rejected = raw_post(addr, &host, None, Some(&wrong), &list);
+        let accepted = raw_post(addr, &host, None, Some(&token), &list);
+
+        assert!(rejected.starts_with("HTTP/1.1 401"), "{rejected}");
+        assert!(accepted.starts_with("HTTP/1.1 200"), "{accepted}");
+        server.shutdown().unwrap();
+    }
+
+    #[test]
+    fn fleet_status_distinguishes_unknown_run_from_existing_empty_run() {
+        let (root, server) = test_server();
+        let addr = server.addr();
+        let host = addr.to_string();
+        let token = server.token().to_string();
+
+        let unknown = raw_post(
+            addr,
+            &host,
+            None,
+            Some(&token),
+            &tools_call("fleet_status", json!({"run_id": "unknown-run"})),
+        );
+        let starting_id = "known-empty-run";
+        std::fs::create_dir_all(root.path().join(".nosis").join("fleet").join(starting_id))
+            .unwrap();
+        let starting = raw_post(
+            addr,
+            &host,
+            None,
+            Some(&token),
+            &tools_call("fleet_status", json!({"run_id": starting_id})),
+        );
+
+        assert!(unknown.contains("unknown run: unknown-run"), "{unknown}");
+        assert!(!unknown.contains("starting"), "{unknown}");
+        assert!(
+            starting.contains("known-empty-run · starting"),
+            "{starting}"
+        );
+        server.shutdown().unwrap();
+    }
+
+    #[test]
+    fn fleet_run_rejects_unresolvable_route_before_claiming_started() {
+        let (_root, server) = test_server();
+        let addr = server.addr();
+        let host = addr.to_string();
+        let token = server.token().to_string();
+
+        let response = raw_post(
+            addr,
+            &host,
+            None,
+            Some(&token),
+            &tools_call(
+                "fleet_run",
+                json!({"tasks": [{"task": "fixture task", "model": "missing-route"}]}),
+            ),
+        );
+
+        assert!(response.contains("fleet run rejected:"), "{response}");
+        assert!(!response.contains("fleet run started"), "{response}");
+        server.shutdown().unwrap();
+    }
+
+    #[test]
+    fn fleet_run_preflights_missing_key_and_valid_config_returns_run_id() {
+        let root = tempfile::tempdir().unwrap();
+        let vault_entry = format!("w2-missing-{}", mint_token());
+        let catalog = format!(
+            r#"
+            [routes.fixture-route]
+            provider = "fixture"
+            model_id = "fixture-route"
+            base_url = "https://example.invalid"
+            wire = "openai"
+            vault_entry = "{vault_entry}"
+            class = "api"
+            "#
+        );
+        let law = nh_law::load(root.path(), &nh_law::LoadOptions { cli_autonomy: None });
+        let server = McpServer::start(ServeConfig {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            catalog,
+            law,
+            default_route: "fixture-route".into(),
+            run_root: root.path().to_path_buf(),
+            token: None,
+            max_workers: 1,
+        })
+        .unwrap();
+        let addr = server.addr();
+        let host = addr.to_string();
+        let token = server.token().to_string();
+
+        let missing_key = raw_post(
+            addr,
+            &host,
+            None,
+            Some(&token),
+            &tools_call("fleet_run", json!({"tasks": [{"task": "native task"}]})),
+        );
+        let started = raw_post(
+            addr,
+            &host,
+            None,
+            Some(&token),
+            &tools_call(
+                "fleet_run",
+                json!({"tasks": [{"task": "swarm task", "backend": "kimi-swarm"}]}),
+            ),
+        );
+
+        assert!(missing_key.contains("fleet run rejected:"), "{missing_key}");
+        assert!(missing_key.contains("run `nh key add"), "{missing_key}");
+        assert!(!missing_key.contains("fleet run started"), "{missing_key}");
+        assert!(started.contains("fleet run started · run_id="), "{started}");
         server.shutdown().unwrap();
     }
 }
