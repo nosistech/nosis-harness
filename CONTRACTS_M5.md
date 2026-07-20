@@ -145,7 +145,7 @@ crate (§0.4 exception below), not a hand-rolled splitter; **(Q2)** undeclared v
 | W1-13 | nit-7 | nh-law `repo_tries_to_weaken` L321 | Δ | warn only when a repo field would actually grant. |
 
 **Held for W4 (not W1):** low-16 (`from_vault` skip-signal) + medium-20 (install_client key-literal union) —
-both nh-cli display/rebuild surface. **W2 seam table appended below — SHIPPED `e903ef0` (2026-07-19), all 18 items; W5 seam table appended below (briefed 2026-07-19) — see §8 A-M5-8.**
+both nh-cli display/rebuild surface. **W2 seam table appended below — SHIPPED `e903ef0` (2026-07-19), all 18 items; W5 seam table below — SHIPPED `eaadfb2` (2026-07-20), all 11 items; see §8 A-M5-8.**
 
 **W3 — METER TRUTH (nh-core + nh-routes; +2-line resolve_effort glue in nh-cli/nh-tui). Owner-ratified three
 design calls 2026-07-19: (Q1) med-2 fixed via wire-aware `resolve_effort` → §8 amendment A-M5-9; (Q2) high-1
@@ -235,6 +235,26 @@ foundation; high-7 repair-under-lock depends on it):
 | W5-9 | low-25 | nh-fleet `execute_tasks` L805 / `status_from_ledger` (+`FleetStatus.unmetered`) | Δ+ | emit a per-receipt "usage unreported — budget cannot count this task" warning when budget is set; surface a derived `unmetered` count; never fabricate tokens into `used_tokens`. |
 | W5-10 | nit-17 | nh-cli `main.rs` L122-125 (+ tests L449-480) / `cmd_fleet.rs` L47-48 | Δ | `escalate`/`defer_offpeak` → `Option<bool>` (`--flag[=true|false]`), resolve `cli.or(file).unwrap_or(false)`. |
 | W5-11 | medium-11 (surface) | nh-mcp `fleet_status` L553-568 | Δ | render `failed: <reason>` + `· N unmetered` (>0 only); byte-identical otherwise. |
+
+**W5 SHIPPED `eaadfb2` (2026-07-20)** — all 11 items W5-1..W5-11 in one Sol run (xhigh), no
+deferrals; gate **410/0/1 `--release`**, clippy `-D` clean, fmt --check clean (orch ran the
+normalizing `cargo fmt` under pinned 1.96.0 post-Sol; Sol ran no fmt); +15 tests; 6 files
++976/−76 (nh-fleet/src/lib.rs + tests/slice_b.rs + new nh-cli/tests/fleet_lock.rs + nh-cli
+main.rs/cmd_fleet.rs + nh-mcp/lib.rs). **Lock strategy shipped = std `File::try_lock` (the
+PRIMARY, not the heartbeat fallback)** — the real Windows contention + kill/recovery integration
+path passed. Public surface additive: `LedgerEvent += RunFailed{run_id,reason}`; `FleetStatus +=
+failed_reason: Option<String>, unmetered: usize`; `TaskQueued += defer_offpeak: bool, backend:
+Backend` (both `#[serde(default)]`, old ledgers still decode). `fleet_kill_resume.rs` untouched;
+no Cargo.toml; no new deps. **Adversarial review: ZERO blocking issues** — verified vs code + a
+dedicated test each: the lock blocks a 2nd coordinator + auto-recovers on kill; the high-6 drain
+ends the hang (30s `recv_timeout` test); readers never mutate the ledger (byte-identical assert);
+`RunFinished` supersedes `RunFailed`; `tokens_in(usage=None)==0` (no fabricated tokens); the
+finished-status shape is byte-identical. **W5-5 folded the two `run()` validations into
+`run_with_id`**, so an empty / `max_workers==0` `run()` now records a `RunFailed` under the lock
+instead of a side-effect-free bail (intended). Self-report `Temp/w5-last-message.txt`; brief
+archived `Temp/slice-f-w5-brief-v1.txt`. **nh-fleet is now REOPENED (A-M5-8) — the last frozen
+crate touched by Slice F.** Order W1✓→W3✓→W2✓→W5✓→**W4** (surfaces, FEEL), now folded into the
+owner-directed Release Slice.
 
 ### 0.2 THE LAW + UX-first
 - THE LAW (top authority): small, simple, secure, safe, lightweight, readable, auditable, modular,
