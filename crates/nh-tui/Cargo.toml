@@ -2,6 +2,10 @@
 name = "nh-tui"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
 anyhow.workspace = true
@@ -10,8 +14,8 @@ crossterm.workspace = true
 ratatui.workspace = true
 reqwest.workspace = true
 toml.workspace = true
-nh-core = { path = "../nh-core" }
-nh-law = { path = "../nh-law" }
-nh-routes = { path = "../nh-routes" }
-nh-tools = { path = "../nh-tools" }
-nh-vault = { path = "../nh-vault" }
+nh-core = { path = "../nh-core", version = "0.1.0" }
+nh-law = { path = "../nh-law", version = "0.1.0" }
+nh-routes = { path = "../nh-routes", version = "0.1.0" }
+nh-tools = { path = "../nh-tools", version = "0.1.0" }
+nh-vault = { path = "../nh-vault", version = "0.1.0" }

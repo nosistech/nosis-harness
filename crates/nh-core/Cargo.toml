@@ -2,6 +2,10 @@
 name = "nh-core"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
 anyhow.workspace = true
@@ -10,9 +14,9 @@ serde_json.workspace = true
 chrono.workspace = true
 zeroize.workspace = true
 reqwest.workspace = true
-nh-tools = { path = "../nh-tools" }
-nh-vault = { path = "../nh-vault" }
-nh-routes = { path = "../nh-routes" }
+nh-tools = { path = "../nh-tools", version = "0.1.0" }
+nh-vault = { path = "../nh-vault", version = "0.1.0" }
+nh-routes = { path = "../nh-routes", version = "0.1.0" }
 
 [dev-dependencies]
 tempfile.workspace = true

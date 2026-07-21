@@ -2,6 +2,10 @@
 name = "nh-mcp"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
 anyhow.workspace = true
@@ -11,11 +15,11 @@ chrono.workspace = true
 tiny_http.workspace = true
 getrandom = "0.2"
 subtle = "2.6"
-nh-fleet = { path = "../nh-fleet" }
-nh-law = { path = "../nh-law" }
-nh-routes = { path = "../nh-routes" }
-nh-vault = { path = "../nh-vault" }
+nh-fleet = { path = "../nh-fleet", version = "0.1.0" }
+nh-law = { path = "../nh-law", version = "0.1.0" }
+nh-routes = { path = "../nh-routes", version = "0.1.0" }
+nh-vault = { path = "../nh-vault", version = "0.1.0" }
 
 [dev-dependencies]
-nh-tools = { path = "../nh-tools" }
+nh-tools = { path = "../nh-tools", version = "0.1.0" }
 tempfile.workspace = true

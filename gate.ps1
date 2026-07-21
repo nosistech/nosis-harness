@@ -35,6 +35,7 @@ function Invoke-GateStep($name, [scriptblock]$cmd) {
 
 Invoke-GateStep 'fmt --check'       { cargo fmt --all --check }
 Invoke-GateStep 'clippy -D warnings' { cargo clippy --workspace --all-targets --release -- -D warnings }
+Invoke-GateStep 'deny check'        { cargo deny check }
 Invoke-GateStep 'test --release'    { cargo test --workspace --release }
 
 Write-Host ""
