@@ -2,6 +2,44 @@
 
 Record every meaningful session here.
 
+## 2026-07-20: Release Slice — Section B: engineering tail (forbid-unsafe + workspace lints + MIT license + cargo-deny gate + keyless CI) — committed `d1f9ad0`
+
+Builder:
+
+- Codex (GPT-5.6 Sol xhigh) — from `Temp/section-b-brief-v1.txt`. Status PASS, all 4 parts, no
+  deferrals. Self-report `Temp/section-b-last-message.txt`.
+
+What changed (release engineering tail; METADATA / CONFIG / CI ONLY — no source, no behavior, no new deps):
+
+- **Forbid unsafe (DRY, one source of truth):** root `[workspace.lints.rust] unsafe_code = "forbid"` +
+  `[lints] workspace = true` in all 9 crates (chosen over per-file `#![forbid]` for auditability;
+  confirmed clean — zero direct `unsafe` in-tree, nothing needed a code change).
+- **License:** `license = "MIT"` in `[workspace.package]` + `license.workspace = true` in each crate.
+- **Supply-chain gate REAL + GREEN:** deny.toml activated (dormant note removed); cargo-deny 0.20.2 =
+  advisories/bans/licenses/sources all ok. Only policy delta = allow `CDLA-Permissive-2.0` (webpki-roots
+  trust-anchor data); **no RustSec advisory found or ignored** (`[advisories] ignore` stays empty —
+  nothing suppressed). Wired as a 4th `Invoke-GateStep 'deny check' { cargo deny check }` in gate.ps1,
+  between clippy and test; existing steps + exit-code aggregation untouched.
+- **Path-dep versions:** 27 internal path deps gained `version = "0.1.0"` (cargo-deny `wildcards=deny`
+  treats a versionless path dep as `*`); dependency resolution + Cargo.lock unchanged.
+- **Keyless CI** (`.github/workflows/ci.yml`): `contents: read`; a `checks` matrix over win+ubuntu on
+  pinned 1.96.0 running the gate's 3 checks (+ Linux `libdbus-1-dev` for the keyring backend) + a
+  separate `supply-chain` cargo-deny 0.20.2 job. No secrets — the suite is offline/mocked.
+
+Orchestrator (Opus 4.8): briefed the wave, launched the single background Sol run (xhigh), ran the
+authoritative gate.ps1 (now FOUR steps — fmt+clippy+deny+test all exit 0, **GATE: PASS 416/0/1**),
+adversarially reviewed the diffs (forbid-unsafe in place; deny genuinely green with NOTHING suppressed;
+gate aggregation intact; CI keyless + minimal perms), and committed. Docs-close also refreshes
+RELEASE_CHECKLIST (cargo-deny now wired; forbid via workspace lints). Deferred to backlog:
+cargo-nextest, AV canary, gate frozen-surface sensor.
+
+Gate: **416 pass / 0 fail / 1 ignored** (`--release`), clippy -D + fmt clean, **cargo deny check green**
+(advisories/bans/licenses/sources ok). 13 files, no source changes. Release Slice next: **W4**
+(nh-tui+nh-cli surfaces, FEEL — last Sol wave) + live provider tests (<$2/provider). MCP not public
+before 2026-07-28.
+
+---
+
 ## 2026-07-20: Release Slice — MCP metered-service expansion (why/route_cost/receipts + structuredContent) — committed `1d04871` (feat) + `202bdca` (docs C+D)
 
 Builder:
