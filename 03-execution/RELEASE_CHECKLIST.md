@@ -22,10 +22,12 @@ The running build history lives in [../00-start-here/BUILD_LOG.md](../00-start-h
       The gate runs, in order, each step's real exit code captured (never piped through `tail`):
   - [ ] `cargo fmt --all --check` — zero formatting drift (contributors format with `cargo fmt`).
   - [ ] `cargo clippy --workspace --all-targets --release -- -D warnings` — zero warnings.
+  - [ ] `cargo deny check` — supply-chain gate green (advisories / bans / licenses / sources).
   - [ ] `cargo test --workspace --release` — full suite, **N passed / 0 failed** (ignored count noted).
-- [ ] `cargo deny check` green. (Note: cargo-deny is being wired into the gate; until it is
-      an `Invoke-GateStep`, run it manually and record the result.)
-- [ ] `#![forbid(unsafe_code)]` present workspace-wide — verify every crate root carries it.
+- [ ] Supply-chain policy (`deny.toml`) is green and enforced by the gate; no RustSec advisory is
+      `ignore`d without a documented rationale.
+- [ ] Unsafe is forbidden workspace-wide via `[workspace.lints.rust] unsafe_code = "forbid"` (each
+      crate opts in with `[lints] workspace = true`).
 - [ ] Security review of the release diff done (see [../SECURITY.md](../SECURITY.md) for scope
       and the reporting contact).
 - [ ] No secrets committed: secret-pattern scan of the diff is clean (the `nh init`
