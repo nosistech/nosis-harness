@@ -283,7 +283,7 @@ fn business_card() -> Value {
     json!({
         "name": "nh-mcp",
         "spec": "2026-07-28",
-        "tools": ["route_resolve", "fleet_run", "fleet_status"],
+        "tools": ["fleet_run", "fleet_status", "receipts", "route_cost", "route_resolve", "why"],
         "notice": "local/preview only"
     })
 }
@@ -313,6 +313,86 @@ fn tools_list() -> Value {
                         "prefer_offpeak": { "type": "boolean" }
                     }
                 },
+                "outputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "route": { "type": "object" },
+                        "would_park_offpeak": { "type": "boolean" }
+                    },
+                    "required": ["route", "would_park_offpeak"]
+                },
+                "annotations": { "readOnlyHint": true }
+            },
+            {
+                "name": "why",
+                "description": "Choose the cheapest capable route and explain every skipped route.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task": { "type": "string" },
+                        "prompt_tokens": { "type": "integer", "minimum": 0 },
+                        "output_tokens": { "type": "integer", "minimum": 0 },
+                        "allowed": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "prefer_offpeak": { "type": "boolean" }
+                    },
+                    "required": ["prompt_tokens", "output_tokens"]
+                },
+                "outputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "route": { "type": "object" },
+                        "cost": { "type": "object" },
+                        "savings": { "type": "object" },
+                        "rejected": { "type": "array", "items": { "type": "object" } }
+                    },
+                    "required": ["route", "cost", "rejected"]
+                },
+                "annotations": { "readOnlyHint": true }
+            },
+            {
+                "name": "route_cost",
+                "description": "Price one catalog route for explicit prompt, cache, and output tokens.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "model": { "type": "string" },
+                        "prompt_tokens": { "type": "integer", "minimum": 0 },
+                        "cached_tokens": { "type": "integer", "minimum": 0 },
+                        "output_tokens": { "type": "integer", "minimum": 0 }
+                    },
+                    "required": ["prompt_tokens", "output_tokens"]
+                },
+                "outputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "route": { "type": "object" },
+                        "quote": { "type": "object" },
+                        "cost": { "type": "object" }
+                    },
+                    "required": ["route", "quote", "cost"]
+                },
+                "annotations": { "readOnlyHint": true }
+            },
+            {
+                "name": "receipts",
+                "description": "Read recent metered receipts from this server's repository root.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
+                    }
+                },
+                "outputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "count": { "type": "integer" },
+                        "receipts": { "type": "array", "items": { "type": "object" } }
+                    },
+                    "required": ["count", "receipts"]
+                },
                 "annotations": { "readOnlyHint": true }
             },
             {
@@ -341,6 +421,14 @@ fn tools_list() -> Value {
                     },
                     "required": ["tasks"]
                 },
+                "outputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "run_id": { "type": "string" },
+                        "task_count": { "type": "integer" }
+                    },
+                    "required": ["run_id", "task_count"]
+                },
                 "annotations": { "readOnlyHint": false }
             },
             {
@@ -350,6 +438,23 @@ fn tools_list() -> Value {
                     "type": "object",
                     "properties": { "run_id": { "type": "string" } },
                     "required": ["run_id"]
+                },
+                "outputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "run_id": { "type": "string" },
+                        "state": {
+                            "type": "string",
+                            "enum": ["finished", "failed", "running", "starting", "unknown"]
+                        },
+                        "failed_reason": { "type": "string" },
+                        "done": { "type": "integer" },
+                        "failed": { "type": "integer" },
+                        "gated": { "type": "integer" },
+                        "pending": { "type": "integer" },
+                        "unmetered": { "type": "integer" }
+                    },
+                    "required": ["run_id", "state", "done", "failed", "gated", "pending", "unmetered"]
                 },
                 "annotations": { "readOnlyHint": true }
             }
@@ -366,6 +471,9 @@ fn tools_call(params: &Value, runtime: &Runtime) -> Value {
     let arguments = params.get("arguments").unwrap_or(&empty_arguments);
     match name {
         "route_resolve" => route_resolve(arguments, runtime),
+        "why" => why(arguments, runtime),
+        "route_cost" => route_cost(arguments, runtime),
+        "receipts" => receipts(arguments, runtime),
         "fleet_run" => fleet_run(arguments, runtime),
         "fleet_status" => fleet_status(arguments, runtime),
         other => tool_error(runtime, &format!("unknown tool '{other}' - use tools/list")),
@@ -411,7 +519,328 @@ fn route_resolve(arguments: &Value, runtime: &Runtime) -> Value {
     {
         text.push_str(" · would park until off-peak");
     }
-    tool_text(runtime, &text, false)
+    let would_park_offpeak = args.prefer_offpeak == Some(true)
+        && route.price_at(now).map(|quote| quote.peak) == Some(true);
+    let structured = json!({
+        "route": {
+            "id": route.id,
+            "provider": route.provider,
+            "thinking": route.thinking_dialect.as_str(),
+            "peak_status": route.peak_status(now, local)
+        },
+        "would_park_offpeak": would_park_offpeak
+    });
+    tool_result(runtime, &text, structured, false)
+}
+
+#[derive(Deserialize)]
+struct WhyArgs {
+    #[serde(default, rename = "task")]
+    _task: Option<String>,
+    prompt_tokens: u64,
+    output_tokens: u64,
+    #[serde(default)]
+    allowed: Option<Vec<String>>,
+    #[serde(default, rename = "prefer_offpeak")]
+    _prefer_offpeak: Option<bool>,
+}
+
+fn why(arguments: &Value, runtime: &Runtime) -> Value {
+    why_at(arguments, runtime, Utc::now())
+}
+
+fn why_at(arguments: &Value, runtime: &Runtime, at: chrono::DateTime<Utc>) -> Value {
+    let args: WhyArgs = match serde_json::from_value(arguments.clone()) {
+        Ok(args) => args,
+        Err(error) => return tool_error(runtime, &error.to_string()),
+    };
+    let resolver = match nh_routes::RouteResolver::from_toml(&runtime.config.catalog) {
+        Ok(resolver) => resolver,
+        Err(error) => return tool_error(runtime, &error.to_string()),
+    };
+    let allowed = match args.allowed {
+        Some(allowed) if !allowed.is_empty() => allowed,
+        _ => resolver
+            .available()
+            .into_iter()
+            .filter(|id| {
+                resolver
+                    .resolve(id)
+                    .is_ok_and(|route| route.class == nh_routes::RouteClass::Api)
+            })
+            .collect(),
+    };
+    let allowed_refs: Vec<&str> = allowed.iter().map(String::as_str).collect();
+    let (route, trace) =
+        match resolver.resolve_capable(args.prompt_tokens, args.output_tokens, &allowed_refs, at) {
+            Ok(result) => result,
+            Err(error) => return tool_error(runtime, &error.to_string()),
+        };
+    let quote = match route.price_at(at) {
+        Some(quote) => quote,
+        None => return tool_error(runtime, "chosen route has no price quote"),
+    };
+    let actual = nh_routes::cost_of(&quote, args.prompt_tokens, 0, args.output_tokens);
+    let usd_approx = resolver
+        .fx()
+        .and_then(|fx| nh_routes::to_usd_approx(actual, quote.currency, fx, at));
+    let naive = resolver.naive_cost(&route, args.prompt_tokens, 0, args.output_tokens, at);
+    let saved_pct = naive
+        .as_ref()
+        .and_then(|naive| nh_routes::saved_pct(actual, naive.no_cache));
+
+    let mut cost = json!({
+        "value": actual,
+        "currency": quote.currency.as_str()
+    });
+    if let Some(usd_approx) = usd_approx {
+        cost["usd_approx"] = json!(usd_approx);
+    }
+    let local = *Local::now().offset();
+    let mut structured = json!({
+        "route": {
+            "id": route.id,
+            "provider": route.provider,
+            "thinking": route.thinking_dialect.as_str(),
+            "peak_status": route.peak_status(at, local)
+        },
+        "cost": cost,
+        "rejected": trace.rejections.iter().map(|rejection| json!({
+            "route_id": rejection.route_id,
+            "reason": rejection.reason
+        })).collect::<Vec<_>>()
+    });
+    if let (Some(naive), Some(saved_pct)) = (naive, saved_pct) {
+        structured["savings"] = json!({
+            "saved_pct": saved_pct,
+            "no_cache": naive.no_cache,
+            "peak": naive.peak,
+            "top_tier": naive.top_tier,
+            "currency": naive.currency.as_str()
+        });
+    }
+    let text = why_text(
+        &route.id,
+        &route.provider,
+        actual,
+        quote.currency,
+        usd_approx,
+        saved_pct,
+        trace.rejections.len(),
+    );
+    tool_result(runtime, &text, structured, false)
+}
+
+fn why_text(
+    route_id: &str,
+    provider: &str,
+    actual: f64,
+    currency: nh_routes::Currency,
+    usd_approx: Option<f64>,
+    saved_pct: Option<u8>,
+    skipped: usize,
+) -> String {
+    let mut text = format!(
+        "cheapest capable: {route_id} | {provider} | {actual:.6} {}",
+        currency.as_str()
+    );
+    if let Some(usd) = usd_approx {
+        text.push_str(&format!(" (~${usd:.6})"));
+    }
+    if let Some(saved_pct) = saved_pct {
+        text.push_str(&format!(" | saved {saved_pct}% vs no-cache"));
+    }
+    text.push_str(&format!(" | {skipped} routes skipped"));
+    text
+}
+
+#[derive(Deserialize)]
+struct RouteCostArgs {
+    #[serde(default)]
+    model: Option<String>,
+    prompt_tokens: u64,
+    #[serde(default)]
+    cached_tokens: u64,
+    output_tokens: u64,
+}
+
+fn route_cost(arguments: &Value, runtime: &Runtime) -> Value {
+    route_cost_at(arguments, runtime, Utc::now())
+}
+
+fn route_cost_at(arguments: &Value, runtime: &Runtime, at: chrono::DateTime<Utc>) -> Value {
+    let args: RouteCostArgs = match serde_json::from_value(arguments.clone()) {
+        Ok(args) => args,
+        Err(error) => return tool_error(runtime, &error.to_string()),
+    };
+    let resolver = match nh_routes::RouteResolver::from_toml(&runtime.config.catalog) {
+        Ok(resolver) => resolver,
+        Err(error) => return tool_error(runtime, &error.to_string()),
+    };
+    let route = match resolver.resolve(
+        args.model
+            .as_deref()
+            .unwrap_or(&runtime.config.default_route),
+    ) {
+        Ok(route) => route,
+        Err(error) => return tool_error(runtime, &error.to_string()),
+    };
+    let quote = match route.price_at(at) {
+        Some(quote) => quote,
+        None => return tool_error(runtime, "route has no token price quote"),
+    };
+    let value = nh_routes::cost_of(
+        &quote,
+        args.prompt_tokens,
+        args.cached_tokens,
+        args.output_tokens,
+    );
+    let usd_approx = resolver
+        .fx()
+        .and_then(|fx| nh_routes::to_usd_approx(value, quote.currency, fx, at));
+    let mut cost = json!({
+        "value": value,
+        "currency": quote.currency.as_str()
+    });
+    if let Some(usd_approx) = usd_approx {
+        cost["usd_approx"] = json!(usd_approx);
+    }
+    let structured = json!({
+        "route": {
+            "id": route.id,
+            "provider": route.provider,
+            "thinking": route.thinking_dialect.as_str()
+        },
+        "quote": {
+            "cache_hit": quote.cache_hit,
+            "cache_miss": quote.cache_miss,
+            "output": quote.output,
+            "currency": quote.currency.as_str(),
+            "peak": quote.peak,
+            "confidence": quote.confidence.as_str(),
+            "stale": quote.stale
+        },
+        "cost": cost
+    });
+    let mut text = format!("{} | {value:.6} {}", route.id, quote.currency.as_str());
+    if let Some(usd) = usd_approx {
+        text.push_str(&format!(" (~${usd:.6})"));
+    }
+    text.push_str(&format!(
+        " | {} prompt ({} cached) | {} output",
+        args.prompt_tokens, args.cached_tokens, args.output_tokens
+    ));
+    tool_result(runtime, &text, structured, false)
+}
+
+#[derive(Deserialize)]
+struct ReceiptsArgs {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+fn receipts(arguments: &Value, runtime: &Runtime) -> Value {
+    let args: ReceiptsArgs = match serde_json::from_value(arguments.clone()) {
+        Ok(args) => args,
+        Err(error) => return tool_error(runtime, &error.to_string()),
+    };
+    let limit = args.limit.unwrap_or(10).clamp(1, 100);
+    let path = runtime
+        .config
+        .run_root
+        .join(".nosis")
+        .join("receipts.jsonl");
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return tool_error(runtime, &format!("could not read receipts: {error}")),
+    };
+    let mut values = match parse_receipt_jsonl(&bytes) {
+        Ok(values) => values,
+        Err(error) => return tool_error(runtime, &error.to_string()),
+    };
+    if values.len() > limit {
+        values.drain(..values.len() - limit);
+    }
+    let text = receipts_text(&values);
+    let structured = json!({
+        "count": values.len(),
+        "receipts": values
+    });
+    tool_result(runtime, &text, structured, false)
+}
+
+fn parse_receipt_jsonl(bytes: &[u8]) -> anyhow::Result<Vec<Value>> {
+    let ends_in_newline = bytes.last() == Some(&b'\n');
+    let lines: Vec<&[u8]> = bytes.split(|byte| *byte == b'\n').collect();
+    let last_non_empty = lines
+        .iter()
+        .rposition(|line| !line.iter().all(|byte| byte.is_ascii_whitespace()));
+    let mut receipts = Vec::new();
+    for (index, line) in lines.into_iter().enumerate() {
+        if line.iter().all(|byte| byte.is_ascii_whitespace()) {
+            continue;
+        }
+        let value: Value = match serde_json::from_slice(line) {
+            Ok(value) => value,
+            Err(_) if !ends_in_newline && Some(index) == last_non_empty => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("receipts line {} is invalid", index + 1));
+            }
+        };
+        let event: nh_fleet::LedgerEvent = serde_json::from_value(json!({
+            "event": "task_receipt",
+            "task_id": "nh-mcp-receipt",
+            "attempt": 1,
+            "receipt": value
+        }))
+        .with_context(|| format!("receipts line {} is invalid", index + 1))?;
+        let nh_fleet::LedgerEvent::TaskReceipt { receipt, .. } = event else {
+            unreachable!("static wrapper always selects task_receipt");
+        };
+        receipts
+            .push(serde_json::to_value(receipt).context("could not serialize a parsed receipt")?);
+    }
+    Ok(receipts)
+}
+
+fn receipts_text(receipts: &[Value]) -> String {
+    if receipts.is_empty() {
+        return "receipts: 0".into();
+    }
+    let rows = receipts
+        .iter()
+        .map(|receipt| {
+            let ts = receipt.get("ts_utc").and_then(Value::as_str).unwrap_or("?");
+            let model = receipt
+                .get("model_id")
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            let outcome = receipt
+                .get("outcome")
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            let turns = receipt.get("turns").and_then(Value::as_u64).unwrap_or(0);
+            let tokens = receipt.get("usage").map_or_else(
+                || "unmetered".to_string(),
+                |usage| {
+                    let prompt = usage
+                        .get("prompt_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let completion = usage
+                        .get("completion_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    format!("{} tokens", prompt.saturating_add(completion))
+                },
+            );
+            format!("{ts} | {model} | {outcome} | {turns} turns | {tokens}")
+        })
+        .collect::<Vec<_>>()
+        .join(" || ");
+    format!("receipts: {} | {rows}", receipts.len())
 }
 
 #[derive(Deserialize)]
@@ -491,9 +920,10 @@ fn fleet_run(arguments: &Value, runtime: &Runtime) -> Value {
             &format!("fleet run rejected: could not start worker thread: {error}"),
         );
     }
-    tool_text(
+    tool_result(
         runtime,
         &format!("fleet run started · run_id={run_id} · {task_count} tasks"),
+        json!({ "run_id": run_id, "task_count": task_count }),
         false,
     )
 }
@@ -548,9 +978,31 @@ fn fleet_status(arguments: &Value, runtime: &Runtime) -> Value {
         Err(error) => return tool_error(runtime, &error.to_string()),
     };
     if !fleet_run_dir(&runtime.config, &args.run_id).is_dir() {
-        return tool_error(runtime, &format!("unknown run: {}", args.run_id));
+        return tool_result(
+            runtime,
+            &format!("unknown run: {}", args.run_id),
+            json!({
+                "run_id": args.run_id,
+                "state": "unknown",
+                "done": 0,
+                "failed": 0,
+                "gated": 0,
+                "pending": 0,
+                "unmetered": 0
+            }),
+            true,
+        );
     }
     let status = nh_fleet::status_from_ledger(&events);
+    let state = if status.finished {
+        "finished"
+    } else if status.failed_reason.is_some() {
+        "failed"
+    } else if events.is_empty() {
+        "starting"
+    } else {
+        "running"
+    };
     let state_word = if status.finished {
         "finished".to_string()
     } else if let Some(reason) = &status.failed_reason {
@@ -565,20 +1017,29 @@ fn fleet_status(arguments: &Value, runtime: &Runtime) -> Value {
     } else {
         String::new()
     };
-    tool_text(
-        runtime,
-        &format!(
-            "{} · {} · {} done · {} failed · {} gated · {} pending{}",
-            args.run_id,
-            state_word,
-            status.done,
-            status.failed,
-            status.gated,
-            status.pending,
-            unmetered_suffix
-        ),
-        false,
-    )
+    let text = format!(
+        "{} · {} · {} done · {} failed · {} gated · {} pending{}",
+        args.run_id,
+        state_word,
+        status.done,
+        status.failed,
+        status.gated,
+        status.pending,
+        unmetered_suffix
+    );
+    let mut structured = json!({
+        "run_id": args.run_id,
+        "state": state,
+        "done": status.done,
+        "failed": status.failed,
+        "gated": status.gated,
+        "pending": status.pending,
+        "unmetered": status.unmetered
+    });
+    if let Some(reason) = status.failed_reason {
+        structured["failed_reason"] = json!(reason);
+    }
+    tool_result(runtime, &text, structured, false)
 }
 
 fn fleet_run_dir(config: &ServeConfig, run_id: &str) -> PathBuf {
@@ -587,6 +1048,16 @@ fn fleet_run_dir(config: &ServeConfig, run_id: &str) -> PathBuf {
 
 fn tool_error(runtime: &Runtime, message: &str) -> Value {
     tool_text(runtime, message, true)
+}
+
+fn tool_result(runtime: &Runtime, text: &str, mut structured: Value, is_error: bool) -> Value {
+    let text = nh_vault::safe_line(&runtime.scrubber, text);
+    scrub_json(&mut structured, &runtime.scrubber);
+    json!({
+        "content": [{ "type": "text", "text": text }],
+        "structuredContent": structured,
+        "isError": is_error
+    })
 }
 
 fn tool_text(runtime: &Runtime, text: &str, is_error: bool) -> Value {
@@ -635,7 +1106,64 @@ mod tests {
     use std::net::{Shutdown, TcpStream};
     use std::path::Path;
 
+    use chrono::TimeZone as _;
+
     use super::*;
+
+    const METER_CATALOG: &str = r#"
+        [routes.cheap]
+        provider = "fixture"
+        model_id = "cheap"
+        base_url = "https://example.invalid"
+        wire = "openai"
+        vault_entry = "fixture"
+        class = "api"
+        context = 100000
+        thinking_dialect = "none"
+        [routes.cheap.price]
+        currency = "CNY"
+        unit = "per_million_tokens"
+        cache_hit = 0.1
+        cache_miss = 1.0
+        output = 2.0
+        valid_until = "2099-01-01"
+        price_confidence = "confirmed"
+
+        [routes.expensive]
+        provider = "fixture"
+        model_id = "expensive"
+        base_url = "https://example.invalid"
+        wire = "openai"
+        vault_entry = "fixture"
+        class = "api"
+        context = 100000
+        thinking_dialect = "glm-hm"
+        [routes.expensive.price]
+        currency = "CNY"
+        unit = "per_million_tokens"
+        cache_hit = 0.2
+        cache_miss = 4.0
+        output = 8.0
+        valid_until = "2099-01-01"
+        price_confidence = "reported"
+
+        [routes.too-small]
+        provider = "fixture"
+        model_id = "too-small"
+        base_url = "https://example.invalid"
+        wire = "openai"
+        vault_entry = "fixture"
+        class = "api"
+        context = 10
+        [routes.too-small.price]
+        currency = "CNY"
+        unit = "per_million_tokens"
+        cache_hit = 0.01
+        cache_miss = 0.01
+        output = 0.01
+        valid_until = "2099-01-01"
+        price_confidence = "confirmed"
+    "#;
 
     fn test_server() -> (tempfile::TempDir, McpServer) {
         let root = tempfile::tempdir().unwrap();
@@ -653,6 +1181,31 @@ mod tests {
         })
         .unwrap();
         (root, server)
+    }
+
+    fn test_runtime(root: &Path, catalog: &str) -> Runtime {
+        let law = nh_law::load(root, &nh_law::LoadOptions { cli_autonomy: None });
+        Runtime {
+            config: Arc::new(ServeConfig {
+                addr: "127.0.0.1:0".parse().unwrap(),
+                catalog: catalog.to_string(),
+                law,
+                default_route: "cheap".into(),
+                run_root: root.to_path_buf(),
+                token: None,
+                max_workers: 1,
+            }),
+            token: "fixture-token".into(),
+            scrubber: nh_vault::Scrubber::new(vec!["fixture-literal".into()]),
+        }
+    }
+
+    fn response_value(response: &str) -> Value {
+        let body = response
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .expect("HTTP response has a body");
+        serde_json::from_str(body).expect("HTTP response body is JSON")
     }
 
     fn raw_post(
@@ -716,6 +1269,228 @@ mod tests {
             .join("\n");
         text.push('\n');
         std::fs::write(run_dir.join("ledger.jsonl"), text).unwrap();
+    }
+
+    #[test]
+    fn why_matches_resolver_cost_and_rejection_trace_without_cold_savings_claim() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(root.path(), METER_CATALOG);
+        let at = Utc.with_ymd_and_hms(2026, 7, 20, 12, 0, 0).unwrap();
+        let arguments = json!({ "prompt_tokens": 1_000, "output_tokens": 100 });
+
+        let result = why_at(&arguments, &runtime, at);
+        let resolver = nh_routes::RouteResolver::from_toml(METER_CATALOG).unwrap();
+        let allowed = resolver.available();
+        let allowed_refs: Vec<&str> = allowed.iter().map(String::as_str).collect();
+        let (route, trace) = resolver
+            .resolve_capable(1_000, 100, &allowed_refs, at)
+            .unwrap();
+        let quote = route.price_at(at).unwrap();
+        let actual = nh_routes::cost_of(&quote, 1_000, 0, 100);
+        let naive = resolver.naive_cost(&route, 1_000, 0, 100, at).unwrap();
+        let expected_saved = nh_routes::saved_pct(actual, naive.no_cache);
+
+        assert_eq!(result["structuredContent"]["route"]["id"], route.id);
+        assert_eq!(
+            result["structuredContent"]["cost"]["value"].as_f64(),
+            Some(actual)
+        );
+        assert_eq!(
+            result["structuredContent"]["rejected"]
+                .as_array()
+                .unwrap()
+                .len(),
+            trace.rejections.len()
+        );
+        assert_eq!(expected_saved, None);
+        assert!(result["structuredContent"].get("savings").is_none());
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(!text.contains("saved"), "{text}");
+    }
+
+    #[test]
+    fn route_cost_matches_quote_and_omits_usd_when_fx_absent_or_stale() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(root.path(), METER_CATALOG);
+        let at = Utc.with_ymd_and_hms(2026, 7, 20, 12, 0, 0).unwrap();
+        let arguments = json!({
+            "model": "cheap",
+            "prompt_tokens": 1_000,
+            "cached_tokens": 600,
+            "output_tokens": 100
+        });
+
+        let result = route_cost_at(&arguments, &runtime, at);
+        let resolver = nh_routes::RouteResolver::from_toml(METER_CATALOG).unwrap();
+        let quote = resolver.resolve("cheap").unwrap().price_at(at).unwrap();
+        assert_eq!(
+            result["structuredContent"]["quote"]["cache_hit"].as_f64(),
+            Some(quote.cache_hit)
+        );
+        assert_eq!(
+            result["structuredContent"]["quote"]["cache_miss"].as_f64(),
+            Some(quote.cache_miss)
+        );
+        assert_eq!(
+            result["structuredContent"]["quote"]["confidence"],
+            quote.confidence.as_str()
+        );
+        assert!(result["structuredContent"]["cost"]
+            .get("usd_approx")
+            .is_none());
+
+        let stale_catalog = format!(
+            r#"
+            [fx]
+            usd_per_cny = 0.139
+            valid_until = "2020-01-01"
+            price_confidence = "reported"
+            {METER_CATALOG}
+            "#
+        );
+        let stale_runtime = test_runtime(root.path(), &stale_catalog);
+        let stale_result = route_cost_at(&arguments, &stale_runtime, at);
+        assert!(stale_result["structuredContent"]["cost"]
+            .get("usd_approx")
+            .is_none());
+    }
+
+    #[test]
+    fn receipts_redact_literals_and_shapes_tolerate_torn_tail_and_never_mutate() {
+        let (root, server) = test_server();
+        let addr = server.addr();
+        let host = addr.to_string();
+        let token = server.token().to_string();
+        let missing = raw_post(
+            addr,
+            &host,
+            None,
+            Some(&token),
+            &tools_call("receipts", json!({})),
+        );
+        assert_eq!(
+            response_value(&missing)["result"]["structuredContent"]["count"],
+            0
+        );
+
+        let shaped = format!("{}{}", "sk-", "fixture-token-0000");
+        let receipt = json!({
+            "ts_utc": "2026-07-20T12:00:00Z",
+            "model_id": format!("fixture {token} {shaped}"),
+            "task": format!("literal {token} and shape {shaped}"),
+            "turns": 2,
+            "tool_calls": 1,
+            "outcome": "pass",
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "cached_tokens": 4
+            }
+        });
+        let path = root.path().join(".nosis").join("receipts.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let bytes = format!("\n{}\n{{\"ts_utc\":", receipt);
+        std::fs::write(&path, bytes.as_bytes()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let response = raw_post(
+            addr,
+            &host,
+            None,
+            Some(&token),
+            &tools_call("receipts", json!({ "limit": 10 })),
+        );
+        let after = std::fs::read(&path).unwrap();
+        let value = response_value(&response);
+        let result = &value["result"];
+        let task = result["structuredContent"]["receipts"][0]["task"]
+            .as_str()
+            .unwrap();
+
+        assert_eq!(before, after);
+        assert_eq!(result["structuredContent"]["count"], 1);
+        assert!(!response.contains(&token), "{response}");
+        assert!(!response.contains(&shaped), "{response}");
+        assert!(task.matches("[REDACTED]").count() >= 2, "{task}");
+        let content = result["content"][0]["text"].as_str().unwrap();
+        assert!(!content.contains(&token));
+        assert!(!content.contains(&shaped));
+        assert!(content.matches("[REDACTED]").count() >= 2, "{content}");
+        server.shutdown().unwrap();
+    }
+
+    #[test]
+    fn route_resolve_keeps_text_and_adds_structured_route() {
+        let (_root, server) = test_server();
+        let addr = server.addr();
+        let host = addr.to_string();
+        let token = server.token().to_string();
+        let response = raw_post(
+            addr,
+            &host,
+            None,
+            Some(&token),
+            &tools_call("route_resolve", json!({})),
+        );
+        let value = response_value(&response);
+        let result = &value["result"];
+
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("route deepseek-v4-flash"));
+        assert_eq!(
+            result["structuredContent"]["route"]["id"],
+            "deepseek-v4-flash"
+        );
+        assert!(result["structuredContent"]["route"]["peak_status"].is_string());
+        assert_eq!(result["structuredContent"]["would_park_offpeak"], false);
+        server.shutdown().unwrap();
+    }
+
+    #[test]
+    fn new_tools_keep_auth_and_origin_fail_closed() {
+        let (_root, server) = test_server();
+        let addr = server.addr();
+        let host = addr.to_string();
+        let token = server.token().to_string();
+
+        for name in ["why", "route_cost", "receipts"] {
+            let request = tools_call(name, json!({}));
+            let missing = raw_post(addr, &host, None, None, &request);
+            let blank = raw_post(addr, &host, None, Some(""), &request);
+            let bad_origin = raw_post(
+                addr,
+                &host,
+                Some("https://evil.example"),
+                Some(&token),
+                &request,
+            );
+            assert!(missing.starts_with("HTTP/1.1 401"), "{name}: {missing}");
+            assert!(blank.starts_with("HTTP/1.1 401"), "{name}: {blank}");
+            assert!(
+                bad_origin.starts_with("HTTP/1.1 403"),
+                "{name}: {bad_origin}"
+            );
+        }
+        server.shutdown().unwrap();
+    }
+
+    #[test]
+    fn scrub_json_redacts_structured_keys_and_values() {
+        let literal = "fixture-literal";
+        let shaped = format!("{}{}", "sk-", "fixture-token-0000");
+        let scrubber = nh_vault::Scrubber::new(vec![literal.into()]);
+        let mut value = json!({
+            format!("key-{literal}"): format!("{literal} {shaped}"),
+            "nested": [format!("prefix {shaped}")]
+        });
+
+        scrub_json(&mut value, &scrubber);
+        let rendered = value.to_string();
+        assert!(!rendered.contains(literal), "{rendered}");
+        assert!(!rendered.contains(&shaped), "{rendered}");
+        assert!(rendered.matches("[REDACTED]").count() >= 3, "{rendered}");
     }
 
     #[test]
@@ -886,9 +1661,17 @@ mod tests {
 
         assert!(unknown.contains("unknown run: unknown-run"), "{unknown}");
         assert!(!unknown.contains("starting"), "{unknown}");
+        assert_eq!(
+            response_value(&unknown)["result"]["structuredContent"]["state"],
+            "unknown"
+        );
         assert!(
             starting.contains("known-empty-run · starting"),
             "{starting}"
+        );
+        assert_eq!(
+            response_value(&starting)["result"]["structuredContent"]["state"],
+            "starting"
         );
         server.shutdown().unwrap();
     }
@@ -919,6 +1702,15 @@ mod tests {
         assert!(
             failed.contains("failed-run · failed: provider unavailable"),
             "{failed}"
+        );
+        let failed_value = response_value(&failed);
+        assert_eq!(
+            failed_value["result"]["structuredContent"]["state"],
+            "failed"
+        );
+        assert_eq!(
+            failed_value["result"]["structuredContent"]["failed_reason"],
+            "provider unavailable"
         );
 
         write_fleet_ledger(
@@ -995,7 +1787,19 @@ mod tests {
             finished.contains("finished-run · finished · 0 done · 0 failed · 0 gated · 0 pending"),
             "{finished}"
         );
-        assert!(!finished.contains("unmetered"), "{finished}");
+        let finished_value = response_value(&finished);
+        assert!(!finished_value["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("unmetered"));
+        assert_eq!(
+            finished_value["result"]["content"][0]["text"],
+            "finished-run · finished · 0 done · 0 failed · 0 gated · 0 pending"
+        );
+        assert_eq!(
+            finished_value["result"]["structuredContent"]["state"],
+            "finished"
+        );
         server.shutdown().unwrap();
     }
 
