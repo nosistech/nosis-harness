@@ -1,12 +1,4 @@
 # cargo-deny policy for the nosis workspace — the supply-chain gate.
-#
-# DORMANT until cargo-deny is installed. To enforce:
-#   cargo install cargo-deny --locked
-#   cargo deny check
-# then add  Invoke-GateStep 'deny' { cargo deny check }  to gate.ps1.
-#
-# This is a starting policy; reconcile the schema against the installed
-# cargo-deny version with `cargo deny init` if any key is rejected.
 
 [advisories]
 # RUSTSEC advisory DB: fail on known-vulnerable or yanked crates.
@@ -31,6 +23,7 @@ allow = [
     "Unicode-3.0",
     "Zlib",
     "MPL-2.0",
+    "CDLA-Permissive-2.0", # webpki-roots trust-anchor data
 ]
 confidence-threshold = 0.9
 
