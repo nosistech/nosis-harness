@@ -2,6 +2,53 @@
 
 Record every meaningful session here.
 
+## 2026-07-20: Release Slice — MCP metered-service expansion (why/route_cost/receipts + structuredContent) — committed `1d04871` (feat) + `202bdca` (docs C+D)
+
+Builder:
+
+- Codex (GPT-5.6 Sol) — MCP executor from `Temp/release-mcp-brief-v2.txt` (v1 brief + the
+  owner-authorized amendment header). The FIRST run STOPPED CLEAN and reverted on a frozen test
+  (`crates/nh-mcp/tests/e3_korvin.rs` asserts the exact old 3-tool set); the amendment authorized
+  widening ONLY that assertion. **This run resolved effort = `xhigh`** (owner switched from `max`
+  after the Fable window closed). Self-report `Temp/mcp-last-message-v2.txt` (`-o` capture); status
+  PASS, no deviations.
+
+What changed (expresses nosis's one differentiator — "priced, routed, receipted, and you can see
+why" — as first-class MCP tools with STRUCTURED output; additive, existing tool TEXT byte-compatible):
+
+- **why (flagship; mirrors `nh why`):** `resolve_capable(prompt,output,allowed,now)` over the caller's
+  allowed set (defaults to available priced API routes) → `naive_cost` + `saved_pct`. structuredContent
+  = route / cost (usd_approx only on FRESH fx) / savings (OMITTED when naive None) / rejected[] from the
+  RejectionTrace. Text never claims a saving it did not compute.
+- **route_cost:** `resolve(model|default)` → `price_at` → `cost_of(prompt,cached,output)`; quote + cost;
+  usd_approx omitted when fx absent/stale.
+- **receipts:** reads `<run_root>/.nosis/receipts.jsonl` READ-ONLY (limit clamp 1..=100; missing →
+  count 0). Torn last line tolerated, file NEVER mutated; typed via `nh_fleet::LedgerEvent::TaskReceipt`
+  (no new dep). Secrets in task text redacted in BOTH text + structuredContent.
+- **route_resolve / fleet_status (enhanced):** text byte-identical (fleet_status finished line too);
+  structuredContent added alongside (route + would_park_offpeak; run_id/state/counts/failed_reason).
+- **Egress choke:** new `tool_result` scrubs text (`safe_line`) AND `scrub_json`'s the structured value
+  (strings, array elements, object values AND keys) before returning content+structuredContent+isError.
+
+Orchestrator (Opus 4.8): assembled the v2 brief, re-launched the single background Sol run (xhigh),
+ran the authoritative `gate.ps1` (fmt drift → normalizing `cargo fmt -p nh-mcp` under pinned 1.96.0 →
+re-gate; Sol ran no fmt), adversarially reviewed (ZERO blocking — every checkpoint invariant verified
+vs code + a dedicated test: structuredContent always scrubbed; receipts read-only + never mutates +
+redacts in both surfaces + missing→0; fleet_status finished line byte-identical; loopback + banner
+unchanged; `why` == `resolve_capable`; usd_approx omitted when fx stale; `e3_korvin` edit = +3/−0 tool
+names only), and committed. Docs C+D (CHANGELOG / README / PRIVACY / CONTRIBUTING / RELEASE_CHECKLIST)
+were drafted by a **Fable 5 ultracode docs workflow** (5 writers, each independently accuracy-verified
+against the real CLI), orchestrator spot-checked (gate.ps1, rust-toolchain.toml, catalog.toml) and
+committed `202bdca`.
+
+Gate: **416 pass / 0 fail / 1 ignored** (`--release`), clippy `-D warnings` clean,
+`cargo fmt --all --check` clean; +6 nh-mcp tests; nh-mcp ONLY (`src/lib.rs` +826/−19, `e3_korvin.rs`
++3), no Cargo.toml, no new deps. Server stays stateless, loopback-only, preview (NOT public before
+2026-07-28). Release Slice next: live-verify MCP → live provider tests (<$2/provider) → Section B
+(forbid-unsafe / cargo-deny / keyless CI) → W4 (nh-tui+nh-cli surfaces, FEEL).
+
+---
+
 ## 2026-07-20: M5 Slice F Wave 5 — FLEET RELIABILITY (audit W5-1..W5-11) — committed `eaadfb2`
 
 Builder:
