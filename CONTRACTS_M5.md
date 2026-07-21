@@ -256,6 +256,44 @@ archived `Temp/slice-f-w5-brief-v1.txt`. **nh-fleet is now REOPENED (A-M5-8) —
 crate touched by Slice F.** Order W1✓→W3✓→W2✓→W5✓→**W4** (surfaces, FEEL), now folded into the
 owner-directed Release Slice.
 
+**W4 — SURFACES (nh-tui + nh-cli [FEEL-GATED]; + two owner-approved cross-crate fold-ins: nh-vault `from_vault`
+low-16 + nh-mcp `print_banner` cosmetic). The LAST Slice-F wave.** No frozen crate touched → **no §8 amendment**
+(verified: no W4 seam needs nh-fleet; medium-19 uses an nh-cli-only honest marker, NOT a per-turn nh-core change —
+STOP CLEAN if any fix appears to need nh-core or nh-fleet). Four owner-ratified FEEL calls (2026-07-20, session 3):
+(1) meter honesty = FULL fix (unmetered marker + honest peak-boundary marker + incomplete-total marker); (2) Esc
+legend made honest (no fake "interrupt"); (3) scroll-while-Working enabled (drop-if-hard); (4) both cross-crate
+fold-ins IN. medium-19 scope call: **honest nh-cli marker** (true per-turn pricing deferred — needs nh-core).
+Current line numbers re-grounded against HEAD `28cfee7` (audit's 2026-07-18 lines had shifted after W1/W2/W3/W5).
+
+| # | Ref (audit) | Crate:seam | Tag | Change |
+|---|---|---|:--:|---|
+| W4-1 | medium-12 | nh-tui `reduce_key` approval branch lib.rs:1647-1655 | Δ | gate the `Status::Waiting` match on `key.modifiers.difference(KeyModifiers::SHIFT).is_empty()`; any Ctrl/Alt combo falls to `_ => {}` (never a silent decide). +reducer test Ctrl+A/N/Y. |
+| W4-2 | low-24 | nh-tui `reduce_key` Working guard lib.rs:1656-1658 | Δ | while Working, still handle scroll keys (Up/Down/PageUp/PageDown → `scroll_transcript`) before returning `None`; all action keys stay blocked. |
+| W4-3 | medium-13 | nh-tui `wrapped_rows` lib.rs:2740-2747 (+ `transcript_scroll_state` 2628-2644) | Δ | word-wrap-accurate row count (replicate ratatui WordWrapper segmentation) so `max_scroll` is exact + newest line never clipped. DROP-IF-HARD floor = guarantee a `↓ more` marker + clamp so the newest line is always reachable. |
+| W4-4 | medium-14 | nh-tui worker Err arm lib.rs:1374-1382 / `failed_timeline_summary` ~1458 | Δ | AgentLoop returns no partial usage on Err (nh-core, out of scope) → mark the session meter INCOMPLETE / `?` after a failed turn; never fabricate zeros. |
+| W4-5 | low-22 | nh-tui `impl Drop for Worker` lib.rs:1141-1150 | Δ | on quit, `stop()` then ALWAYS take+join the handle (bounded) so an in-flight ledger append completes; don't skip the join when the thread is still running. |
+| W4-6 | low-23 | nh-tui `PanicHookGuard::install` lib.rs:2952-2963 (+ event/draw loop) | Δ | on a background-thread panic, set a shared abort flag the main event/draw loop checks each iteration and exits cleanly after `restore_terminal()` (stop drawing over the restored terminal). DROP-IF-HARD. |
+| W4-7 | nit-11 | nh-tui `chat_lines` lib.rs:2681-2738 | Δ | render pre-scrubbed transcript text (scrub once at insertion, cache), not `safe_line` on every ~50ms frame. Perf; display byte-identical. |
+| W4-8 | nit-12 | nh-tui `APPROVAL_LEGEND` lib.rs:57 | Δ | honest legend — drop the false "Esc interrupt"; relabel Esc as deny (e.g. `[y] yes  [a] always  [n]/[Esc] no`). Esc already = deny (1651). |
+| W4-9 | nit-13 | nh-tui `set_status` lib.rs:387-396 / `answer_approval_with_rule` 1462 | Δ | preserve `working_since` across an approval interlude: stamp it only when entering Working with no task already in progress (not on Waiting→Working from an approval) so the heartbeat shows true elapsed. |
+| W4-10 | medium-18 | nh-cli `cmd_run::run` cmd_run.rs:172-190 | Δ | keep `receipt.usage` as `Option`; when `None`, print "tokens: not reported by provider — cost unknown" and skip the tokens/cost lines (mirror cmd_chat:320); never `unwrap_or_default()` zeros. |
+| W4-11 | medium-19 | nh-cli `cmd_run::run` cmd_run.rs:191 (capture run-start) | Δ | HONEST MARKER (nh-cli only): capture `started` before `agent.run`; if `route.peak_status(started) != peak_status(end)`, append `*priced at run end — spans a peak boundary` to the cost line. No nh-core change; no true per-turn split. |
+| W4-12 | medium-20 | nh-cli `install_client` cmd_chat.rs:345-364 | Δ | build the scrubber as the UNION of `from_vault(...)` literals + every `s.key_literals` entry, so switched-away keys stay scrubbed for the session lifetime. |
+| W4-13 | medium-21 | nh-cli answer print cmd_run.rs:171 + cmd_chat.rs:326 | Δ | route the model answer through per-line `safe_line` (scrub + control-escape each line, rejoin `\n`) so ANSI/OSC never reach the terminal raw; newlines preserved. |
+| W4-14 | low-26 | nh-cli cmd_run.rs:165 + cmd_chat.rs:206-208, 120, 397 | Δ | wrap catalog-derived ids + connect/vault errors in `safe_line` (terminal-injection from catalog.toml / error text). |
+| W4-15 | low-27 | nh-cli `add_session_cost` cmd_chat.rs:470-495 (+ `ChatSession`, `session_money`) | Δ+ | track `has_unpriced_turns: bool` (set in the price-`None` branch); `session_money` appends `(incomplete — N unpriced turns)` when set. |
+| W4-16 | low-30 | nh-cli `init_at` cmd_init.rs:66-80 | Δ | when `.git` is a FILE (worktree/submodule): resolve the `gitdir:` pointer and install there, or at minimum print a visible "pre-commit secret guard NOT installed — install manually" line (no silent skip). |
+| W4-17 | nit-15 | nh-cli `main.rs` max_turns L54-55 + `cmd_run` bail L194-198 | Δ | reject `--max-turns 0` (clap `value_parser` range `1..` or a run-entry guard) with a message naming a positive value; never advise "rerun with --max-turns 0". |
+| W4-18 | low-16 | nh-vault `from_vault` lib.rs:130-141 (+ callers) | Δ | surface skipped entry NAMES (never values): return `(Scrubber, Vec<String>)`, startup call sites warn "redaction registry missing N — shape-only for those"; **or** add a sibling `from_vault_reporting` if any caller is frozen (STOP CLEAN + report if a nh-fleet caller exists). |
+| W4-19 | cosmetic | nh-mcp `print_banner` lib.rs:130 | Δ | replace the hardcoded `(tools: route_resolve, fleet_run, fleet_status)` with all 6 (derive from the tools/list source if cheap; else list all 6). |
+| W4-20 | nit-16 | nh-cli `cmd_mcp::serve` cmd_mcp.rs:15 | Δ | DROP-IF-HARD: keep the serve token in `Zeroizing` locally; full end-to-end zeroize crosses into nh-mcp `ServeConfig.token` (W2 kept it `Option<String>`) → defer if it needs the type change. |
+
+**Mutable surface (W4):** `nh-tui/src/lib.rs`; `nh-cli/src/{cmd_run.rs, cmd_chat.rs, cmd_init.rs, cmd_mcp.rs, main.rs}`;
+`nh-vault/src/lib.rs` (low-16); `nh-mcp/src/lib.rs` (print_banner) + new adversarial tests in nh-tui + nh-cli.
+**FROZEN / STOP-CLEAN:** nh-fleet (untouched), nh-core (medium-19 uses the marker, NOT per-turn), nh-routes
+(reuse `price_at`/`peak_status`), nh-tools. **No new deps, no Cargo.toml, no §8 amendment.** DROP-IF-HARD per item
+(UX-first). Brief: `Temp/slice-f-w4-brief-v1.txt`.
+
 ### 0.2 THE LAW + UX-first
 - THE LAW (top authority): small, simple, secure, safe, lightweight, readable, auditable, modular,
   congruent, harmonic. **Reuse over duplication** — the resolver reuses `price_at`/`peak_status`; the
