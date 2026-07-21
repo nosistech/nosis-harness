@@ -2,6 +2,50 @@
 
 Record every meaningful session here.
 
+## 2026-07-20: Release Slice — LIVE provider tests (launch evidence) — no commit-of-code; docs-only
+
+Orchestrator (Opus 4.8) ran the four-provider live smoke against the shipped `target/release/nh.exe`
+(the MCP-tools build). Identical tiny prompt each time ("Answer in one short sentence: what does a
+compiler do?"), `--max-turns 2`. Keys resolved from the OS vault (env `NH_*_KEY` fallbacks all unset).
+`.nosis/receipts.jsonl` is gitignored → the appended receipts leave the tree clean.
+
+Results (all `outcome: pass`, 1 turn, 0 tool calls):
+
+| Provider | Route | This-turn cost | usd_approx | top-tier counterfactual | wire verified |
+|---|---|---|---|---|---|
+| GLM / Z.ai | `glm-4.7-flash` | **$0.00** (free) | — | $0.0024 | free path OK |
+| DeepSeek | `deepseek-v4-flash` | **¥0.0025** | ≈$0.0003 | ¥0.0074 | `thinking:{type:disabled}` (`--think none`) ✅ |
+| Kimi / Moonshot | `kimi-k2.6` | **$0.0009** | (USD native) | $0.0018 | `kimi-toggle` (default think) ✅ |
+| MiMo / Xiaomi | `mimo-v2.5` | **$0.0002** | (USD native) | $0.0025 | dialect `none` OK |
+
+**Total real spend ≈ $0.0014 across all four** — priciest single provider (Kimi $0.0009) is ~2200× under
+the $2/provider HARD CAP.
+
+Honest-meter invariants verified LIVE (launch evidence):
+
+- **Cross-currency refusal** — `nh why "refactor a 200-line rust module and add unit tests"` picked
+  `mimo-v2.5` (cheapest capable, ~1037 tok, $0.0003 est) and REFUSED to rank the DeepSeek routes:
+  "¥0.0041 vs chosen $0.0003 — different currency, not directly comparable" (no fake FX for the compare).
+  It also honestly skipped the three GLM free routes as "unknown context" (no `context` field → can't
+  confirm the task fits → not auto-selected; explicit `--model glm-4.7-flash` still runs).
+- **`usd_approx` only on fresh fx** — DeepSeek ¥0.0025 → ≈$0.0003 because catalog `[fx]` `valid_until
+  2026-07-24` is fresh (today 07-20); ¥0.0025 × 0.139 = $0.000348 ✓. Native CNY stays the billed truth.
+- **Peak pricing applied honestly** — the DeepSeek turn stamped 03:36Z = 11:36 Asia/Shanghai, inside the
+  09:00–12:00 peak window, so the 2× is already in the actual cost and the `peak` counterfactual equals it
+  (¥0.0025) — an honest "we ARE at peak", not a fabricated markup. Base would have been ~¥0.0012.
+- **No invented savings** — free GLM prints a real `$0.00` next to `top-tier $0.0024`; every run renders
+  the full `cost · peak · no-cache · top-tier` line; `no-cache == cost` at 0% cache is correct.
+- **VERIFY-LIVE §7 wire shapes CONFIRMED** — the two guesses carried since Slice A both accepted by the
+  real APIs with no 400: DeepSeek `thinking:{type:disabled}` (via `--think none`) and the Kimi K2.6 toggle.
+- **Typed receipts written** — each run appended `{ts_utc, model_id, task, turns, tool_calls, outcome,
+  usage{prompt/completion/cached}, effective_profile:"balanced"}` to `.nosis/receipts.jsonl`.
+
+Not exercised (out of scope for a cost smoke): identity honesty on the contaminated providers
+(DeepSeek/MiMo self-ID as "Claude") — the prompt was purely factual. Release Slice remainder: **W4**
+(nh-tui+nh-cli surfaces, FEEL — the last Sol code wave) + the cosmetic `print_banner` 6-tool fix.
+
+---
+
 ## 2026-07-20: Release Slice — Section B: engineering tail (forbid-unsafe + workspace lints + MIT license + cargo-deny gate + keyless CI) — committed `d1f9ad0`
 
 Builder:
