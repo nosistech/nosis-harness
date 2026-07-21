@@ -64,7 +64,10 @@ fn e3_korvin_starts_and_polls_a_stateless_fleet_run() -> anyhow::Result<()> {
         BTreeSet::from([
             "fleet_run".to_string(),
             "fleet_status".to_string(),
+            "receipts".to_string(),
+            "route_cost".to_string(),
             "route_resolve".to_string(),
+            "why".to_string(),
         ])
     );
 
