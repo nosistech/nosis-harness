@@ -6,6 +6,12 @@ public deviations are not. Spec source: `NOSIS_HARNESS_Master_Plan.md` §2 (nh-t
 (UX answers 1–8), §6 (M3), `02-architecture/SECURITY_MODEL.md`, `MILESTONES.md` (M3 exit).
 Amendments go through the orchestrator only, additive, logged in §7.
 
+> **OWNER SUPERSESSION — 2026-07-26:** The Telegram implementation described below is retained as
+> historical M3 context only. It is removed from public v0.1: no notification config, bot
+> credential, destination, sender thread, or Telegram network path remains. The local terminal bell
+> remains. Remote notifications stay open only as a future, separately reviewed explicit opt-in
+> integration. See §7.
+
 Carlos's M3 scoping decisions (2026-07-13), binding:
 - **Timeline = view-first.** M3 ships the timeline as VIEW + diff-inspect. Side-git snapshots
   and `R` restore are DEFERRED to a later slice — do NOT build a snapshot store in M3.
@@ -306,6 +312,15 @@ nh tui [--model <id>] [--budget <tokens>]
 
 ## 7. Integration amendments (append here, dated, orchestrator authority)
 
+- **2026-07-26 — remote notifications removed from public v0.1 (owner supersession):**
+  Delete the Telegram config/parser, bot-token lookup, sender thread, HTTP path, and associated
+  dependencies/tests. Preserve the local terminal bell on approval. This deliberately narrows the
+  product to its core harness boundary: the remote path was never live-verified, was not wired to
+  headless Fleet (the strongest walk-away use case), and introduced credential, destination,
+  privacy, and outbound-network risk. The product may revisit remote notifications only as a
+  separately reviewed, explicit opt-in integration; this amendment does not prohibit that future
+  work.
+
 - **2026-07-13 — shared peak chip:** lifted the existing chat peak/off-peak display
   logic into additive nh_routes::ResolvedRoute::peak_status; both nh chat and
   nh-tui call the same method, preserving the existing chat strings and tests.
@@ -420,6 +435,20 @@ erodes trust. Carlos's decision (2026-07-14): move to a **type-freely + slash-co
   Overlays keep Up/Down for their own navigation. Enable mouse capture on startup; DisableMouse
   capture on EVERY teardown (guard + panic hook) — no residue. Show a dim honest overflow hint
   (`↑ more` / `↓ more`); a full Scrollbar is drop-if-hard.
+
+  > **RETROACTIVE AMENDMENT 2026-07-25 (recording M3 Slice F, commit `3fcd00e`, 2026-07-15).**
+  > REVERSED: mouse capture is NOT enabled. `EnableMouseCapture` was removed so that **native
+  > terminal click-drag copy works with no Shift held** — with capture on, the terminal never sees
+  > the drag and the user cannot select text out of the transcript, which the owner judged a worse
+  > daily-use failure than losing wheel-scroll. **Consequence accepted: wheel-scroll is gone.** It is
+  > covered by the keyboard scroll shipped in Slice E (`↑↓` line, PageUp/PageDown page, End newest)
+  > plus the `↑ more`/`↓ more` overflow hints this section already required, so no scrolling
+  > capability was lost — only the input device. Slice F was shipped in `3fcd00e` and recorded in
+  > BUILD_LOG:637-640 but never carried a dated contract amendment the way §7 authorized Slice D;
+  > this block closes that gap. **Not recorded at the time:** whether the wheel-scroll loss was
+  > explicitly weighed in the moment, or simply accepted as the cost of restoring copy — the owner
+  > has no recollection (2026-07-25), and the reasoning above is reconstructed from the commit
+  > message and the shipped keyboard-scroll fallback, not from a contemporaneous note.
 
 ### 9.3 Live model/provider switch (mirror cmd_chat's proven `switch_to`)
 - `/model`/`/provider` re-resolve via `TuiConfig.resolver` and rebuild the worker's client for the

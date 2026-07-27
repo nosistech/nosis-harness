@@ -16,7 +16,7 @@ Implementation bursts in the build loop — subscription already paid, quota-sca
 
 Model/tool:
 
-Opus 4.8 (Claude Code delegate, `claude -p`); Sonnet 4.6 pre-screens to stretch quota.
+Opus 5 (Claude Code delegate, `claude -p`); Sonnet 4.6 pre-screens to stretch quota.
 
 Use for:
 
@@ -57,6 +57,6 @@ Use for:
 | Free vision for tests | GLM-4.6V-Flash (**free**) |
 | Web-grounded research | Gemini 3.1 Pro (Antigravity delegate, best-effort) |
 | Implementation bursts | GPT-5.6 Terra/Sol (Codex delegate) |
-| Review / gate / security | Opus 4.8 (Claude Code delegate) |
+| Review / gate / security | Opus 5 (Claude Code delegate) |
 
 Escalation ladder: Flash → K2.7 → V4 Pro High → V4 Pro Max → Opus gate. Two failures per tier, receipt attached, never silently retry the same route more than twice.

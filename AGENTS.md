@@ -1,5 +1,15 @@
 # AGENTS.md — Nosis Harness (repo root)
 
+> ## ⇒ RESUMING? START HERE: `00-start-here/CONTINUE_HERE.md`
+> If the owner typed **`continue`**, read that file FIRST and in full, before any other action.
+> It is the self-contained handoff written 2026-07-26 by the outgoing orchestrator (Claude Opus 5)
+> for the incoming one (GPT-5.6 Sol max), followed by a status banner recording completion of the
+> audit, hardening, Telegram removal, modularization, and owner commit gate. The older detailed
+> checkpoints below that banner are retained as historical context.
+>
+> **Do not create another commit unless the owner explicitly requests it. Do not run `cargo fmt`.**
+> The owner explicitly passed the previous FEEL/commit gate on 2026-07-26.
+
 Instructions for any coding agent working in this repo. Project-level detail: `05-ai-collaboration/AGENTS.md`. Canonical spec: `NOSIS_HARNESS_Master_Plan.md` (Appendices A/B supersede §1/§3).
 
 ## THE LAW (top authority)

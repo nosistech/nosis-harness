@@ -6,15 +6,17 @@ Nosis Harness
 
 ## One-Sentence Pitch
 
-The first agent CLI that treats cost, clock, cache, and modality as routing inputs — open-weight frontier models do the bulk work, subscription delegates (Claude/Codex/Gemini) do what only they can.
+The honest, visible, auditable *metered* agent for open-weight models — native on Windows: choose a route explicitly, inspect the cheapest-capable estimate, and get a local receipt.
+
+> **Amended 2026-07-25.** This pitch previously read "...open-weight frontier models do the bulk work, subscription delegates (Claude/Codex/Gemini) do what only they can." The subscription-delegate backend class was **cut from v1** (2026-07-16/17); only a commented catalog schema stub remains. The pitch above now matches the shipped positioning in `WHY_BEST_IN_CATEGORY_2026.md`.
 
 ## Problem
 
 What painful problem does this solve?
 
 - Existing CLIs (Claude Code, Codex, Gemini CLI, CodeWhale) have documented pain: approval fatigue, opaque cost/rate-limit shock, ambiguous status, context loss in long sessions, Windows instability.
-- Nobody routes by price-at-this-hour or cache economics, even though cache-hit input is ~120× cheaper on DeepSeek V4-Pro and peak hours cost 2×.
-- Multi-provider reality (API credits here, subscriptions there) has no harness that treats both as first-class routes.
+- Provider prices and limits change quickly, while existing CLIs rarely expose a reproducible local estimate tied to reported usage and freshness-dated catalog data.
+- Multi-provider API users lack one small harness that applies the same approval, receipt, context, and credential rules across each direct route.
 
 ## Customer
 
@@ -25,27 +27,27 @@ Who has this problem?
 
 ## Solution
 
-What will the product do? The 7 differentiators (plan §0):
+What v0.1 does now:
 
-1. Time-of-day cost routing (DeepSeek peak/off-peak, MiMo night discounts; La Ceiba daytime = DeepSeek off-peak).
-2. Modality-aware dispatch (per-route flags; vision subtasks auto-delegate instead of erroring).
-3. Thinking-budget governor (task complexity → per-provider reasoning dialect).
+1. Freshness-dated price estimates plus opt-in off-peak Fleet deferral when a trusted route actually defines a peak window.
+2. Validated per-route modality data and an auditable `nh why` comparison; execution remains explicit.
+3. Per-provider reasoning dialects controlled by bounded execution profiles.
 4. KV-cache-first context engine (stable prefix as invariant; cache-hit % in the status line).
-5. MCP 2026-07-28 stateless-native, both client and server — no legacy to migrate.
+5. A loopback-only, bearer-guarded MCP preview; it is not a public network service.
 6. UX that fixes the documented pain (semáforo status, cost HUD, trust dial, timeline scrubber, `?` palette, Windows-first).
 7. Constitution-native: THE LAW + AGENTS.md enforced in code, never overridable by model text.
 
 ## Why Now
 
-- DeepSeek V4 official launch (mid-July 2026) introduces peak/off-peak pricing — the routing lever exists for the first time.
+- Provider pricing and model limits are changing quickly; a data-driven catalog with short recheck deadlines avoids hard-coded cost claims.
 - MCP 2026-07-28 spec finalizes in days; incumbents must migrate, a greenfield harness starts clean.
-- GPT-5.6 (July 9) + Opus 4.8 make the Claude-plans/Codex-builds/Opus-gates loop strong enough to build this with one person.
+- GPT-5.6 (July 9) + Opus 5 make the Claude-plans/Codex-builds/Opus-gates loop strong enough to build this with one person.
 
 ## Success Criteria
 
 This product is working if:
 
 - Cache-hit % >60% on a 50-turn session (M2 exit).
-- Deferrable jobs actually execute off-peak and the HUD shows the saving.
+- A synthetic peak-window route parks and resumes correctly; any future production peak window must be reverified before it enters the trusted catalog.
 - A full native Windows session with zero renderer artifacts (M3 exit).
 - Carlos uses it daily over the incumbents for open-model work.

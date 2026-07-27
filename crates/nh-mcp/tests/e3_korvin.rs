@@ -1,3 +1,9 @@
+//! End-to-end MCP/Fleet exercise for the debug-only echo provider seam.
+//!
+//! Release builds deliberately compile that seam out; the CLI integration suite
+//! separately proves a release binary refuses `NH_FLEET_TEST_PROVIDER`.
+#![cfg(debug_assertions)]
+
 use std::collections::BTreeSet;
 use std::io::{Read as _, Write as _};
 use std::net::{Shutdown, SocketAddr, TcpStream};
@@ -76,7 +82,10 @@ fn e3_korvin_starts_and_polls_a_stateless_fleet_run() -> anyhow::Result<()> {
 
     let started = client.call_tool(
         "fleet_run",
-        serde_json::json!({ "tasks": [{"task":"echo one"}, {"task":"echo two"}] }),
+        serde_json::json!({
+            "tasks": [{"task":"echo one"}, {"task":"echo two"}],
+            "budget": 1_000
+        }),
     )?;
     let run_id = started
         .split_whitespace()

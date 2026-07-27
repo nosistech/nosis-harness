@@ -1,4 +1,4 @@
-//! `nh key add` — hidden prompt, store in the OS-native vault, never echo the value.
+//! `nh key` — add or remove an OS-native vault entry without echoing its value.
 
 use nh_vault::{KeyringVault, Vault};
 use zeroize::Zeroizing;
@@ -24,5 +24,14 @@ pub fn add(entry: &str) -> anyhow::Result<()> {
     }
     KeyringVault.set(entry, value)?;
     println!("stored {entry} in {STORE}");
+    Ok(())
+}
+
+pub fn remove(entry: &str) -> anyhow::Result<()> {
+    if KeyringVault.remove(entry)? {
+        println!("removed {entry} from {STORE}");
+    } else {
+        println!("no {entry} key was stored in {STORE}");
+    }
     Ok(())
 }

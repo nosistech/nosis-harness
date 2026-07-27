@@ -2,6 +2,147 @@
 
 Record every meaningful session here.
 
+## 2026-07-26: Responsibility-boundary modularity refactor
+
+What changed:
+
+- Reorganized the largest first-party crates by responsibility while preserving their public
+  facades and behavior:
+  - `nh-tui`: input, render, session, state, palette, timeline, terminal, and worker.
+  - `nh-core`: agent loop, wire protocol, receipts, credentials, and runtime paths.
+  - `nh-fleet`: model, engine, preparation, ledger, and run/resume orchestration.
+  - `nh-mcp`: protocol dispatch, route tools, receipt tools, Fleet tools, responses, and transport.
+  - `nh-tools`: MCP config/client/adapter, shell execution, and the built-in tool facade.
+  - `nh-routes`: route vocabulary, pricing, resolver, profiles, and the banned-ID boundary.
+  - `nh-law`: policy model, layered loading/compilation, and pure matchers.
+- Extracted embedded tests from production modules throughout the workspace, including the CLI and
+  vault. Large test suites remain intentionally grouped where that improves invariant visibility;
+  they no longer inflate or couple the production modules.
+- Updated `02-architecture/ARCHITECTURE_OVERVIEW.md` with the exact internal ownership map so the
+  code boundaries are discoverable without reverse-engineering the module tree.
+- Kept existing external paths available through thin re-exports. This was a structural change,
+  not a command, wire-format, persistence-format, or entitlement change.
+- Strengthened the central route invariant by colocating `ResolvedRoute` with `RouteResolver`;
+  its fields remain private, and tests now exercise public accessors instead of weakening the
+  resolver-only construction boundary.
+- Added no dependency and made no manifest change in this refactor. The owner then explicitly
+  passed the FEEL/commit gate and requested the coherent commit; no tag was created.
+
+Verification:
+
+- `cargo test --workspace` — PASS (512 passed, including the resolver compile-fail doctest;
+  1 OS-keyring test ignored, 0 failures).
+- `cargo clippy --workspace --all-targets -- -D warnings` — PASS.
+- `cargo test --workspace --release` — PASS with the same totals.
+- `cargo clippy --workspace --all-targets --release -- -D warnings` — PASS.
+- Direct `rustfmt --check` over every crate Rust source — PASS. `cargo fmt` was deliberately not
+  run; direct `rustfmt` was scoped to files created or structurally rewritten in this session.
+
+Result:
+
+- Production code is now organized around stable responsibilities rather than historical file
+  growth. The public crate architecture and the internal module architecture both satisfy the
+  repository's small/simple/readable/auditable/modular principles; this supersedes the earlier
+  note below that named Fleet, MCP, route, and TUI coordinators as future split candidates.
+
+## 2026-07-26: Public-v0.1 hardening — audit remediation, safe modularization, and release gate
+
+What changed:
+
+- Closed the pre-release audit's load-bearing security paths with regression coverage:
+  exact HTTPS origin/port authorization before provider-key materialization; resolver-only route
+  minting; symlink/size/containment checks for repository instructions and runtime state; mandatory
+  approval at the `exec_shell` operation boundary; bounded remote/request/tool/task/output bodies;
+  typed finish-reason handling; checked usage arithmetic; locked, scrubbed receipts; worker/server
+  shutdown ownership; and repository MCP/catalog configuration that can only tighten trusted
+  operator configuration.
+- Replaced ordinary credential copies with zeroizing `SecretValue`/`SecretRegistry` ownership for
+  active routes. Added `nh key remove <entry>` and made the generated Git hook consume the same
+  canonical secret-shape registry as runtime redaction.
+- Added per-call output caps, Fleet task/count/id/file caps, mandatory Fleet budgets, and an MCP
+  Fleet budget ceiling. Provider-side account alerts/hard limits remain operator-owned controls.
+- Reverified the production catalog against first-party provider pages on 2026-07-26, normalized
+  current prices to USD, removed unsupported historical peak windows, and set 2026-08-02 as the
+  next mandatory recheck date. Synthetic peak-pricing tests now use far-future fixture dates.
+- Kept routing behavior honest: execution remains explicitly selected; `nh why` is advisory and
+  cannot silently dispatch a different route.
+- Removed Telegram end to end in the following owner-directed slice (documented separately below).
+- Made focused modularity extractions instead of a high-risk cosmetic rewrite:
+  `nh-core::{credential,runtime_path}` and `nh-tui::{terminal,worker}` now own shared security and
+  lifecycle invariants. Large Fleet, MCP, route, and TUI coordinator modules remain candidates for
+  later characterization-first splits; they are not launch-blocking correctness changes.
+- Hardened GitHub Actions with exact action commit pins, read-only permissions, no persisted
+  checkout credential, locked dependencies, timeouts, concurrency cancellation, Windows/Linux/
+  macOS jobs, a supply-chain job, and weekly Dependabot configuration.
+- Replaced blank operations templates and corrected security, privacy, architecture, product,
+  release, and master-plan claims so they describe the current local CLI rather than planned
+  hosted, delegate, sandbox, telemetry, snapshot, or automatic-routing features.
+- Marked all workspace crates `publish = false`; the documented distribution is a reviewed source
+  release, not nine independently publishable crates.io packages.
+- Made the debug-only MCP/Fleet echo integration test explicitly debug-only. Release builds retain
+  and pass the separate proof that the test-provider switch is unavailable.
+
+Verification and evidence:
+
+- Personally re-derived and executed the top three negative regressions:
+  exact-origin mismatch is refused before vault access; an out-of-repository `AGENTS.md` symlink is
+  refused; and `Guard::Allow` still cannot bypass explicit shell approval.
+- Scanned all 66 reachable commits using the canonical key-shape registry. Only deliberate
+  fake/redaction fixtures matched; no candidate live credential was found.
+- `cargo test --locked --workspace`: 512 passed, 0 failed, 1 ignored (real OS-keyring mutation).
+- `cargo clippy --locked --workspace --all-targets -- -D warnings`: pass.
+- `cargo fmt --all --check`: pass. Formatting drift was corrected manually; `cargo fmt` was not run.
+- `cargo clippy --locked --workspace --all-targets --release -- -D warnings`: pass.
+- `cargo deny --locked check`: advisories, bans, licenses, and sources all pass. It reports only
+  non-blocking duplicate transitive Windows-support crates and unused license allowances.
+- `cargo test --locked --workspace --release`: 512 passed, 0 failed, 1 ignored.
+- Release binary smoke: `nh 0.1.0`; `nh why "quick task"` succeeds without a key; `nh init` is
+  idempotent in a disposable Git repository; `nh mcp serve --addr 0.0.0.0:8765` refuses before
+  serving; the disposable repository was removed and no audit artifact remains.
+
+External release gates still owned by the operator:
+
+- This checkout has no Git remote, so the configured Windows/Ubuntu/macOS CI has never run on a
+  pushed release commit. Branch protection, required checks, private vulnerability intake, and the
+  public repository metadata therefore cannot yet be verified.
+- The owner must complete the Windows FEEL pass. Linux and macOS remain unverified and must not be
+  advertised until their remote jobs and platform smoke tests pass.
+- Provider-account hard spend limits/alerts and a post-hardening live provider smoke are external
+  checks. No paid provider call was made in this hardening session.
+- The official MCP project still labels 2026-07-28 as an RC on 2026-07-26. `nh mcp serve` remains a
+  loopback-only preview; the normal CLI/TUI release is independent.
+
+No commit or tag was created, `cargo fmt` was not run, and the owner-held uncommitted FEEL-gate tree
+was preserved.
+
+## 2026-07-26: Public-v0.1 hardening — remote notifications removed by owner decision
+
+What changed:
+
+- Removed the TUI Telegram surface end to end: `NotifyConfig`/parser, `notify.toml` loading, bot
+  credential lookup, sender thread, HTTP POST, failure channel, and notification-specific tests.
+  The existing local approval bell and taskbar/status transitions remain unchanged.
+- Removed `nh-tui`'s now-unused direct `reqwest` and `toml` dependencies.
+- Updated the canonical plan, roadmap, milestone and architecture views. Historical M3 records were
+  preserved and marked superseded. Recorded why the feature was removed and the narrow conditions
+  for a future explicit opt-in integration.
+
+Why:
+
+- Remote notification is outside the harness's central invariant and added credential,
+  destination-config, privacy, dependency, background-thread, and outbound-network attack surface.
+  Its strongest walk-away justification was not wired to headless Fleet, and the real send remained
+  verify-live. Public v0.1 keeps the local signal without owning that remote surface.
+
+Checks run:
+
+- `cargo test -p nh-tui`: 69 passed, 0 failed.
+- `cargo test -p nh-cli cmd_tui`: 3 passed, 0 failed.
+- Full workspace test/clippy and release gates remain pending for the larger uncommitted hardening
+  session.
+
+No commit was created and `cargo fmt` was not run.
+
 ## 2026-07-20: Release Slice — LIVE provider tests (launch evidence) — no commit-of-code; docs-only
 
 Orchestrator (Opus 4.8) ran the four-provider live smoke against the shipped `target/release/nh.exe`
@@ -375,6 +516,61 @@ Next step:
 - Ground + brief W3 "METER TRUTH" (nh-core + nh-routes), the next wave in the
   ratified order W1→W3→W2→W5→W4.
 
+## 2026-07-18: M5 Slice E — LOOP hygiene, PARTIAL (E5) — committed `bc2a1b1` + `a71eb23`
+
+*Backfilled 2026-07-25 from the commit record (`bc2a1b1`, `a71eb23`, docs-close `0c14743`);
+no BUILD_LOG entry was written at the time.*
+
+Builder:
+
+- Not recorded at the time. Neither commit message nor the docs-close names an executor.
+  Both commits are repo-tooling/formatting only and touch no crate logic. (The same session
+  logged the standing rule that Sol must NOT run `cargo fmt` — formatting is the gate's job.)
+
+What changed:
+
+- `bc2a1b1` — one-time `cargo fmt --all` normalization of the 37-hunk / 7-file backlog that
+  had accumulated because the workspace was never fmt-clean, so any scoped `cargo fmt -p`
+  reflowed pre-existing code and polluted slice diffs (it bit Slice A and Slice D). Pure
+  behavior-preserving reflow across nh-cli (`cmd_init`, `cmd_key`, `m2_exit`), nh-fleet,
+  nh-tools (`lib`, `mcp`), and nh-vault.
+- `bc2a1b1` — added `gate.ps1`, mechanizing the three checks that define "clean": `fmt
+  --check`, `clippy -D warnings`, `test --release`, with per-step exit-code aggregation
+  (never `| tail`, whose 0 would mask a real failure). This is the Slice E "fmt --check gate"
+  item, pulled forward to kill the reflow pitfall at its root.
+- `a71eb23` — `rust-toolchain.toml` pins 1.96.0 + rustfmt/clippy so fmt/clippy/build are
+  reproducible on every machine and in CI, and a future rustfmt cannot silently re-introduce
+  the reflow drift the normalize just cleared.
+- `a71eb23` — `.gitattributes` makes line-ending handling explicit and portable (LF in repo,
+  native checkout; Windows scripts CRLF) so fmt never churns on EOL.
+- `a71eb23` — `deny.toml`, a DORMANT cargo-deny supply-chain policy (advisories / bans /
+  licenses / sources). cargo-deny was not installed; wiring `cargo deny check` into `gate.ps1`
+  was left as follow-up. No crate source touched.
+
+Tests/checks:
+
+- After `bc2a1b1`: `cargo test --workspace --release`: **357 passed / 0 failed / 1 ignored**;
+  clippy `-D warnings` clean.
+- For `a71eb23`: no gate run is recorded — the commit touches no crate source.
+- Owner FEEL gate: not recorded at the time (Slice E changes no human-facing surface).
+
+Not delivered in this pass — Slice E is PARTIAL and E5 is NOT met:
+
+- The `gate.ps1` frozen-surface / allowed-files sensor, which is the E5 acceptance test (an
+  out-of-surface edit must fail the gate). `gate.ps1` as shipped here runs fmt/clippy/test only.
+- Keyless CI (windows + ubuntu); `codex exec --output-schema` structured Sol self-report;
+  `cargo-nextest` + AV-canary preflight; `[workspace.lints]` + `forbid(unsafe_code)`; wiring
+  cargo-deny into the gate. All recorded as "rest of Slice E" in `0c14743`.
+- Later record: forbid-unsafe, workspace lints, the cargo-deny gate step, and keyless CI
+  landed in the Release Slice Section B commit `d1f9ad0` (see its entry above). The
+  frozen-surface sensor, nextest/AV canary, and `--output-schema` remain undelivered.
+
+Next step:
+
+- Owner expanded the scope: a full Fable 5 high read-only audit was launched in the background
+  (workflow run `wf_72da5ecf-6f6`). Triage its findings, then `[workspace.lints]` +
+  `forbid(unsafe_code)`, then the rest of Slice E "LOOP".
+
 ## 2026-07-18: M5 Slice D — LEVER (E4 implementation)
 
 Builder:
@@ -415,6 +611,57 @@ Next step:
 - Orchestrator adversarial review and owner FEEL approval of `nh profile`, the
   `/profile` confirmation, and the HUD chip before the Slice D commit.
 
+## 2026-07-18: M5 Slice C — VISIBLE (E3 implementation) — THE FEEL GATE — committed `a0a4036`
+
+*Backfilled 2026-07-25 from the commit record (`a0a4036`, docs-close `3a5df91`); no BUILD_LOG
+entry was written at the time.*
+
+Builder:
+
+- Codex (GPT-5.6 Sol xhigh) — Slice C executor from a seam-by-seam brief, in two handoffs
+  (the full slice, then a sub-cent honesty fix that live testing exposed); gated,
+  adversarially reviewed, and live-verified by the orchestrator.
+
+What changed:
+
+- Money HUD: currency cost (cached/miss/output split) + per-currency session total, replacing
+  the token-only line; an honest-stale (`*`) flag on verify_live prices; the token budget
+  hard-stop kept.
+- The counterfactual savings line (the aha): cost + "saved N% vs no-cache" over catalog price
+  × JSONL tokens, with a peak / no-cache / top-tier breakdown. A cold turn makes no false
+  claim. New pure `cost_of` / `naive_cost` / `saved_pct` in nh-routes.
+- Approximate USD gloss: native currency stays the billed truth; `~$` is omitted when the rate
+  is stale or absent and is never FX-summed across CNY/USD (per-currency subtotals). New
+  `[fx]` catalog data + `Fx` type (A-M5-6).
+- Adaptive money precision: a real sub-cent spend never renders as `$0.00` — only a genuinely
+  free route shows `$0.00`, so the meter cannot lie by rounding.
+- `/why` (TUI) + `nh why` (CLI): live `resolve_capable` + `RejectionTrace` explain the chosen
+  route and every route it beat.
+- Approval cluster (L6 fixed): y/a/n/Esc only, any other key is a no-op (never a silent deny);
+  always-this-session rule; visible legend; Esc-to-interrupt.
+- Working heartbeat; OSC 9;4 Windows taskbar semaforo; an errors-that-teach helper.
+- drop-if-hard: "Esc to stop" while working was dropped — there is no truthful cooperative
+  cancel path, so the harness does not claim an interrupt that does not work.
+
+Tests/checks:
+
+- `cargo test --workspace --release`: **339 passed / 0 failed / 1 ignored** (319 → +20:
+  Slice C +17, sub-cent fix +3).
+- `cargo clippy --workspace --all-targets --release -- -D warnings`: clean.
+- Live-verified with the owner's real GLM key: free `glm-4.7-flash` ran end-to-end and printed
+  an honest `$0.00`; paid `glm-5.2` returned a clean "insufficient balance" error; `nh why`
+  ran live.
+- **Owner FEEL-approved before commit.** FEEL finding worth keeping: at 2 dp a real ~$0.003
+  turn rounded to `$0.00`, fixed by the adaptive precision above.
+- Still open at close: a live money / savings-% demo needs a key with paid balance (a free GLM
+  key caps the display at `$0.00`).
+- Amendment A-M5-6 (USD gloss + `[fx]` catalog data + the no-cache-headline FEEL ruling)
+  logged in CONTRACTS_M5 §8.
+
+Next step:
+
+- Brief Sol for Slice D "LEVER" (E4, profiles).
+
 ## 2026-07-18: M5 Slice B — FLOOR (E2 implementation)
 
 Builder:
@@ -447,6 +694,61 @@ Tests/checks:
 Next step:
 
 - Orchestrator adversarial review and commit gate for Slice B, then Slice C VISIBLE.
+
+## 2026-07-18: M5 Slice A — TRUTH (E1 implementation) — committed `9c96259`
+
+*Backfilled 2026-07-25 from the commit record (`9c96259`, docs-close `70a2f9d`); no BUILD_LOG
+entry was written at the time.*
+
+Builder:
+
+- Codex (GPT-5.6 Sol xhigh) — Slice A executor from the locked seam-by-seam brief, in two
+  handoffs (truth-math + resolver, then an Anthropic-wire fix); gated and adversarially
+  reviewed by the orchestrator. Changes confined to the CONTRACTS_M5 §0.1 Slice A seams plus
+  amendments A-M5-1/2/3.
+
+What changed:
+
+- nh-core meter-math, L1 `apply_thinking`: explicit `thinking:{type:disabled}` for None/Low on
+  `deepseek-nhm` (it was omitting the field, so the provider auto-escalated), plus a new
+  kimi-toggle dialect for K2.6.
+- L2 reasoning replay is now conditional on the effective thinking state
+  (`preserve_when_thinking`) — K2.6 thinking+tools no longer errors.
+- L7 `compact_history`: the elision note is a NEW message and the retained messages stay
+  byte-identical (cache-safe), with a cache-aware trigger. L8 `estimate_tokens` counts
+  preserved reasoning + serialized tool specs. L9 output cap on BOTH wires (OpenAI now sends
+  `max_tokens`; Anthropic is no longer clamped to 8192). L12 PrefixSeal enforced in ALL builds
+  plus a cache-break signal (was debug-only).
+- Added the `effective_context` clamp (context-rot guard) and a native
+  `prompt_cache_hit/miss_tokens` fallback parse.
+- `build_anthropic_body` merges consecutive user-role blocks, fixing an L7 regression that
+  emitted two consecutive user messages after compaction (rejected by the Anthropic wire;
+  found in review, A-M5-3).
+- nh-routes honest resolver: `resolve_capable` + `RejectionTrace` — the cheapest
+  context-fitting priced `Api` route by expected cost, with an auditable per-route skip trace
+  (reuses `price_at`; no jurisdiction and no learning, those are M6). Added the `KimiToggle`
+  dialect variant and the `preserve_when_thinking` route field (A-M5-1).
+- Frozen-crate glue (A-M5-2): one behavior-preserving `KimiToggle` arm in `effort_for` in
+  nh-fleet, nh-tui, and nh-cli (a toggle model defaults to no-thinking).
+
+Tests/checks:
+
+- Tests +14 over the 292 baseline.
+- `cargo test --workspace --release`: **306 passed / 0 failed / 1 ignored**.
+- `cargo clippy` with `-D warnings`: clean.
+- No owner FEEL gate — Slice A has no human-facing surface (that is Slice C).
+- Two `[VERIFY-LIVE §7]` wire shapes remained unconfirmed pending a live key: the DeepSeek
+  explicit non-thinking shape and the Kimi K2.6 toggle shape.
+- nh-core and nh-routes carry incidental cargo-fmt normalization of pre-existing code; the
+  frozen crates were reverted to fmt-clean HEAD with only the glue arm re-applied.
+- Process lesson recorded: the workspace was clippy-clean but never fmt-clean, so a
+  `cargo fmt --all` run mid-gate reformatted the entire workspace and polluted the diff across
+  frozen crates. Rule captured — never `cargo fmt --all` mid-slice; use scoped `cargo fmt -p`.
+  Slice E is to add an `fmt --check` gate plus a one-time workspace normalization.
+
+Next step:
+
+- Brief Sol for Slice B "FLOOR" (E2).
 
 ## 2026-07-17: M4 CLOSED (Slice D committed `aa751f4`) + M5 direction research
 

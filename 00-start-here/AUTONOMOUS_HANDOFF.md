@@ -4,7 +4,7 @@
 
 ## Roles (fixed by Carlos)
 
-- **Orchestrator = Opus 4.8, high effort** (this Claude session). Plans, writes per-milestone briefs + locked contracts, runs verification gates, adversarially reviews, gates, commits, writes docs. Does NOT hand-write milestone implementation code.
+- **Orchestrator = Opus 5, high effort** (this Claude session). Plans, writes per-milestone briefs + locked contracts, runs verification gates, adversarially reviews, gates, commits, writes docs. Does NOT hand-write milestone implementation code.
 - **Executor = GPT-5.6 Sol, xhigh effort**, driven headless via Codex CLI. Writes all M2–M5 implementation code.
 - Verified working 2026-07-13: `codex exec -m gpt-5.6-sol -c model_reasoning_effort=xhigh` returned SOL-READY. Codex CLI 0.144.1, logged in via ChatGPT.
 
@@ -26,7 +26,7 @@ Give Sol a written brief + a locked `CONTRACTS_<Mx>.md` (same pattern as `CONTRA
 2. Executor (Sol xhigh) implements via `codex exec`.
 3. Orchestrator verifies: `cargo test --workspace` + `cargo clippy --workspace --all-targets -- -D warnings` + the milestone's exit criteria (see `MILESTONES.md`).
 4. Orchestrator adversarially reviews vs THE LAW + `02-architecture/SECURITY_MODEL.md`; sends confirmed findings back to Sol to fix (hardening pass).
-5. Update `BUILD_LOG.md` + `CURRENT_TASK.md`; `git commit` (trailer: `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>` + note Sol as implementer in body).
+5. Update `BUILD_LOG.md` + `CURRENT_TASK.md`; `git commit` (trailer: `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>` + note Sol as implementer in body).
 6. Next milestone. Do not skip the review gate.
 
 ## Guardrails (non-negotiable)

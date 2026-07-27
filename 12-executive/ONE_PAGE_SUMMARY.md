@@ -6,7 +6,7 @@ Nosis Harness (NosisTech LLC)
 
 ## What It Is
 
-A Rust terminal agent harness — like Claude Code or Codex CLI, but provider-plural: it routes each task to the cheapest capable model across DeepSeek V4, Kimi K2.x, MiMo V2.5, and GLM APIs, while driving Claude, Codex, and Gemini headless through existing subscriptions for what only they do best.
+A Rust terminal agent harness for DeepSeek V4, Kimi K2.x, MiMo V2.5, and GLM APIs. The operator selects the execution route; Nosis meters reported usage and separately explains the cheapest capable catalog route.
 
 ## Who It Serves
 
@@ -14,23 +14,23 @@ Carlos/NosisTech first (KORVIN, LECTOR, daily coding); then power users of open-
 
 ## Problem
 
-Every incumbent CLI is single-provider-biased, cost-opaque, approval-fatiguing, and unstable on Windows — and none of them route by price-at-this-hour or cache economics, the two biggest cost levers of 2026.
+Provider-specific CLIs make it hard to apply one auditable receipt, cost, approval, context, and credential policy across several direct APIs—especially on Windows.
 
 ## Solution
 
-Seven differentiators: time-of-day cost routing, modality-aware dispatch, thinking-budget governor, KV-cache-first context engine, MCP 2026-07-28 stateless-native (client + server), pain-fixing UX (semáforo, cost HUD, trust dial, timeline scrubber), constitution-native governance (THE LAW enforced in code).
+Current differentiators: clock-aware price advice and opt-in Fleet deferral, explicit modality/capability metadata, bounded reasoning profiles, KV-cache-stable context, a loopback-only MCP preview, pain-fixing terminal UX (semáforo, cost HUD, trust dial, timeline), and constitution-native governance.
 
 ## Why It Can Win
 
-- Structural cost edge: La Ceiba daytime = DeepSeek off-peak; cache hits ~120× cheaper; free GLM routes for CI.
-- Timing: DeepSeek peak/off-peak pricing and the MCP stateless spec both land in July 2026 — greenfield starts clean while incumbents migrate.
+- Structural visibility edge: provider-reported cache usage and freshness-dated catalog rates are visible in the same local receipt/HUD path; currently listed GLM Flash routes provide a recheck-dated free smoke lane.
+- Timing: provider catalogs are changing quickly and the MCP stateless spec lands in July 2026; a small data-driven harness can adapt without changing its core.
 - Windows-first native support — a wedge nobody serves.
-- Build leverage: Claude plans → GPT-5.6 implements → Opus 4.8 gates, one human directing.
+- Build leverage: Claude plans → GPT-5.6 implements → Opus 5 gates, one human directing.
 
 ## Current Status
 
-Planning complete (Master Plan v0.1 + verified catalog, July 11, 2026). Project OS in place. Repo init + M0 next.
+Nine-crate Rust workspace implemented and tested on Windows. Public v0.1 hardening is in progress; Linux and macOS are not yet verified.
 
 ## Next Milestone
 
-M0 (week 1): workspace skeleton, turn loop on deepseek-v4-flash, read/edit/exec tools, JSONL receipts, nh-vault. Exit: fixes a failing test in a sample repo end-to-end.
+Finish the public-release gates: full security/correctness checks, Windows FEEL verification, Linux execution, honest platform wording, and release documentation.

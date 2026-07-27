@@ -1,0 +1,97 @@
+//! The single boundary for route-scoped provider credentials and wire clients.
+
+use crate::wire::{make_client, ChatClient};
+use nh_routes::{ResolvedRoute, RouteClass};
+use nh_vault::{SecretValue, Vault};
+
+pub type CredentialedConnection = (Box<dyn ChatClient>, SecretValue);
+
+/// Authorize a resolver-minted route, materialize only its scoped secret, and
+/// build the corresponding no-redirect wire client. `output_cap` may tighten
+/// the catalog cap but can never widen it.
+pub fn connect<V: Vault>(
+    vault: &V,
+    route: &ResolvedRoute,
+    approved_origins: &[String],
+    output_cap: Option<u64>,
+) -> anyhow::Result<CredentialedConnection> {
+    if route.class() != RouteClass::Api {
+        anyhow::bail!("delegate routes do not accept provider credentials");
+    }
+    let secret = nh_vault::get_scoped(
+        vault,
+        route.vault_entry(),
+        route.base_url(),
+        approved_origins,
+    )?;
+    let literal = secret.clone();
+    let output_cap = min_cap(route.max_out(), output_cap);
+    Ok((make_client(route, secret, output_cap), literal))
+}
+
+fn min_cap(route_cap: Option<u64>, requested_cap: Option<u64>) -> Option<u64> {
+    match (route_cap, requested_cap) {
+        (Some(route), Some(requested)) => Some(route.min(requested)),
+        (Some(route), None) => Some(route),
+        (None, Some(requested)) => Some(requested),
+        (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nh_routes::RouteResolver;
+    use zeroize::Zeroizing;
+
+    struct PanicVault;
+
+    impl Vault for PanicVault {
+        fn get(&self, _entry: &str) -> anyhow::Result<Zeroizing<String>> {
+            panic!("a refused route must not materialize its credential")
+        }
+
+        fn set(&self, _entry: &str, _value: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn route(base_url: &str) -> ResolvedRoute {
+        RouteResolver::from_toml(&format!(
+            r#"
+            [routes.test]
+            provider = "test"
+            model_id = "test-model"
+            base_url = "{base_url}"
+            wire = "openai"
+            vault_entry = "test"
+            "#
+        ))
+        .unwrap()
+        .resolve("test")
+        .unwrap()
+    }
+
+    #[test]
+    fn refuses_an_unapproved_origin_before_materializing() {
+        let route = route("https://api.example.invalid:8443/v1");
+        let error = connect(
+            &PanicVault,
+            &route,
+            &["https://api.example.invalid".to_owned()],
+            None,
+        )
+        .err()
+        .expect("origin mismatch must be refused");
+
+        assert!(error.downcast_ref::<nh_vault::AudienceRefused>().is_some());
+    }
+
+    #[test]
+    fn output_cap_never_widens_the_resolved_route() {
+        assert_eq!(min_cap(Some(10), Some(20)), Some(10));
+        assert_eq!(min_cap(Some(20), Some(10)), Some(10));
+        assert_eq!(min_cap(Some(20), None), Some(20));
+        assert_eq!(min_cap(None, Some(10)), Some(10));
+    }
+}

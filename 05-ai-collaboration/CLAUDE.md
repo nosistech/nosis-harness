@@ -8,9 +8,9 @@ Use Claude for:
 - Architecture review and THE LAW conformance
 - Security review (nh-vault, MCP posture, prompt-injection surfaces)
 - Long-form research synthesis (provider/pricing updates → catalog + Appendix B deltas)
-- Review gating via Opus 4.8 delegate (`claude -p`) — batch reviews, send receipts + diffs only
+- Review gating via Opus 5 delegate (`claude -p`) — batch reviews, send receipts + diffs only
 
-Quota nuance: plan usage is shared across all Claude surfaces (chat + Code). Two-stage review stretches quota 3–5×: Sonnet 4.6 pre-screens diffs → Opus 4.8 gates only what passes.
+Quota nuance: plan usage is shared across all Claude surfaces (chat + Code). Two-stage review stretches quota 3–5×: Sonnet 4.6 pre-screens diffs → Opus 5 gates only what passes.
 
 Read first:
 
