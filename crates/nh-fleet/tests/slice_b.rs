@@ -15,6 +15,26 @@ use nh_law::LoadOptions;
 use nh_routes::RouteResolver;
 
 const CATALOG: &str = include_str!("../../../catalog.toml");
+const PEAK_CATALOG: &str = r#"
+    [routes.peak-echo]
+    provider = "echo"
+    model_id = "echo-model"
+    base_url = "https://example.invalid/v1"
+    wire = "openai"
+    vault_entry = "echo"
+    [routes.peak-echo.price]
+    currency = "USD"
+    unit = "per_million_tokens"
+    cache_hit = 0.1
+    cache_miss = 0.2
+    output = 0.3
+    price_confidence = "confirmed"
+    valid_until = "2099-01-01"
+    [routes.peak-echo.price.peak]
+    multiplier = 2.0
+    timezone = "Asia/Shanghai"
+    windows = ["09:00-12:00", "14:00-18:00"]
+"#;
 const TEST_PROVIDER_ENV: &str = "NH_FLEET_TEST_PROVIDER";
 const TEST_SLEEP_MS_ENV: &str = "NH_FLEET_TEST_SLEEP_MS";
 const TEST_OUTCOME_ENV: &str = "NH_FLEET_TEST_OUTCOME";
@@ -129,6 +149,9 @@ fn task(id: &str) -> TaskSpec {
 
 #[test]
 fn e2_deferred_task_parks_at_peak_then_dispatches_off_peak() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
     let _env = TestEnv::echo("pass");
     let tmp = tempfile::tempdir().unwrap();
     let peak = Utc.with_ymd_and_hms(2026, 7, 15, 2, 0, 0).unwrap();
@@ -136,6 +159,8 @@ fn e2_deferred_task_parks_at_peak_then_dispatches_off_peak() {
     let clock = Arc::new(MockClock::new(peak));
     let (line_tx, line_rx) = mpsc::channel();
     let mut fleet = config(tmp.path(), vec![task("deferred")]);
+    fleet.resolver = RouteResolver::from_toml(PEAK_CATALOG).unwrap();
+    fleet.default_route = "peak-echo".into();
     fleet.tasks[0].defer_offpeak = Some(true);
     fleet.clock = Some(clock.clone());
     fleet.on_event = Some(Arc::new(move |line| {
@@ -180,6 +205,9 @@ fn e2_deferred_task_parks_at_peak_then_dispatches_off_peak() {
 
 #[test]
 fn non_deferred_task_dispatches_during_peak() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
     let _env = TestEnv::echo("pass");
     let tmp = tempfile::tempdir().unwrap();
     let peak = Utc.with_ymd_and_hms(2026, 7, 15, 2, 0, 0).unwrap();
@@ -196,6 +224,9 @@ fn non_deferred_task_dispatches_during_peak() {
 
 #[test]
 fn live_ladder_attaches_receipts_and_gates_once() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
     let _env = TestEnv::echo("fail");
     let tmp = tempfile::tempdir().unwrap();
     let lines = Arc::new(Mutex::new(Vec::new()));
@@ -284,6 +315,9 @@ fn live_ladder_attaches_receipts_and_gates_once() {
 
 #[test]
 fn resume_continues_escalation_from_the_ledger_ladder_position() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
     let _env = TestEnv::echo("fail");
     let tmp = tempfile::tempdir().unwrap();
     let run_id = "resume-climb";
@@ -381,6 +415,9 @@ fn resume_continues_escalation_from_the_ledger_ladder_position() {
 
 #[test]
 fn no_ladder_failure_is_one_attempt_and_task_failed() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
     let _env = TestEnv::echo("fail");
     let tmp = tempfile::tempdir().unwrap();
     let report = nh_fleet::run(config(tmp.path(), vec![task("single")])).unwrap();

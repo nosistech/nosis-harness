@@ -1314,6 +1314,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "getrandom 0.2.17",
+ "nh-core",
  "nh-fleet",
  "nh-law",
  "nh-routes",
@@ -1334,6 +1335,7 @@ dependencies = [
  "chrono",
  "serde",
  "toml",
+ "url",
 ]
 
 [[package]]
@@ -1362,8 +1364,6 @@ dependencies = [
  "nh-tools",
  "nh-vault",
  "ratatui",
- "reqwest",
- "toml",
 ]
 
 [[package]]

@@ -1,0 +1,314 @@
+//! Approved shell execution with bounded capture, timeout, and process-tree termination.
+
+use super::*;
+
+impl Tool for ExecShell {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "exec_shell".into(),
+            description: "Run a shell command in the working directory. Requires user approval."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to run."
+                    }
+                },
+                "required": ["command"]
+            }),
+        }
+    }
+
+    fn execute(&self, args: serde_json::Value, ctx: &ToolCtx) -> anyhow::Result<String> {
+        self.execute_with_timeout(args, ctx, EXEC_TIMEOUT)
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct BoundedOutput {
+    pub(super) bytes: Vec<u8>,
+    pub(super) truncated: bool,
+}
+
+pub(super) enum DrainCompletion {
+    Complete,
+    Failed(String),
+    Incomplete(Duration),
+    Panicked,
+}
+
+pub(super) struct DrainOutcome {
+    pub(super) output: BoundedOutput,
+    pub(super) completion: DrainCompletion,
+}
+
+pub(super) struct DrainHandle {
+    pub(super) shared: Arc<Mutex<BoundedOutput>>,
+    pub(super) done: mpsc::Receiver<std::io::Result<()>>,
+}
+
+impl DrainHandle {
+    pub(super) fn finish(self, deadline: Instant, grace: Duration) -> DrainOutcome {
+        let completion = match self
+            .done
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
+            Ok(Ok(())) => DrainCompletion::Complete,
+            Ok(Err(error)) => DrainCompletion::Failed(error.to_string()),
+            Err(mpsc::RecvTimeoutError::Timeout) => DrainCompletion::Incomplete(grace),
+            Err(mpsc::RecvTimeoutError::Disconnected) => DrainCompletion::Panicked,
+        };
+        let output = match self.shared.lock() {
+            Ok(output) => output.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        DrainOutcome { output, completion }
+    }
+}
+
+pub(super) fn drain_bounded<R: Read>(
+    mut reader: R,
+    shared: &Mutex<BoundedOutput>,
+) -> std::io::Result<()> {
+    let mut chunk = [0u8; TOOL_BUFFER_BYTES];
+    loop {
+        let read = reader.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        let mut output = shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let remaining = MAX_TOOL_READ_BYTES.saturating_sub(output.bytes.len());
+        let keep = remaining.min(read);
+        output.bytes.extend_from_slice(&chunk[..keep]);
+        output.truncated |= keep < read;
+    }
+    Ok(())
+}
+
+pub(super) fn spawn_drain<R: Read + Send + 'static>(reader: R) -> DrainHandle {
+    let shared = Arc::new(Mutex::new(BoundedOutput {
+        bytes: Vec::with_capacity(TOOL_BUFFER_BYTES),
+        truncated: false,
+    }));
+    let thread_shared = Arc::clone(&shared);
+    let (done_tx, done) = mpsc::channel();
+    let _drain_thread = thread::spawn(move || {
+        let result = drain_bounded(reader, &thread_shared);
+        let _ = done_tx.send(result);
+    });
+    DrainHandle { shared, done }
+}
+
+pub(super) fn render_bounded_output(outcome: DrainOutcome, stream: &str) -> String {
+    let DrainOutcome { output, completion } = outcome;
+    let mut rendered = String::from_utf8_lossy(&output.bytes).into_owned();
+    if output.truncated {
+        rendered.push_str(&format!(
+            "\n…[{stream} truncated at {MAX_TOOL_READ_BYTES} bytes]"
+        ));
+    }
+    match completion {
+        DrainCompletion::Complete => {}
+        DrainCompletion::Failed(error) => {
+            rendered.push_str(&format!("\n…[{stream} capture failed: {error}]"));
+        }
+        DrainCompletion::Incomplete(grace) => {
+            rendered.push_str(&format!(
+                "\n…[{stream} capture incomplete after {} - a surviving child process may still hold the pipe]",
+                timeout_label(grace)
+            ));
+        }
+        DrainCompletion::Panicked => {
+            rendered.push_str(&format!(
+                "\n…[{stream} capture incomplete - drain thread panicked]"
+            ));
+        }
+    }
+    rendered
+}
+
+pub(super) fn timeout_label(timeout: Duration) -> String {
+    if timeout.subsec_nanos() == 0 {
+        format!("{}s", timeout.as_secs())
+    } else {
+        format!("{}ms", timeout.as_millis())
+    }
+}
+
+pub(super) enum Termination {
+    Reaped(ExitStatus),
+    Survived(String),
+}
+
+pub(super) fn poll_child_reaped(
+    child: &mut Child,
+    command: &str,
+    deadline: Instant,
+) -> anyhow::Result<Option<ExitStatus>> {
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("could not reap timed-out command: {command}"))?
+        {
+            return Ok(Some(status));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        thread::sleep(remaining.min(Duration::from_millis(50)));
+    }
+}
+
+pub(super) fn terminate_child_tree(
+    child: &mut Child,
+    command: &str,
+) -> anyhow::Result<Termination> {
+    #[cfg(windows)]
+    let tree_kill_status = std::process::Command::new("taskkill")
+        .args(["/PID", &child.id().to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    #[cfg(unix)]
+    let tree_kill_status = std::process::Command::new("kill")
+        .args(["-KILL", &format!("-{}", child.id())])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let tree_kill_succeeded = matches!(&tree_kill_status, Ok(status) if status.success());
+    let tree_kill_detail = match &tree_kill_status {
+        Ok(status) if status.success() => format!("tree-kill exit status: {status}"),
+        Ok(status) => format!("tree-kill non-success exit status: {status}"),
+        Err(error) => format!("tree-kill failed to start: {error}"),
+    };
+
+    let verification_started = Instant::now();
+    let verification_deadline = verification_started + KILL_VERIFY_GRACE;
+    let tree_kill_deadline = if tree_kill_succeeded {
+        verification_started + KILL_VERIFY_GRACE / 2
+    } else {
+        verification_started
+    };
+    if let Some(status) = poll_child_reaped(child, command, tree_kill_deadline)? {
+        return Ok(Termination::Reaped(status));
+    }
+    child
+        .kill()
+        .with_context(|| format!("could not kill timed-out command: {command}"))?;
+    if let Some(status) = poll_child_reaped(child, command, verification_deadline)? {
+        return Ok(Termination::Reaped(status));
+    }
+    Ok(Termination::Survived(format!(
+        "{tree_kill_detail}; child did not reap within {} across tree-kill verification and the direct-kill fallback",
+        timeout_label(KILL_VERIFY_GRACE)
+    )))
+}
+
+impl ExecShell {
+    pub(super) fn execute_with_timeout(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolCtx,
+        timeout: Duration,
+    ) -> anyhow::Result<String> {
+        self.execute_with_deadlines(args, ctx, timeout, DRAIN_GRACE)
+    }
+
+    pub(super) fn execute_with_deadlines(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolCtx,
+        timeout: Duration,
+        drain_grace: Duration,
+    ) -> anyhow::Result<String> {
+        let command = str_arg(&args, "command")?;
+        if let Guard::Block(reason) = (ctx.guard)(&Access::Exec(command)) {
+            return Ok(format!("blocked by law: {reason}"));
+        }
+        // SECURITY INVARIANT: this boundary requires explicit approval for every non-blocked exec,
+        // regardless of which non-Block verdict the guard returned.
+        if !(ctx.approve)(command) {
+            // Ok-shaped so the model can read the denial and adapt, not crash the turn.
+            return Ok(format!("user denied: {command}"));
+        }
+        #[cfg(windows)]
+        let mut cmd = {
+            let mut c = std::process::Command::new("cmd");
+            c.arg("/C");
+            c.raw_arg(command);
+            c
+        };
+        #[cfg(not(windows))]
+        let mut cmd = {
+            let mut c = std::process::Command::new("sh");
+            c.args(["-c", command]);
+            c.process_group(0);
+            c
+        };
+        cmd.current_dir(&ctx.workdir);
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        // SECURITY INVARIANT: approved commands get only the minimum environment required
+        // for shells and normal build tools, never ambient credentials.
+        cmd.env_clear();
+        for (name, value) in std::env::vars_os() {
+            if is_allowed_env_var(&name.to_string_lossy()) {
+                cmd.env(&name, value);
+            }
+        }
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("could not run command: {command}"))?;
+        let stdout: ChildStdout = child.stdout.take().expect("stdout configured as piped");
+        let stderr: ChildStderr = child.stderr.take().expect("stderr configured as piped");
+        let stdout_drain = spawn_drain(stdout);
+        let stderr_drain = spawn_drain(stderr);
+
+        let deadline = Instant::now() + timeout;
+        let (status, termination) = loop {
+            if let Some(status) = child
+                .try_wait()
+                .with_context(|| format!("could not wait for command: {command}"))?
+            {
+                break (Some(status), None);
+            }
+            if Instant::now() >= deadline {
+                break (None, Some(terminate_child_tree(&mut child, command)?));
+            }
+            thread::sleep(Duration::from_millis(50));
+        };
+
+        let drain_deadline = Instant::now() + drain_grace;
+        let stdout =
+            render_bounded_output(stdout_drain.finish(drain_deadline, drain_grace), "stdout");
+        let stderr =
+            render_bounded_output(stderr_drain.finish(drain_deadline, drain_grace), "stderr");
+        let content = match termination {
+            Some(Termination::Reaped(_status)) => format!(
+                "command timed out after {} - killed\nstdout:\n{stdout}\nstderr:\n{stderr}",
+                timeout_label(timeout)
+            ),
+            Some(Termination::Survived(detail)) => format!(
+                "command timed out after {} - could NOT be killed: {detail}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+                timeout_label(timeout)
+            ),
+            None => {
+                let status = status.expect("normal command completion includes an exit status");
+                let code = status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "killed by signal".into());
+                format!("exit code: {code}\nstdout:\n{stdout}\nstderr:\n{stderr}")
+            }
+        };
+        Ok(ToolResultEnvelope::new(content, &ctx.scrubber).render())
+    }
+}

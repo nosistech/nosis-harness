@@ -204,7 +204,7 @@ impl Profiles {
                 };
                 ("balanced", &SAFE_BALANCED)
             });
-        let output_cap = min_cap(route.max_out, profile.max_output_tokens);
+        let output_cap = min_cap(route.max_out(), profile.max_output_tokens);
         EffectiveExecutionPolicy {
             profile: profile_name.to_owned(),
             output_cap,
@@ -233,16 +233,6 @@ impl Profiles {
             .collect();
         names.extend(extras);
         names
-    }
-}
-
-impl EffectiveExecutionPolicy {
-    /// Clone a route and clamp only its output cap for the existing client
-    /// factory. Route identity, capability, pricing, and law remain unchanged.
-    pub fn clamp_route(&self, route: &ResolvedRoute) -> ResolvedRoute {
-        let mut clamped = route.clone();
-        clamped.max_out = min_cap(self.output_cap, route.max_out);
-        clamped
     }
 }
 
@@ -298,30 +288,32 @@ fn read_optional_profiles(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{RouteClass, RouteResolver, ThinkingDialect, Wire};
+    use crate::RouteResolver;
 
     fn layer(text: &str) -> ProfilesLayer {
         ProfilesLayer::parse(text).unwrap()
     }
 
     fn route(max_out: u64) -> ResolvedRoute {
-        ResolvedRoute {
-            id: "test".into(),
-            provider: "test".into(),
-            model_id: "test-model".into(),
-            base_url: "https://example.invalid".into(),
-            wire: Wire::OpenAi,
-            vault_entry: "test".into(),
-            class: RouteClass::Api,
-            modality: vec!["text".into()],
-            context: Some(100_000),
-            max_out: Some(max_out),
-            thinking_dialect: ThinkingDialect::DeepseekNhm,
-            preserve_reasoning: true,
-            preserve_when_thinking: true,
-            quirks: vec!["test-quirk".into()],
-            price: None,
-        }
+        RouteResolver::from_toml(&format!(
+            r#"
+            [routes.test]
+            provider = "test"
+            model_id = "test-model"
+            base_url = "https://example.invalid"
+            wire = "openai"
+            vault_entry = "test"
+            context = 100000
+            max_out = {max_out}
+            thinking_dialect = "deepseek-nhm"
+            preserve_reasoning = true
+            preserve_when_thinking = true
+            quirks = ["test-quirk"]
+            "#
+        ))
+        .unwrap()
+        .resolve("test")
+        .unwrap()
     }
 
     #[test]
@@ -367,24 +359,26 @@ mod tests {
     }
 
     #[test]
-    fn frugal_cap_is_below_balanced_native_cap() {
+    fn bundled_profiles_bound_default_output_and_require_opt_in_for_more() {
         let profiles = Profiles::bundled();
         let r = route(64_000);
 
         assert_eq!(profiles.effective("frugal", &r).output_cap, Some(16_384));
-        assert_eq!(profiles.effective("balanced", &r).output_cap, r.max_out);
+        assert_eq!(profiles.effective("balanced", &r).output_cap, Some(16_384));
+        assert_eq!(
+            profiles.effective("max-quality", &r).output_cap,
+            r.max_out()
+        );
     }
 
     #[test]
-    fn clamp_route_changes_only_max_out() {
+    fn effective_policy_clamps_without_minting_a_route() {
         let profiles = Profiles::bundled();
         let r = route(64_000);
-        let clamped = profiles.effective("frugal", &r).clamp_route(&r);
+        let policy = profiles.effective("frugal", &r);
 
-        assert_eq!(clamped.max_out, Some(16_384));
-        let mut restored = clamped;
-        restored.max_out = r.max_out;
-        assert_eq!(format!("{restored:?}"), format!("{r:?}"));
+        assert_eq!(policy.output_cap, Some(16_384));
+        assert_eq!(r.max_out(), Some(64_000));
     }
 
     #[test]
@@ -437,7 +431,7 @@ mod tests {
         let policy = Profiles::bundled().effective("missing", &route(64_000));
         assert_eq!(policy.profile, "balanced");
         assert_eq!(policy.posture, ThinkingPosture::Default);
-        assert_eq!(policy.output_cap, Some(64_000));
+        assert_eq!(policy.output_cap, Some(16_384));
     }
 
     #[test]

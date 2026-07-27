@@ -105,14 +105,57 @@ fn mock_provider() -> (String, mpsc::Receiver<Vec<serde_json::Value>>) {
 }
 
 #[test]
-fn protected_path_is_blocked_at_auto_end_to_end() {
+fn run_and_chat_refuse_an_unapproved_exact_origin_before_key_access() {
     let repo = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let home_nosis = home.path().join(".nosis");
     std::fs::create_dir(&home_nosis).unwrap();
     std::fs::write(
         home_nosis.join("law.toml"),
-        "[credential.m2-slice-c-exit]\naudience = [\"127.0.0.1\"]\n",
+        "[credential.scoped-cli]\naudience = [\"https://api.deepseek.com\"]\n",
+    )
+    .unwrap();
+    let catalog = r#"[routes.scoped]
+provider = "fixture"
+model_id = "scoped-model"
+base_url = "https://api.deepseek.com:8443/v1"
+wire = "openai"
+vault_entry = "scoped-cli"
+"#;
+    std::fs::write(repo.path().join("catalog.toml"), catalog).unwrap();
+    std::fs::write(home_nosis.join("catalog.toml"), catalog).unwrap();
+
+    for args in [
+        vec!["run", "fixture task", "--model", "scoped"],
+        vec!["chat", "--model", "scoped"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_nh"))
+            .current_dir(repo.path())
+            .env("USERPROFILE", home.path())
+            .env("HOME", home.path())
+            .args(&args)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(!output.status.success(), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("not approved for https://api.deepseek.com:8443"),
+            "{args:?}: {stderr}"
+        );
+        assert!(!stderr.contains("nh key add"), "{args:?}: {stderr}");
+    }
+}
+
+#[test]
+fn protected_path_is_blocked_at_auto_end_to_end() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let (base_url, requests) = mock_provider();
+    let home_nosis = home.path().join(".nosis");
+    std::fs::create_dir(&home_nosis).unwrap();
+    std::fs::write(
+        home_nosis.join("law.toml"),
+        format!("[credential.m2-slice-c-exit]\naudience = [\"{base_url}\"]\n"),
     )
     .unwrap();
     let nosis = repo.path().join(".nosis");
@@ -121,7 +164,6 @@ fn protected_path_is_blocked_at_auto_end_to_end() {
     std::fs::write(&protected, nh_law::STARTER_LAW_TOML).unwrap();
     let before = std::fs::read_to_string(&protected).unwrap();
 
-    let (base_url, requests) = mock_provider();
     let catalog = format!(
         r#"[routes.m2-exit]
 provider = "mock"
@@ -132,7 +174,8 @@ vault_entry = "m2-slice-c-exit"
 context = 128000
 "#
     );
-    std::fs::write(repo.path().join("catalog.toml"), catalog).unwrap();
+    std::fs::write(repo.path().join("catalog.toml"), &catalog).unwrap();
+    std::fs::write(home_nosis.join("catalog.toml"), &catalog).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_nh"))
         .current_dir(repo.path())

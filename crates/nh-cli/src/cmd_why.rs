@@ -29,7 +29,7 @@ pub(crate) fn render(
     let explicit = model.map(|id| resolver.resolve(id)).transpose()?;
     if explicit
         .as_ref()
-        .is_some_and(|route| route.class != RouteClass::Api)
+        .is_some_and(|route| route.class() != RouteClass::Api)
     {
         anyhow::bail!("selected route is a delegate - choose an api route with --model");
     }
@@ -43,7 +43,7 @@ pub(crate) fn render(
         .filter(|id| {
             resolver
                 .resolve(id)
-                .is_ok_and(|route| route.class == RouteClass::Api)
+                .is_ok_and(|route| route.class() == RouteClass::Api)
         })
         .map(String::as_str)
         .collect();
@@ -52,15 +52,17 @@ pub(crate) fn render(
 
     let mut lines = vec![format!(
         "route: {} (cheapest capable at ~{} tokens, est)",
-        chosen.id,
+        chosen.id(),
         prompt_estimate.saturating_add(OUTPUT_ESTIMATE)
     )];
     if let Some(quote) = chosen.price_at(at) {
-        let estimate = cost_of(&quote, prompt_estimate, 0, OUTPUT_ESTIMATE);
-        let mut cost = format!(
-            "  {} this turn (est)",
-            money_with_gloss(estimate, quote.currency, resolver.fx(), at)
-        );
+        let mut cost = match cost_of(&quote, prompt_estimate, 0, OUTPUT_ESTIMATE) {
+            Some(estimate) => format!(
+                "  {} this turn (est)",
+                money_with_gloss(estimate, quote.currency, resolver.fx(), at)
+            ),
+            None => "  unpriced this turn (est) - cost unavailable".into(),
+        };
         if quote.stale {
             cost.push_str(" · *price stale");
         } else if quote.confidence == PriceConfidence::VerifyLive {
@@ -70,10 +72,11 @@ pub(crate) fn render(
     }
     lines.extend(trace.lines());
     if let Some(explicit) = explicit {
-        if explicit.id != chosen.id {
+        if explicit.id() != chosen.id() {
             lines.push(format!(
                 "current route {} was selected explicitly; cheapest capable is {}",
-                explicit.id, chosen.id
+                explicit.id(),
+                chosen.id()
             ));
         }
     }
@@ -88,7 +91,7 @@ mod tests {
     const CATALOG: &str = r#"
         [fx]
         usd_per_cny = 0.139
-        valid_until = "2026-07-24"
+        valid_until = "2099-01-01"
         price_confidence = "reported"
 
         [routes.cheap]

@@ -3,6 +3,7 @@ name = "nh-tui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [lints]
 workspace = true
@@ -12,8 +13,6 @@ anyhow.workspace = true
 chrono.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
-reqwest.workspace = true
-toml.workspace = true
 nh-core = { path = "../nh-core", version = "0.1.0" }
 nh-law = { path = "../nh-law", version = "0.1.0" }
 nh-routes = { path = "../nh-routes", version = "0.1.0" }

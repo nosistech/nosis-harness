@@ -119,10 +119,11 @@ fn agent(
         client,
         tools: Vec::new(),
         ctx: ToolCtx::new(dir.to_path_buf(), Box::new(|_| false)),
-        receipts: ReceiptWriter {
-            path: dir.join("receipts.jsonl"),
-            scrubber: nh_vault::Scrubber::new(Vec::new()),
-        },
+        receipts: ReceiptWriter::for_path(
+            dir,
+            dir.join("receipts.jsonl"),
+            nh_vault::Scrubber::new(Vec::new()),
+        ),
         model_id: "mock-model".into(),
         max_turns: 2,
         thinking: ThinkingEffort::None,

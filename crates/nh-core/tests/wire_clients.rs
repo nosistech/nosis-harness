@@ -1,5 +1,5 @@
 //! Wire-client tests against a local one-shot mock HTTP server (loopback only,
-//! no live calls): `make_client` picks the client per wire, headers and paths
+//! no live calls): the credential boundary picks the client per wire, headers and paths
 //! are exactly per contract, route policy is captured at construction.
 
 use std::collections::HashMap;
@@ -7,8 +7,10 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::mpsc;
 
-use nh_core::wire::{make_client, ChatMessage, ChatRequest, ThinkingEffort, ToolCallReq};
-use nh_routes::{Profiles, ResolvedRoute, RouteClass, ThinkingDialect, Wire};
+use nh_core::credential;
+use nh_core::wire::{ChatClient, ChatMessage, ChatRequest, ThinkingEffort, ToolCallReq};
+use nh_routes::{Profiles, ResolvedRoute, RouteResolver, ThinkingDialect, Wire};
+use nh_vault::Vault;
 use zeroize::Zeroizing;
 
 /// Obviously fake test secret (never a real key shape in use).
@@ -97,23 +99,79 @@ fn route(
     quirks: &[&str],
     max_out: Option<u64>,
 ) -> ResolvedRoute {
-    ResolvedRoute {
-        id: "mock-route".into(),
-        provider: "mock".into(),
-        model_id: "mock-model".into(),
-        base_url: base_url.into(),
+    route_with_preserve_when(
+        base_url,
         wire,
-        vault_entry: "mock".into(),
-        class: RouteClass::Api,
-        modality: vec!["text".into()],
-        context: Some(128_000),
-        max_out,
-        thinking_dialect: dialect,
+        dialect,
         preserve_reasoning,
-        preserve_when_thinking: false,
-        quirks: quirks.iter().map(|s| s.to_string()).collect(),
-        price: None,
+        false,
+        quirks,
+        max_out,
+    )
+}
+
+fn route_with_preserve_when(
+    base_url: &str,
+    wire: Wire,
+    dialect: ThinkingDialect,
+    preserve_reasoning: bool,
+    preserve_when_thinking: bool,
+    quirks: &[&str],
+    max_out: Option<u64>,
+) -> ResolvedRoute {
+    let wire = match wire {
+        Wire::OpenAi => "openai",
+        Wire::AnthropicMessages => "anthropic",
+    };
+    let max_out = max_out.map_or_else(String::new, |value| format!("max_out = {value}"));
+    let quirks = quirks
+        .iter()
+        .map(|quirk| format!("\"{quirk}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    RouteResolver::from_toml(&format!(
+        r#"
+        [routes.mock-route]
+        provider = "mock"
+        model_id = "mock-model"
+        base_url = "{base_url}"
+        wire = "{wire}"
+        vault_entry = "mock"
+        context = 128000
+        {max_out}
+        thinking_dialect = "{}"
+        preserve_reasoning = {preserve_reasoning}
+        preserve_when_thinking = {preserve_when_thinking}
+        quirks = [{quirks}]
+        "#,
+        dialect.as_str()
+    ))
+    .unwrap()
+    .resolve("mock-route")
+    .unwrap()
+}
+
+struct TestVault;
+
+impl Vault for TestVault {
+    fn get(&self, _entry: &str) -> anyhow::Result<Zeroizing<String>> {
+        Ok(Zeroizing::new(FAKE_SECRET.to_owned()))
     }
+
+    fn set(&self, _entry: &str, _value: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+fn client(route: &ResolvedRoute, output_cap: Option<u64>) -> Box<dyn ChatClient> {
+    credential::connect(
+        &TestVault,
+        route,
+        &[route.base_url().to_owned()],
+        output_cap,
+    )
+    .unwrap()
+    .0
 }
 
 fn msg(role: &str, content: Option<&str>) -> ChatMessage {
@@ -149,7 +207,7 @@ fn factory_openai_wire_posts_chat_completions_with_route_policy() {
         &["empty-reasoning-content-on-tool-replay"],
         Some(384_000),
     );
-    let client = make_client(&r, Zeroizing::new(FAKE_SECRET.into()));
+    let client = client(&r, None);
 
     let request = req(
         vec![
@@ -197,7 +255,7 @@ fn deepseek_none_and_low_send_explicit_disable_with_route_cap() {
             &[],
             Some(384_000),
         );
-        let client = make_client(&r, Zeroizing::new(FAKE_SECRET.into()));
+        let client = client(&r, None);
         client
             .complete(&req(vec![msg("user", Some("hi"))], effort))
             .unwrap();
@@ -216,16 +274,16 @@ fn factory_kimi_toggle_replays_reasoning_only_while_thinking_is_active() {
         (ThinkingEffort::None, "disabled", false),
     ] {
         let (url, rx) = one_shot_server(200, OPENAI_OK.into());
-        let mut r = route(
+        let r = route_with_preserve_when(
             &url,
             Wire::OpenAi,
             ThinkingDialect::KimiToggle,
             false,
+            true,
             &[],
             Some(131_072),
         );
-        r.preserve_when_thinking = true;
-        let client = make_client(&r, Zeroizing::new(FAKE_SECRET.into()));
+        let client = client(&r, None);
         let request = req(
             vec![ChatMessage {
                 reasoning_content: Some("required chain".into()),
@@ -261,7 +319,7 @@ fn factory_anthropic_wire_posts_v1_messages_with_required_headers() {
         &[],
         Some(384_000),
     );
-    let client = make_client(&r, Zeroizing::new(FAKE_SECRET.into()));
+    let client = client(&r, None);
 
     let request = req(
         vec![msg("system", Some("be brief")), msg("user", Some("hi"))],
@@ -299,7 +357,7 @@ fn anthropic_max_tokens_follows_route_max_out_below_cap() {
         &[],
         Some(4096),
     );
-    let client = make_client(&r, Zeroizing::new(FAKE_SECRET.into()));
+    let client = client(&r, None);
     client
         .complete(&req(vec![msg("user", Some("hi"))], ThinkingEffort::None))
         .unwrap();
@@ -317,7 +375,7 @@ fn anthropic_route_cap_is_not_artificially_clamped() {
         &[],
         Some(384_000),
     );
-    let client = make_client(&r, Zeroizing::new(FAKE_SECRET.into()));
+    let client = client(&r, None);
     client
         .complete(&req(vec![msg("user", Some("hi"))], ThinkingEffort::None))
         .unwrap();
@@ -342,10 +400,8 @@ fn profile_clamp_changes_max_tokens_on_both_wires() {
             &[],
             Some(64_000),
         );
-        let quality_route = profiles
-            .effective("max-quality", &quality_route)
-            .clamp_route(&quality_route);
-        make_client(&quality_route, Zeroizing::new(FAKE_SECRET.into()))
+        let quality_policy = profiles.effective("max-quality", &quality_route);
+        client(&quality_route, quality_policy.output_cap)
             .complete(&req(vec![msg("user", Some("hi"))], ThinkingEffort::None))
             .unwrap();
         assert_eq!(quality_rx.recv().unwrap().body["max_tokens"], 64_000);
@@ -359,10 +415,8 @@ fn profile_clamp_changes_max_tokens_on_both_wires() {
             &[],
             Some(64_000),
         );
-        let clamped = profiles
-            .effective("frugal", &route_for_frugal)
-            .clamp_route(&route_for_frugal);
-        make_client(&clamped, Zeroizing::new(FAKE_SECRET.into()))
+        let frugal_policy = profiles.effective("frugal", &route_for_frugal);
+        client(&route_for_frugal, frugal_policy.output_cap)
             .complete(&req(vec![msg("user", Some("hi"))], ThinkingEffort::None))
             .unwrap();
         assert_eq!(frugal_rx.recv().unwrap().body["max_tokens"], 16_384);
@@ -383,7 +437,7 @@ fn cross_host_redirects_are_refused_never_followed() {
             String::new(),
         );
         let r = route(&url, wire, ThinkingDialect::None, false, &[], None);
-        let client = make_client(&r, Zeroizing::new(FAKE_SECRET.into()));
+        let client = client(&r, None);
         let err = client
             .complete(&req(vec![msg("user", Some("hi"))], ThinkingEffort::None))
             .unwrap_err()
@@ -415,7 +469,7 @@ fn anthropic_error_is_one_friendly_scrubbed_line() {
         &[],
         None,
     );
-    let client = make_client(&r, Zeroizing::new(FAKE_SECRET.into()));
+    let client = client(&r, None);
     let err = client
         .complete(&req(vec![msg("user", Some("hi"))], ThinkingEffort::None))
         .unwrap_err()

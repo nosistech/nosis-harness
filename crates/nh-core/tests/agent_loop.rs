@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use nh_core::agent::AgentLoop;
+use nh_core::agent::{AgentLoop, MAX_TASK_BYTES};
 use nh_core::receipt::{FailureClass, Outcome, Receipt, ReceiptWriter};
 use nh_core::wire::{ChatClient, ChatMessage, ChatRequest, ChatResponse, ToolCallReq, Usage};
 use nh_tools::{Tool, ToolCtx, ToolSpec};
@@ -45,6 +45,14 @@ struct FailingClient;
 impl ChatClient for FailingClient {
     fn complete(&self, _req: &ChatRequest) -> anyhow::Result<ChatResponse> {
         anyhow::bail!("provider returned HTTP 500: overloaded")
+    }
+}
+
+struct NeverCalledClient;
+
+impl ChatClient for NeverCalledClient {
+    fn complete(&self, _req: &ChatRequest) -> anyhow::Result<ChatResponse> {
+        panic!("invalid input reached the provider")
     }
 }
 
@@ -113,10 +121,10 @@ fn agent_in(
         client,
         tools,
         ctx: ToolCtx::new(dir.to_path_buf(), Box::new(|_| true)),
-        receipts: ReceiptWriter {
-            path: dir.join(".nosis").join("receipts.jsonl"),
-            scrubber: nh_vault::Scrubber::new(vec![FAKE_SECRET.to_string()]),
-        },
+        receipts: ReceiptWriter::project(
+            dir,
+            nh_vault::Scrubber::new(vec![FAKE_SECRET.to_string()]),
+        ),
         model_id: "mock-model".into(),
         max_turns,
         thinking: nh_core::wire::ThinkingEffort::None,
@@ -301,6 +309,28 @@ fn run_with_history_carries_context_and_writes_one_receipt_per_task() {
     assert_eq!(history.iter().filter(|m| m.role == "system").count(), 1);
 
     assert_eq!(receipt_lines(dir.path()).len(), 2, "one receipt per task");
+}
+
+#[test]
+fn oversized_task_is_rejected_before_provider_history_or_receipt() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut agent = agent_in(dir.path(), Box::new(NeverCalledClient), vec![], 8);
+    let mut history = vec![ChatMessage {
+        role: "system".into(),
+        content: Some("existing session".into()),
+        tool_calls: None,
+        tool_call_id: None,
+        reasoning_content: None,
+    }];
+    let error = agent
+        .run_with_history(&mut history, &"x".repeat(MAX_TASK_BYTES + 1))
+        .unwrap_err();
+
+    assert!(error.to_string().contains("maximum"));
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].role, "system");
+    assert_eq!(history[0].content.as_deref(), Some("existing session"));
+    assert!(!dir.path().join(".nosis").join("receipts.jsonl").exists());
 }
 
 #[test]
