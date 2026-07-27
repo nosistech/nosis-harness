@@ -2,6 +2,30 @@
 
 Use this for fast decisions. Large technical decisions live in `../02-architecture/ARCHITECTURE_DECISIONS.md`.
 
+## 2026-07-26: Remote notifications removed from public v0.1
+
+Decision:
+
+Remove Telegram configuration, credential access, sender thread, HTTP code, tests, and TUI
+dependencies. Keep the local approval bell. Leave remote notifications open only as a future,
+separately reviewed explicit opt-in integration.
+
+Why:
+
+Telegram is not part of the harness's central invariant. The implementation added credential,
+destination, privacy, thread, dependency, and outbound-network surface; its strongest walk-away
+justification was not wired to headless Fleet, and the real send remained unverified.
+
+Tradeoffs:
+
+- Public v0.1 has no phone alert for unattended work.
+- Reintroduction requires a fresh owner decision and security review, preferably behind an isolated
+  adapter/plugin boundary.
+
+Review later:
+
+yes — only when a concrete walk-away workflow justifies the attack surface.
+
 ## 2026-07-13: M1 contract amendments ratified with orchestrator authority
 
 Decision:

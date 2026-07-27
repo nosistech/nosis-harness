@@ -12,7 +12,7 @@ pub fn serve(addr: &str, token_entry: Option<&str>) -> anyhow::Result<()> {
             let vault = nh_vault::EnvFallbackVault {
                 inner: nh_vault::KeyringVault,
             };
-            Some(vault.get(entry)?.as_str().to_owned())
+            Some(vault.get(entry)?)
         }
         None => None,
     };

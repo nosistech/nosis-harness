@@ -1,6 +1,6 @@
 # Nosis Harness — Project OS
 
-**nh** is an honest, metered, multi-model terminal agent (Rust) for open-weight models — DeepSeek V4, Kimi K2.x, MiMo V2.5, GLM — with Claude, Codex, and Gemini as subscription-delegate peers. For every task it picks the **cheapest capable** route and hands you the **receipt**: cost, token usage, and savings. It is a harness with a meter, not a chat UI.
+**nh** is an honest, metered, multi-model terminal agent (Rust) for open-weight models — DeepSeek V4, Kimi K2.x, MiMo V2.5, and GLM. You select the execution route explicitly; `nh why` independently estimates the **cheapest capable** catalog route. Every accepted run produces a local receipt with reported token usage and price-derived cost context. It is a harness with a meter, not an automatic router.
 
 **Canonical spec:** `NOSIS_HARNESS_Master_Plan.md` (root). Appendices A/B supersede Sections 1 and 3 where they conflict. The folders below are the working layer on top of it.
 
@@ -16,19 +16,24 @@ The binary lands at `target/release/nh` (`target\release\nh.exe` on Windows). Ad
 
 ## Quickstart
 
-- `nh init` — scaffold `.nosis/` in the current repo: the receipts dir, a `.gitignore`, a secret-pattern pre-commit hook, and a starter `catalog.toml`.
+- `nh init` — scaffold `.nosis/` in the current repo: the receipts dir, a `.gitignore`, a secret-pattern pre-commit hook, and the trusted bundled `catalog.toml`. A changed repository catalog is refused unless the operator has placed an exact reviewed copy at `~/.nosis/catalog.toml`. Existing Git hooks are preserved and reported for manual chaining.
 - `nh key add deepseek` — prompt for your DeepSeek API key and store it in the OS-native vault (never echoed, never written to files). For CI/headless use, the env fallback is `NH_<ENTRY>_KEY` with the entry uppercased — here, `NH_DEEPSEEK_KEY`.
+- `nh key remove deepseek` — remove that entry from the OS-native vault. Environment fallbacks must be unset separately.
 - `nh run "fix the failing test" --model deepseek-v4-flash` — run one agent task. Every shell command stops at a y/N approval prompt (default **deny**), and each turn is logged to `.nosis/receipts.jsonl`. Defaults: `--model deepseek-v4-flash`, `--max-turns 20`, `--profile balanced`. Optional: `--think none|low|high|max` (absent = per-route-dialect default: High on always-thinking dialects, None on non-thinking) and `--autonomy ask|auto` (absent = the law-file default).
 - `nh why "review the diff"` — explain the cheapest capable route for a rough token estimate of the task; add `--model <id>` to compare a specific route against it.
-- `nh chat` — interactive session. `/model` and `/provider` switch routes mid-session (history and cumulative usage preserved); `/price` shows live peak/off-peak pricing.
+- `nh chat` — interactive session. `/model` and `/provider` switch routes mid-session (history and cumulative usage preserved); `/price` evaluates the catalog price at the current clock time and flags stale data.
 - `nh profile` — list the execution profiles (frugal / balanced / max-quality) and their effective caps for a model.
 - `nh tui` — full-screen terminal UI (`--model <id>`, `--budget <tokens>`, `--profile <p>`).
-- `nh fleet run tasks.json` — run independent tasks in a durable, resumable worker fleet (`--max-workers <n>`, `--budget <tokens>`, `--escalate`, `--defer-offpeak`). `nh fleet resume` picks up the latest incomplete run.
-- `nh mcp serve` — **PREVIEW**: serve the local MCP endpoint (default `--addr 127.0.0.1:8765`), loopback-only and bearer-token guarded (`--token-entry <entry>`). Tools: `why`, `route_cost`, and `receipts` (the metered-routing surface, with structured output), alongside `route_resolve`, `fleet_run`, and `fleet_status`. Do **not** expose it publicly before the MCP final spec lands on 2026-07-28.
+- `nh fleet run tasks.json` — run independent tasks in a durable, resumable worker fleet (`--max-workers <n>`, required `--budget <tokens>` unless `budget_tokens` is in the file, `--escalate`, `--defer-offpeak`). The observed-token budget stops new dispatch after completed receipts reach it; already-running calls can finish. Off-peak deferral activates only for a trusted route whose catalog entry currently defines peak windows. `nh fleet resume` picks up the latest incomplete run.
+- `nh mcp serve` — **PREVIEW**: serve the local MCP endpoint (default `--addr 127.0.0.1:8765`), loopback-only and bearer-token guarded (`--token-entry <entry>`). Tools: `why`, `route_cost`, and `receipts` (the metered-routing surface, with structured output), alongside `route_resolve`, budget-required `fleet_run`, and `fleet_status`. Do **not** expose it publicly before the MCP final spec lands on 2026-07-28.
+
+## Platform status
+
+Windows is built and tested. Linux and macOS paths exist but have not yet been executed on those platforms; this release does not claim them as verified.
 
 ## Privacy
 
-Prompts and task text go only to the model provider you explicitly select, over TLS — nh adds no intermediary and does not phone home (no analytics, no beacons, no crash reporting). Receipts stay local in `.nosis/receipts.jsonl`. Details in [PRIVACY.md](./PRIVACY.md).
+`nh` has no Nosis-operated telemetry, analytics, beacons, or crash reporting. Model requests go directly to the provider route you select; approved MCP calls and shell commands can create additional network traffic. Receipts are local by default. Exact boundaries and deletion steps are in [PRIVACY.md](./PRIVACY.md).
 
 ## License & contributing
 

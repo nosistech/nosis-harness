@@ -1,5 +1,7 @@
 # Nosis Harness route catalog — DATA, not code (AGENTS.md hard rule).
-# Source of truth: NOSIS_HARNESS_Master_Plan.md Appendix B (verified 2026-07-11).
+# Prices and capabilities verified against first-party provider docs on 2026-07-26.
+# `valid_until = "2026-08-02"` is Nosis's short recheck deadline, not a provider
+# guarantee. Quotes become stale after it instead of silently trusting old prices.
 #
 # Schema, per route:
 #   class               "api" (direct, token-metered) | "delegate" (subscription child CLI — M4)
@@ -19,19 +21,11 @@
 #                       windows ["HH:MM-HH:MM", ...] local to that timezone,
 #                       start inclusive, end exclusive.
 
-[fx]
-usd_per_cny = 0.139          # ≈ 7.2 CNY per USD
-valid_until = "2026-07-24"
-price_confidence = "reported"
-
 # ------------------------------------------------------------------ DeepSeek (plan B.1)
-# Peak = Beijing 09:00-12:00 & 14:00-18:00, 2x on all rates (plan 0.1, confirmed).
-# Base rates re-confirmed 2026-07-13 on api-docs.deepseek.com (CNY page matches
-# exactly). Peak windows: announced for the mid-July V4 official launch; NOT yet on
-# the first-party pricing page as of 2026-07-13 — re-check at valid_until.
-# valid_until = 2026-07-24: re-verify once the official V4 launch settles (DeepSeek
-# emails 24h before any billing change). The -anthropic variants are the same models
-# on the Anthropic Messages wire — the deepclaude-proven agent-loop path (plan A.1).
+# USD rates, limits, and both wire URLs re-confirmed 2026-07-26 on
+# api-docs.deepseek.com/quick_start/pricing. That page no longer publishes the old
+# 2x peak schedule, so no peak multiplier is applied. The -anthropic variants are
+# the same models on the Anthropic Messages wire.
 
 [routes.deepseek-v4-pro]
 provider = "deepseek"
@@ -48,18 +42,13 @@ preserve_reasoning = false
 quirks = ["empty-reasoning-content-on-tool-replay"]
 
 [routes.deepseek-v4-pro.price]
-currency = "CNY"
+currency = "USD"
 unit = "per_million_tokens"
-cache_hit = 0.025
-cache_miss = 3.00
-output = 6.00
+cache_hit = 0.003625
+cache_miss = 0.435
+output = 0.87
 price_confidence = "confirmed"
-valid_until = "2026-07-24"
-
-[routes.deepseek-v4-pro.price.peak]
-multiplier = 2.0
-timezone = "Asia/Shanghai"
-windows = ["09:00-12:00", "14:00-18:00"]
+valid_until = "2026-08-02"
 
 [routes.deepseek-v4-pro-anthropic]
 provider = "deepseek"
@@ -76,18 +65,13 @@ preserve_reasoning = false
 quirks = ["empty-reasoning-content-on-tool-replay"]
 
 [routes.deepseek-v4-pro-anthropic.price]
-currency = "CNY"
+currency = "USD"
 unit = "per_million_tokens"
-cache_hit = 0.025
-cache_miss = 3.00
-output = 6.00
+cache_hit = 0.003625
+cache_miss = 0.435
+output = 0.87
 price_confidence = "confirmed"
-valid_until = "2026-07-24"
-
-[routes.deepseek-v4-pro-anthropic.price.peak]
-multiplier = 2.0
-timezone = "Asia/Shanghai"
-windows = ["09:00-12:00", "14:00-18:00"]
+valid_until = "2026-08-02"
 
 [routes.deepseek-v4-flash]
 provider = "deepseek"
@@ -104,18 +88,13 @@ preserve_reasoning = false
 quirks = ["empty-reasoning-content-on-tool-replay"]
 
 [routes.deepseek-v4-flash.price]
-currency = "CNY"
+currency = "USD"
 unit = "per_million_tokens"
-cache_hit = 0.02
-cache_miss = 1.00
-output = 2.00
+cache_hit = 0.0028
+cache_miss = 0.14
+output = 0.28
 price_confidence = "confirmed"
-valid_until = "2026-07-24"
-
-[routes.deepseek-v4-flash.price.peak]
-multiplier = 2.0
-timezone = "Asia/Shanghai"
-windows = ["09:00-12:00", "14:00-18:00"]
+valid_until = "2026-08-02"
 
 [routes.deepseek-v4-flash-anthropic]
 provider = "deepseek"
@@ -132,18 +111,13 @@ preserve_reasoning = false
 quirks = ["empty-reasoning-content-on-tool-replay"]
 
 [routes.deepseek-v4-flash-anthropic.price]
-currency = "CNY"
+currency = "USD"
 unit = "per_million_tokens"
-cache_hit = 0.02
-cache_miss = 1.00
-output = 2.00
+cache_hit = 0.0028
+cache_miss = 0.14
+output = 0.28
 price_confidence = "confirmed"
-valid_until = "2026-07-24"
-
-[routes.deepseek-v4-flash-anthropic.price.peak]
-multiplier = 2.0
-timezone = "Asia/Shanghai"
-windows = ["09:00-12:00", "14:00-18:00"]
+valid_until = "2026-08-02"
 
 # ------------------------------------------------------------------ Kimi / Moonshot (plan B.2)
 # K2.7 protocol nuances are adapter-enforced: always-thinking (never send a mode
@@ -153,7 +127,7 @@ windows = ["09:00-12:00", "14:00-18:00"]
 [routes."kimi-k2.7-code"]
 provider = "kimi"
 model_id = "kimi-k2.7-code"
-base_url = "https://api.moonshot.ai/v1" # confirmed 2026-07-13 (platform.kimi.ai/docs/api/overview.md)
+base_url = "https://api.moonshot.ai/v1" # confirmed 2026-07-26 (platform.kimi.ai/docs/api/overview)
 wire = "openai"
 vault_entry = "kimi"
 class = "api"
@@ -169,13 +143,14 @@ unit = "per_million_tokens"
 cache_hit = 0.19
 cache_miss = 0.95
 output = 4.00
-price_confidence = "confirmed" # 2026-07-13 platform.kimi.ai/docs/pricing/chat-k27-code.md
+price_confidence = "confirmed" # 2026-07-26 platform.kimi.ai/docs/pricing/chat-k27-code
+valid_until = "2026-08-02"
 
 # Highspeed serving of the same model (~180 tok/s): human-waiting turns only.
 [routes."kimi-k2.7-code-highspeed"]
 provider = "kimi"
 model_id = "kimi-k2.7-code-highspeed"
-base_url = "https://api.moonshot.ai/v1" # confirmed 2026-07-13 (platform.kimi.ai/docs/api/overview.md)
+base_url = "https://api.moonshot.ai/v1" # confirmed 2026-07-26 (platform.kimi.ai/docs/api/overview)
 wire = "openai"
 vault_entry = "kimi"
 class = "api"
@@ -191,13 +166,14 @@ unit = "per_million_tokens"
 cache_hit = 0.38  # was 0.19 (reported) — first-party page lists 2x standard input rates
 cache_miss = 1.90 # was 0.95 (reported)
 output = 8.00
-price_confidence = "confirmed" # 2026-07-13 platform.kimi.ai/docs/pricing/chat-k27-code.md
+price_confidence = "confirmed" # 2026-07-26 platform.kimi.ai/docs/pricing/chat-k27-code
+valid_until = "2026-08-02"
 
 # K2.6 supports an explicit thinking toggle and requires reasoning replay while enabled.
 [routes."kimi-k2.6"]
 provider = "kimi"
 model_id = "kimi-k2.6"
-base_url = "https://api.moonshot.ai/v1" # confirmed 2026-07-13 (platform.kimi.ai/docs/api/overview.md)
+base_url = "https://api.moonshot.ai/v1" # confirmed 2026-07-26 (platform.kimi.ai/docs/api/overview)
 wire = "openai"
 vault_entry = "kimi"
 class = "api"
@@ -214,10 +190,11 @@ unit = "per_million_tokens"
 cache_hit = 0.16    # was 0.60 worst-case; cache-hit rate now published first-party
 cache_miss = 0.95   # was 0.60 (reported range) — first-party page supersedes
 output = 4.00       # was 2.65 (reported range) — first-party page supersedes
-price_confidence = "confirmed" # 2026-07-13 platform.kimi.ai/docs/pricing/chat-k26.md
+price_confidence = "confirmed" # 2026-07-26 platform.kimi.ai/docs/pricing/chat-k26
+valid_until = "2026-08-02"
 
 # ------------------------------------------------------------------ MiMo / Xiaomi (plan B.3)
-# Plan B.3 pricing conflict RESOLVED 2026-07-13: Xiaomi's own pricing page
+# Plan B.3 pricing conflict RESOLVED and rechecked 2026-07-26: Xiaomi's own pricing page
 # (mimo.mi.com/docs/pricing, the redirect target of platform.xiaomimimo.com) lists
 # the lower marketplace-side rates, superseding the May 27 $1/$3 notice. Details in
 # 04-research/SOURCE_INDEX.md.
@@ -226,7 +203,7 @@ price_confidence = "confirmed" # 2026-07-13 platform.kimi.ai/docs/pricing/chat-k
 [routes."mimo-v2.5-pro"]
 provider = "mimo"
 model_id = "mimo-v2.5-pro"
-base_url = "https://api.xiaomimimo.com/v1" # confirmed 2026-07-13 (mimo.mi.com first-api-call docs)
+base_url = "https://api.xiaomimimo.com/v1" # confirmed 2026-07-26 (mimo.mi.com first-api-call docs)
 wire = "openai"
 vault_entry = "mimo"
 class = "api"
@@ -243,12 +220,13 @@ unit = "per_million_tokens"
 cache_hit = 0.0036 # was 0.20 (reported) — first-party page supersedes
 cache_miss = 0.435 # conflict resolved: platform page lists $0.435, not the May 27 $1.00
 output = 0.87      # conflict resolved: platform page lists $0.87, not $3.00
-price_confidence = "confirmed" # 2026-07-13 mimo.mi.com/docs/pricing
+price_confidence = "confirmed" # 2026-07-26 mimo.mi.com/docs/en-US/price/pay-as-you-go
+valid_until = "2026-08-02"
 
 [routes."mimo-v2.5"]
 provider = "mimo"
 model_id = "mimo-v2.5"
-base_url = "https://api.xiaomimimo.com/v1" # confirmed 2026-07-13 (mimo.mi.com first-api-call docs)
+base_url = "https://api.xiaomimimo.com/v1" # confirmed 2026-07-26 (mimo.mi.com first-api-call docs)
 wire = "openai"
 vault_entry = "mimo"
 class = "api"
@@ -265,16 +243,17 @@ unit = "per_million_tokens"
 cache_hit = 0.0028 # was 0.14 worst-case; cache-hit rate now published first-party
 cache_miss = 0.14
 output = 0.28
-price_confidence = "confirmed" # 2026-07-13 mimo.mi.com/docs/pricing
+price_confidence = "confirmed" # 2026-07-26 mimo.mi.com/docs/en-US/price/pay-as-you-go
+valid_until = "2026-08-02"
 
 # ------------------------------------------------------------------ GLM / Z.ai (plan B.4)
 # Free routes are the $0 CI/smoke-test lane. Zeros confirmed on Z.ai's own pricing
-# page 2026-07-13 — free tiers stay rate-limited (limits unpublished) and can change.
+# page 2026-07-26 — free tiers stay rate-limited (limits unpublished) and can change.
 
 [routes."glm-5.2"]
 provider = "glm"
 model_id = "glm-5.2"
-base_url = "https://api.z.ai/api/paas/v4" # confirmed 2026-07-13 (docs.z.ai quick-start)
+base_url = "https://api.z.ai/api/paas/v4" # confirmed 2026-07-26 (docs.z.ai quick-start)
 wire = "openai"
 vault_entry = "glm"
 class = "api"
@@ -291,12 +270,13 @@ unit = "per_million_tokens"
 cache_hit = 0.26
 cache_miss = 1.40
 output = 4.40
-price_confidence = "confirmed" # 2026-07-13 docs.z.ai/guides/overview/pricing
+price_confidence = "confirmed" # 2026-07-26 docs.z.ai/guides/overview/pricing
+valid_until = "2026-08-02"
 
 [routes."glm-4.7-flash"]
 provider = "glm"
 model_id = "glm-4.7-flash"
-base_url = "https://api.z.ai/api/paas/v4" # confirmed 2026-07-13 (docs.z.ai quick-start)
+base_url = "https://api.z.ai/api/paas/v4" # confirmed 2026-07-26 (docs.z.ai quick-start)
 wire = "openai"
 vault_entry = "glm"
 class = "api"
@@ -311,12 +291,13 @@ unit = "per_million_tokens"
 cache_hit = 0.0
 cache_miss = 0.0
 output = 0.0
-price_confidence = "confirmed" # 2026-07-13 docs.z.ai/guides/overview/pricing lists this model as Free
+price_confidence = "confirmed" # 2026-07-26 docs.z.ai/guides/overview/pricing lists this model as Free
+valid_until = "2026-08-02"
 
 [routes."glm-4.6v-flash"]
 provider = "glm"
 model_id = "glm-4.6v-flash"
-base_url = "https://api.z.ai/api/paas/v4" # confirmed 2026-07-13 (docs.z.ai quick-start)
+base_url = "https://api.z.ai/api/paas/v4" # confirmed 2026-07-26 (docs.z.ai quick-start)
 wire = "openai"
 vault_entry = "glm"
 class = "api"
@@ -331,12 +312,13 @@ unit = "per_million_tokens"
 cache_hit = 0.0
 cache_miss = 0.0
 output = 0.0
-price_confidence = "confirmed" # 2026-07-13 docs.z.ai/guides/overview/pricing lists this model as Free
+price_confidence = "confirmed" # 2026-07-26 docs.z.ai/guides/overview/pricing lists this model as Free
+valid_until = "2026-08-02"
 
 [routes."glm-4.5-flash"]
 provider = "glm"
 model_id = "glm-4.5-flash"
-base_url = "https://api.z.ai/api/paas/v4" # confirmed 2026-07-13 (docs.z.ai quick-start)
+base_url = "https://api.z.ai/api/paas/v4" # confirmed 2026-07-26 (docs.z.ai quick-start)
 wire = "openai"
 vault_entry = "glm"
 class = "api"
@@ -351,7 +333,8 @@ unit = "per_million_tokens"
 cache_hit = 0.0
 cache_miss = 0.0
 output = 0.0
-price_confidence = "confirmed" # 2026-07-13 docs.z.ai/guides/overview/pricing lists this model as Free
+price_confidence = "confirmed" # 2026-07-26 docs.z.ai/guides/overview/pricing lists this model as Free
+valid_until = "2026-08-02"
 
 # ------------------------------------------------------------------ Class-2 delegate routes (M4)
 # Subscription-metered child CLIs (plan A.0): no API key, quota units not tokens.

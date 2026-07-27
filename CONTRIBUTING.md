@@ -24,18 +24,19 @@ Run the workspace gate before every PR:
 ./gate.ps1
 ```
 
-[`gate.ps1`](gate.ps1) mechanizes the three checks that define "clean" for this workspace,
+[`gate.ps1`](gate.ps1) mechanizes the four checks that define "clean" for this workspace,
 in order:
 
 1. `cargo fmt --all --check` — no formatting drift.
-2. `cargo clippy --workspace --all-targets --release -- -D warnings` — zero warnings, all targets.
-3. `cargo test --workspace --release` — the full workspace suite.
+2. `cargo clippy --locked --workspace --all-targets --release -- -D warnings` — zero warnings, all targets.
+3. `cargo deny --locked check` — advisories, bans, licenses, and sources.
+4. `cargo test --locked --workspace --release` — the full workspace suite.
 
 It captures each step's real exit code, prints a per-step summary, and exits non-zero if
 **any** step fails — all three must be green. (On Windows it also kills any running
 `nh.exe` first, which would otherwise lock the target directory and fail the link.)
 
-Not on PowerShell? Run the same three cargo commands above, in the same order, under the
+Not on PowerShell? Run the same four cargo commands above, in the same order, under the
 pinned toolchain.
 
 Format your code with `cargo fmt` — the gate enforces `fmt --check`, it does not reformat

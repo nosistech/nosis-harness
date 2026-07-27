@@ -1,6 +1,7 @@
 /target
 **/target/
 .nosis/receipts.jsonl
+.nosis/fleet/
 .nosis/*.log
 .nosis/auth*
 *.key

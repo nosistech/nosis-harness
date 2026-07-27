@@ -20,8 +20,14 @@ const CATALOG: &str = r#"
 
 #[test]
 fn live_coordinator_refuses_resume_then_kill_releases_lock() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
     let tmp = tempfile::tempdir().unwrap();
     fs::write(tmp.path().join("catalog.toml"), CATALOG).unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(home.join(".nosis")).unwrap();
+    fs::write(home.join(".nosis").join("catalog.toml"), CATALOG).unwrap();
     let task_ids: Vec<String> = (0..8).map(|index| format!("task-{index:02}")).collect();
     let tasks: Vec<serde_json::Value> = task_ids
         .iter()
@@ -29,13 +35,16 @@ fn live_coordinator_refuses_resume_then_kill_releases_lock() {
         .collect();
     fs::write(
         tmp.path().join("tasks.json"),
-        serde_json::to_vec_pretty(&serde_json::json!({"tasks": tasks})).unwrap(),
+        serde_json::to_vec_pretty(&serde_json::json!({"tasks": tasks, "budget_tokens": 1_000_000}))
+            .unwrap(),
     )
     .unwrap();
     let binary = env!("CARGO_BIN_EXE_nh");
     let mut child = Command::new(binary)
         .args(["fleet", "run", "tasks.json", "--max-workers", "1"])
         .current_dir(tmp.path())
+        .env("USERPROFILE", &home)
+        .env("HOME", &home)
         .env("NH_FLEET_TEST_PROVIDER", "echo")
         .env("NH_FLEET_TEST_SLEEP_MS", "750")
         .stdout(Stdio::piped())
@@ -47,6 +56,8 @@ fn live_coordinator_refuses_resume_then_kill_releases_lock() {
     let blocked = Command::new(binary)
         .args(["fleet", "resume", "--max-workers", "2"])
         .current_dir(tmp.path())
+        .env("USERPROFILE", &home)
+        .env("HOME", &home)
         .env("NH_FLEET_TEST_PROVIDER", "echo")
         .output()
         .unwrap();
@@ -67,6 +78,8 @@ fn live_coordinator_refuses_resume_then_kill_releases_lock() {
     let resumed = Command::new(binary)
         .args(["fleet", "resume", "--max-workers", "2"])
         .current_dir(tmp.path())
+        .env("USERPROFILE", &home)
+        .env("HOME", &home)
         .env("NH_FLEET_TEST_PROVIDER", "echo")
         .env("NH_FLEET_TEST_SLEEP_MS", "20")
         .output()

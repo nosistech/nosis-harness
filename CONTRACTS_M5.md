@@ -495,6 +495,17 @@ only in Temp).
 
 - **`wip/<slice>` commit rule.** Gated-but-unapproved slice work is committed to a `wip/<slice>` branch
   before the owner FEEL-review — durability, no more one-AV-quarantine-from-loss.
+
+  > **AMENDMENT 2026-07-25 — NEVER ADOPTED; SUPERSEDED BY THE GATE.** `git log` shows every M5 slice
+  > commit landing directly on `main`; no `wip/` branch was ever created. The rule is hereby recorded
+  > as superseded rather than violated. What actually provided the durability and safety it was meant
+  > to provide: (1) the 4-step `gate.ps1` (fmt --check / clippy -D / cargo-deny / test --release) as a
+  > mechanical floor no commit passes without; (2) a mandatory per-wave adversarial review by the
+  > orchestrator before any commit; (3) Sol's self-report + brief retained in `Temp/` per wave. On a
+  > solo, single-working-tree project a `wip/` branch added ceremony without adding protection — the
+  > work was never on a second machine, so the branch protected against nothing the gate did not.
+  > This amendment also governs the identical clause at §6 (~line 530). Ratified by the owner
+  > 2026-07-25.
 - **`gate.ps1`** — mechanizes the §0.1 frozen-surface / allowed-files check (a diff touching a
   non-enumerated seam FAILS the gate); runs `cargo test --workspace --release` + clippy `-D warnings` +
   (optional) `cargo public-api` additive proof.

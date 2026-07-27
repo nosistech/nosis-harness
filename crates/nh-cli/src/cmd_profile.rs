@@ -28,12 +28,8 @@ pub(crate) fn render(profiles: &Profiles, route: &ResolvedRoute) -> Vec<String> 
         .into_iter()
         .map(|name| {
             let policy = profiles.effective(name, route);
-            let effort = cmd_run::effort_for(
-                None,
-                policy.posture,
-                route.thinking_dialect,
-                route.wire.clone(),
-            );
+            let effort =
+                cmd_run::effort_for(None, policy.posture, route.thinking_dialect(), route.wire());
             let cap = policy
                 .output_cap
                 .map_or_else(|| "route default".to_owned(), |cap| cap.to_string());
@@ -79,7 +75,7 @@ mod tests {
             lines[0],
             "frugal: thinking none · max output 16384 · prefer off-peak"
         );
-        assert_eq!(lines[1], "balanced: thinking none · max output 64000");
+        assert_eq!(lines[1], "balanced: thinking none · max output 16384");
         assert_eq!(lines[2], "max-quality: thinking high · max output 64000");
     }
 }

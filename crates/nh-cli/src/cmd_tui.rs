@@ -5,7 +5,7 @@ use std::path::Path;
 use nh_law::LoadOptions;
 use nh_routes::{Profiles, RouteResolver};
 use nh_tools::McpToolset;
-use nh_tui::{mcp_palette_entries, parse_notify_config, NotifyConfig, PaletteEntry, TuiConfig};
+use nh_tui::{mcp_palette_entries, PaletteEntry, TuiConfig};
 use nh_vault::Scrubber;
 
 use crate::cmd_run;
@@ -19,13 +19,10 @@ pub fn run(model: &str, budget: Option<u64>, profile: &str) -> anyhow::Result<()
         eprintln!("warning: {}", pre_screen_line(&warning_scrubber, warning));
     }
     let mut mcp_warnings = Vec::new();
-    let palette_entries = load_mcp_palette(&repo_root, &law.policy, &mut mcp_warnings);
+    let home = nh_law::user_home_dir();
+    let palette_entries =
+        load_mcp_palette(&repo_root, home.as_deref(), &law.policy, &mut mcp_warnings);
     for warning in &mcp_warnings {
-        eprintln!("warning: {}", pre_screen_line(&warning_scrubber, warning));
-    }
-    let mut notify_warnings = Vec::new();
-    let notify = load_notify_config(&repo_root, &mut notify_warnings);
-    for warning in &notify_warnings {
         eprintln!("warning: {}", pre_screen_line(&warning_scrubber, warning));
     }
     let resolver = RouteResolver::from_toml(&catalog)?;
@@ -48,7 +45,6 @@ pub fn run(model: &str, budget: Option<u64>, profile: &str) -> anyhow::Result<()
         repo_root,
         workdir,
         palette_entries,
-        notify,
     })
 }
 
@@ -59,73 +55,31 @@ fn pre_screen_line(scrubber: &Scrubber, line: &str) -> String {
 /// Load and discover MCP once, before nh-tui takes terminal ownership.
 fn load_mcp_palette(
     root: &Path,
+    home: Option<&Path>,
     policy: &nh_law::Policy,
     warnings: &mut Vec<String>,
 ) -> Vec<PaletteEntry> {
-    let path = root.join(".nosis").join("mcp.toml");
-    if !path.is_file() {
-        return Vec::new();
-    }
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) => {
-            let warning =
-                format!("could not read .nosis/mcp.toml ({error}) - palette marks MCP stale");
-            warnings.push(warning.clone());
-            return mcp_palette_entries(
-                &[],
-                &McpToolset {
-                    tools: Vec::new(),
-                    warnings: vec![warning],
-                },
-            );
+    let warning_start = warnings.len();
+    let configs = cmd_run::load_and_vet_mcp_configs(root, home, policy, warnings);
+    if configs.is_empty() && warnings.len() > warning_start {
+        for warning in &mut warnings[warning_start..] {
+            warning.push_str(" - palette marks MCP stale");
         }
+    }
+    let send_allowed = |host: &str| !matches!(policy.send_verdict(host), nh_law::Verdict::Block(_));
+    let McpToolset {
+        tools,
+        warnings: discovery_warnings,
+    } = nh_tools::mcp_tools(&configs, &send_allowed);
+    let mut palette_warnings = warnings[warning_start..].to_vec();
+    palette_warnings.extend(discovery_warnings.iter().cloned());
+    let toolset = McpToolset {
+        tools,
+        warnings: palette_warnings,
     };
-    match nh_tools::load_mcp_config(&text) {
-        Ok(configs) => {
-            let configs = cmd_run::filter_mcp_audiences(configs, policy, warnings);
-            let toolset = nh_tools::mcp_tools(&configs);
-            let entries = mcp_palette_entries(&configs, &toolset);
-            warnings.extend(toolset.warnings.iter().cloned());
-            entries
-        }
-        Err(error) => {
-            let warning = format!(".nosis/mcp.toml: {error} - palette marks MCP stale");
-            warnings.push(warning.clone());
-            mcp_palette_entries(
-                &[],
-                &McpToolset {
-                    tools: Vec::new(),
-                    warnings: vec![warning],
-                },
-            )
-        }
-    }
-}
-
-/// Load notification settings once, before nh-tui takes terminal ownership.
-fn load_notify_config(root: &Path, warnings: &mut Vec<String>) -> NotifyConfig {
-    let path = root.join(".nosis").join("notify.toml");
-    if !path.is_file() {
-        warnings.push(".nosis/notify.toml not found - using bell only".into());
-        return NotifyConfig::default();
-    }
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) => {
-            warnings.push(format!(
-                "could not read .nosis/notify.toml ({error}) - using bell only"
-            ));
-            return NotifyConfig::default();
-        }
-    };
-    match parse_notify_config(&text) {
-        Ok(config) => config,
-        Err(error) => {
-            warnings.push(format!(".nosis/notify.toml: {error} - using bell only"));
-            NotifyConfig::default()
-        }
-    }
+    let entries = mcp_palette_entries(&configs, &toolset);
+    warnings.extend(discovery_warnings);
+    entries
 }
 
 #[cfg(test)]
@@ -140,7 +94,7 @@ mod tests {
         let mut warnings = Vec::new();
         let law = nh_law::load(root.path(), &LoadOptions { cli_autonomy: None });
 
-        let entries = load_mcp_palette(root.path(), &law.policy, &mut warnings);
+        let entries = load_mcp_palette(root.path(), None, &law.policy, &mut warnings);
 
         assert!(entries.is_empty());
         assert!(warnings.is_empty());
@@ -154,55 +108,11 @@ mod tests {
         let mut warnings = Vec::new();
         let law = nh_law::load(root.path(), &LoadOptions { cli_autonomy: None });
 
-        let entries = load_mcp_palette(root.path(), &law.policy, &mut warnings);
+        let entries = load_mcp_palette(root.path(), None, &law.policy, &mut warnings);
 
         assert_eq!(entries.len(), 1);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("palette marks MCP stale"));
-    }
-
-    #[test]
-    fn absent_and_broken_notify_config_are_bell_only_with_one_warning() {
-        let root = tempfile::tempdir().unwrap();
-        let mut warnings = Vec::new();
-        let absent = load_notify_config(root.path(), &mut warnings);
-        assert_eq!(absent, NotifyConfig::default());
-        assert_eq!(warnings.len(), 1);
-
-        std::fs::create_dir_all(root.path().join(".nosis")).unwrap();
-        std::fs::write(
-            root.path().join(".nosis").join("notify.toml"),
-            "not [ valid",
-        )
-        .unwrap();
-        warnings.clear();
-        let broken = load_notify_config(root.path(), &mut warnings);
-        assert_eq!(broken, NotifyConfig::default());
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("using bell only"));
-    }
-
-    #[test]
-    fn valid_notify_config_enables_telegram_without_a_token_in_toml() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join(".nosis")).unwrap();
-        std::fs::write(
-            root.path().join(".nosis").join("notify.toml"),
-            "[telegram]\nenabled = true\nchat_id = \"123456789\"\n",
-        )
-        .unwrap();
-        let mut warnings = Vec::new();
-
-        let config = load_notify_config(root.path(), &mut warnings);
-
-        assert!(warnings.is_empty());
-        assert_eq!(
-            config.telegram,
-            Some(nh_tui::TelegramNotifyConfig {
-                enabled: true,
-                chat_id: "123456789".into(),
-            })
-        );
     }
 
     #[test]

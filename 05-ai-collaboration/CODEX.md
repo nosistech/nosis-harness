@@ -4,8 +4,9 @@ Guidance for Codex/OpenAI sessions.
 
 ## Models
 
-- Default implementer: `gpt-5.6-terra` (GPT-5.5-class at half price).
-- Hardest changes: `gpt-5.6-sol` with `max` effort; `ultra` mode (parallel subagents) for M2 context engine and anything touching nh-law/security.
+- **Default implementer: `gpt-5.6-sol` at `model_reasoning_effort=max`** (fallback `xhigh`; report which resolved). This superseded the original "`gpt-5.6-terra` by default, Sol for the hardest changes" split on **2026-07-13** — from M2 onward every milestone was implemented by Sol, and the directive is to STOP rather than silently fall back if Sol is unavailable.
+- Launch shape (PS 5.1 mangles a big multiline argument, so the prompt goes via STDIN):
+  `Get-Content -Raw <brief>.txt | codex exec -m gpt-5.6-sol -c 'model_reasoning_effort=max' -s workspace-write --color never -C <repo> -o <out>.md *> <run>.log`
 - Quota stretcher when approaching plan limits: `gpt-5.4-mini`.
 - Deprecated under ChatGPT sign-in — never select: `gpt-5.2*`, `gpt-5.3-codex`.
 - Update the Codex CLI binary first; outdated clients don't show 5.6. Codex + ChatGPT Work share one usage pool — `/status` shows remaining.
@@ -21,7 +22,7 @@ Guidance for Codex/OpenAI sessions.
 3. Make scoped changes — small PRs, never direct-to-main.
 4. Verify: `cargo test && cargo clippy -- -D warnings` must pass before handoff.
 5. Update `../00-start-here/BUILD_LOG.md`.
-6. Hand off to Opus 4.8 gate with receipt + diff.
+6. Hand off to Opus 5 gate with receipt + diff.
 
 ## M0 First Prompt (paste into Codex after repo init)
 

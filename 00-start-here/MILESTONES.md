@@ -23,9 +23,9 @@ The project has:
 - DeepSeek gotcha tests (alias ban, `reasoning_content: ""` replay); banned-string rejection.
 - MCP client against one stateless 2026-07-28 server.
 
-Exit: `/model` and `/provider` switch mid-session; peak/off-peak price shown correctly; MCP tool call with handle passthrough and no session header on the wire. MiMo prices verified live (B.3 conflict resolved).
+Exit: `/model` and `/provider` switch mid-session; clock-aware catalog prices render correctly; MCP tool call with handle passthrough and no session header on the wire. Provider prices are verified against first-party sources.
 
-Status (2026-07-13): **exit criteria met** — MiMo prices verified live against first-party pages (B.3 resolved, `confirmed` — see `../04-research/SOURCE_INDEX.md`). Mock-verified: mid-session `/model`/`/provider` switching, peak/off-peak display, and the stateless MCP call (handle passthrough, no session header) all run against loopback mock servers only. Live-pending: real provider calls (DeepSeek keyed + GLM free route), a real 2026-07-28 MCP server, DeepSeek peak windows (re-verify ~2026-07-24), GLM free-tier rate limits.
+Status (updated 2026-07-26): **exit criteria met for the implemented surface.** Provider calls were live-smoked on 2026-07-20. Prices and limits were reverified against first-party pages on 2026-07-26; the current catalog has no provider peak windows because DeepSeek's current pricing page no longer publishes the earlier schedule. Generic peak-window behavior remains mock-tested. A real external 2026-07-28 MCP implementation is still pending.
 
 ## Milestone 2: Context engine + law (weeks 3–5)
 
@@ -40,12 +40,15 @@ Exit: cache-hit % >60% on a 50-turn session; protected path blocked even in max 
 
 The project has:
 
-- Semáforo status (WORKING/WAITING/BLOCKED/IDLE), cost HUD (tokens + delegate quota units), timeline scrubber + side-git snapshots, trust dial, `?` palette with live MCP server state, Telegram notify hook.
+- Semáforo status (WORKING/WAITING/BLOCKED/IDLE) with a local approval bell, token/cost HUD, view-and-inspect timeline, trust dial, and `?` palette with live MCP server state. Snapshot/restore, delegate quota units, and remote notifications are not part of public v0.1.
 
 Exit: full session on the Predator natively (Windows Terminal, VS Code terminal, ConHost), zero renderer artifacts.
 
-Status (2026-07-15): **exit criteria met (UX-approved).** Slices A–C shipped the surfaces (semáforo,
-cost HUD, timeline, trust dial, `?` palette, Telegram hook). Carlos then rejected the
+Status (2026-07-15): **exit criteria met (UX-approved).** Slices A–C initially shipped the surfaces
+(semáforo, cost HUD, timeline, trust dial, `?` palette, and a Telegram hook). On 2026-07-26 the
+owner removed the remote-notification implementation from public v0.1 to eliminate its credential,
+destination-config, privacy, and outbound-network attack surface; the local bell remains and a
+future explicit opt-in integration is still open. Carlos then rejected the
 content-complete-but-flat TUI on UX grounds, so M3 was reopened and re-skinned + interaction-fixed
 across **Slices D+E+F**: framed chat transcript with `❯ you`/`◆ nosis` roles + turn separation;
 type-freely **slash-command** input (`/` live menu; removed the bare-letter shortcuts that collided
@@ -63,7 +66,7 @@ VS Code terminal + ConHost; case-insensitive `/effort`.
 
 The project has:
 
-- Append-only ledger, workers, typed receipts, idempotent resume; off-peak scheduler; Kimi Swarm passthrough; escalation ladder (Flash → K2.7 → V4 Pro High → V4 Pro Max → Opus gate).
+- Append-only ledger, bounded workers, typed receipts, idempotent resume, a generic off-peak scheduler, and an escalation ladder ending at a human gate. The Kimi Swarm backend interface exists, but the public Swarm client remains an explicit pending stub.
 - nh-mcp server exposing route-resolver + fleet-runner.
 
 Exit: 10-task fleet run survives kill -9 and resumes idempotently; deferred job executes off-peak; KORVIN connects to nh-mcp and triggers a fleet run; OAuth refresh survives forced expiry.
@@ -72,9 +75,9 @@ Exit: 10-task fleet run survives kill -9 and resumes idempotently; deferred job 
 
 The project has:
 
-- Sandbox tiers (Windows: approval-gating + restricted tokens; Linux: Landlock/seccomp; macOS: Seatbelt — honest docs about the difference), headless `nh exec`, docs, launch post.
+- Policy-level containment, exact-origin credential scoping, bounded provider/tool/MCP inputs and outputs, denial-of-wallet budgets, supply-chain policy, pinned multi-OS CI, current security/privacy documentation, and the headless `nh run` surface.
 
-Exit: public release. Do not ship nh-mcp server publicly until the MCP final spec lands (July 28).
+Exit: public source release after the full debug/release gate, owner FEEL check, remote CI on Windows/Linux/macOS, a configured public remote, and release smoke tests. `nh-mcp` stays loopback-only even after the MCP final spec lands.
 
 ## Milestone 6: Multimodal orchestration (post-launch — added 2026-07-14, Carlos)
 

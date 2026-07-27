@@ -2,36 +2,73 @@
 
 ## Current Architecture
 
-A Rust workspace. An agent turn loop (nh-core) sends work to exactly one resolved route per turn. The RouteResolver (nh-routes) is the only component allowed to mint a resolved route: endpoint + wire protocol + model ID + context limit + price-at-current-clock + modality flags + thinking dialect. Two backend classes: direct API routes (DeepSeek, Kimi, MiMo, GLM — token-metered, keys in nh-vault) and delegate routes (Claude Code, Codex CLI, Antigravity CLI driven headless as subprocesses — quota-metered). Full spec: plan §2, §A.0.
+A nine-crate Rust workspace. The operator selects one direct API route for execution. Only
+`nh-routes::RouteResolver` can mint a `ResolvedRoute`; it carries the trusted endpoint, wire
+protocol, model ID, limits, modality, thinking dialect, and catalog price data. The schema
+can parse delegate routes, but no delegate execution backend ships in v0.1.
 
 ## Main Components
 
-- Frontend: nh-tui (ratatui; semáforo, cost HUD, timeline scrubber, trust dial, `?` palette) + nh-cli (headless `nh exec` for CI).
-- Backend: nh-core (turn state machine, receipts), nh-routes (RouteResolver, catalog TOML, wire adapters: OpenAI + Anthropic Messages only), nh-context (budget, compaction, KV-cache prefix discipline, per-route `preserve_reasoning`).
-- Database: SQLite for memory (retain/recall/reflect); append-only JSONL for receipts and fleet ledger.
-- Background jobs: nh-fleet (workers, heartbeats, idempotent resume) + off-peak scheduler.
-- External services: 5 provider APIs, MCP servers (client via nh-tools), KORVIN (as nh-mcp consumer), Telegram notify.
-- Auth: nh-vault — OS-native secret stores (Windows Credential Manager/DPAPI, Keychain, secret-service), OAuth tokens for delegates/MCP.
-- Billing: none in v1; cost accounting is internal (tokens × price(clock), delegate quota units).
-- Observability: typed receipts per turn, failure classification (context/constraint/verification/planning), W3C Trace Context through MCP calls.
+- `nh-cli`: command parsing and the `init`, `key`, `run`, `chat`, `why`, `profile`, `tui`,
+  `fleet`, and loopback `mcp serve` surfaces.
+- `nh-tui`: ratatui frontend, with terminal lifecycle and worker ownership extracted into
+  dedicated modules. Its timeline is view/inspect only; snapshot restore is not implemented.
+- `nh-core`: OpenAI/Anthropic wire clients, turn loop, context compaction, receipts, the
+  shared credentialed-connection boundary, and contained runtime paths.
+- `nh-routes`: trusted catalog parsing, non-forgeable routes, profiles, capability checks,
+  price calculation, and cheapest-capable advice.
+- `nh-law`: layered constitution and policy loading. Repository inputs are symlink-rejected,
+  contained, and size-bounded.
+- `nh-tools`: bounded read/edit/exec tools plus the outbound MCP client. Shell execution
+  requires explicit approval and receives a minimal environment.
+- `nh-vault`: OS-native storage, exact-origin credential authorization, zeroizing secret
+  ownership, and output redaction.
+- `nh-fleet`: bounded task validation, worker ownership, append-only JSONL ledger, locking,
+  budgets, escalation, and idempotent resume.
+- `nh-mcp`: stateless, bearer-guarded, loopback-only preview server with bounded request and
+  Fleet concurrency limits.
+
+## Internal Responsibility Boundaries
+
+Crate roots expose the existing public API and retain only top-level orchestration or a small
+shared import boundary. Production responsibilities live in named modules:
+
+- `nh-cli`: one command module per user-facing command; large command test suites live beside,
+  but outside, their production modules.
+- `nh-tui`: `input`, `palette`, `render`, `session`, `state`, `terminal`, `timeline`, and `worker`.
+- `nh-core`: `agent`, `credential`, `receipt`, `runtime_path`, and `wire`.
+- `nh-routes`: `pricing`, `profiles`, `resolver`, and `route`. `ResolvedRoute` is defined inside
+  `resolver`, keeping its private construction boundary colocated with `RouteResolver`.
+- `nh-law`: `load` for layered parsing/compilation, `matcher` for pure matching, and `model` for
+  policy types and read-only views.
+- `nh-tools`: `exec` for process execution and `mcp::{adapter,client,config}` for outbound MCP;
+  the crate root owns the bounded built-in read/edit/tool facade.
+- `nh-fleet`: `engine`, `ledger`, `model`, and `prepare`; the crate root owns run/resume
+  orchestration.
+- `nh-mcp`: `protocol`, `route_tools`, `receipts`, `fleet_tools`, and `response`; the crate root
+  owns authenticated loopback transport and shutdown.
+- `nh-vault`: one cohesive production module for the OS key store, secret ownership, audience
+  checks, and scrubber; its test suite is isolated from production code.
 
 ## Data Flow
 
-1. Task arrives → classifier tags it `{modality, horizon, complexity, deferrable, secret-touching}`.
-2. RouteResolver applies the policy table (plan §A.9) + clock + quota state → resolved route; deferrable work queues into off-peak windows.
-3. nh-core runs the turn: stable prefix (law + AGENTS.md) → cached; dynamic content after the cache breakpoint; tools execute behind the trust dial.
-4. Every turn: JSONL receipt + side-git snapshot (outside repo `.git`); verification policy gates phase advances; 2 failures at a tier → escalate one tier with receipt attached.
+1. The CLI loads bundled/user/repository policy. Repository policy may only tighten trust.
+2. A trusted catalog is accepted only when it matches the bundled catalog or an exact
+   operator-reviewed user-global copy.
+3. The operator's route is resolved. The shared credential boundary validates its exact
+   origin before materializing only that route's key.
+4. `nh-core` sends the stable constitution plus dynamic conversation data to the selected
+   provider. Read, edit, shell, and MCP tools pass through policy and approval boundaries.
+5. Provider-reported usage is validated and written to a local typed receipt. Fleet adds a
+   locked append-only run ledger. Required-receipt failure cannot be reported as success.
 
 ## Deployment Shape
 
-Local:
+`nh` is a local CLI, not a hosted multi-user service. Public v0.1 is a source-install release.
+Windows is the only platform executed locally so far. CI is configured for Windows, Linux,
+and macOS, but those remote jobs cannot run until the repository has a public remote.
 
-Windows 11 native (ASUS build machine; verify over SSH on Predator). No sandbox parity pretense: Windows = approval-gating + restricted tokens/Job Objects; Linux = Landlock/seccomp; macOS = Seatbelt.
-
-Staging:
-
-n/a — it's a local CLI. CI runs headless `nh exec` with the free GLM-4.7-Flash route ($0 test suite).
-
-Production:
-
-Shipped binary + docs at M5; nh-mcp server exposed to KORVIN on the local network only in v1.
+There is no OS-level sandbox in v0.1. Containment is policy-level: workspace path checks,
+protected-file holds, exact-origin credential audiences, minimal child environments, explicit
+shell approval, time/output bounds, and verified best-effort process-tree termination. The
+MCP server cannot bind outside `127.0.0.1` and is not a public network service.

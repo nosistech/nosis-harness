@@ -26,23 +26,23 @@ Include this data in your report:
 
 ## Security Model (Summary)
 
-nosis is a local agent harness for Windows. It routes each task to a capable model with the lowest cost. It gives you a receipt for each turn. The file `02-architecture/SECURITY_MODEL.md` in this repository contains the full security model.
+nosis is a local terminal agent. The operator selects the execution route. The separate `nh why` command estimates the cheapest capable route from trusted catalog data. Accepted model turns produce local receipts. The file `02-architecture/SECURITY_MODEL.md` contains the detailed security model.
 
 ### The law and verdict classes
 
-A local law file controls each tool action. The law gives a verdict for each action. The verdict classes are `[read]`, `[send]`, and `[credential]`. A verdict is Allow, Ask, or Block. This defense prevents the "Lethal Trifecta": external input, plus secrets, plus a state change, together without a gate. Shell commands stay behind an approval gate.
+A layered law controls read, write, send, credential, and shell actions. A verdict is Allow, Ask, or Block. Repository policy can restrict trusted user policy but cannot widen it. Every non-blocked shell command still requires explicit human approval at the execution boundary. Command-block patterns unwrap common shell and environment launchers as a defense in depth; they are not an operating-system sandbox.
 
 ### Secret audience binding
 
-The law class `[credential]` binds each secret to a list of approved hosts. The broker compares the host of each request with this list. If the host is not in the list, the broker refuses the request. The secret does not leave the vault. Thus a repo configuration cannot send a secret to a different host. If the list of approved hosts is empty, the broker also refuses the request.
+The `[credential]` law binds each vault entry to approved origins. Before reading a key, the shared connection boundary compares the exact scheme, host, and effective port. Remote origins require HTTPS; literal loopback addresses have a narrow HTTP exception. An empty, malformed, downgraded, or unapproved origin is refused before the key is materialized. After authorization, the key exists in process memory and is sent in the provider authorization header to that approved origin.
 
 ### Secret storage
 
-The vault keeps secrets in the store of the operating system. On Windows, this store is the Windows Credential Manager. nosis reads a secret only at request time. The secret stays in memory only. nosis sets the memory of the secret to zero after use.
+The primary store is the operating-system credential store. The optional `NH_<ENTRY>_KEY` environment fallback is for CI and headless use. Active secrets use zeroizing application-owned buffers. Interactive sessions retain only credentials that have been active so later output can redact them, then zeroize those buffers when the session ends. Third-party HTTP and operating-system libraries can make transient internal copies that `nh` cannot prove were zeroized.
 
 ### The Scrubber
 
-The `Scrubber` examines each output path. Output paths include the terminal, the logs, the receipts, and all outbound tool results. The `Scrubber` finds text that has the shape of a secret. It also finds the secret values that are in the local vault. It replaces each match with the text `[REDACTED]`. Each tool result also has a size limit.
+The `Scrubber` covers application-controlled terminal, receipt, tool-result, and MCP-result paths. It matches known key shapes and the literal values active in the current session. It does not bulk-read every catalog credential. Literal values are stored in zeroizing buffers and matched longest-first. Tool and remote response paths have explicit size limits.
 
 ### Fail-closed defaults
 
@@ -54,7 +54,7 @@ The MCP preview server binds only to the local address 127.0.0.1. The server mak
 
 ### Audits
 
-An internal security audit examined the full codebase in July 2026. The audit found no critical problems. The project repairs the other findings in planned waves.
+Two internal reviews are part of the public record. The first full audit on 2026-07-20 reported no critical findings. A stricter pre-release audit on 2026-07-21 then found **2 critical and 14 high** findings and correctly judged that tree not releasable. The current release candidate includes the Slice G remediations, including exact-origin credential authorization for C-01 and symlink-rejecting, contained, 64 KiB-bounded constitution reads for C-02, with regression tests. The original report remains available at `04-research/AUDIT_2026-07-21_sol-max_pre-release.md`; the release checklist still requires the complete gate and manual release checks before a tag.
 
 ## Scope
 

@@ -27,8 +27,14 @@ const CATALOG: &str = r#"
 
 #[test]
 fn kill_then_resume_does_not_rerun_committed_tasks() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
     let tmp = tempfile::tempdir().unwrap();
     fs::write(tmp.path().join("catalog.toml"), CATALOG).unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(home.join(".nosis")).unwrap();
+    fs::write(home.join(".nosis").join("catalog.toml"), CATALOG).unwrap();
     let task_ids: Vec<String> = (0..10).map(|index| format!("task-{index:02}")).collect();
     let tasks: Vec<serde_json::Value> = task_ids
         .iter()
@@ -36,7 +42,8 @@ fn kill_then_resume_does_not_rerun_committed_tasks() {
         .collect();
     fs::write(
         tmp.path().join("tasks.json"),
-        serde_json::to_vec_pretty(&serde_json::json!({"tasks": tasks})).unwrap(),
+        serde_json::to_vec_pretty(&serde_json::json!({"tasks": tasks, "budget_tokens": 1_000_000}))
+            .unwrap(),
     )
     .unwrap();
     let execution_log = tmp.path().join("execution.log");
@@ -45,6 +52,8 @@ fn kill_then_resume_does_not_rerun_committed_tasks() {
     let mut child = Command::new(binary)
         .args(["fleet", "run", "tasks.json", "--max-workers", "2"])
         .current_dir(tmp.path())
+        .env("USERPROFILE", &home)
+        .env("HOME", &home)
         .env("NH_FLEET_TEST_PROVIDER", "echo")
         .env("NH_FLEET_TEST_EXECUTION_LOG", &execution_log)
         .env("NH_FLEET_TEST_SLEEP_MS", "250")
@@ -95,6 +104,8 @@ fn kill_then_resume_does_not_rerun_committed_tasks() {
     let resumed = Command::new(binary)
         .args(["fleet", "resume", "--max-workers", "2"])
         .current_dir(tmp.path())
+        .env("USERPROFILE", &home)
+        .env("HOME", &home)
         .env("NH_FLEET_TEST_PROVIDER", "echo")
         .env("NH_FLEET_TEST_EXECUTION_LOG", &execution_log)
         .env("NH_FLEET_TEST_SLEEP_MS", "20")
@@ -168,6 +179,39 @@ fn kill_then_resume_does_not_rerun_committed_tasks() {
             "committed task {id} executed twice"
         );
     }
+}
+
+#[cfg(not(debug_assertions))]
+#[test]
+fn release_binary_refuses_the_test_provider_switch() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("catalog.toml"), CATALOG).unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(home.join(".nosis")).unwrap();
+    fs::write(home.join(".nosis").join("catalog.toml"), CATALOG).unwrap();
+    fs::write(
+        tmp.path().join("tasks.json"),
+        br#"{"tasks":[{"id":"one","task":"execute one"}],"budget_tokens":1000}"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_nh"))
+        .args(["fleet", "run", "tasks.json", "--max-workers", "1"])
+        .current_dir(tmp.path())
+        .env("USERPROFILE", &home)
+        .env("HOME", &home)
+        .env("NH_FLEET_TEST_PROVIDER", "echo")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("NH_FLEET_TEST_PROVIDER is unavailable in release builds"),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn find_ledger(root: &Path) -> Option<PathBuf> {

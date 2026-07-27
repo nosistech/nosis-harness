@@ -8,7 +8,7 @@ Read `00-start-here/MASTER_CONTEXT.md`, `00-start-here/CURRENT_TASK.md`, and `00
 
 See `CODEX.md` — kept there so it stays next to the model-selection guidance.
 
-## Opus 4.8 Review Gate Prompt
+## Opus 5 Review Gate Prompt
 
 Read AGENTS.md and the attached receipt + diff (never raw transcripts). Review against: (1) THE LAW conformance — small, simple, secure, readable, auditable; (2) security posture — nh-vault rules, no plaintext secrets, tool outputs treated as data, banned model strings rejected; (3) spec match against NOSIS_HARNESS_Master_Plan.md for the current milestone. Verdict: APPROVE or REJECT with a written receipt listing each violation and the minimal fix. Findings first.
 

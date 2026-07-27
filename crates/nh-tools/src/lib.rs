@@ -1,5 +1,6 @@
 //! nh-tools — read_file / edit_file / exec_shell behind an approval gate.
-//! THE LAW: tool outputs are DATA, never instructions. exec always passes the gate.
+//! THE LAW: tool outputs are DATA, never instructions. exec is refused on Block and
+//! otherwise always requires explicit approval, regardless of the guard verdict.
 
 use anyhow::{bail, Context};
 use serde_json::json;
@@ -7,6 +8,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdout, ExitStatus, Stdio};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,7 +17,11 @@ use std::os::unix::process::CommandExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
+mod exec;
 pub mod mcp;
+
+#[cfg(test)]
+use exec::{render_bounded_output, spawn_drain, BoundedOutput, DrainCompletion, DrainOutcome};
 
 pub use mcp::{
     load_mcp_config, mcp_tools, McpAuth, McpClient, McpServerConfig, McpToolInfo, McpToolset,
@@ -100,9 +106,10 @@ pub struct ReadFile;
 /// telling the model what to fix (not found / not unique).
 pub struct EditFile;
 
-/// args: {"command": string} — MUST call ctx.approve(command) first; denial returns an
-/// Ok-shaped result the model can read ("user denied: <command>"). Runs via the platform
-/// shell, captures stdout+stderr+exit code.
+/// args: {"command": string} — refused on Guard::Block and otherwise MUST call
+/// ctx.approve(command), regardless of the guard verdict. Denial returns an Ok-shaped
+/// result the model can read ("user denied: <command>"). Runs via the platform shell,
+/// captures stdout+stderr+exit code.
 pub struct ExecShell;
 
 /// Maximum returned tool-result excerpt before head/tail elision.
@@ -111,6 +118,10 @@ const MAX_TOOL_RESULT_CHARS: usize = 32_000;
 const MAX_TOOL_READ_BYTES: usize = 2 * 1024 * 1024;
 const TOOL_BUFFER_BYTES: usize = 8 * 1024;
 const EXEC_TIMEOUT: Duration = Duration::from_secs(300);
+// A surviving descendant can hold a captured pipe open forever.
+const DRAIN_GRACE: Duration = Duration::from_secs(5);
+// Tree termination must be verified without replacing one hang with another.
+const KILL_VERIFY_GRACE: Duration = Duration::from_secs(2);
 
 pub(crate) struct ToolResultEnvelope {
     excerpt: String,
@@ -349,7 +360,22 @@ impl Tool for EditFile {
         if !resolved.is_file() {
             bail!("file not found: {path} — check the path against the working directory");
         }
-        let content = std::fs::read_to_string(&resolved)
+        let file = std::fs::File::open(&resolved)
+            .with_context(|| format!("could not read {path} — is it UTF-8 text?"))?;
+        let metadata = file
+            .metadata()
+            .with_context(|| format!("could not read {path} — is it UTF-8 text?"))?;
+        if !metadata.is_file() {
+            bail!("file not found: {path} — check the path against the working directory");
+        }
+        let mut bytes = Vec::with_capacity(TOOL_BUFFER_BYTES);
+        file.take((MAX_TOOL_READ_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("could not read {path} — is it UTF-8 text?"))?;
+        if bytes.len() > MAX_TOOL_READ_BYTES {
+            bail!("file too large to edit safely (> {MAX_TOOL_READ_BYTES} bytes)");
+        }
+        let content = String::from_utf8(bytes)
             .with_context(|| format!("could not read {path} — is it UTF-8 text?"))?;
         match content.matches(old).count() {
             0 => bail!("old_string not found in {path}"),
@@ -357,202 +383,71 @@ impl Tool for EditFile {
             n => bail!("old_string appears {n} times in {path} — provide more context"),
         }
         let edited = content.replacen(old, new, 1);
-        std::fs::write(&resolved, edited).with_context(|| format!("could not write {path}"))?;
-        Ok(format!("edited {path}"))
-    }
-}
-
-impl Tool for ExecShell {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "exec_shell".into(),
-            description: "Run a shell command in the working directory. Requires user approval."
-                .into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "The shell command to run."
-                    }
-                },
-                "required": ["command"]
-            }),
-        }
-    }
-
-    fn execute(&self, args: serde_json::Value, ctx: &ToolCtx) -> anyhow::Result<String> {
-        self.execute_with_timeout(args, ctx, EXEC_TIMEOUT)
-    }
-}
-
-struct BoundedOutput {
-    bytes: Vec<u8>,
-    truncated: bool,
-}
-
-fn drain_bounded<R: Read>(mut reader: R) -> std::io::Result<BoundedOutput> {
-    let mut bytes = Vec::with_capacity(TOOL_BUFFER_BYTES);
-    let mut truncated = false;
-    let mut chunk = [0u8; TOOL_BUFFER_BYTES];
-    loop {
-        let read = reader.read(&mut chunk)?;
-        if read == 0 {
-            break;
-        }
-        let remaining = MAX_TOOL_READ_BYTES.saturating_sub(bytes.len());
-        let keep = remaining.min(read);
-        bytes.extend_from_slice(&chunk[..keep]);
-        truncated |= keep < read;
-    }
-    Ok(BoundedOutput { bytes, truncated })
-}
-
-fn join_output(
-    handle: thread::JoinHandle<std::io::Result<BoundedOutput>>,
-    stream: &str,
-) -> anyhow::Result<BoundedOutput> {
-    handle
-        .join()
-        .map_err(|_| anyhow::anyhow!("could not capture command {stream}: drain thread panicked"))?
-        .with_context(|| format!("could not capture command {stream}"))
-}
-
-fn render_bounded_output(output: BoundedOutput, stream: &str) -> String {
-    let mut rendered = String::from_utf8_lossy(&output.bytes).into_owned();
-    if output.truncated {
-        rendered.push_str(&format!(
-            "\n…[{stream} truncated at {MAX_TOOL_READ_BYTES} bytes]"
-        ));
-    }
-    rendered
-}
-
-fn timeout_label(timeout: Duration) -> String {
-    if timeout.subsec_nanos() == 0 {
-        format!("{}s", timeout.as_secs())
-    } else {
-        format!("{}ms", timeout.as_millis())
-    }
-}
-
-fn terminate_child_tree(child: &mut Child, command: &str) -> anyhow::Result<ExitStatus> {
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &child.id().to_string(), "/T", "/F"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-    #[cfg(unix)]
-    {
-        let _ = std::process::Command::new("kill")
-            .args(["-KILL", &format!("-{}", child.id())])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-    if let Some(status) = child
-        .try_wait()
-        .with_context(|| format!("could not reap timed-out command: {command}"))?
-    {
-        return Ok(status);
-    }
-    child
-        .kill()
-        .with_context(|| format!("could not kill timed-out command: {command}"))?;
-    child
-        .wait()
-        .with_context(|| format!("could not reap timed-out command: {command}"))
-}
-
-impl ExecShell {
-    fn execute_with_timeout(
-        &self,
-        args: serde_json::Value,
-        ctx: &ToolCtx,
-        timeout: Duration,
-    ) -> anyhow::Result<String> {
-        let command = str_arg(&args, "command")?;
-        match (ctx.guard)(&Access::Exec(command)) {
-            Guard::Block(reason) => return Ok(format!("blocked by law: {reason}")),
-            Guard::Ask => {
-                // THE LAW: shipped policy always routes exec through approval.
-                if !(ctx.approve)(command) {
-                    // Ok-shaped so the model can read the denial and adapt, not crash the turn.
-                    return Ok(format!("user denied: {command}"));
+        let parent = resolved.parent().ok_or_else(|| {
+            anyhow::anyhow!("could not write {path}: file has no parent directory")
+        })?;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let mut attempt = 0_u16;
+        let (temp_path, mut temp_file) = loop {
+            if attempt == 1000 {
+                bail!("could not create temporary file for {path}");
+            }
+            let candidate = parent.join(format!(
+                ".nh-edit-{}-{nonce}-{attempt}.tmp",
+                std::process::id()
+            ));
+            match std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&candidate)
+            {
+                Ok(file) => break (candidate, file),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    attempt += 1;
+                }
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("could not create temporary file for {path}"))
                 }
             }
-            Guard::Allow => {}
-        }
-        #[cfg(windows)]
-        let mut cmd = {
-            let mut c = std::process::Command::new("cmd");
-            c.arg("/C");
-            c.raw_arg(command);
-            c
         };
-        #[cfg(not(windows))]
-        let mut cmd = {
-            let mut c = std::process::Command::new("sh");
-            c.args(["-c", command]);
-            c.process_group(0);
-            c
-        };
-        cmd.current_dir(&ctx.workdir);
-        cmd.stdin(Stdio::null());
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-        // THE LAW: approved commands get only the minimum environment required
-        // for shells and normal build tools, never ambient credentials.
-        cmd.env_clear();
-        for (name, value) in std::env::vars_os() {
-            if is_allowed_env_var(&name.to_string_lossy()) {
-                cmd.env(&name, value);
-            }
-        }
-        let mut child = cmd
-            .spawn()
-            .with_context(|| format!("could not run command: {command}"))?;
-        let stdout: ChildStdout = child.stdout.take().expect("stdout configured as piped");
-        let stderr: ChildStderr = child.stderr.take().expect("stderr configured as piped");
-        let stdout_thread = thread::spawn(move || drain_bounded(stdout));
-        let stderr_thread = thread::spawn(move || drain_bounded(stderr));
 
-        let deadline = Instant::now() + timeout;
-        let mut timed_out = false;
-        let status = loop {
-            if let Some(status) = child
-                .try_wait()
-                .with_context(|| format!("could not wait for command: {command}"))?
+        let write_result = (|| -> anyhow::Result<()> {
+            use std::io::Write as _;
+
+            temp_file
+                .write_all(edited.as_bytes())
+                .with_context(|| format!("could not write {path}"))?;
+            #[cfg(unix)]
             {
-                break status;
+                use std::os::unix::fs::PermissionsExt as _;
+                temp_file
+                    .set_permissions(std::fs::Permissions::from_mode(
+                        metadata.permissions().mode(),
+                    ))
+                    .with_context(|| format!("could not preserve permissions for {path}"))?;
             }
-            if Instant::now() >= deadline {
-                timed_out = true;
-                break terminate_child_tree(&mut child, command)?;
-            }
-            thread::sleep(Duration::from_millis(50));
-        };
-
-        let stdout = render_bounded_output(join_output(stdout_thread, "stdout")?, "stdout");
-        let stderr = render_bounded_output(join_output(stderr_thread, "stderr")?, "stderr");
-        let content = if timed_out {
-            format!(
-                "command timed out after {} — killed\nstdout:\n{stdout}\nstderr:\n{stderr}",
-                timeout_label(timeout)
-            )
-        } else {
-            let code = status
-                .code()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "killed by signal".into());
-            format!("exit code: {code}\nstdout:\n{stdout}\nstderr:\n{stderr}")
-        };
-        Ok(ToolResultEnvelope::new(content, &ctx.scrubber).render())
+            temp_file
+                .flush()
+                .with_context(|| format!("could not flush temporary file for {path}"))?;
+            temp_file
+                .sync_all()
+                .with_context(|| format!("could not fsync temporary file for {path}"))?;
+            Ok(())
+        })();
+        drop(temp_file);
+        if let Err(error) = write_result {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(error);
+        }
+        if let Err(error) = std::fs::rename(&temp_path, &resolved) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(error).with_context(|| format!("could not replace {path}"));
+        }
+        Ok(format!("edited {path}"))
     }
 }
 
@@ -561,552 +456,4 @@ pub fn builtin_tools() -> Vec<Box<dyn Tool>> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-
-    fn ctx_with(workdir: &Path, approve: bool) -> ToolCtx {
-        ToolCtx::new(workdir.to_path_buf(), Box::new(move |_| approve))
-    }
-
-    #[test]
-    fn specs_have_expected_names_and_required_args() {
-        let tools = builtin_tools();
-        let specs: Vec<ToolSpec> = tools.iter().map(|t| t.spec()).collect();
-        let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["read_file", "edit_file", "exec_shell"]);
-        assert_eq!(specs[0].parameters["required"], json!(["path"]));
-        assert_eq!(
-            specs[1].parameters["required"],
-            json!(["path", "old_string", "new_string"])
-        );
-        assert_eq!(specs[2].parameters["required"], json!(["command"]));
-        for spec in &specs {
-            assert_eq!(spec.parameters["type"], "object");
-            assert!(!spec.description.is_empty());
-        }
-    }
-
-    #[test]
-    fn read_edit_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("note.txt"), "hello old world").unwrap();
-        let ctx = ctx_with(dir.path(), true);
-
-        let text = ReadFile.execute(json!({"path": "note.txt"}), &ctx).unwrap();
-        assert_eq!(text, "hello old world");
-
-        let result = EditFile
-            .execute(
-                json!({"path": "note.txt", "old_string": "old", "new_string": "new"}),
-                &ctx,
-            )
-            .unwrap();
-        assert_eq!(result, "edited note.txt");
-
-        let text = ReadFile.execute(json!({"path": "note.txt"}), &ctx).unwrap();
-        assert_eq!(text, "hello new world");
-    }
-
-    #[test]
-    fn read_uses_session_scrubber_for_literal_secrets() {
-        let dir = tempfile::tempdir().unwrap();
-        const LITERAL: &str = "fixture-literal-abc123";
-        std::fs::write(dir.path().join("secret.txt"), LITERAL).unwrap();
-        let ctx = ctx_with(dir.path(), true)
-            .with_scrubber(nh_vault::Scrubber::new(vec![LITERAL.to_string()]));
-
-        let result = ReadFile
-            .execute(json!({"path": "secret.txt"}), &ctx)
-            .unwrap();
-
-        assert_eq!(result, "[REDACTED]");
-        assert!(!result.contains(LITERAL));
-    }
-
-    #[test]
-    fn default_tool_context_still_scrubs_shapes_only() {
-        let dir = tempfile::tempdir().unwrap();
-        let shaped = "sk-fixture-abc123";
-        let plain = "fixture-literal-abc123";
-        std::fs::write(dir.path().join("output.txt"), format!("{shaped}\n{plain}")).unwrap();
-
-        let result = ReadFile
-            .execute(json!({"path": "output.txt"}), &ctx_with(dir.path(), true))
-            .unwrap();
-
-        assert_eq!(result, format!("[REDACTED]\n{plain}"));
-    }
-
-    #[test]
-    fn oversized_read_is_bounded_before_envelope_elision() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("large.txt"),
-            vec![b'x'; MAX_TOOL_READ_BYTES + 100_000],
-        )
-        .unwrap();
-
-        let result = ReadFile
-            .execute(json!({"path": "large.txt"}), &ctx_with(dir.path(), true))
-            .unwrap();
-
-        assert!(result.contains("chars elided; digest "), "got: {result}");
-        assert!(
-            result.contains("input truncated at 2097152 bytes"),
-            "got: {result}"
-        );
-        assert!(result.chars().count() <= MAX_TOOL_RESULT_CHARS + 100);
-    }
-
-    #[test]
-    fn read_missing_file_names_the_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = ctx_with(dir.path(), true);
-        let err = ReadFile
-            .execute(json!({"path": "nope.txt"}), &ctx)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("file not found: nope.txt"), "got: {err}");
-    }
-
-    #[test]
-    fn edit_old_string_not_found() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.txt"), "abc").unwrap();
-        let ctx = ctx_with(dir.path(), true);
-        let err = EditFile
-            .execute(
-                json!({"path": "a.txt", "old_string": "zzz", "new_string": "y"}),
-                &ctx,
-            )
-            .unwrap_err()
-            .to_string();
-        assert_eq!(err, "old_string not found in a.txt");
-    }
-
-    #[test]
-    fn edit_non_unique_old_string() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.txt"), "foo bar foo").unwrap();
-        let ctx = ctx_with(dir.path(), true);
-        let err = EditFile
-            .execute(
-                json!({"path": "a.txt", "old_string": "foo", "new_string": "baz"}),
-                &ctx,
-            )
-            .unwrap_err()
-            .to_string();
-        assert_eq!(
-            err,
-            "old_string appears 2 times in a.txt — provide more context"
-        );
-    }
-
-    #[test]
-    fn path_escape_blocked_for_existing_and_missing_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let workdir = dir.path().join("inner");
-        std::fs::create_dir(&workdir).unwrap();
-        std::fs::write(dir.path().join("secret.txt"), "sk-test-0000").unwrap();
-        let ctx = ctx_with(&workdir, true);
-
-        // Existing file above workdir (canonicalize branch).
-        let err = ReadFile
-            .execute(json!({"path": "../secret.txt"}), &ctx)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("escapes the working directory"), "got: {err}");
-
-        // Missing file above workdir (lexical branch) — still an escape, not "not found".
-        let err = ReadFile
-            .execute(json!({"path": "../missing.txt"}), &ctx)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("escapes the working directory"), "got: {err}");
-
-        // Absolute path outside workdir.
-        let abs = dir.path().join("secret.txt").display().to_string();
-        let err = ReadFile
-            .execute(json!({"path": abs}), &ctx)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("escapes the working directory"), "got: {err}");
-
-        // EditFile goes through the same gate.
-        let err = EditFile
-            .execute(
-                json!({"path": "../secret.txt", "old_string": "a", "new_string": "b"}),
-                &ctx,
-            )
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("escapes the working directory"), "got: {err}");
-    }
-
-    #[test]
-    fn exec_denied_never_runs_and_is_ok_shaped() {
-        let dir = tempfile::tempdir().unwrap();
-        let calls = Arc::new(AtomicUsize::new(0));
-        let calls_seen = calls.clone();
-        let ctx = ToolCtx::new(
-            dir.path().to_path_buf(),
-            Box::new(move |cmd| {
-                assert_eq!(cmd, "echo pwned > marker.txt");
-                calls_seen.fetch_add(1, Ordering::SeqCst);
-                false
-            }),
-        );
-        let result = ExecShell
-            .execute(json!({"command": "echo pwned > marker.txt"}), &ctx)
-            .unwrap();
-        assert_eq!(result, "user denied: echo pwned > marker.txt");
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "approval gate must be consulted"
-        );
-        assert!(
-            !dir.path().join("marker.txt").exists(),
-            "denied command must never execute"
-        );
-    }
-
-    #[test]
-    fn exec_echo_happy_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = ctx_with(dir.path(), true);
-        let result = ExecShell
-            .execute(json!({"command": "echo hello"}), &ctx)
-            .unwrap();
-        assert!(result.contains("exit code: 0"), "got: {result}");
-        assert!(result.contains("hello"), "got: {result}");
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn exec_windows_preserves_approved_embedded_quotes_verbatim() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = ctx_with(dir.path(), true);
-        let command = r#"echo a "b c" d"#;
-
-        let result = ExecShell
-            .execute(json!({"command": command}), &ctx)
-            .unwrap();
-
-        assert!(result.contains("a \"b c\" d"), "got: {result}");
-    }
-
-    #[test]
-    fn exec_timeout_kills_child_and_prevents_late_marker() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = ctx_with(dir.path(), true);
-        let command = if cfg!(windows) {
-            "ping -n 6 127.0.0.1 > nul && echo late > marker.txt"
-        } else {
-            "sleep 5; echo late > marker.txt"
-        };
-
-        let started = Instant::now();
-        let result = ExecShell
-            .execute_with_timeout(
-                json!({"command": command}),
-                &ctx,
-                Duration::from_millis(100),
-            )
-            .unwrap();
-        let elapsed = started.elapsed();
-        thread::sleep(Duration::from_millis(1_200));
-
-        assert!(
-            result.contains("command timed out after 100ms — killed"),
-            "got: {result}"
-        );
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "timeout waited for a descendant instead of killing its process tree: {elapsed:?}"
-        );
-        assert!(
-            !dir.path().join("marker.txt").exists(),
-            "timed-out command continued after its shell was killed"
-        );
-    }
-
-    #[test]
-    fn child_env_allowlist_is_case_insensitive_and_minimal() {
-        assert!(is_allowed_env_var("PATH"));
-        assert!(is_allowed_env_var("path"));
-        assert!(is_allowed_env_var("CARGO_HOME"));
-        assert!(!is_allowed_env_var("NH_DEEPSEEK_KEY"));
-        assert!(!is_allowed_env_var("GITHUB_TOKEN"));
-        assert!(!is_allowed_env_var("OPENAI_API_KEY"));
-    }
-
-    #[test]
-    fn exec_child_never_sees_nh_key_env_fallback() {
-        std::env::set_var("NH_EXECTEST_KEY", "sk-test-0000-exec");
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = ctx_with(dir.path(), true);
-        let command = if cfg!(windows) {
-            "echo [%NH_EXECTEST_KEY%]"
-        } else {
-            "echo [${NH_EXECTEST_KEY:-unset}]"
-        };
-        let result = ExecShell
-            .execute(json!({"command": command}), &ctx)
-            .unwrap();
-        std::env::remove_var("NH_EXECTEST_KEY");
-        assert!(
-            !result.contains("sk-test-0000-exec"),
-            "child must not inherit NH_*_KEY: {result}"
-        );
-    }
-
-    #[test]
-    fn exec_child_never_sees_ambient_github_token() {
-        const SECRET: &str = "ambient-secret-must-not-pass";
-        let previous = std::env::var_os("GITHUB_TOKEN");
-        std::env::set_var("GITHUB_TOKEN", SECRET);
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = ctx_with(dir.path(), true);
-        let command = if cfg!(windows) {
-            "echo [%GITHUB_TOKEN%]"
-        } else {
-            "echo [${GITHUB_TOKEN:-unset}]"
-        };
-        let result = ExecShell
-            .execute(json!({"command": command}), &ctx)
-            .unwrap();
-        match previous {
-            Some(value) => std::env::set_var("GITHUB_TOKEN", value),
-            None => std::env::remove_var("GITHUB_TOKEN"),
-        }
-        assert!(
-            !result.contains(SECRET),
-            "ambient credential leaked: {result}"
-        );
-    }
-
-    #[test]
-    fn over_cap_exec_result_is_bounded_with_digest_marker() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = ctx_with(dir.path(), true);
-        let command = if cfg!(windows) {
-            "for /L %i in (1,1,40000) do @echo x"
-        } else {
-            "yes x | head -n 40000"
-        };
-        let raw_chars = 80_000;
-        let result = ExecShell
-            .execute(json!({"command": command}), &ctx)
-            .unwrap();
-        assert!(result.contains("chars elided; digest "), "got: {result}");
-        assert!(result.chars().count() < raw_chars);
-        assert!(result.chars().count() <= MAX_TOOL_RESULT_CHARS + 100);
-    }
-
-    #[test]
-    fn exec_stream_is_bounded_before_envelope_elision() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = ctx_with(dir.path(), true);
-        let command = if cfg!(windows) {
-            "powershell -NoProfile -Command \"[Console]::Out.Write('x' * 2200000)\""
-        } else {
-            "yes x | head -c 2200000"
-        };
-
-        let result = ExecShell
-            .execute(json!({"command": command}), &ctx)
-            .unwrap();
-
-        assert!(result.contains("chars elided; digest "), "got: {result}");
-        assert!(
-            result.contains("stdout truncated at 2097152 bytes"),
-            "got: {result}"
-        );
-        assert!(result.chars().count() <= MAX_TOOL_RESULT_CHARS + 100);
-    }
-
-    #[test]
-    fn exec_reports_nonzero_exit_code() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = ctx_with(dir.path(), true);
-        let result = ExecShell
-            .execute(json!({"command": "exit 7"}), &ctx)
-            .unwrap();
-        assert!(result.contains("exit code: 7"), "got: {result}");
-    }
-
-    #[test]
-    fn missing_argument_is_actionable() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = ctx_with(dir.path(), true);
-        let err = ReadFile.execute(json!({}), &ctx).unwrap_err().to_string();
-        assert_eq!(err, "missing required argument: path");
-    }
-
-    #[test]
-    fn protected_edit_is_ok_shaped_and_leaves_file_unchanged() {
-        let dir = tempfile::tempdir().unwrap();
-        let protected = dir.path().join(".nosis").join("law.toml");
-        std::fs::create_dir_all(protected.parent().unwrap()).unwrap();
-        std::fs::write(&protected, "before").unwrap();
-        let ctx = ToolCtx::new(dir.path().to_path_buf(), Box::new(|_| true)).with_guard(Box::new(
-            |access| match access {
-                Access::Write(path) if *path == ".nosis/law.toml" => {
-                    Guard::Block("protected path (.nosis/**)".into())
-                }
-                _ => Guard::Allow,
-            },
-        ));
-
-        let result = EditFile
-            .execute(
-                json!({"path": ".nosis/law.toml", "old_string": "before", "new_string": "after"}),
-                &ctx,
-            )
-            .unwrap();
-
-        assert_eq!(result, "blocked by law: protected path (.nosis/**)");
-        assert_eq!(std::fs::read_to_string(protected).unwrap(), "before");
-    }
-
-    #[test]
-    fn protected_read_is_blocked_before_io_and_normal_source_is_allowed() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("src")).unwrap();
-        std::fs::write(dir.path().join("src").join("lib.rs"), "pub fn safe() {}").unwrap();
-        let ctx = ToolCtx::new(dir.path().to_path_buf(), Box::new(|_| true)).with_guard(Box::new(
-            |access| match access {
-                Access::Read(".env") => Guard::Block("protected read (**/.env*)".into()),
-                _ => Guard::Allow,
-            },
-        ));
-
-        let blocked = ReadFile.execute(json!({"path": ".env"}), &ctx).unwrap();
-        assert_eq!(blocked, "blocked by law: protected read (**/.env*)");
-        let allowed = ReadFile
-            .execute(json!({"path": "src/lib.rs"}), &ctx)
-            .unwrap();
-        assert_eq!(allowed, "pub fn safe() {}");
-    }
-
-    #[test]
-    fn tool_result_redacts_key_shapes_before_egress() {
-        let dir = tempfile::tempdir().unwrap();
-        let fake = format!("ghp_{}", "A".repeat(36));
-        std::fs::write(dir.path().join("output.txt"), &fake).unwrap();
-        let result = ReadFile
-            .execute(json!({"path": "output.txt"}), &ctx_with(dir.path(), true))
-            .unwrap();
-        assert_eq!(result, "[REDACTED]");
-        assert!(!result.contains(&fake));
-    }
-
-    #[test]
-    fn protected_missing_edit_is_blocked_before_file_check() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = ToolCtx::new(dir.path().to_path_buf(), Box::new(|_| true)).with_guard(Box::new(
-            |access| match access {
-                Access::Write(".nosis/new.toml") => Guard::Block("protected path".into()),
-                _ => Guard::Allow,
-            },
-        ));
-
-        let result = EditFile
-            .execute(
-                json!({"path": ".nosis/new.toml", "old_string": "before", "new_string": "after"}),
-                &ctx,
-            )
-            .unwrap();
-
-        assert_eq!(result, "blocked by law: protected path");
-    }
-
-    #[test]
-    fn edit_ask_uses_normalized_relative_path_and_denial_is_ok_shaped() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("nested")).unwrap();
-        std::fs::write(dir.path().join("note.txt"), "before").unwrap();
-        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let approvals = Arc::clone(&seen);
-        let ctx = ToolCtx::new(
-            dir.path().to_path_buf(),
-            Box::new(move |action| {
-                approvals.lock().unwrap().push(action.to_string());
-                false
-            }),
-        )
-        .with_guard(Box::new(|access| match access {
-            Access::Write("note.txt") => Guard::Ask,
-            _ => Guard::Allow,
-        }));
-
-        let result = EditFile
-            .execute(
-                json!({"path": "nested/../note.txt", "old_string": "before", "new_string": "after"}),
-                &ctx,
-            )
-            .unwrap();
-
-        assert_eq!(result, "user denied: edit note.txt");
-        assert_eq!(*seen.lock().unwrap(), ["edit note.txt"]);
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("note.txt")).unwrap(),
-            "before"
-        );
-    }
-
-    #[test]
-    fn default_context_allows_edit_and_routes_exec_through_approval() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("note.txt"), "before").unwrap();
-        let approvals = Arc::new(AtomicUsize::new(0));
-        let seen = Arc::clone(&approvals);
-        let ctx = ToolCtx::new(
-            dir.path().to_path_buf(),
-            Box::new(move |_| {
-                seen.fetch_add(1, Ordering::SeqCst);
-                false
-            }),
-        );
-
-        let edited = EditFile
-            .execute(
-                json!({"path": "note.txt", "old_string": "before", "new_string": "after"}),
-                &ctx,
-            )
-            .unwrap();
-        let denied = ExecShell
-            .execute(json!({"command": "echo should-not-run"}), &ctx)
-            .unwrap();
-
-        assert_eq!(edited, "edited note.txt");
-        assert_eq!(denied, "user denied: echo should-not-run");
-        assert_eq!(approvals.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn blocked_exec_never_runs_or_asks() {
-        let dir = tempfile::tempdir().unwrap();
-        let approvals = Arc::new(AtomicUsize::new(0));
-        let seen = Arc::clone(&approvals);
-        let ctx = ToolCtx::new(
-            dir.path().to_path_buf(),
-            Box::new(move |_| {
-                seen.fetch_add(1, Ordering::SeqCst);
-                true
-            }),
-        )
-        .with_guard(Box::new(|_| Guard::Block("blocked command".into())));
-
-        let result = ExecShell
-            .execute(json!({"command": "echo pwned > marker.txt"}), &ctx)
-            .unwrap();
-
-        assert_eq!(result, "blocked by law: blocked command");
-        assert_eq!(approvals.load(Ordering::SeqCst), 0);
-        assert!(!dir.path().join("marker.txt").exists());
-    }
-}
+mod tests;

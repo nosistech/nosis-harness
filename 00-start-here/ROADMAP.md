@@ -35,7 +35,7 @@ Something Carlos uses daily instead of the incumbents.
 Deliverables:
 
 - M2: cache-first context engine (+cache-hit metric), compaction at 70%, nested constitution loader, mechanical write-holds.
-- M3: TUI — semáforo status, cost HUD (dual units: tokens + quota), timeline scrubber + side-git snapshots, trust dial, `?` palette, Telegram notify. Windows renderer matrix.
+- M3: TUI — semáforo status with local approval bell, token/cost HUD, view-and-inspect timeline, trust dial, and `?` palette. Snapshot/restore, delegate quota units, and remote notifications are deferred. Windows renderer matrix.
 
 ## Phase 3: Fleet & Integration (M4, weeks 7–9)
 
@@ -45,7 +45,7 @@ Parallelism, scheduling, and becoming a node in the orchestration layer.
 
 Deliverables:
 
-- Fleet ledger/workers/resume, off-peak scheduler, Kimi Swarm passthrough, escalation ladder with Opus gate route.
+- Fleet ledger/workers/resume, generic off-peak scheduler, escalation ladder with a human gate, and a typed Kimi Swarm seam whose public client is still pending.
 - nh-mcp server: route-resolver + fleet-runner exposed over MCP; KORVIN drives a fleet run.
 
 ## Phase 4: Hardening & Launch (M5, weeks 9–10)
@@ -56,6 +56,6 @@ Ship it.
 
 Deliverables:
 
-- Sandbox tiers, headless `nh exec` for CI, docs.
+- Policy-level containment, headless `nh run`, bounded spend/input/output, exact-origin credentials, pinned multi-OS CI, supply-chain checks, and release/security/privacy docs.
 - nosistech.com launch post (Category: AI Projects, MEDIUM risk disclaimer), CC BY 4.0 footer.
 - Optional: flagship of the 55-agent Series 2 line.

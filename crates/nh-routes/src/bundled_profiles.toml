@@ -5,6 +5,8 @@ prefer_offpeak = true
 
 [profiles.balanced]
 thinking = "default"
+max_output_tokens = 16384
 
 [profiles."max-quality"]
 thinking = "ceiling"
+max_output_tokens = 65536

@@ -5,6 +5,12 @@ category, July 2026." When the honest meter is **done** (M5 shipped + FEEL-appro
 **at least 5 detailed posts, each with real examples/screenshots**. Keep appending new article seeds
 here as we discover them (bottom section). Owner: Carlos / NosisTech LLC. Started 2026-07-17.
 
+> **INTERNAL HYPOTHESIS DRAFT — NOT RELEASE OR MARKETING COPY.** The examples below preserve
+> superseded CNY/peak-price research, simulated savings lines, competitive superlatives, and planned
+> features. The 2026-07-26 trusted catalog uses current USD rates and has no provider peak windows.
+> Do not publish any claim from this file until it is re-derived from a tagged build and captured
+> evidence under the discipline at the end of this document.
+
 > **"Done" trigger:** M5 ("The Honest Meter") shipped and owner-FEEL-approved. At that point every
 > claim below is demonstrable, not aspirational — that's the bar for turning a seed into a published post.
 

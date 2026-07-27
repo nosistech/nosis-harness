@@ -2,12 +2,33 @@
 **Project:** Terminal agent harness for open-weight models (DeepSeek V4, Kimi K2.x, MiMo V2.5) + Claude/Codex as peers
 **Owner:** Carlos Paredes Vargas / NosisTech LLC
 **Governance:** THE LAW (small, simple, secure, safe, lightweight, readable, auditable, modular, congruent, harmonic)
-**Build loop:** Claude (plan/spec) → Codex 5.5 (implement) → Opus 4.8 (review/gate) → ship
+**Build loop (current):** Claude plans/specifies → GPT-5.6 implements → Opus 5 reviews/gates → ship
 **Date:** July 9, 2026 · **Research current through:** July 9, 2026
+
+> **Current implementation amendment — 2026-07-26 (supersedes every conflicting
+> statement below for public v0.1).** This document preserves the original design and
+> research history; it is not release copy. The operator selects execution routes
+> explicitly, while `nh why` provides separate cheapest-capable advice. The trusted
+> catalog was reverified against first-party sources on 2026-07-26, now uses USD, and
+> contains no current provider peak windows; the generic off-peak scheduler remains
+> available only when a trusted route defines one. Public v0.1 has no delegate backend,
+> automatic modality dispatch, side-git snapshot/restore, OS-level sandbox or restricted
+> token, OpenTelemetry export, MCP Apps/Tasks support, remote notification service, or
+> `nh exec` command (`nh run` is the headless surface). `nh-mcp` is a bearer-guarded
+> loopback preview and cannot bind publicly. For literal current behavior, use
+> `README.md`, `catalog.toml`, `SECURITY.md`, `PRIVACY.md`, and
+> `02-architecture/ARCHITECTURE_OVERVIEW.md`.
 
 ---
 
-## 0. Verdict and strategy
+## Historical design record below — not implemented behavior
+
+Everything below this heading is the original July 9 design/research record. It explains intent and
+trade-offs, but its model names, prices, dates, launch claims, routing automation, sandboxing,
+snapshot, delegate, telemetry, and MCP feature statements are not current product facts. The
+2026-07-26 amendment above and the linked current documents govern public v0.1.
+
+## 0. Original verdict and strategy
 
 Yes — this is buildable with the Codex-builds / Opus-checks loop. But CodeWhale is ~4,300 commits of Rust across many crates. Rebuilding all of it violates THE LAW. Two routes:
 
@@ -181,7 +202,7 @@ Documented complaints across Claude Code / Codex / Gemini CLI / CodeWhale (2025�
 
 **Nosis Harness answers:**
 
-1. **Semáforo status model.** Exactly one state at all times, color + word + icon: `WORKING` (green) / `WAITING ON YOU` (amber, bell) / `BLOCKED` (red, reason) / `IDLE`. No ambiguous spinners. State changes emit OS notification *and* optional Telegram push via your existing KORVIN bot — walk away from a 2-hour MiMo run and get pinged only when it needs you.
+1. **Semáforo status model.** Exactly one state at all times, color + word + icon: `WORKING` (green) / `WAITING ON YOU` (amber, local terminal bell) / `BLOCKED` (red, reason) / `IDLE`. No ambiguous spinners. Public v0.1 has no remote-notification credential, destination, or network path. A future remote-notification integration remains open only as a separately reviewed, explicit opt-in extension.
 2. **Cost HUD.** Footer chips: session cost so far, cache-hit %, current route + peak/off-peak indicator, projected cost-to-goal (rolling estimate from tokens/turn × remaining plan items), budget bar with hard stop. Kills "rate-limit shock."
 3. **Trust dial, not YOLO binary.** Autonomy is per-path/per-command, compiled from `.nosis/law.toml` invariants: e.g. `src/**` auto-approve edits, `migrations/**` always ask, `rm|curl|ssh` always ask, protected paths hard-block even in max autonomy. Approval fatigue drops because you only get asked about things you declared sensitive.
 4. **Timeline scrubber.** Left-rail vertical timeline of turns; each entry = snapshot + receipt + cost. Arrow keys scrub, `Enter` inspects diff, `R` restores. Rollback becomes visual, not a slash-command you have to remember.
@@ -202,7 +223,7 @@ Documented complaints across Claude Code / Codex / Gemini CLI / CodeWhale (2025�
 
 **M2 — Context engine + law (weeks 3–5).** Stable-prefix cache discipline + cache-hit metric, compaction at 70%, nested constitution loader (bundled law → user law → repo `.nosis/law.toml` → AGENTS.md → memory), mechanical write-holds for protected paths. *Exit: cache-hit % >60% on a 50-turn session; protected path blocked in max autonomy.*
 
-**M3 — TUI (weeks 5–7).** Semáforo, cost HUD, timeline scrubber + side-git snapshots, trust dial, `?` palette, Telegram notify hook. Windows renderer test matrix (Windows Terminal, VS Code terminal, ConHost). *Exit: full session on the Predator natively, zero renderer artifacts.*
+**M3 — TUI (weeks 5–7).** Semáforo with local approval bell, cost HUD, timeline scrubber + side-git snapshots, trust dial, `?` palette. Windows renderer test matrix (Windows Terminal, VS Code terminal, ConHost). *Exit: full session on the Predator natively, zero renderer artifacts.*
 
 **M4 — Fleet + swarm + scheduler + nh-mcp server (weeks 7–9).** Ledger, workers, resume, receipts; off-peak scheduler; Kimi Swarm passthrough; escalation ladder with Opus 4.8 gate route; nh-mcp exposes route-resolver + fleet-runner over MCP. *Exit: 10-task fleet run survives a kill -9 and resumes idempotently; deferred job executes off-peak; KORVIN connects to nh-mcp and triggers a fleet run; OAuth refresh survives forced expiry.*
 
