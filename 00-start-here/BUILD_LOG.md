@@ -2,6 +2,49 @@
 
 Record every meaningful session here.
 
+## 2026-07-26: v0.1.0 local release-candidate evidence
+
+What changed:
+
+- Rolled the complete first-public-release changelog into `[0.1.0] - 2026-07-26` and left a new
+  empty `[Unreleased]` section.
+- Updated the release checklist only for controls backed by current evidence. Remote CI, public
+  repository settings, the owner's terminal FEEL pass, release commit/push/tag, and publication
+  remain deliberately unchecked.
+- No product logic, dependency, catalog, wire-format, or persistence-format change was made.
+
+Verification:
+
+- Ran the complete checked-in `gate.ps1` on `9856ebf`: formatting check, locked strict release
+  Clippy, `cargo deny` advisories/bans/licenses/sources, and locked release tests all PASS.
+  Tests: 512 passed / 0 failed / 1 OS-keyring test ignored. The first sandboxed attempt could not
+  lock the read-only user advisory cache; the identical full script passed with normal cache access.
+- Built the exact optimized binary with `cargo build --locked --release`.
+- Release binary SHA-256:
+  `225248E64F16050072201E42398692F8F9812E800E44912C9BBD22E62D1C337C`.
+- Smoke-tested the optimized binary:
+  - `nh --version` prints `nh 0.1.0`.
+  - `nh why "quick task"` returns a cheapest-capable explanation without network or key access.
+  - `nh init` is idempotent in an isolated Git repository.
+  - A pre-existing user hook is preserved byte-for-byte and produces the manual-chaining warning.
+  - `nh mcp serve --addr 0.0.0.0:8765` refuses before binding.
+  - Both isolated smoke repositories were removed after verification.
+- Scanned all 67 reachable commits with the canonical key-shape family without printing candidate
+  values. Reviewed 2,663 historical occurrences across 259 unique redacted contexts; all were
+  ordinary-word substring false positives or explicit redaction/security test fixtures. No
+  credential was found.
+- Audited every freshness date: production catalog data remains valid through 2026-08-02; fixtures
+  evaluated for freshness use far-future dates or injected clocks, while the remaining dated
+  fixture is parse-only and cannot age into a behavior change.
+
+Remaining before tag:
+
+- Complete and record the owner's subjective terminal FEEL pass.
+- Configure the intended public remote and valid GitHub authentication, replace local changelog
+  version links, push `main`, and obtain green Windows/Ubuntu/macOS/supply-chain CI.
+- Configure branch protection, private vulnerability intake, repository metadata, and required
+  checks; then tag and publish.
+
 ## 2026-07-26: Responsibility-boundary modularity refactor
 
 What changed:

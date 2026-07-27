@@ -3,10 +3,13 @@
 ## Current state — owner commit approval (2026-07-26)
 
 The whole-project audit, public-v0.1 hardening, Telegram removal, and responsibility-boundary
-modularization are complete. Debug and release tests pass (512 passed / 0 failed / 1 ignored), and
-strict Clippy passes in both profiles. The owner explicitly passed the FEEL/commit gate and
-requested the coherent commit. Historical checkpoints below are retained for provenance; their
-older "do not commit" and blocker language is superseded by this status.
+modularization are committed at `9856ebf`. The complete local release gate and optimized-binary
+smokes pass (512 passed / 0 failed / 1 ignored). The `0.1.0` changelog is rolled and the
+evidence-backed release checklist is current. Remaining before `v0.1.0`: the owner's subjective
+terminal FEEL pass; a valid intended public GitHub remote; protected `main`, private vulnerability
+intake, and repository metadata; green Windows/Ubuntu/macOS/supply-chain CI; then tag and publish.
+Historical checkpoints below are retained for provenance; their older "do not commit" and blocker
+language is superseded by this status.
 
 ## Immediate Goal — **RELEASE SLICE** (owner-directed 2026-07-20): take nosis from private-beta to public-1.0-ready. **W5 "FLEET RELIABILITY" SHIPPED + committed `eaadfb2` (2026-07-20)** — all 11 items W5-1..W5-11, gate 410/0/1 `--release`, clippy `-D` + fmt clean, std `File::try_lock` PRIMARY lock; reviewed ZERO-blocking; docs-closed (BUILD_LOG + CONTRACTS §0.1-F SHIPPED). That closes M5 Slice F HARDEN waves **W1✓→W3✓→W2✓→W5✓**, leaving only **W4** (nh-tui+nh-cli surfaces, FEEL) — now folded into the Release Slice. **NOW = the Release Slice, 4 owner-assigned items:** (1) **LICENSE = MIT © nosistech LLC** (not Carlos personally); (2) **SECURITY.md in ASD-STE100 Simplified Technical English**; (3) **live testing** (orchestrator runs it — DeepSeek/MiMo/Kimi REAL keys, **<$2/provider HARD CAP**; GLM free = `$0.00`) to light up the honest-meter/savings headline + confirm the VERIFY-LIVE wire shapes (DeepSeek `thinking:{type:disabled}`, Kimi K2.6 toggle); (4) **best-long-term MCP server** + finish sections **B** (engineering tail: `#![forbid(unsafe_code)]`+`[workspace.lints]`, cargo-deny green+wired-into-gate, keyless CI, rest of Slice E), **C** (distribution: install path, CHANGELOG, real RELEASE_CHECKLIST, versioning/tags), **D** (user docs: quickstart, privacy statement, telemetry stance, CONTRIBUTING) — every call rooted in long-term harness health, IN-SCOPE, law-abiding. **HARD GATE: MCP server may be hardened now but NOT shipped publicly until the MCP final spec lands 2026-07-28.** Orchestrator brings a scoped MCP recommendation BEFORE building (per [[decisions-explain-rec-then-owner-decides]]). **Execution model:** orchestrator (Opus 5) plans/gates/reviews/live-tests/commits; **Fable 5 high** writes docs (parallel, background); **Sol max** (`gpt-5.6-sol`, `model_reasoning_effort=max`, fallback `xhigh` — report which resolved) writes code (parallel, background) — DISJOINT files, NEVER two nosis codexes at once. **Checkpoint protocol (owner):** at ~250k context orchestrator STOPS + hands a self-contained continuation prompt; owner saves + `/clear` + types `continue` → seamless resume. Product identity held firm (harness with a meter: cheapest CAPABLE route + the receipt — NOT a chat UI, no new providers/autonomy in M5, no M6/M7 scope leak). Prior W1 (`d95a8d6`), W3 (`2b68163`), W2 (`e903ef0`); Slice A–D + fmt/gate/toolchain done; FULL Fable 5 audit (`d868f16`).
 

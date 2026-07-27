@@ -2,11 +2,13 @@
 STATUS UPDATE — 2026-07-26
 =====================================================================
 The incoming orchestrator completed the requested whole-project analysis, public-v0.1 hardening,
-Telegram removal, and responsibility-boundary modularization. Debug and release gates pass:
-512 passed / 0 failed / 1 ignored; strict Clippy passes in both profiles. The owner explicitly
-passed the FEEL/commit gate and requested the coherent commit. Read the newest BUILD_LOG entries
-for the implemented state. The remainder of this file is preserved as pre-gate historical context;
-its old "do not commit" and blocker statements are no longer current instructions.
+Telegram removal, and responsibility-boundary modularization, committed at `9856ebf`. The complete
+local release gate and optimized-binary smokes pass: 512 passed / 0 failed / 1 ignored. The `0.1.0`
+changelog is rolled. Remaining before `v0.1.0`: the owner's subjective terminal FEEL pass, the
+intended public GitHub remote and repository controls, green Windows/Ubuntu/macOS/supply-chain CI,
+then tag and publication. Read the newest BUILD_LOG entry for exact evidence. The remainder of
+this file is preserved as pre-gate historical context; its old "do not commit" and blocker
+statements are no longer current instructions.
 
 You are taking over as ORCHESTRATOR of the nosis Harness project (repo: C:\Users\capv2\Desktop\nosis-Harness).
 The previous orchestrator (Claude Opus 5) handed off on 2026-07-26. Read this whole brief before acting.

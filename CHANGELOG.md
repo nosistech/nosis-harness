@@ -4,13 +4,17 @@ All notable, user-facing changes to the Nosis Harness (`nh`) are documented in t
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-The first public release will be tagged `v0.1.0`; until then, the full current feature
-set lives under **Unreleased**.
+The initial public release is `0.1.0`. Its tag is created only after the reviewed release
+commit passes local and remote gates.
 
 For the full engineering history behind these entries, see
 [00-start-here/BUILD_LOG.md](00-start-here/BUILD_LOG.md).
 
 ## [Unreleased]
+
+No changes yet.
+
+## [0.1.0] - 2026-07-26
 
 ### Added
 
@@ -79,6 +83,8 @@ For the full engineering history behind these entries, see
   reviewed source release rather than as independently publishable crates.io packages.
 - Provider credentials, runtime path containment, TUI terminal ownership, and TUI worker
   lifecycle now live behind shared modules instead of being duplicated across UI surfaces.
+- TUI, Core, Fleet, MCP, tools, routing, law, CLI, and vault tests are organized into named
+  responsibility modules while preserving public commands, APIs, wire formats, and ledgers.
 
 ### Removed
 
@@ -102,7 +108,7 @@ For the full engineering history behind these entries, see
 - Report vulnerabilities per [SECURITY.md](SECURITY.md) — info@nosistech.com,
   5-business-day response SLA.
 
-<!-- Reference-style version links. Replace the Unreleased target with the
-     compare URL (.../compare/v0.1.0...HEAD) once the public remote and the
-     v0.1.0 tag exist. -->
+<!-- Reference-style version links remain local until the intended public remote exists.
+     Replace them with the repository compare/release URLs before publishing the tag. -->
 [Unreleased]: ./
+[0.1.0]: ./
