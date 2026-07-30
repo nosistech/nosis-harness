@@ -7,6 +7,7 @@
 mod anthropic;
 mod http;
 mod openai;
+mod usage_debug;
 
 pub use anthropic::AnthropicMessagesClient;
 pub use openai::OpenAiCompatClient;
@@ -169,7 +170,8 @@ pub(crate) fn make_client(
 ) -> anyhow::Result<Box<dyn ChatClient>> {
     let client: Box<dyn ChatClient> = match route.wire() {
         Wire::OpenAi => {
-            let mut client = OpenAiCompatClient::new(route.base_url().to_owned(), api_key)?;
+            let mut client =
+                OpenAiCompatClient::new(route.base_url().to_owned(), api_key, route.id())?;
             client.policy = OpenAiPolicy {
                 dialect: route.thinking_dialect(),
                 preserve_reasoning: route.preserve_reasoning(),
@@ -185,6 +187,7 @@ pub(crate) fn make_client(
             api_key,
             max_out.unwrap_or(DEFAULT_MAX_TOKENS),
             route.thinking_dialect(),
+            route.id(),
         )?),
     };
     Ok(client)
