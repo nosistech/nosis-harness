@@ -30,13 +30,18 @@ The running build history lives in [../00-start-here/BUILD_LOG.md](../00-start-h
   - [x] `RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps` — public
         documentation builds with zero warnings.
   - [x] `cargo deny --locked check` — supply-chain gate green (advisories / bans / licenses / sources).
-  - [x] `cargo test --locked --workspace --release` — full suite, **515 passed / 0 failed**
+  - [x] `cargo test --locked --workspace --release` — full suite, **579 passed / 0 failed**
         (1 OS-keyring test ignored).
 - [x] Supply-chain policy (`deny.toml`) is green and enforced by the gate; no RustSec advisory is
       `ignore`d without a documented rationale.
 - [ ] The pushed release commit has green GitHub Actions jobs on **Windows, Ubuntu, and macOS**,
       plus the supply-chain job. A configured matrix is not evidence until those remote jobs run.
-- [ ] Dependabot is enabled for Cargo and GitHub Actions on the public repository.
+- [x] Dependabot is enabled for Cargo and GitHub Actions on the public repository.
+      `.github/dependabot.yml` declares both ecosystems (`cargo` and `github-actions`) at the repo
+      root on a weekly Monday schedule, capped at 5 open PRs each. Verified 2026-07-30 against the
+      live repository: `dependabot_security_updates` is `enabled`, as are `secret_scanning` and
+      `secret_scanning_push_protection`. Still `disabled` and available if wanted:
+      `secret_scanning_non_provider_patterns` and `secret_scanning_validity_checks`.
 - [x] **No test fixture can age out.** No `valid_until` (or similar date) in a `#[cfg(test)]` fixture
       is a near-future real date. Fixtures that must read "fresh" use the far-future sentinel
       `2099-01-01` (convention set in `crates/nh-mcp/src/lib.rs`); fixtures that must read "stale" use
@@ -67,7 +72,12 @@ The running build history lives in [../00-start-here/BUILD_LOG.md](../00-start-h
       snapshot restore, OS sandboxing, remote notifications, or telemetry that the build does not have.
 - [x] `catalog.toml` prices, limits, URLs, and free/paid status were rechecked against first-party
       sources recently enough that every production `valid_until` includes the release date.
-- [ ] Owner completes the Windows FEEL pass in the actual terminal used day to day.
+- [x] Owner completes the Windows FEEL pass in the actual terminal used day to day.
+      Passed 2026-07-29 against the rebuilt binary. Six findings came out of the pass and none
+      blocked the verdict; all six were folded into wave 4, which shipped in `90a7ce7`. Note that
+      the surfaces changed after the pass (wave 4 altered `/why`, the model-picker rows, the
+      in-flight indicator and the cache line), so a short confirming re-pass on the current binary
+      is worthwhile before the tag even though the gate is green.
 - [x] MCP boundary respected: `nh mcp serve` is a loopback-only preview (binds `127.0.0.1`,
       bearer-token guarded). Public source availability does not authorize exposing it on a public
       interface; confirm no docs, defaults, proxy examples, or deployment files suggest otherwise.
