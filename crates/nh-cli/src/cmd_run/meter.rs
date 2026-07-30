@@ -25,15 +25,17 @@ pub(super) fn run_meter_lines(
         }
         return lines;
     };
-    let cache = cache_hit_pct(usage.prompt_tokens, usage.cached_tokens.unwrap_or(0))
-        .map(|pct| format!(" | cache {pct:.0}%"))
-        .unwrap_or_default();
-    let mut lines = vec![format!(
-        "turns {turns} | tool calls {tool_calls} | tokens {} in / {} out / {} cached{cache}",
-        usage.prompt_tokens,
-        usage.completion_tokens,
-        usage.cached_tokens.unwrap_or(0)
-    )];
+    let mut token_line = format!(
+        "turns {turns} | tool calls {tool_calls} | tokens {} in / {} out",
+        usage.prompt_tokens, usage.completion_tokens
+    );
+    if let (Some(cached), Some(pct)) = (
+        usage.cached_tokens,
+        cache_hit_pct(usage.prompt_tokens, usage.cached_tokens),
+    ) {
+        token_line.push_str(&format!(" / {cached} cached | cache {pct:.0}%"));
+    }
+    let mut lines = vec![token_line];
     if let Some(line) = turn_cost_line_for_run(resolver, route, usage, started, ended) {
         lines.push(line);
     }

@@ -2,6 +2,26 @@
 
 Record every meaningful session here.
 
+## 2026-07-29: Wave 4 strict release Clippy gate cleared
+
+What changed:
+
+- Replaced the one-pattern JSON parse `match` in `agent/tool_repair.rs` with the equivalent
+  `if let` fast path.
+- Grouped the private `make_receipt` helper's six per-run values into a private `ReceiptFields`
+  struct. Receipt fields and cache-hit percentage derivation remain unchanged.
+- Added no lint suppression, dependency, test change, commit, push, or tag.
+
+Verification:
+
+- `cargo clippy --locked --workspace --all-targets --release -- -D warnings` — PASS.
+- `cargo fmt --all --check` — PASS. Write-mode `cargo fmt` was not run.
+- `cargo test --locked --workspace` — PASS: 579 passed / 0 failed / 1 ignored.
+
+Next step:
+
+- The orchestrator reviews and commits the complete Wave 4 working tree.
+
 ## 2026-07-29: Env-gated raw provider-usage diagnostic
 
 What changed:

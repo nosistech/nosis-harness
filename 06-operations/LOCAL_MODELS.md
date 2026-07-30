@@ -17,6 +17,15 @@ HTTP 400 and token counts instead of silently dropping conversation history.
 Do not enable llama.cpp `--context-shift` when that fail-closed property matters. It is opt-in and
 changes the overflow behavior.
 
+Launch `llama-server` with both `--jinja` and `--cache-reuse`:
+
+```text
+llama-server ... --jinja --cache-reuse ...
+```
+
+`--jinja` is required for tool calling. `--cache-reuse` enables prefix-cache reuse, so the
+harness's stable-prefix cache discipline reaches the local runtime instead of being wasted.
+
 Ollama has a serious honesty hazard: when a conversation exceeds its configured context, it can
 silently discard the oldest messages server-side. The OpenAI-compatible response contains no
 signal, and `/v1` has no opt-out. Nosis therefore cannot detect, prevent, or report the lost

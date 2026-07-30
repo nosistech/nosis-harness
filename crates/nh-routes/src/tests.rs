@@ -941,7 +941,7 @@ fn resolve_capable_picks_cheapest_fitting_route_and_explains_every_skip() {
     assert_eq!(reasons["unpriced"], "no price");
     assert_eq!(reasons["missing"], "unknown route");
     assert_eq!(reasons["fit-b"], "same price; route id tie-break");
-    assert_eq!(reasons["fit-expensive"], "4.0x price");
+    assert_eq!(reasons["fit-expensive"], "4.0x price — $0.18 estimated");
     assert!(trace
         .lines()
         .iter()
@@ -1025,7 +1025,27 @@ fn resolve_capable_same_currency_still_uses_a_price_ratio() {
             utc(2026, 7, 20, 0, 0, 0),
         )
         .unwrap();
-    assert_eq!(trace.rejections[0].reason, "4.0x price");
+    assert_eq!(trace.rejections[0].reason, "4.0x price — $0.0040 estimated");
+}
+
+#[test]
+fn resolve_capable_uses_absolute_cost_when_the_chosen_route_is_free() {
+    let catalog = [
+        priced_route("free", "api", Some(64_000), 0.0, 0.0),
+        priced_route("paid", "api", Some(64_000), 2.0, 2.0),
+    ]
+    .join("\n");
+    let resolver = RouteResolver::from_toml(&catalog).unwrap();
+    let (route, trace) = resolver
+        .resolve_capable(40_000, 5_000, &["free", "paid"], utc(2026, 7, 20, 0, 0, 0))
+        .unwrap();
+
+    assert_eq!(route.id(), "free");
+    assert_eq!(
+        trace.rejections[0].reason,
+        "$0.09 estimated; chosen route is free"
+    );
+    assert!(!trace.rejections[0].reason.contains("higher price"));
 }
 
 #[test]
