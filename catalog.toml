@@ -24,10 +24,9 @@
 #                       start inclusive, end exclusive.
 
 # ------------------------------------------------------------------ DeepSeek (plan B.1)
-# USD rates, limits, and both wire URLs re-confirmed 2026-07-26 on
+# USD rates, limits, and the OpenAI-wire URL re-confirmed 2026-07-26 on
 # api-docs.deepseek.com/quick_start/pricing. That page no longer publishes the old
-# 2x peak schedule, so no peak multiplier is applied. The -anthropic variants are
-# the same models on the Anthropic Messages wire.
+# 2x peak schedule, so no peak multiplier is applied.
 
 [routes.deepseek-v4-pro]
 provider = "deepseek"
@@ -53,30 +52,6 @@ output = 0.87
 price_confidence = "confirmed"
 valid_until = "2026-08-02"
 
-[routes.deepseek-v4-pro-anthropic]
-provider = "deepseek"
-model_id = "deepseek-v4-pro"
-base_url = "https://api.deepseek.com/anthropic"
-wire = "anthropic"
-vault_entry = "deepseek"
-class = "api"
-modality = ["text"]
-context = 1000000
-max_out = 384000
-thinking_dialect = "deepseek-nhm"
-preserve_reasoning = false
-preserve_when_thinking = true
-quirks = ["empty-reasoning-content-on-tool-replay"]
-
-[routes.deepseek-v4-pro-anthropic.price]
-currency = "USD"
-unit = "per_million_tokens"
-cache_hit = 0.003625
-cache_miss = 0.435
-output = 0.87
-price_confidence = "confirmed"
-valid_until = "2026-08-02"
-
 [routes.deepseek-v4-flash]
 provider = "deepseek"
 model_id = "deepseek-v4-flash"
@@ -93,30 +68,6 @@ preserve_when_thinking = true
 quirks = ["empty-reasoning-content-on-tool-replay"]
 
 [routes.deepseek-v4-flash.price]
-currency = "USD"
-unit = "per_million_tokens"
-cache_hit = 0.0028
-cache_miss = 0.14
-output = 0.28
-price_confidence = "confirmed"
-valid_until = "2026-08-02"
-
-[routes.deepseek-v4-flash-anthropic]
-provider = "deepseek"
-model_id = "deepseek-v4-flash"
-base_url = "https://api.deepseek.com/anthropic"
-wire = "anthropic"
-vault_entry = "deepseek"
-class = "api"
-modality = ["text"]
-context = 1000000
-max_out = 384000
-thinking_dialect = "deepseek-nhm"
-preserve_reasoning = false
-preserve_when_thinking = true
-quirks = ["empty-reasoning-content-on-tool-replay"]
-
-[routes.deepseek-v4-flash-anthropic.price]
 currency = "USD"
 unit = "per_million_tokens"
 cache_hit = 0.0028

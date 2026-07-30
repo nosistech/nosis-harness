@@ -22,7 +22,7 @@ use std::fmt;
 /// ```
 #[derive(Debug, Clone)]
 pub struct ResolvedRoute {
-    /// Catalog key ("deepseek-v4-pro-anthropic") — may differ from `model_id`.
+    /// Catalog key ("kimi-k2.7-code") — may differ from `model_id`.
     id: String,
     provider: String,
     model_id: String,
