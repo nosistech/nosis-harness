@@ -6,13 +6,28 @@ pub enum Wire {
     AnthropicMessages,
 }
 
-/// Backend class (plan A.0): "api" = direct, token-metered; "delegate" =
-/// subscription child CLI (claude/codex - adapter lands in M4, schema parses today).
+/// Backend class: "api" = direct and token-metered, "local" = an explicitly
+/// selected loopback OpenAI-compatible runtime, and "delegate" = a subscription
+/// child CLI (the delegate schema parses, but its adapter does not ship).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteClass {
     Api,
+    Local,
     Delegate,
 }
+
+impl RouteClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Api => "api",
+            Self::Local => "local",
+            Self::Delegate => "delegate",
+        }
+    }
+}
+
+/// Verbatim user-facing qualifier for local-route metering.
+pub const LOCAL_METER_COPY: &str = "Local: no billed tokens; hardware and power are not metered.";
 
 /// How a route expresses thinking effort on the wire (plan §3, A.1-A.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +38,8 @@ pub enum ThinkingDialect {
     KimiToggle,
     /// Kimi K2.7: no non-thinking mode exists - never send a toggle.
     AlwaysThinking,
+    /// Always-thinking route with Low/High/Max effort control.
+    AlwaysThinkingEffort,
     /// GLM thinking High/Max only.
     GlmHm,
     /// No effort toggle for this route.
@@ -35,6 +52,7 @@ impl ThinkingDialect {
             Self::DeepseekNhm => "deepseek-nhm",
             Self::KimiToggle => "kimi-toggle",
             Self::AlwaysThinking => "always-thinking",
+            Self::AlwaysThinkingEffort => "always-thinking-effort",
             Self::GlmHm => "glm-hm",
             Self::None => "none",
         }

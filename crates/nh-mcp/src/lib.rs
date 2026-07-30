@@ -9,30 +9,22 @@ mod receipts;
 mod response;
 mod route_tools;
 
-use fleet_tools::*;
-use protocol::*;
-use receipts::*;
-use response::*;
-use route_tools::*;
+use protocol::{business_card, rpc_error, rpc_success, tools_call, tools_list};
+use response::respond_json;
 
-use std::collections::{BTreeSet, VecDeque};
-use std::fs::File;
-use std::io::{Read as _, Seek as _, SeekFrom};
+use std::io::Read as _;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{bail, Context as _};
-use chrono::{Local, Utc};
-use nh_core::credential;
 use nh_vault::{SecretRegistry, SecretValue};
-use serde::Deserialize;
 use serde_json::{json, Value};
 use subtle::ConstantTimeEq;
-use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
+use tiny_http::{Method, Request, Server};
 
 const PREVIEW_NOTICE: &str =
     "nh-mcp preview - local only; do not expose publicly before the MCP final spec (2026-07-28).";
@@ -149,7 +141,7 @@ fn bind(mut config: ServeConfig) -> anyhow::Result<(Server, SocketAddr, Arc<Runt
             }
             (caller, false)
         }
-        None => (mint_token(), true),
+        None => (mint_token()?, true),
     };
     let mut token_registry = SecretRegistry::new();
     token_registry.insert(token.clone());
@@ -165,15 +157,17 @@ fn bind(mut config: ServeConfig) -> anyhow::Result<(Server, SocketAddr, Arc<Runt
 }
 
 /// Loopback preview token from the operating system CSPRNG; not a long-term credential.
-fn mint_token() -> SecretValue {
+fn mint_token() -> anyhow::Result<SecretValue> {
     let mut bytes = [0u8; 32];
-    getrandom::getrandom(&mut bytes).expect("OS CSPRNG");
-    nh_vault::secret(
+    getrandom::getrandom(&mut bytes).map_err(|error| {
+        anyhow::anyhow!("could not obtain randomness for the nh-mcp token: {error}")
+    })?;
+    Ok(nh_vault::secret(
         bytes
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>(),
-    )
+    ))
 }
 
 fn print_banner(addr: SocketAddr, runtime: &Runtime) {

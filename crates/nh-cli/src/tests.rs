@@ -170,7 +170,22 @@ fn run_rejects_zero_max_turns() {
         Ok(_) => panic!("zero turns must be rejected"),
         Err(error) => error,
     };
-    assert!(error.to_string().contains("--max-turns"));
+    let error = error.to_string();
+    assert!(error.contains("--max-turns"));
+    assert!(error.contains("1 to 100"), "got: {error}");
+    assert!(!error.contains("4294967295"), "got: {error}");
+}
+
+#[test]
+fn run_max_turns_has_a_human_sized_inclusive_upper_bound() {
+    let accepted = Cli::try_parse_from(["nh", "run", "task", "--max-turns", "100"]).unwrap();
+    assert!(matches!(accepted.cmd, Cmd::Run { max_turns: 100, .. }));
+
+    let error = match Cli::try_parse_from(["nh", "run", "task", "--max-turns", "101"]) {
+        Ok(_) => panic!("101 turns must be rejected"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("1 to 100"), "got: {error}");
 }
 
 #[test]
@@ -384,5 +399,27 @@ fn parses_mcp_serve_token_entry() {
             assert_eq!(token_entry.as_deref(), Some("korvin-mcp"));
         }
         _ => panic!("expected mcp serve"),
+    }
+}
+
+#[test]
+fn mcp_serve_help_names_all_six_runtime_tools() {
+    use clap::CommandFactory as _;
+
+    let mut command = Cli::command();
+    let serve = command
+        .find_subcommand_mut("mcp")
+        .and_then(|mcp| mcp.find_subcommand_mut("serve"))
+        .expect("mcp serve subcommand");
+    let help = serve.render_long_help().to_string();
+    for tool in [
+        "route_resolve",
+        "fleet_run",
+        "fleet_status",
+        "why",
+        "route_cost",
+        "receipts",
+    ] {
+        assert!(help.contains(tool), "missing {tool}: {help}");
     }
 }

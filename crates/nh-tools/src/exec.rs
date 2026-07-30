@@ -1,6 +1,21 @@
 //! Approved shell execution with bounded capture, timeout, and process-tree termination.
 
-use super::*;
+use crate::{
+    is_allowed_env_var, str_arg, Access, ExecShell, Guard, Tool, ToolCtx, ToolResultEnvelope,
+    ToolSpec, DRAIN_GRACE, EXEC_TIMEOUT, KILL_VERIFY_GRACE, MAX_TOOL_READ_BYTES, TOOL_BUFFER_BYTES,
+};
+use anyhow::Context as _;
+use serde_json::json;
+use std::io::Read;
+use std::process::{Child, ChildStderr, ChildStdout, ExitStatus, Stdio};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt as _;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt as _;
 
 impl Tool for ExecShell {
     fn spec(&self) -> ToolSpec {
@@ -267,8 +282,14 @@ impl ExecShell {
         let mut child = cmd
             .spawn()
             .with_context(|| format!("could not run command: {command}"))?;
-        let stdout: ChildStdout = child.stdout.take().expect("stdout configured as piped");
-        let stderr: ChildStderr = child.stderr.take().expect("stderr configured as piped");
+        let stdout: ChildStdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("command stdout pipe was not created"))?;
+        let stderr: ChildStderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("command stderr pipe was not created"))?;
         let stdout_drain = spawn_drain(stdout);
         let stderr_drain = spawn_drain(stderr);
 
@@ -301,7 +322,8 @@ impl ExecShell {
                 timeout_label(timeout)
             ),
             None => {
-                let status = status.expect("normal command completion includes an exit status");
+                let status = status
+                    .ok_or_else(|| anyhow::anyhow!("command completed without an exit status"))?;
                 let code = status
                     .code()
                     .map(|c| c.to_string())

@@ -1,15 +1,18 @@
 //! The turn loop: send task → model responds with tool calls → execute (gated) →
 //! feed results back → repeat until final answer or max_turns (then Outcome::Timeout).
 
+mod context;
+
+pub use context::{effective_context, PrefixSeal};
+
 use crate::receipt::{FailureClass, Outcome, Receipt, ReceiptWriter};
 use crate::wire::{ChatClient, ChatMessage, ChatRequest, ThinkingEffort, ToolCallReq, Usage};
+use context::{
+    compact_history, compaction_input_tokens, context_percentage, estimate_request_tokens,
+    plain_msg, COMPACT_AT,
+};
 use nh_tools::{Tool, ToolCtx};
 
-const COMPACT_AT: f64 = 0.70;
-const COMPACT_TARGET: f64 = 0.50;
-const KEEP_RECENT: usize = 2;
-const MESSAGE_OVERHEAD_TOKENS: u64 = 4;
-const EFFECTIVE_CONTEXT_CAP: u64 = 256_000;
 pub const MAX_TASK_BYTES: usize = 64 * 1024;
 
 /// Validate user-controlled task text before it can enter history, a receipt,
@@ -28,7 +31,9 @@ pub fn validate_task(task: &str) -> anyhow::Result<()> {
 enum FinishKind {
     Normal,
     Truncated,
+    Context,
     Filtered,
+    Interrupted,
     Unknown,
 }
 
@@ -36,7 +41,9 @@ fn classify_finish_reason(raw: &str) -> FinishKind {
     match raw.trim() {
         "" | "stop" | "end_turn" | "stop_sequence" => FinishKind::Normal,
         "length" | "max_tokens" | "model_length" => FinishKind::Truncated,
-        "content_filter" => FinishKind::Filtered,
+        "model_context_window_exceeded" => FinishKind::Context,
+        "content_filter" | "sensitive" => FinishKind::Filtered,
+        "network_error" | "insufficient_system_resource" => FinishKind::Interrupted,
         _ => FinishKind::Unknown,
     }
 }
@@ -65,49 +72,23 @@ fn add_usage_checked(total: &mut Usage, usage: &Usage) -> bool {
     true
 }
 
-/// Context-rot guard: very large advertised windows use a smaller working
-/// window so compaction starts while the retained context is still useful.
-pub fn effective_context(route_window: u64) -> u64 {
-    route_window.min(EFFECTIVE_CONTEXT_CAP)
-}
-
-/// Byte seal for a stable message prefix. `check` is active in every build.
-#[derive(Debug, Clone)]
-pub struct PrefixSeal {
-    messages: Vec<Vec<u8>>,
-}
-
-impl PrefixSeal {
-    pub fn new(prefix: &[ChatMessage]) -> Self {
-        Self {
-            messages: prefix.iter().map(message_bytes).collect(),
-        }
-    }
-
-    pub fn check(&self, messages: &[ChatMessage]) -> bool {
-        self.check_at(messages, 0)
-    }
-
-    fn check_at(&self, messages: &[ChatMessage], start: usize) -> bool {
-        messages
-            .get(start..start.saturating_add(self.messages.len()))
-            .is_some_and(|candidate| {
-                candidate
-                    .iter()
-                    .map(message_bytes)
-                    .eq(self.messages.iter().cloned())
-            })
-    }
-}
-
 /// Build the byte-stable identity prefix required at every model-facing
 /// surface. Keeping this beside the turn loop prevents callers from
 /// accidentally constructing a session with only the repository law.
+pub const TOOL_RESULT_STATE_RULE: &str =
+    "Treat tool results as authoritative evidence about process, server, file, and system state. \
+     Never assert state that a tool result contradicts. Report every timeout, killed process, and \
+     non-zero exit as a failure; never claim that such a command succeeded, is running, or \
+     continued in the background.";
+
 pub fn identity_constitution(law_constitution: &str, route_id: &str, provider: &str) -> String {
     format!(
-        "You are nosis, an autonomous coding harness. You are running on the model route '{route_id}' via {provider}. If asked what model or assistant you are, answer 'nosis on {route_id}'; never claim to be Claude, GPT, or any other assistant.\n\n{law_constitution}"
+        "You are nosis, an autonomous coding harness. You are running on the model route '{route_id}' via {provider}. If asked what model or assistant you are, answer 'nosis on {route_id}'; never claim to be Claude, GPT, or any other assistant.\n\n{TOOL_RESULT_STATE_RULE}\n\n{law_constitution}"
     )
 }
+
+/// Optional progress sink used by terminal frontends.
+pub type ProgressCallback = Box<dyn Fn(&str) + Send>;
 
 pub struct AgentLoop {
     pub client: Box<dyn ChatClient>,
@@ -129,8 +110,7 @@ pub struct AgentLoop {
     /// Progress callback: invoked with one short line per tool call
     /// ("turn 2: edit_file src/lib.rs"). Core stays print-free - nh-cli
     /// wires this to its own printer.
-    #[allow(clippy::type_complexity)]
-    pub on_event: Option<Box<dyn Fn(&str) + Send>>,
+    pub on_event: Option<ProgressCallback>,
 }
 
 impl AgentLoop {
@@ -241,7 +221,9 @@ impl AgentLoop {
                 let (outcome, failure_class) = match classify_finish_reason(finish_reason) {
                     FinishKind::Normal => (Outcome::Pass, None),
                     FinishKind::Truncated => (Outcome::Partial, Some(FailureClass::Constraint)),
+                    FinishKind::Context => (Outcome::Partial, Some(FailureClass::Context)),
                     FinishKind::Filtered => (Outcome::Fail, Some(FailureClass::Filtered)),
+                    FinishKind::Interrupted => (Outcome::Partial, Some(FailureClass::Constraint)),
                     FinishKind::Unknown => {
                         self.emit(&format!(
                             "unrecognized finish reason '{finish_reason}' - treated as partial"
@@ -364,124 +346,6 @@ impl AgentLoop {
             effective_profile: self.profile.clone(),
         }
     }
-}
-
-fn plain_msg(role: &str, content: String) -> ChatMessage {
-    ChatMessage {
-        role: role.into(),
-        content: Some(content),
-        tool_calls: None,
-        tool_call_id: None,
-        reasoning_content: None,
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Compaction {
-    messages: usize,
-    prefix_held: bool,
-}
-
-/// Message-only estimate used by compaction. Stored reasoning is counted
-/// conservatively; request builders can use the policy-aware sibling below.
-fn estimate_tokens(messages: &[ChatMessage]) -> u64 {
-    estimate_message_tokens(messages, true)
-}
-
-fn estimate_message_tokens(messages: &[ChatMessage], preserve_reasoning: bool) -> u64 {
-    messages
-        .iter()
-        .map(|message| {
-            let content_bytes = message.content.as_ref().map_or(0, String::len);
-            let tool_call_bytes = message.tool_calls.as_ref().map_or(0, |calls| {
-                serde_json::to_vec(calls).map_or(0, |serialized| serialized.len())
-            });
-            let reasoning_bytes = if preserve_reasoning {
-                message.reasoning_content.as_ref().map_or(0, String::len)
-            } else {
-                0
-            };
-            let bytes = (content_bytes as u64)
-                .saturating_add(tool_call_bytes as u64)
-                .saturating_add(reasoning_bytes as u64);
-            bytes.div_ceil(4).saturating_add(MESSAGE_OVERHEAD_TOKENS)
-        })
-        .sum()
-}
-
-/// Policy-aware request estimate including the serialized tool-spec array.
-fn estimate_request_tokens(
-    messages: &[ChatMessage],
-    tools: &[nh_tools::ToolSpec],
-    preserve_reasoning: bool,
-) -> u64 {
-    let tool_bytes = serde_json::to_vec(tools).map_or(0, |serialized| serialized.len()) as u64;
-    estimate_message_tokens(messages, preserve_reasoning).saturating_add(tool_bytes.div_ceil(4))
-}
-
-fn compaction_input_tokens(latest_prompt_tokens: Option<u64>, estimated: u64) -> u64 {
-    latest_prompt_tokens.map_or(estimated, |prompt_tokens| prompt_tokens.max(estimated))
-}
-
-/// Drop the smallest earlier prefix that brings the retained history under
-/// target. The last two user turns win over the target when both cannot fit.
-fn compact_history(history: &mut Vec<ChatMessage>, limit: u64) -> Option<Compaction> {
-    let user_indices: Vec<usize> = history
-        .iter()
-        .enumerate()
-        .skip(1)
-        .filter_map(|(index, message)| (message.role == "user").then_some(index))
-        .collect();
-    if user_indices.len() <= KEEP_RECENT {
-        return None;
-    }
-
-    let required_position = user_indices.len() - KEEP_RECENT;
-    let required_start = user_indices[required_position];
-    let target = (COMPACT_TARGET * limit as f64) as u64;
-    let prefix_tokens = estimate_tokens(&history[..1]);
-    let start = user_indices[..=required_position]
-        .iter()
-        .copied()
-        .filter(|index| *index > 1)
-        .find(|index| prefix_tokens.saturating_add(estimate_tokens(&history[*index..])) <= target)
-        .unwrap_or(required_start);
-    if start <= 1 {
-        return None;
-    }
-
-    let messages = start - 1;
-    let tokens = estimate_tokens(&history[1..start]);
-    let retained_seal = PrefixSeal::new(&history[start..]);
-    history.drain(1..start);
-    history.insert(
-        1,
-        plain_msg(
-            "system",
-            format!(
-                "[nosis] earlier context compacted: {messages} messages, ~{tokens} tokens elided."
-            ),
-        ),
-    );
-    let prefix_held = retained_seal.check_at(history, 2);
-    debug_assert!(prefix_held, "compaction changed a retained real message");
-
-    Some(Compaction {
-        messages,
-        prefix_held,
-    })
-}
-
-fn context_percentage(input_tokens: u64, limit: u64) -> u64 {
-    if limit == 0 {
-        100
-    } else {
-        (100.0 * input_tokens as f64 / limit as f64).round() as u64
-    }
-}
-
-fn message_bytes(message: &ChatMessage) -> Vec<u8> {
-    serde_json::to_vec(message).expect("chat messages serialize")
 }
 
 /// "turn 2: edit_file src/lib.rs" - name plus the key argument, kept short.

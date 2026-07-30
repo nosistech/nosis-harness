@@ -52,7 +52,7 @@ enum Cmd {
         model: String,
         /// Max agent turns before giving up with a timeout receipt
         #[arg(long, default_value_t = 20)]
-        #[arg(value_parser = clap::value_parser!(u32).range(1..))]
+        #[arg(value_parser = parse_max_turns)]
         max_turns: u32,
         /// Thinking effort (default picked per route dialect)
         #[arg(long, value_enum)]
@@ -136,7 +136,7 @@ enum FleetAction {
 
 #[derive(Subcommand)]
 enum McpAction {
-    /// Start the local MCP server (route_resolve, fleet_run, fleet_status)
+    /// Start the local MCP server (route_resolve, fleet_run, fleet_status, why, route_cost, receipts)
     Serve {
         #[arg(long, default_value = "127.0.0.1:8765")]
         addr: String,
@@ -151,6 +151,20 @@ enum KeyAction {
     Add { entry: String },
     /// Remove a key from the OS-native store (e.g. `nh key remove deepseek`)
     Remove { entry: String },
+}
+
+fn parse_max_turns(value: &str) -> Result<u32, String> {
+    let turns = value
+        .parse::<u32>()
+        .map_err(|_| "max turns must be a whole number from 1 to 100".to_owned())?;
+    if (1..=cmd_run::MAX_RUN_TURNS).contains(&turns) {
+        Ok(turns)
+    } else {
+        Err(format!(
+            "max turns must be from 1 to {}",
+            cmd_run::MAX_RUN_TURNS
+        ))
+    }
 }
 
 fn main() -> anyhow::Result<()> {

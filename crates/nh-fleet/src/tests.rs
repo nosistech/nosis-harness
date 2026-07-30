@@ -1,6 +1,23 @@
 use super::*;
+use crate::engine::{
+    escalation_outcome, run_one_task, DurableWriter, IndexRecord, PreparedTask, QueuedTask,
+    RunLock, Runtime, WorkerPool,
+};
+use crate::ledger::{
+    append_index, ensure_single_terminal, fleet_root, latest_incomplete_run, parse_jsonl,
+    queued_tasks, read_ledger, receipt_tokens, repair_uncommitted_tail, terminal_counts, tokens_in,
+};
+use crate::prepare::{preflight_keys, prepare_new_tasks};
+use chrono::{DateTime, Utc};
+use nh_core::receipt::{Outcome, Receipt};
+use nh_core::wire::{ThinkingEffort, Usage};
 use nh_law::LoadOptions;
-use std::sync::MutexGuard;
+use nh_routes::RouteResolver;
+use nh_vault::Scrubber;
+use std::fs;
+use std::sync::atomic::Ordering;
+use std::sync::{mpsc, MutexGuard};
+use std::thread;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -150,7 +167,7 @@ fn early_error_drains_worker_before_run_lock_releases() {
             job_tx: Some(job_tx),
             workers: vec![worker],
         };
-        pool.sender().send(PreparedTask {
+        pool.sender().unwrap().send(PreparedTask {
             task_id: "in-flight".into(),
             task: "finish before return".into(),
             route_id: "echo".into(),

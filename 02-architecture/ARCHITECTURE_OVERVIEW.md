@@ -2,10 +2,12 @@
 
 ## Current Architecture
 
-A nine-crate Rust workspace. The operator selects one direct API route for execution. Only
-`nh-routes::RouteResolver` can mint a `ResolvedRoute`; it carries the trusted endpoint, wire
-protocol, model ID, limits, modality, thinking dialect, and catalog price data. The schema
-can parse delegate routes, but no delegate execution backend ships in v0.1.
+A nine-crate Rust workspace. The operator selects one direct API route or one explicitly
+configured local route for execution. Only `nh-routes::RouteResolver` can mint a
+`ResolvedRoute`; it carries the trusted endpoint, wire protocol, model ID, limits, modality,
+thinking dialect, and catalog price data. Local routes are OpenAI-compatible and loopback-only;
+they are excluded from cheapest-capable advice and cost anchors. The schema can parse delegate
+routes, but no delegate execution backend ships in v0.1.
 
 ## Main Components
 
@@ -33,18 +35,27 @@ can parse delegate routes, but no delegate execution backend ships in v0.1.
 Crate roots expose the existing public API and retain only top-level orchestration or a small
 shared import boundary. Production responsibilities live in named modules:
 
-- `nh-cli`: one command module per user-facing command; large command test suites live beside,
-  but outside, their production modules.
-- `nh-tui`: `input`, `palette`, `render`, `session`, `state`, `terminal`, `timeline`, and `worker`.
-- `nh-core`: `agent`, `credential`, `receipt`, `runtime_path`, and `wire`.
+- `nh-cli`: one command module per user-facing command; `cmd_run::{config,meter}` isolate trusted
+  configuration assembly and receipt projection, chat startup is isolated from its REPL, and
+  large command test suites live beside, but outside, their production modules.
+- `nh-tui`: `input` owns event reduction while `input::commands` owns slash commands; `render`
+  owns frame components while `render::transcript` owns projection and wrapping; `session`,
+  `state`, `terminal`, `timeline`, and `worker` each retain one lifecycle concern.
+- `nh-core`: `agent`, `credential`, `receipt`, `runtime_path`, and `wire`. `agent::context` owns
+  cache-safe prefix sealing, estimation, and compaction. The wire facade owns shared types and
+  route-to-client construction; `wire::{http,openai,anthropic}` isolate common HTTP safety limits
+  and provider-specific encoding.
 - `nh-routes`: `pricing`, `profiles`, `resolver`, and `route`. `ResolvedRoute` is defined inside
-  `resolver`, keeping its private construction boundary colocated with `RouteResolver`.
+  `resolver`, keeping its private construction boundary colocated with `RouteResolver`;
+  `resolver::catalog` owns untrusted TOML parsing and validation.
 - `nh-law`: `load` for layered parsing/compilation, `matcher` for pure matching, and `model` for
   policy types and read-only views.
 - `nh-tools`: `exec` for process execution and `mcp::{adapter,client,config}` for outbound MCP;
-  the crate root owns the bounded built-in read/edit/tool facade.
-- `nh-fleet`: `engine`, `ledger`, `model`, and `prepare`; the crate root owns run/resume
-  orchestration.
+  `mcp::client::oauth` owns token lifetime and refresh state, while the crate root owns the
+  bounded built-in read/edit/tool facade.
+- `nh-fleet`: `engine` owns workers and durable I/O, `scheduler` owns task state transitions,
+  and `ledger`, `model`, and `prepare` own persistence, public types, and validated setup; the
+  crate root owns run/resume orchestration.
 - `nh-mcp`: `protocol`, `route_tools`, `receipts`, `fleet_tools`, and `response`; the crate root
   owns authenticated loopback transport and shutdown.
 - `nh-vault`: one cohesive production module for the OS key store, secret ownership, audience

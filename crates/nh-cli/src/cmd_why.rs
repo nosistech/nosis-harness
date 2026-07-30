@@ -29,7 +29,7 @@ pub(crate) fn render(
     let explicit = model.map(|id| resolver.resolve(id)).transpose()?;
     if explicit
         .as_ref()
-        .is_some_and(|route| route.class() != RouteClass::Api)
+        .is_some_and(|route| route.class() == RouteClass::Delegate)
     {
         anyhow::bail!("selected route is a delegate - choose an api route with --model");
     }
@@ -123,6 +123,23 @@ mod tests {
         cache_miss = 4.0
         output = 8.0
         price_confidence = "confirmed"
+
+        [routes.local-test]
+        provider = "ollama"
+        model_id = "user-filled-model"
+        base_url = "http://127.0.0.1:11434/v1"
+        wire = "openai"
+        vault_entry = "ollama-local"
+        class = "local"
+        context = 100000
+        max_out = 2048
+        [routes.local-test.price]
+        currency = "USD"
+        unit = "per_million_tokens"
+        cache_hit = 0.0
+        cache_miss = 0.0
+        output = 0.0
+        price_confidence = "confirmed"
     "#;
 
     #[test]
@@ -137,5 +154,26 @@ mod tests {
         assert!(lines.iter().any(|line| {
             line == "current route expensive was selected explicitly; cheapest capable is cheap"
         }));
+    }
+
+    #[test]
+    fn explicitly_selected_local_route_stays_out_of_the_capable_comparison() {
+        let resolver = RouteResolver::from_toml(CATALOG).unwrap();
+        let at = Utc.with_ymd_and_hms(2026, 7, 29, 12, 0, 0).unwrap();
+        let lines = render(
+            &resolver,
+            Some("explain this route"),
+            Some("local-test"),
+            at,
+        )
+        .unwrap();
+
+        assert!(lines[0].starts_with("route: cheap"), "got: {lines:?}");
+        assert!(lines.iter().any(|line| {
+            line == "current route local-test was selected explicitly; cheapest capable is cheap"
+        }));
+        assert!(!lines
+            .iter()
+            .any(|line| line.starts_with("route: local-test")));
     }
 }

@@ -1,7 +1,10 @@
 use super::*;
 use chrono::TimeZone;
+use nh_core::receipt::ReceiptWriter;
 use nh_core::wire::{ChatRequest, ChatResponse, ThinkingEffort, Usage};
+use nh_law::LoadOptions;
 use nh_routes::{ThinkingDialect, ThinkingPosture, Wire};
+use nh_tools::{builtin_tools, ToolCtx};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -100,6 +103,23 @@ const TEST_CATALOG: &str = r#"
     base_url = "https://example.invalid"
     wire = "openai"
     vault_entry = "kimi"
+
+    [routes.local-test]
+    provider = "ollama"
+    model_id = "user-filled-model"
+    base_url = "http://127.0.0.1:11434/v1"
+    wire = "openai"
+    vault_entry = "ollama-local"
+    class = "local"
+    context = 8192
+    max_out = 2048
+    [routes.local-test.price]
+    currency = "USD"
+    unit = "per_million_tokens"
+    cache_hit = 0.0
+    cache_miss = 0.0
+    output = 0.0
+    price_confidence = "confirmed"
 "#;
 
 /// ChatMessage literals live only in nh-core (CONTRACTS_M1.md §5.2) - build via serde.
@@ -153,6 +173,8 @@ fn test_session(model: &str, tmp: &Path) -> (ChatSession, Arc<AtomicUsize>) {
     let route = resolver.resolve(model).expect("known test route");
     let profiles = Profiles::bundled();
     let execution_policy = profiles.effective("balanced", &route);
+    let law_constitution = "test constitution\n";
+    let constitution = cmd_run::agent_constitution(law_constitution, &route);
     let (client, literal) = connect(&route, execution_policy.output_cap).unwrap();
     let mut key_literals = SecretRegistry::new();
     key_literals.insert(literal);
@@ -171,7 +193,7 @@ fn test_session(model: &str, tmp: &Path) -> (ChatSession, Arc<AtomicUsize>) {
             route.wire(),
         ),
         profile: Some(execution_policy.profile.clone()),
-        constitution: Some("test constitution\n".into()),
+        constitution: Some(constitution),
         context_limit: route.context(),
         on_event: None,
     };
@@ -181,7 +203,7 @@ fn test_session(model: &str, tmp: &Path) -> (ChatSession, Arc<AtomicUsize>) {
         profiles,
         active_profile: execution_policy.profile,
         agent,
-        law_constitution: "test constitution\n".into(),
+        law_constitution: law_constitution.into(),
         history: Vec::new(),
         session_in: 0,
         session_out: 0,
@@ -197,6 +219,18 @@ fn test_session(model: &str, tmp: &Path) -> (ChatSession, Arc<AtomicUsize>) {
         mcp_warnings: Vec::new(),
     };
     (session, calls)
+}
+
+#[test]
+fn chat_constitution_contains_the_authoritative_tool_result_rule() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (session, _) = test_session("deepseek-v4-flash", tmp.path());
+    let constitution = session.agent.constitution.as_deref().unwrap_or("");
+
+    assert!(
+        constitution.contains(nh_core::agent::TOOL_RESULT_STATE_RULE),
+        "got: {constitution}"
+    );
 }
 
 #[test]
@@ -278,7 +312,8 @@ fn model_switch_preserves_history_and_changes_route() {
     let constitution = s.agent.constitution.clone().unwrap();
     assert!(
         constitution.contains("nosis on kimi-k2.6")
-            && constitution.contains("never claim to be Claude"),
+            && constitution.contains("never claim to be Claude")
+            && constitution.contains(nh_core::agent::TOOL_RESULT_STATE_RULE),
         "identity prompt for new route: {constitution}"
     );
     assert!(
@@ -440,6 +475,30 @@ fn price_without_table_says_how_to_add_one() {
         out,
         "no price data for unpriced - add a [routes.unpriced.price] table to catalog.toml\n"
     );
+}
+
+#[test]
+fn local_turn_and_price_command_use_the_ratified_meter_copy() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut session, _calls) = test_session("local-test", tmp.path());
+    let (out, err) = drive(&mut session, &["hello", "/price"]);
+
+    assert!(out.contains(nh_routes::LOCAL_METER_COPY), "got: {out}");
+    assert!(err.contains(nh_routes::LOCAL_METER_COPY), "got: {err}");
+    assert!(err.contains("session no billed tokens"), "got: {err}");
+    assert!(!out.contains("$0.00"), "got: {out}");
+    assert!(!err.contains("$0.00"), "got: {err}");
+}
+
+#[test]
+fn model_command_can_switch_explicitly_to_a_local_route() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut session, _calls) = test_session("deepseek-v4-flash", tmp.path());
+    let (out, err) = drive(&mut session, &["/model local-test", "hello"]);
+
+    assert!(out.contains("switched to local-test"), "got: {out}");
+    assert_eq!(session.route.class(), RouteClass::Local);
+    assert!(err.contains(nh_routes::LOCAL_METER_COPY), "got: {err}");
 }
 
 // ------------------------------------------------------------- footer

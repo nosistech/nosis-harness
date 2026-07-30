@@ -1,9 +1,24 @@
 use super::*;
+use crate::palette::trust_dial_lines;
+use crate::state::{Overlay, PickerKind, UiDiscovery};
+use crate::worker::WorkerCommand;
+use chrono::{DateTime, Utc};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use nh_core::agent::MAX_TASK_BYTES;
 use nh_core::wire::{ChatRequest, ChatResponse};
-use ratatui::backend::TestBackend;
+use ratatui::{
+    backend::TestBackend,
+    layout::Rect,
+    style::{Color, Modifier},
+    text::Line,
+    widgets::{Paragraph, Wrap},
+    Terminal,
+};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TEST_CATALOG: &str = r#"
     [routes.test-route]
@@ -86,6 +101,96 @@ const METER_CATALOG: &str = r#"
     price_confidence = "confirmed"
 "#;
 
+const PICKER_CATALOG: &str = r#"
+    [routes.a-cheap]
+    provider = "alpha"
+    model_id = "a-cheap"
+    base_url = "https://example.invalid"
+    wire = "openai"
+    vault_entry = "alpha"
+    context = 100000
+    [routes.a-cheap.price]
+    currency = "USD"
+    unit = "per_million_tokens"
+    cache_hit = 0.1
+    cache_miss = 0.1
+    output = 0.1
+    price_confidence = "confirmed"
+    valid_until = "2099-01-01"
+
+    [routes.b-expensive]
+    provider = "beta"
+    model_id = "b-expensive"
+    base_url = "https://example.invalid"
+    wire = "openai"
+    vault_entry = "beta"
+    context = 100000
+    [routes.b-expensive.price]
+    currency = "USD"
+    unit = "per_million_tokens"
+    cache_hit = 0.2
+    cache_miss = 0.2
+    output = 0.2
+    price_confidence = "confirmed"
+    valid_until = "2099-01-01"
+
+    [routes.c-unknown-context]
+    provider = "gamma"
+    model_id = "c-unknown-context"
+    base_url = "https://example.invalid"
+    wire = "openai"
+    vault_entry = "gamma"
+    [routes.c-unknown-context.price]
+    currency = "USD"
+    unit = "per_million_tokens"
+    cache_hit = 0.0
+    cache_miss = 0.0
+    output = 0.0
+    price_confidence = "confirmed"
+    valid_until = "2099-01-01"
+
+    [routes.d-unknown-price]
+    provider = "delta"
+    model_id = "d-unknown-price"
+    base_url = "https://example.invalid"
+    wire = "openai"
+    vault_entry = "delta"
+    context = 100000
+
+    [routes.e-stale]
+    provider = "epsilon"
+    model_id = "e-stale"
+    base_url = "https://example.invalid"
+    wire = "openai"
+    vault_entry = "epsilon"
+    context = 100000
+    [routes.e-stale.price]
+    currency = "USD"
+    unit = "per_million_tokens"
+    cache_hit = 0.3
+    cache_miss = 0.3
+    output = 0.3
+    price_confidence = "confirmed"
+    valid_until = "2020-01-01"
+
+    [routes.f-local]
+    provider = "ollama"
+    model_id = "user-filled-model"
+    base_url = "http://127.0.0.1:11434/v1"
+    wire = "openai"
+    vault_entry = "ollama-local"
+    class = "local"
+    context = 8192
+    max_out = 2048
+    [routes.f-local.price]
+    currency = "USD"
+    unit = "per_million_tokens"
+    cache_hit = 0.0
+    cache_miss = 0.0
+    output = 0.0
+    price_confidence = "confirmed"
+"#;
+
 fn test_resolver() -> RouteResolver {
     RouteResolver::from_toml(TEST_CATALOG).expect("test catalog parses")
 }
@@ -107,7 +212,10 @@ fn test_app(budget: Option<u64>) -> App {
             block_paths: Vec::new(),
             block_commands: Vec::new(),
         },
-        Vec::new(),
+        UiDiscovery {
+            palette_entries: Vec::new(),
+            credentialed_providers: Vec::new(),
+        },
         (Profiles::bundled(), "balanced".into()),
     )
 }
@@ -127,7 +235,33 @@ fn meter_app() -> App {
             block_paths: Vec::new(),
             block_commands: Vec::new(),
         },
-        Vec::new(),
+        UiDiscovery {
+            palette_entries: Vec::new(),
+            credentialed_providers: Vec::new(),
+        },
+        (Profiles::bundled(), "balanced".into()),
+    )
+}
+
+fn picker_app() -> App {
+    let resolver = RouteResolver::from_toml(PICKER_CATALOG).unwrap();
+    let route = resolver.resolve("a-cheap").unwrap();
+    App::new(
+        resolver,
+        route,
+        None,
+        Arc::new(RwLock::new(Scrubber::new(Vec::new()))),
+        PolicyView {
+            autonomy: Autonomy::Ask,
+            auto_paths: Vec::new(),
+            ask_paths: Vec::new(),
+            block_paths: Vec::new(),
+            block_commands: Vec::new(),
+        },
+        UiDiscovery {
+            palette_entries: Vec::new(),
+            credentialed_providers: vec!["alpha".into(), "beta".into()],
+        },
         (Profiles::bundled(), "balanced".into()),
     )
 }
@@ -394,7 +528,10 @@ fn every_new_surface_scrubs_literals_and_control_characters() {
             block_paths: vec![format!("{modal_secret}\r\x1b[2K")],
             block_commands: Vec::new(),
         },
-        Vec::new(),
+        UiDiscovery {
+            palette_entries: Vec::new(),
+            credentialed_providers: Vec::new(),
+        },
         (Profiles::bundled(), "balanced".into()),
     );
 
@@ -835,6 +972,153 @@ fn bad_model_command_is_one_friendly_line_and_keeps_route() {
 }
 
 #[test]
+fn bare_model_opens_an_honest_catalog_picker_and_uses_the_typed_switch_action() {
+    let mut app = picker_app();
+    app.push_line("conversation stays", TranscriptKind::Answer);
+    let transcript = app
+        .transcript
+        .iter()
+        .map(|line| line.text.clone())
+        .collect::<Vec<_>>();
+
+    type_text(&mut app, "/model");
+    assert_eq!(
+        reduce_key(&mut app, code_key(KeyCode::Enter)),
+        UiAction::None
+    );
+    let labels = match &app.overlay {
+        Overlay::Picker {
+            kind: PickerKind::Model,
+            selected,
+            rows,
+        } => {
+            assert_eq!(*selected, 0);
+            rows.iter().map(|row| row.label.clone()).collect::<Vec<_>>()
+        }
+        other => panic!("expected model picker, got {other:?}"),
+    };
+    assert_eq!(labels.len(), 6);
+    assert!(labels[0].contains("a-cheap · cheapest capable · USD"));
+    assert!(labels[1].contains("b-expensive · 2.0x price · USD"));
+    assert!(
+        labels[2].contains("relative unavailable: context unknown · USD"),
+        "got: {}",
+        labels[2]
+    );
+    assert!(
+        labels[3].contains("price unknown · currency unknown"),
+        "got: {}",
+        labels[3]
+    );
+    assert!(labels[4].contains("price stale"), "got: {}", labels[4]);
+    assert!(
+        labels[5].contains("local · explicit selection only · no billed tokens"),
+        "got: {}",
+        labels[5]
+    );
+    let rendered = buffer_text(&render_buffer(&app, 100, 24));
+    assert!(rendered.contains("Select model"), "got: {rendered}");
+
+    assert_eq!(
+        reduce_key(&mut app, code_key(KeyCode::Down)),
+        UiAction::None
+    );
+    assert_eq!(
+        reduce_key(&mut app, code_key(KeyCode::Enter)),
+        UiAction::SwitchRoute("b-expensive".into())
+    );
+    assert_eq!(
+        app.transcript
+            .iter()
+            .map(|line| line.text.clone())
+            .collect::<Vec<_>>(),
+        transcript
+    );
+
+    let mut typed = picker_app();
+    type_text(&mut typed, "/model b-expensive");
+    assert_eq!(
+        reduce_key(&mut typed, code_key(KeyCode::Enter)),
+        UiAction::SwitchRoute("b-expensive".into())
+    );
+
+    let mut local = picker_app();
+    type_text(&mut local, "/model f-local");
+    assert_eq!(
+        reduce_key(&mut local, code_key(KeyCode::Enter)),
+        UiAction::SwitchRoute("f-local".into())
+    );
+}
+
+#[test]
+fn bare_provider_lists_only_credentialed_providers_and_selects_their_default() {
+    let mut app = picker_app();
+    type_text(&mut app, "/provider");
+    assert_eq!(
+        reduce_key(&mut app, code_key(KeyCode::Enter)),
+        UiAction::None
+    );
+
+    let labels = match &app.overlay {
+        Overlay::Picker {
+            kind: PickerKind::Provider,
+            rows,
+            ..
+        } => rows.iter().map(|row| row.label.clone()).collect::<Vec<_>>(),
+        other => panic!("expected provider picker, got {other:?}"),
+    };
+    assert_eq!(labels.len(), 2);
+    assert!(labels[0].contains("alpha · a-cheap · credential available"));
+    assert!(labels[1].contains("beta · b-expensive · credential available"));
+    assert!(labels.iter().all(|line| !line.contains("gamma")));
+
+    reduce_key(&mut app, code_key(KeyCode::Down));
+    assert_eq!(
+        reduce_key(&mut app, code_key(KeyCode::Enter)),
+        UiAction::SwitchRoute("b-expensive".into())
+    );
+}
+
+#[test]
+fn bare_profile_lists_three_profiles_and_escape_is_a_no_op() {
+    let mut app = picker_app();
+    type_text(&mut app, "/profile");
+    assert_eq!(
+        reduce_key(&mut app, code_key(KeyCode::Enter)),
+        UiAction::None
+    );
+    match &app.overlay {
+        Overlay::Picker {
+            kind: PickerKind::Profile,
+            selected,
+            rows,
+        } => {
+            assert_eq!(*selected, 1);
+            assert_eq!(
+                rows.iter()
+                    .map(|row| row.value.as_str())
+                    .collect::<Vec<_>>(),
+                ["frugal", "balanced", "max-quality"]
+            );
+        }
+        other => panic!("expected profile picker, got {other:?}"),
+    }
+    let before = app.active_profile.clone();
+    assert_eq!(reduce_key(&mut app, code_key(KeyCode::Esc)), UiAction::None);
+    assert_eq!(app.overlay, Overlay::None);
+    assert_eq!(app.active_profile, before);
+
+    type_text(&mut app, "/profile");
+    reduce_key(&mut app, code_key(KeyCode::Enter));
+    reduce_key(&mut app, code_key(KeyCode::Down));
+    assert_eq!(
+        reduce_key(&mut app, code_key(KeyCode::Enter)),
+        UiAction::SetProfile("max-quality".into())
+    );
+    assert_eq!(app.active_profile, "max-quality");
+}
+
+#[test]
 fn effort_command_sets_header_and_invalid_value_shows_usage() {
     let mut app = test_app(None);
     type_text(&mut app, "/effort High");
@@ -1261,6 +1545,34 @@ fn savings_line_renders_counterfactuals_and_omits_cold_claim() {
 }
 
 #[test]
+fn local_hud_and_turn_meter_do_not_present_hardware_cost_as_zero() {
+    let mut app = picker_app();
+    app.route = app.resolver.resolve("f-local").unwrap();
+    let usage = Usage {
+        prompt_tokens: 100,
+        completion_tokens: 20,
+        cached_tokens: None,
+    };
+
+    assert!(
+        app.hud_line(fixed_at())
+            .contains("session no billed tokens"),
+        "got: {}",
+        app.hud_line(fixed_at())
+    );
+    assert_eq!(
+        savings_lines(&app.resolver, &app.route, &usage, fixed_at()),
+        vec![nh_routes::LOCAL_METER_COPY.to_owned()]
+    );
+    record_turn_cost(&mut app, &usage, fixed_at());
+    assert_eq!(
+        app.transcript.last().map(|line| line.text.as_str()),
+        Some(nh_routes::LOCAL_METER_COPY)
+    );
+    assert!(app.session_cost.is_empty());
+}
+
+#[test]
 fn why_command_uses_live_resolver_trace() {
     let mut app = meter_app();
     assert_eq!(explain_why(&mut app), UiAction::None);
@@ -1282,6 +1594,39 @@ fn heartbeat_formats_two_elapsed_deltas() {
         let (label, _) = status_chip(&Status::Working, Some(since), now);
         assert_eq!(label, expected);
     }
+}
+
+#[test]
+fn in_flight_tool_event_shows_name_and_elapsed_seconds_until_finish() {
+    let mut app = test_app(None);
+    let started_at = fixed_at();
+    app.set_status(Status::Working, started_at);
+    apply_event(
+        &mut app,
+        AgentEvent::ToolStarted {
+            name: "exec_shell".into(),
+            started_at,
+        },
+    );
+
+    let (label, _) = tool_status_chip(
+        "exec_shell",
+        started_at,
+        started_at + chrono::Duration::seconds(34),
+    );
+    assert_eq!(label, "● TOOL exec_shell · 34s");
+    assert_eq!(
+        app.active_tool.as_ref().map(|tool| tool.name.as_str()),
+        Some("exec_shell")
+    );
+
+    apply_event(
+        &mut app,
+        AgentEvent::ToolFinished {
+            name: "exec_shell".into(),
+        },
+    );
+    assert!(app.active_tool.is_none());
 }
 
 #[test]
@@ -1342,7 +1687,10 @@ fn rendered_line_is_redacted_and_has_no_control_characters() {
             block_paths: Vec::new(),
             block_commands: Vec::new(),
         },
-        Vec::new(),
+        UiDiscovery {
+            palette_entries: Vec::new(),
+            credentialed_providers: Vec::new(),
+        },
         (Profiles::bundled(), "balanced".into()),
     );
     apply_event(
@@ -1371,13 +1719,16 @@ fn rendered_overlay_scrubs_descriptions_and_control_characters() {
             block_paths: Vec::new(),
             block_commands: Vec::new(),
         },
-        vec![PaletteEntry {
-            kind: "tool",
-            name: "secret-tool".into(),
-            description: format!("value={secret}\r\x1b[2K"),
-            state: Some(McpState::Enabled),
-            action: PaletteAction::Describe,
-        }],
+        UiDiscovery {
+            palette_entries: vec![PaletteEntry {
+                kind: "tool",
+                name: "secret-tool".into(),
+                description: format!("value={secret}\r\x1b[2K"),
+                state: Some(McpState::Enabled),
+                action: PaletteAction::Describe,
+            }],
+            credentialed_providers: Vec::new(),
+        },
         (Profiles::bundled(), "balanced".into()),
     );
     app.overlay = Overlay::Palette {
@@ -1451,6 +1802,10 @@ fn identity_constitution_is_stable_and_names_the_route_honestly() {
     assert!(first.contains("test-route"), "got: {first}");
     assert!(first.contains("via test"), "got: {first}");
     assert!(first.contains("never claim to be Claude"), "got: {first}");
+    assert!(
+        first.contains(nh_core::agent::TOOL_RESULT_STATE_RULE),
+        "got: {first}"
+    );
     assert!(first.ends_with("law bytes"), "got: {first}");
 }
 
@@ -1802,7 +2157,10 @@ fn worker_uses_injected_client_and_keeps_one_history_across_tasks() {
                     assert_eq!(summary.answer, "ok");
                     saw_receipt = true;
                 }
-                AgentEvent::Usage(_) | AgentEvent::Progress(_) => {}
+                AgentEvent::Usage(_)
+                | AgentEvent::Progress(_)
+                | AgentEvent::ToolStarted { .. }
+                | AgentEvent::ToolFinished { .. } => {}
                 AgentEvent::MeterIncomplete => panic!("successful worker lost meter data"),
                 AgentEvent::Approval(_) => panic!("mock never asks for approval"),
                 AgentEvent::Failed(reason) => panic!("worker failed: {reason}"),
@@ -1856,7 +2214,11 @@ fn worker_profile_change_reconnects_with_clamp_and_records_next_turn() {
     let receipt = loop {
         match worker.events.recv_timeout(Duration::from_secs(2)).unwrap() {
             AgentEvent::TaskReceipt(summary) => break summary.receipt,
-            AgentEvent::Usage(_) | AgentEvent::Answer(_) | AgentEvent::Progress(_) => {}
+            AgentEvent::Usage(_)
+            | AgentEvent::Answer(_)
+            | AgentEvent::Progress(_)
+            | AgentEvent::ToolStarted { .. }
+            | AgentEvent::ToolFinished { .. } => {}
             AgentEvent::MeterIncomplete => panic!("successful worker lost meter data"),
             AgentEvent::Approval(_) => panic!("mock never asks for approval"),
             AgentEvent::Failed(reason) => panic!("worker failed: {reason}"),

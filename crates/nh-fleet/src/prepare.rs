@@ -1,6 +1,29 @@
 //! Task preparation, credential preflight, test-provider wiring, and display helpers.
 
-use super::*;
+use crate::engine::{PreparedTask, TestProvider};
+use crate::model::{validate_task_specs, Backend, EventCallback, Ladder, TaskSpec};
+use crate::{DEFAULT_MAX_WORKERS, TEST_LOG_LOCK, TEST_PROVIDER_ENV};
+#[cfg(any(test, debug_assertions))]
+use crate::{TEST_EXECUTION_LOG_ENV, TEST_OUTCOME_ENV, TEST_SLEEP_MS_ENV};
+use anyhow::bail;
+#[cfg(any(test, debug_assertions))]
+use anyhow::Context as _;
+use nh_core::credential;
+#[cfg(any(test, debug_assertions))]
+use nh_core::receipt::Outcome;
+use nh_core::wire::{ChatClient, ChatMessage, ChatRequest, ChatResponse, ThinkingEffort, Usage};
+use nh_law::Law;
+use nh_routes::{RouteClass, RouteResolver, ThinkingDialect};
+use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, SecretRegistry};
+use std::collections::{BTreeSet, HashSet};
+use std::fs::{self, OpenOptions};
+use std::io::Write as _;
+use std::path::Path;
+#[cfg(any(test, debug_assertions))]
+use std::path::PathBuf;
+use std::thread;
+#[cfg(any(test, debug_assertions))]
+use std::time::Duration;
 
 pub(super) fn prepare_new_tasks(
     resolver: &RouteResolver,
@@ -21,8 +44,8 @@ pub(super) fn prepare_new_tasks(
         }
         for tier in ladder.tiers() {
             let route = resolver.resolve(&tier.route_id)?;
-            if route.class() == RouteClass::Delegate {
-                bail!("escalation ladder worker tiers must use api routes");
+            if route.class() != RouteClass::Api {
+                bail!("escalation ladder worker tiers must use priced api routes");
             }
         }
     }
@@ -46,7 +69,9 @@ pub(super) fn prepare_new_tasks(
         };
         let route = resolver.resolve(route_id)?;
         if route.class() == RouteClass::Delegate {
-            bail!("delegate routes are not available to fleet workers - pick an api route");
+            bail!(
+                "delegate routes are not available to fleet workers - pick an api or local route"
+            );
         }
         tasks.push(PreparedTask {
             task_id,
@@ -222,7 +247,9 @@ pub(super) fn stable_hash(text: &str) -> u64 {
 
 pub(super) fn effort_for(dialect: ThinkingDialect) -> ThinkingEffort {
     match dialect {
-        ThinkingDialect::AlwaysThinking | ThinkingDialect::GlmHm => ThinkingEffort::High,
+        ThinkingDialect::AlwaysThinking
+        | ThinkingDialect::AlwaysThinkingEffort
+        | ThinkingDialect::GlmHm => ThinkingEffort::High,
         ThinkingDialect::DeepseekNhm | ThinkingDialect::KimiToggle | ThinkingDialect::None => {
             ThinkingEffort::None
         }
@@ -253,12 +280,7 @@ pub(super) fn effective_workers(
     Ok(workers)
 }
 
-#[allow(clippy::type_complexity)]
-pub(super) fn emit(
-    callback: &Option<Arc<dyn Fn(&str) + Send + Sync>>,
-    scrubber: &Scrubber,
-    line: &str,
-) {
+pub(super) fn emit(callback: &Option<EventCallback>, scrubber: &Scrubber, line: &str) {
     if let Some(callback) = callback {
         callback(&nh_vault::safe_line(scrubber, line));
     }

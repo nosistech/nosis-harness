@@ -16,6 +16,9 @@ use serde::{Deserialize, Serialize};
 pub const MAX_FLEET_TASKS: usize = 256;
 pub const MAX_TASK_ID_BYTES: usize = 128;
 
+/// Thread-safe progress sink used by CLI and MCP frontends.
+pub type EventCallback = Arc<dyn Fn(&str) + Send + Sync>;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskSpec {
     #[serde(default)]
@@ -58,19 +61,13 @@ pub fn validate_task_specs(specs: &[TaskSpec]) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Backend {
+    #[default]
     Native,
     #[serde(rename = "kimi-swarm")]
     KimiSwarm,
-}
-
-#[allow(clippy::derivable_impls)]
-impl Default for Backend {
-    fn default() -> Self {
-        Self::Native
-    }
 }
 
 pub trait Clock: Send + Sync {
@@ -86,9 +83,8 @@ impl Clock for SystemClock {
 }
 
 /// Off-peak and routes without price data dispatch immediately; peak routes park.
-#[allow(clippy::unnecessary_map_or)]
 pub fn ready_to_dispatch(route: &nh_routes::ResolvedRoute, now: DateTime<Utc>) -> bool {
-    route.price_at(now).map_or(true, |quote| !quote.peak)
+    route.price_at(now).is_none_or(|quote| !quote.peak)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,8 +182,7 @@ pub struct FleetConfig {
     pub swarm: Option<Arc<dyn SwarmClient>>,
     /// Repository root; fleet data is stored below `.nosis/fleet`.
     pub run_root: PathBuf,
-    #[allow(clippy::type_complexity)]
-    pub on_event: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    pub on_event: Option<EventCallback>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

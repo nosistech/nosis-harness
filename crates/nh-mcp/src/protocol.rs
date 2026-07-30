@@ -1,6 +1,11 @@
 //! JSON-RPC method catalog and tool dispatch.
 
-use super::*;
+use crate::fleet_tools::{fleet_run, fleet_status};
+use crate::receipts::receipts;
+use crate::response::tool_error;
+use crate::route_tools::{route_cost, route_resolve, why};
+use crate::{Runtime, MAX_MCP_FLEET_BUDGET_TOKENS};
+use serde_json::{json, Value};
 
 pub(super) fn business_card() -> Value {
     json!({

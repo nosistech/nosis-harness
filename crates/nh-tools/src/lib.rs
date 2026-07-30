@@ -7,15 +7,7 @@ use serde_json::json;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, ChildStderr, ChildStdout, ExitStatus, Stdio};
-use std::sync::{mpsc, Arc, Mutex};
-use std::thread;
-use std::time::{Duration, Instant};
-
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
+use std::time::Duration;
 
 mod exec;
 pub mod mcp;
@@ -54,6 +46,9 @@ pub struct ToolSpec {
     /// JSON Schema for arguments.
     pub parameters: serde_json::Value,
 }
+
+/// JSON arguments passed across the tool boundary.
+pub type ToolArgs = serde_json::Value;
 
 pub struct ToolCtx {
     pub workdir: PathBuf,
@@ -96,7 +91,7 @@ impl ToolCtx {
 
 pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
-    fn execute(&self, args: serde_json::Value, ctx: &ToolCtx) -> anyhow::Result<String>;
+    fn execute(&self, args: ToolArgs, ctx: &ToolCtx) -> anyhow::Result<String>;
 }
 
 /// args: {"path": string} - read file relative to workdir, refuse escapes above workdir.
@@ -108,7 +103,7 @@ pub struct EditFile;
 
 /// args: {"command": string} - refused on Guard::Block and otherwise MUST call
 /// ctx.approve(command), regardless of the guard verdict. Denial returns an Ok-shaped
-/// result the model can read ("user denied: <command>"). Runs via the platform shell,
+/// result the model can read (`user denied: <command>`). Runs via the platform shell,
 /// captures stdout+stderr+exit code.
 pub struct ExecShell;
 
@@ -252,7 +247,7 @@ fn resolve_in_workdir(workdir: &Path, rel: &str) -> anyhow::Result<(PathBuf, Str
     }
     let relative = resolved
         .strip_prefix(&root)
-        .expect("resolved path was checked inside workdir")
+        .map_err(|_| anyhow::anyhow!("resolved path escaped the working directory"))?
         .components()
         .map(|component| component.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()

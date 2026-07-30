@@ -300,6 +300,12 @@ fn factory_kimi_toggle_replays_reasoning_only_while_thinking_is_active() {
 
         let body = rx.recv().unwrap().body;
         assert_eq!(body["thinking"]["type"], toggle);
+        assert_eq!(
+            body["thinking"]
+                .get("keep")
+                .and_then(serde_json::Value::as_str),
+            replays.then_some("all")
+        );
         assert_eq!(body["max_tokens"], 131_072);
         assert_eq!(
             body["messages"][0].get("reasoning_content").is_some(),
@@ -344,6 +350,27 @@ fn factory_anthropic_wire_posts_v1_messages_with_required_headers() {
     assert_eq!(captured.body["max_tokens"], 384_000);
     assert_eq!(captured.body["system"], "be brief");
     assert_eq!(captured.body["messages"][0]["content"][0]["text"], "hi");
+    assert!(captured.body.get("thinking").is_none());
+}
+
+#[test]
+fn factory_deepseek_anthropic_wire_disables_default_thinking() {
+    let (url, rx) = one_shot_server(200, ANTHROPIC_OK.into());
+    let r = route(
+        &url,
+        Wire::AnthropicMessages,
+        ThinkingDialect::DeepseekNhm,
+        false,
+        &[],
+        Some(4096),
+    );
+    let client = client(&r, None);
+    client
+        .complete(&req(vec![msg("user", Some("hi"))], ThinkingEffort::None))
+        .unwrap();
+
+    let body = rx.recv().unwrap().body;
+    assert_eq!(body["thinking"]["type"], "disabled");
 }
 
 #[test]

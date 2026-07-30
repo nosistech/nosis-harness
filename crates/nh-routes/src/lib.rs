@@ -14,19 +14,10 @@ pub use pricing::{
 };
 pub use profiles::*;
 pub use resolver::{RejectionTrace, ResolvedRoute, RouteRejection, RouteResolver};
-pub use route::{RouteClass, ThinkingDialect, Wire};
+pub use route::{RouteClass, ThinkingDialect, Wire, LOCAL_METER_COPY};
 
 #[cfg(test)]
 use pricing::format_money_digits;
-use pricing::usd_compare_key;
-
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
-use std::net::IpAddr;
-
-use anyhow::anyhow;
-use chrono::{DateTime, FixedOffset, NaiveDate, NaiveTime, Utc};
-use serde::Deserialize;
 
 /// Dead/deprecated model ids (plan §A.9). Exact ids and prefixes; `mimo-v2-` does NOT
 /// match `mimo-v2.5-*` (those are current). Rejection errors must name the replacement

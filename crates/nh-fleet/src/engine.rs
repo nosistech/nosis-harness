@@ -1,6 +1,25 @@
 //! Durable execution engine: coordinator lock, worker pool, scheduling, and task runs.
 
-use super::*;
+use crate::ledger::now_utc;
+use crate::model::{Backend, Clock, LedgerEvent, RunReport, SwarmClient};
+use crate::prepare::{effort_for, effort_name, EchoClient};
+use crate::{FLEET_OUTPUT_CAP, HEARTBEAT_INTERVAL, LOCK_RETRY_INTERVAL, MAX_TURNS};
+use anyhow::{bail, Context as _};
+use nh_core::agent::{identity_constitution, AgentLoop};
+use nh_core::credential;
+use nh_core::receipt::{FailureClass, Outcome, Receipt, ReceiptWriter};
+use nh_core::wire::{ChatClient, ChatMessage, ThinkingEffort};
+use nh_law::Law;
+use nh_routes::RouteResolver;
+use nh_tools::{builtin_tools, Access, Guard, ToolCtx};
+use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, SecretRegistry};
+use serde::{Deserialize, Serialize};
+use std::fs::{self, File, OpenOptions, TryLockError};
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub(super) struct PreparedTask {
@@ -74,10 +93,8 @@ pub(super) struct IndexRecord {
     pub(super) status: String,
 }
 
-#[allow(dead_code)]
 pub(super) struct RunLock {
-    pub(super) file: File,
-    pub(super) path: PathBuf,
+    _file: File,
 }
 
 impl RunLock {
@@ -117,7 +134,7 @@ impl RunLock {
             .with_context(|| format!("could not update {}", path.display()))?;
         file.flush()
             .with_context(|| format!("could not flush {}", path.display()))?;
-        Ok(Self { file, path })
+        Ok(Self { _file: file })
     }
 }
 
@@ -221,10 +238,10 @@ pub(super) struct WorkerPool {
 }
 
 impl WorkerPool {
-    pub(super) fn sender(&self) -> &mpsc::Sender<PreparedTask> {
+    pub(super) fn sender(&self) -> anyhow::Result<&mpsc::Sender<PreparedTask>> {
         self.job_tx
             .as_ref()
-            .expect("job sender present until finish/drop")
+            .ok_or_else(|| anyhow::anyhow!("fleet worker pool is already closed"))
     }
 
     pub(super) fn finish(mut self) -> anyhow::Result<()> {
@@ -241,343 +258,6 @@ impl Drop for WorkerPool {
             let _ = worker.join();
         }
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::type_complexity)]
-pub(super) fn execute_tasks(
-    run_id: &str,
-    tasks: Vec<PreparedTask>,
-    max_workers: usize,
-    budget_tokens: Option<u64>,
-    mut used_tokens: u64,
-    mut counts: Counts,
-    runtime: Arc<Runtime>,
-    ledger: &DurableWriter,
-    on_event: &Option<Arc<dyn Fn(&str) + Send + Sync>>,
-    ladder: Option<&Ladder>,
-    escalate_on_partial: bool,
-    mut failed_attempts: HashMap<String, u32>,
-) -> anyhow::Result<RunReport> {
-    let display_scrubber = runtime.key_literals.scrubber();
-    let mut remaining: VecDeque<PreparedTask> = tasks.into();
-    let mut deferred_announced = HashSet::new();
-    let worker_count = max_workers.min(remaining.len().max(1));
-    let (job_tx, job_rx) = mpsc::channel::<PreparedTask>();
-    let job_rx = Arc::new(Mutex::new(job_rx));
-    let event_capacity = worker_count.saturating_mul(4).max(16);
-    let (event_tx, pending_event_rx) = mpsc::sync_channel::<WorkerEvent>(event_capacity);
-    let workers = spawn_workers(
-        worker_count,
-        Arc::clone(&job_rx),
-        event_tx,
-        Arc::clone(&runtime),
-    )?;
-    let pool = WorkerPool {
-        job_tx: Some(job_tx),
-        workers,
-    };
-    // The receiver must drop before the pool on an early return. That releases
-    // workers waiting for a start acknowledgement or blocked on an event send
-    // before WorkerPool::drop joins them.
-    let event_rx = pending_event_rx;
-
-    let mut active = 0usize;
-    let mut budget_halted = budget_tokens.is_some_and(|limit| used_tokens >= limit);
-    if budget_halted {
-        halt_remaining_for_budget(
-            &mut remaining,
-            ledger,
-            on_event,
-            &display_scrubber,
-            &mut counts,
-        )?;
-    } else {
-        dispatch_ready_tasks(
-            &mut remaining,
-            pool.sender(),
-            &mut active,
-            worker_count,
-            &runtime,
-            on_event,
-            &display_scrubber,
-            &mut deferred_announced,
-        )?;
-    }
-
-    while active > 0 || !remaining.is_empty() {
-        match event_rx.recv_timeout(SCHEDULER_WAKE_INTERVAL) {
-            Ok(WorkerEvent::Started {
-                task_id,
-                route_id,
-                effort,
-                attempt,
-                ack,
-            }) => {
-                let result = ledger
-                    .append(&LedgerEvent::TaskStarted {
-                        task_id: task_id.clone(),
-                        route_id,
-                        effort,
-                        attempt,
-                    })
-                    .map_err(|error| error.to_string());
-                if result.is_ok() {
-                    emit(
-                        on_event,
-                        &display_scrubber,
-                        &format!("running {task_id} - attempt {attempt}"),
-                    );
-                }
-                let failed = result.as_ref().err().cloned();
-                let _ = ack.send(result);
-                if let Some(error) = failed {
-                    bail!("{error}");
-                }
-            }
-            Ok(WorkerEvent::Heartbeat { task_id, ts }) => {
-                ledger.append(&LedgerEvent::TaskHeartbeat { task_id, ts })?;
-            }
-            Ok(WorkerEvent::Progress(line)) => emit(on_event, &display_scrubber, &line),
-            Ok(WorkerEvent::Finished { mut job, result }) => {
-                active = active.saturating_sub(1);
-                match result {
-                    Ok(receipt) => {
-                        if budget_tokens.is_some() && receipt.usage.is_none() {
-                            emit(
-                                on_event,
-                                &display_scrubber,
-                                &format!("usage unreported - budget cannot count {}", job.task_id),
-                            );
-                        }
-                        used_tokens = used_tokens.saturating_add(tokens_in(&receipt));
-                        let outcome = receipt.outcome;
-                        let reason = typed_receipt_reason(&receipt, job.attempt);
-                        ledger.append(&LedgerEvent::TaskReceipt {
-                            task_id: job.task_id.clone(),
-                            attempt: job.attempt,
-                            receipt,
-                        })?;
-                        let policy_outcome = escalation_outcome(outcome, escalate_on_partial);
-                        if matches!(policy_outcome, Outcome::Fail | Outcome::Timeout) {
-                            failed_attempts
-                                .entry(job.task_id.clone())
-                                .and_modify(|count| *count = count.saturating_add(1))
-                                .or_insert(1);
-                        }
-                        let step = ladder
-                            .map(|ladder| {
-                                next_step(ladder, job.tier_idx, job.attempt, policy_outcome)
-                            })
-                            .or(match policy_outcome {
-                                Outcome::Pass | Outcome::Partial | Outcome::Skip => {
-                                    Some(Step::Done)
-                                }
-                                Outcome::Fail | Outcome::Timeout => None,
-                            });
-                        match step {
-                            Some(Step::Done) => {
-                                ledger.append(&LedgerEvent::TaskDone {
-                                    task_id: job.task_id.clone(),
-                                    outcome,
-                                })?;
-                                counts.done += 1;
-                                emit(
-                                    on_event,
-                                    &display_scrubber,
-                                    &format!("done {} - {outcome:?}", job.task_id),
-                                );
-                            }
-                            Some(Step::Retry) => {
-                                job.attempt = job.attempt.saturating_add(1);
-                                remaining.push_back(job);
-                            }
-                            Some(Step::Escalate(next_tier_idx)) => {
-                                let ladder = ladder.expect("escalation steps require a ladder");
-                                let tier = ladder.tiers().get(next_tier_idx).ok_or_else(|| {
-                                    anyhow::anyhow!("escalation ladder selected a missing tier")
-                                })?;
-                                ledger.append(&LedgerEvent::TaskEscalated {
-                                    task_id: job.task_id.clone(),
-                                    from_route: job.route_id.clone(),
-                                    to_route: tier.route_id.clone(),
-                                    reason: reason.clone(),
-                                })?;
-                                let from_route = runtime.resolver.resolve(&job.route_id)?;
-                                let from_effort =
-                                    effort_name(job.effort.unwrap_or_else(|| {
-                                        effort_for(from_route.thinking_dialect())
-                                    }));
-                                emit(
-                                    on_event,
-                                    &display_scrubber,
-                                    &format!(
-                                        "escalated {} - {}/{} → {}/{} ({reason})",
-                                        job.task_id,
-                                        job.route_id,
-                                        from_effort,
-                                        tier.route_id,
-                                        effort_name(tier.effort)
-                                    ),
-                                );
-                                job.route_id = tier.route_id.clone();
-                                job.tier_idx = next_tier_idx;
-                                job.effort = Some(tier.effort);
-                                job.attempt = 1;
-                                remaining.push_back(job);
-                            }
-                            Some(Step::Gate) => {
-                                let failed_attempts =
-                                    failed_attempts.get(&job.task_id).copied().unwrap_or(0);
-                                ledger.append(&LedgerEvent::TaskGate {
-                                    task_id: job.task_id.clone(),
-                                    reason: format!(
-                                        "ladder exhausted - paused for human review after {failed_attempts} failed attempts"
-                                    ),
-                                })?;
-                                counts.gated += 1;
-                                emit(
-                                    on_event,
-                                    &display_scrubber,
-                                    &format!(
-                                        "gated {} - ladder exhausted, needs human review ({failed_attempts} failed attempts)",
-                                        job.task_id
-                                    ),
-                                );
-                            }
-                            None => {
-                                ledger.append(&LedgerEvent::TaskFailed {
-                                    task_id: job.task_id.clone(),
-                                    reason: reason.clone(),
-                                })?;
-                                counts.failed += 1;
-                                emit(
-                                    on_event,
-                                    &display_scrubber,
-                                    &format!("failed {} - {reason}", job.task_id),
-                                );
-                            }
-                        }
-                    }
-                    Err(reason) => {
-                        // Infrastructure faults terminate immediately; the ladder only climbs on receipts.
-                        ledger.append(&LedgerEvent::TaskFailed {
-                            task_id: job.task_id.clone(),
-                            reason: reason.clone(),
-                        })?;
-                        counts.failed += 1;
-                        emit(
-                            on_event,
-                            &display_scrubber,
-                            &format!("failed {} - {reason}", job.task_id),
-                        );
-                    }
-                }
-
-                if budget_tokens.is_some_and(|limit| used_tokens >= limit) {
-                    if !budget_halted {
-                        budget_halted = true;
-                        emit(
-                            on_event,
-                            &display_scrubber,
-                            &format!(
-                                "budget halted at {used_tokens} tokens - no new tasks will start"
-                            ),
-                        );
-                    }
-                    halt_remaining_for_budget(
-                        &mut remaining,
-                        ledger,
-                        on_event,
-                        &display_scrubber,
-                        &mut counts,
-                    )?;
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                bail!("fleet worker pool stopped unexpectedly")
-            }
-        }
-        if !budget_halted {
-            dispatch_ready_tasks(
-                &mut remaining,
-                pool.sender(),
-                &mut active,
-                worker_count,
-                &runtime,
-                on_event,
-                &display_scrubber,
-                &mut deferred_announced,
-            )?;
-        }
-    }
-
-    pool.finish()?;
-    let report = counts.report(run_id.to_string());
-    ledger.append(&LedgerEvent::RunFinished {
-        run_id: report.run_id.clone(),
-        done: report.done,
-        failed: report.failed,
-        gated: report.gated,
-    })?;
-    emit(
-        on_event,
-        &display_scrubber,
-        &format!(
-            "fleet {} finished - {} done, {} failed, {} gated",
-            report.run_id, report.done, report.failed, report.gated
-        ),
-    );
-    Ok(report)
-}
-
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::type_complexity)]
-pub(super) fn dispatch_ready_tasks(
-    remaining: &mut VecDeque<PreparedTask>,
-    jobs: &mpsc::Sender<PreparedTask>,
-    active: &mut usize,
-    worker_count: usize,
-    runtime: &Runtime,
-    on_event: &Option<Arc<dyn Fn(&str) + Send + Sync>>,
-    scrubber: &Scrubber,
-    deferred_announced: &mut HashSet<String>,
-) -> anyhow::Result<()> {
-    let candidates = remaining.len();
-    for _ in 0..candidates {
-        if *active >= worker_count {
-            break;
-        }
-        let Some(task) = remaining.pop_front() else {
-            break;
-        };
-        if task.defer_offpeak {
-            let now = runtime.clock.now();
-            if let Ok(route) = runtime.resolver.resolve(&task.route_id) {
-                if !ready_to_dispatch(&route, now) {
-                    if deferred_announced.insert(task.task_id.clone()) {
-                        let local: FixedOffset = *Local::now().offset();
-                        emit(
-                            on_event,
-                            scrubber,
-                            &format!(
-                                "deferred {} - {}, parked",
-                                task.task_id,
-                                route.peak_status(now, local)
-                            ),
-                        );
-                    }
-                    remaining.push_back(task);
-                    continue;
-                }
-            }
-        }
-        jobs.send(task)
-            .context("fleet worker pool stopped before dispatch")?;
-        *active = active.saturating_add(1);
-    }
-    Ok(())
 }
 
 pub(super) fn escalation_outcome(outcome: Outcome, escalate_on_partial: bool) -> Outcome {
@@ -609,29 +289,6 @@ pub(super) fn typed_receipt_reason(receipt: &Receipt, attempt: u32) -> String {
         Some(class) => format!("{outcome} ({class}) after {attempt} {tries}"),
         None => format!("{outcome} after {attempt} {tries}"),
     }
-}
-
-#[allow(clippy::type_complexity)]
-pub(super) fn halt_remaining_for_budget(
-    remaining: &mut VecDeque<PreparedTask>,
-    ledger: &DurableWriter,
-    on_event: &Option<Arc<dyn Fn(&str) + Send + Sync>>,
-    scrubber: &Scrubber,
-    counts: &mut Counts,
-) -> anyhow::Result<()> {
-    while let Some(task) = remaining.pop_front() {
-        ledger.append(&LedgerEvent::TaskFailed {
-            task_id: task.task_id.clone(),
-            reason: "budget halted before dispatch".into(),
-        })?;
-        counts.failed += 1;
-        emit(
-            on_event,
-            scrubber,
-            &format!("failed {} - budget halted before dispatch", task.task_id),
-        );
-    }
-    Ok(())
 }
 
 pub(super) fn spawn_workers(

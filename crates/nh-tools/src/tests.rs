@@ -1,5 +1,8 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
+use std::thread;
+use std::time::Instant;
 
 fn ctx_with(workdir: &Path, approve: bool) -> ToolCtx {
     ToolCtx::new(workdir.to_path_buf(), Box::new(move |_| approve))

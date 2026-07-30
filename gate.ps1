@@ -1,11 +1,12 @@
 # gate.ps1 - the nosis build gate. Run before every commit.
 #
-# Mechanizes the four checks that define "clean" for this workspace:
+# Mechanizes the five checks that define "clean" for this workspace:
 #   1. fmt --check   - no formatting drift (the check that would have caught the
 #                      37-hunk fmt backlog before it bit a slice mid-flight).
 #   2. clippy        - -D warnings, all targets, release.
-#   3. deny          - advisories, bans, licenses, and sources.
-#   4. test          - the full workspace suite, release.
+#   3. rustdoc       - every public API document builds without warnings.
+#   4. deny          - advisories, bans, licenses, and sources.
+#   5. test          - the full workspace suite, release.
 #
 # GATE RULE: each step's real exit code is captured via $LASTEXITCODE and
 # aggregated - never piped through `tail` (a pipeline's exit code is the last
@@ -35,6 +36,12 @@ function Invoke-GateStep($name, [scriptblock]$cmd) {
 
 Invoke-GateStep 'fmt --check'       { cargo fmt --all --check }
 Invoke-GateStep 'clippy -D warnings' { cargo clippy --locked --workspace --all-targets --release -- -D warnings }
+Invoke-GateStep 'rustdoc -D warnings' {
+    $previousRustdocFlags = $env:RUSTDOCFLAGS
+    $env:RUSTDOCFLAGS = '-D warnings'
+    cargo doc --locked --workspace --no-deps
+    $env:RUSTDOCFLAGS = $previousRustdocFlags
+}
 Invoke-GateStep 'deny check'        { cargo deny --locked check }
 Invoke-GateStep 'test --release'    { cargo test --locked --workspace --release }
 

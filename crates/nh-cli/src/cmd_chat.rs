@@ -4,25 +4,23 @@
 //! local time ("peak 2x until 22:00"). `/model` and `/provider` keep the session
 //! history across the switch (M1 exit criterion); usage accumulates all session.
 
+mod startup;
+
 use std::io::{BufRead, Write};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use chrono::{DateTime, FixedOffset, Utc};
 use nh_core::agent::{AgentLoop, MAX_TASK_BYTES};
-use nh_core::credential;
-use nh_core::receipt::ReceiptWriter;
 use nh_core::wire::{cache_hit_pct, ChatClient, ChatMessage};
-use nh_law::LoadOptions;
 use nh_routes::{
     cost_of, money, money_with_gloss, Currency, PriceConfidence, Profiles, ResolvedRoute,
-    RouteClass, RouteResolver,
+    RouteClass, RouteResolver, LOCAL_METER_COPY,
 };
-use nh_tools::{builtin_tools, Access, Tool, ToolCtx};
-use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, SecretRegistry, SecretValue};
+use nh_tools::Tool;
+use nh_vault::{Scrubber, SecretRegistry, SecretValue};
 
 use crate::cmd_run::{self, effort_for, DELEGATE_MSG};
-use crate::guard_from;
 
 /// Builds a wire client + its key literal (for the Scrubber) from a route.
 /// Injected so tests drive the REPL with a mock client - no vault, no network.
@@ -116,147 +114,7 @@ struct ChatSession {
 }
 
 pub fn run(model: &str, profile: &str) -> anyhow::Result<()> {
-    let cwd = std::env::current_dir()?;
-    let (root, catalog) = cmd_run::find_catalog(&cwd)?;
-    let law = nh_law::load(&root, &LoadOptions { cli_autonomy: None });
-    let warning_scrubber = Scrubber::new(Vec::new());
-    for warning in &law.warnings {
-        eprintln!(
-            "warning: {}",
-            cmd_run::safe_line(&warning_scrubber, warning)
-        );
-    }
-    let resolver = RouteResolver::from_toml(&catalog)?;
-    let route = resolver.resolve(model)?;
-    let (profiles, profile_warnings) = Profiles::load(&root);
-    for warning in &profile_warnings {
-        eprintln!(
-            "warning: {}",
-            cmd_run::safe_line(&warning_scrubber, warning)
-        );
-    }
-    let execution_policy = profiles.effective(profile, &route);
-    if let Some(warning) = cmd_run::profile_fallback_warning(profile, &execution_policy.profile) {
-        eprintln!(
-            "warning: {}",
-            cmd_run::safe_line(&warning_scrubber, &warning)
-        );
-    }
-    if route.class() == RouteClass::Delegate {
-        anyhow::bail!("{DELEGATE_MSG}");
-    }
-
-    let connect_policy = law.policy.clone();
-    let connect: ConnectFn = Box::new(move |route, output_cap| {
-        let vault = EnvFallbackVault {
-            inner: KeyringVault,
-        };
-        credential::connect(
-            &vault,
-            route,
-            &connect_policy.approved_audiences(route.vault_entry()),
-            output_cap,
-        )
-    });
-    // No key yet? Chat still starts (§4: EOF or /quit → exit 0): warn once and
-    // install a stand-in client that re-surfaces this error only when a task runs.
-    // Commands (/model, /provider, /price, /tools, /quit) all work keyless.
-    let (client, key_literals, connected) = match connect(&route, execution_policy.output_cap) {
-        Ok((client, literal)) => {
-            let mut registry = SecretRegistry::new();
-            registry.insert(literal);
-            (client, registry, true)
-        }
-        Err(e) if e.downcast_ref::<nh_vault::AudienceRefused>().is_some() => return Err(e),
-        Err(e) => {
-            eprintln!(
-                "warning: {}",
-                cmd_run::safe_line(&warning_scrubber, &e.to_string())
-            );
-            (
-                Box::new(NotConnected { msg: e.to_string() }) as Box<dyn ChatClient>,
-                SecretRegistry::new(),
-                false,
-            )
-        }
-    };
-    let registry_scrubber = key_literals.scrubber();
-    let scrubber: SharedScrubber = Arc::new(RwLock::new(registry_scrubber.clone()));
-
-    // MCP tools load at chat start when .nosis/mcp.toml exists; a broken file is
-    // one warning line and the chat continues without MCP - never a hard failure.
-    let mut mcp_warnings = Vec::new();
-    let mut tools = builtin_tools();
-    let home = nh_law::user_home_dir();
-    tools.extend(load_mcp(
-        &root,
-        home.as_deref(),
-        &law.policy,
-        &mut mcp_warnings,
-    ));
-    for w in &mcp_warnings {
-        eprintln!("warning: {}", scrub_line(&scrubber, w));
-    }
-
-    let approve_scrubber = Arc::clone(&scrubber);
-    let event_scrubber = Arc::clone(&scrubber);
-    let policy = law.policy.clone();
-    let law_constitution = law.constitution;
-    let agent = AgentLoop {
-        client,
-        tools,
-        ctx: ToolCtx::new(
-            cwd,
-            Box::new(move |action| {
-                cmd_run::approve_on_stdin(&scrub_line(&approve_scrubber, action))
-            }),
-        )
-        .with_scrubber(registry_scrubber.clone())
-        .with_guard(Box::new(move |access| match access {
-            Access::Read(path) => guard_from(policy.read_verdict(path)),
-            Access::Write(path) => guard_from(policy.write_verdict(path)),
-            Access::Exec(command) => guard_from(policy.exec_verdict(command)),
-            Access::Send(target) => guard_from(policy.send_verdict(target)),
-        })),
-        receipts: ReceiptWriter::project(root.clone(), registry_scrubber),
-        model_id: route.model_id().to_owned(),
-        max_turns: 20,
-        thinking: effort_for(
-            None,
-            execution_policy.posture,
-            route.thinking_dialect(),
-            route.wire(),
-        ),
-        profile: Some(execution_policy.profile.clone()),
-        // Honest identity: name the real route + forbid claiming to be Claude/GPT.
-        constitution: Some(nh_tui::identity_constitution(&law_constitution, &route)),
-        context_limit: route.context(),
-        on_event: Some(Box::new(move |line| {
-            eprintln!("  {}", scrub_line(&event_scrubber, line));
-        })),
-    };
-    let mut session = ChatSession {
-        resolver,
-        route,
-        profiles,
-        active_profile: execution_policy.profile,
-        agent,
-        law_constitution,
-        history: Vec::new(),
-        session_in: 0,
-        session_out: 0,
-        session_cached: 0,
-        session_cost: Vec::new(),
-        unpriced_turns: 0,
-        key_literals,
-        scrubber,
-        connect,
-        connected,
-        now: Box::new(Utc::now),
-        local_offset: *chrono::Local::now().offset(),
-        mcp_warnings,
-    };
-
+    let mut session = startup::open(model, profile)?;
     eprintln!(
         "chat started on {} - /model <id>, /provider <name>, /price, /tools, /quit",
         scrub_line(&session.scrubber, session.route.id())
@@ -385,14 +243,20 @@ fn run_task(s: &mut ChatSession, task: &str, out: &mut dyn Write, err: &mut dyn 
     match s.agent.run_with_history(&mut s.history, task) {
         Ok((answer, receipt)) => {
             let _ = writeln!(out, "{}", scrub_text(&s.scrubber, &answer));
+            let is_local = s.route.class() == RouteClass::Local;
             if let Some(u) = &receipt.usage {
                 if add_session_usage(s, u) {
                     let at = (s.now)();
                     add_session_cost(s, u, at);
-                    if let Some(line) = cmd_run::turn_cost_line(&s.resolver, &s.route, u, at) {
-                        let _ = writeln!(err, "{}", scrub_line(&s.scrubber, &line));
+                    if !is_local {
+                        if let Some(line) = cmd_run::turn_cost_line(&s.resolver, &s.route, u, at) {
+                            let _ = writeln!(err, "{}", scrub_line(&s.scrubber, &line));
+                        }
                     }
                 }
+            }
+            if is_local {
+                let _ = writeln!(err, "{LOCAL_METER_COPY}");
             }
             let _ = writeln!(err, "{}", scrub_line(&s.scrubber, &footer(s)));
         }
@@ -439,7 +303,7 @@ fn switch_to(s: &mut ChatSession, route: ResolvedRoute, out: &mut dyn Write, err
             // Refresh the identity prompt for the NEW route - both the agent's stored
             // constitution and the live system message already in history (which
             // run_with_history seeds only once, on the first turn).
-            let constitution = nh_tui::identity_constitution(&s.law_constitution, &route);
+            let constitution = cmd_run::agent_constitution(&s.law_constitution, &route);
             if let Some(system) = s.history.first_mut() {
                 if system.role == "system" {
                     system.content = Some(constitution.clone());
@@ -457,6 +321,10 @@ fn switch_to(s: &mut ChatSession, route: ResolvedRoute, out: &mut dyn Write, err
 
 /// `/price` - the cost HUD quote for this instant, one aligned line.
 fn print_price(s: &ChatSession, out: &mut dyn Write) {
+    if s.route.class() == RouteClass::Local {
+        let _ = writeln!(out, "{LOCAL_METER_COPY}");
+        return;
+    }
     let now = (s.now)();
     let Some(quote) = s.route.price_at(now) else {
         let line = format!(
@@ -546,6 +414,9 @@ fn add_session_usage(s: &mut ChatSession, usage: &nh_core::wire::Usage) -> bool 
 }
 
 fn add_session_cost(s: &mut ChatSession, usage: &nh_core::wire::Usage, at: DateTime<Utc>) {
+    if s.route.class() == RouteClass::Local {
+        return;
+    }
     let Some(quote) = s.route.price_at(at) else {
         s.unpriced_turns = s.unpriced_turns.saturating_add(1);
         return;
@@ -578,16 +449,20 @@ fn add_session_cost(s: &mut ChatSession, usage: &nh_core::wire::Usage, at: DateT
 
 fn session_money(s: &ChatSession, at: DateTime<Utc>) -> String {
     let mut display = if s.session_cost.is_empty() {
-        s.route.price_at(at).map_or_else(
-            || "-".into(),
-            |quote| {
-                let mut display = money_with_gloss(0.0, quote.currency, s.resolver.fx(), at);
-                if quote.stale || quote.confidence == PriceConfidence::VerifyLive {
-                    display.push('*');
-                }
-                display
-            },
-        )
+        if s.route.class() == RouteClass::Local {
+            "no billed tokens".into()
+        } else {
+            s.route.price_at(at).map_or_else(
+                || "-".into(),
+                |quote| {
+                    let mut display = money_with_gloss(0.0, quote.currency, s.resolver.fx(), at);
+                    if quote.stale || quote.confidence == PriceConfidence::VerifyLive {
+                        display.push('*');
+                    }
+                    display
+                },
+            )
+        }
     } else {
         let mixed = s.session_cost.len() > 1;
         [Currency::Cny, Currency::Usd]

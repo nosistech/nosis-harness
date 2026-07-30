@@ -1,7 +1,16 @@
+use super::adapter::{args_one_line, McpToolAdapter};
+use super::client::{
+    lint_headers, ToolEntry, MAX_MCP_BODY_BYTES, MAX_TOOLS, SPEC_DEFAULT, SPEC_FALLBACK,
+};
 use super::*;
+use crate::{Tool, ToolCtx, ToolSpec};
+use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 // ---- tiny hand-rolled HTTP mock (std only) ----
 
@@ -179,6 +188,10 @@ fn config(url: &str, trust: McpTrust) -> McpServerConfig {
         default_mode: None,
         trust,
     }
+}
+
+fn mcp_client(config: McpServerConfig) -> McpClient {
+    McpClient::new(config).expect("test HTTP clients initialize")
 }
 
 fn approving_ctx(answer: bool) -> (ToolCtx, Arc<Mutex<Vec<String>>>) {
@@ -375,7 +388,7 @@ fn config_bad_toml_is_one_friendly_line() {
 #[test]
 fn stateless_invariant_no_session_no_initialize_meta_on_every_request() {
     let mock = start_mock(full_responder);
-    let client = McpClient::new(config(&mock.url, McpTrust::Ask));
+    let client = mcp_client(config(&mock.url, McpTrust::Ask));
 
     client.list_tools().unwrap();
     let opened = client.call_tool("browser_open", json!({})).unwrap();
@@ -420,7 +433,7 @@ fn fallback_spec_is_echoed_in_meta() {
     let mock = start_mock(|req| rpc_result(req, mock_tools_result(None)));
     let mut cfg = config(&mock.url, McpTrust::Ask);
     cfg.spec = SPEC_FALLBACK.into();
-    McpClient::new(cfg).list_tools().unwrap();
+    mcp_client(cfg).list_tools().unwrap();
     let recorded = mock.recorded.lock().unwrap();
     assert_eq!(
         recorded[0].body["params"]["_meta"]["protocolVersion"],
@@ -431,7 +444,7 @@ fn fallback_spec_is_echoed_in_meta() {
 #[test]
 fn handle_passes_back_as_ordinary_argument() {
     let mock = start_mock(full_responder);
-    let client = McpClient::new(config(&mock.url, McpTrust::Ask));
+    let client = mcp_client(config(&mock.url, McpTrust::Ask));
     let opened = client.call_tool("browser_open", json!({})).unwrap();
     assert_eq!(opened, "browser_id: b-42");
     // The model reads the handle and passes it back as a plain argument -
@@ -452,7 +465,7 @@ fn handle_passes_back_as_ordinary_argument() {
 #[test]
 fn tools_list_second_call_within_ttl_hits_cache() {
     let mock = start_mock(|req| rpc_result(req, mock_tools_result(Some(60_000))));
-    let client = McpClient::new(config(&mock.url, McpTrust::Ask));
+    let client = mcp_client(config(&mock.url, McpTrust::Ask));
     let first = client.list_tools().unwrap();
     let second = client.list_tools().unwrap();
     assert_eq!(first.len(), 2);
@@ -468,7 +481,7 @@ fn tools_list_second_call_within_ttl_hits_cache() {
 #[test]
 fn tools_list_ttl_zero_never_caches() {
     let mock = start_mock(|req| rpc_result(req, mock_tools_result(Some(0))));
-    let client = McpClient::new(config(&mock.url, McpTrust::Ask));
+    let client = mcp_client(config(&mock.url, McpTrust::Ask));
     client.list_tools().unwrap();
     client.list_tools().unwrap();
     assert_eq!(count_method(&mock, "tools/list"), 2);
@@ -477,7 +490,7 @@ fn tools_list_ttl_zero_never_caches() {
 #[test]
 fn tools_list_absent_ttl_defaults_to_60s_cache() {
     let mock = start_mock(|req| rpc_result(req, mock_tools_result(None)));
-    let client = McpClient::new(config(&mock.url, McpTrust::Ask));
+    let client = mcp_client(config(&mock.url, McpTrust::Ask));
     client.list_tools().unwrap();
     client.list_tools().unwrap();
     assert_eq!(count_method(&mock, "tools/list"), 1);
@@ -486,7 +499,7 @@ fn tools_list_absent_ttl_defaults_to_60s_cache() {
 #[test]
 fn tools_list_extreme_ttl_is_clamped_and_cached() {
     let mock = start_mock(|req| rpc_result(req, mock_tools_result(Some(u64::MAX))));
-    let client = McpClient::new(config(&mock.url, McpTrust::Ask));
+    let client = mcp_client(config(&mock.url, McpTrust::Ask));
 
     let first = client.list_tools().unwrap();
     let second = client.list_tools().unwrap();
@@ -503,7 +516,7 @@ fn tools_list_extreme_ttl_is_clamped_and_cached() {
 #[test]
 fn oversized_mcp_response_is_rejected() {
     let mock = start_mock(|_| (200, "x".repeat(MAX_MCP_BODY_BYTES + 1)));
-    let client = McpClient::new(config(&mock.url, McpTrust::Ask));
+    let client = mcp_client(config(&mock.url, McpTrust::Ask));
 
     let error = client.list_tools().unwrap_err().to_string();
 
@@ -524,7 +537,7 @@ fn tools_list_is_truncated_to_the_tool_count_cap() {
             .collect::<Vec<_>>();
         rpc_result(request, json!({ "tools": tools, "_meta": { "ttlMs": 0 } }))
     });
-    let client = McpClient::new(config(&mock.url, McpTrust::Ask));
+    let client = mcp_client(config(&mock.url, McpTrust::Ask));
 
     let tools = client.list_tools().unwrap();
 
@@ -539,7 +552,7 @@ fn tools_list_is_truncated_to_the_tool_count_cap() {
 #[test]
 fn tools_list_cache_expires_after_ttl() {
     let mock = start_mock(|req| rpc_result(req, mock_tools_result(Some(1))));
-    let client = McpClient::new(config(&mock.url, McpTrust::Ask));
+    let client = mcp_client(config(&mock.url, McpTrust::Ask));
     client.list_tools().unwrap();
     std::thread::sleep(Duration::from_millis(25));
     client.list_tools().unwrap();
@@ -560,7 +573,7 @@ fn call_tool_joins_text_and_marks_non_text_blocks() {
             ] }),
         )
     });
-    let client = McpClient::new(config(&mock.url, McpTrust::Ask));
+    let client = mcp_client(config(&mock.url, McpTrust::Ask));
     assert_eq!(
         client.call_tool("peek", json!({})).unwrap(),
         "a\n[image block]\nb"
@@ -576,7 +589,7 @@ fn call_tool_is_error_becomes_one_line_err() {
                     "content": [{ "type": "text", "text": "boom\nhappened" }] }),
         )
     });
-    let client = McpClient::new(config(&mock.url, McpTrust::Ask));
+    let client = mcp_client(config(&mock.url, McpTrust::Ask));
     let err = client.call_tool("peek", json!({})).unwrap_err().to_string();
     assert_eq!(err, "boom happened");
 }
@@ -591,7 +604,7 @@ fn jsonrpc_error_is_a_friendly_one_liner() {
             .to_string(),
         )
     });
-    let client = McpClient::new(config(&mock.url, McpTrust::Ask));
+    let client = mcp_client(config(&mock.url, McpTrust::Ask));
     let err = client.list_tools().unwrap_err().to_string();
     assert_eq!(err, "server error: kaboom");
 }
@@ -607,7 +620,7 @@ fn discover_reads_well_known_business_card() {
             (500, "{}".to_string())
         }
     });
-    let client = McpClient::new(config(&mock.url, McpTrust::Ask));
+    let client = mcp_client(config(&mock.url, McpTrust::Ask));
     let card = client.discover().unwrap();
     assert_eq!(card["name"], json!("mock-server"));
     let recorded = mock.recorded.lock().unwrap();
@@ -619,7 +632,7 @@ fn discover_reads_well_known_business_card() {
 #[test]
 fn discover_falls_back_to_server_discover_post() {
     let mock = start_mock(full_responder); // GETs 404
-    let client = McpClient::new(config(&mock.url, McpTrust::Ask));
+    let client = mcp_client(config(&mock.url, McpTrust::Ask));
     let card = client.discover().unwrap();
     assert_eq!(card["name"], json!("mock-server"));
     let recorded = mock.recorded.lock().unwrap();
@@ -630,7 +643,7 @@ fn discover_falls_back_to_server_discover_post() {
 
 #[test]
 fn discover_unreachable_is_one_friendly_error() {
-    let client = McpClient::new(config(&refused_url(), McpTrust::Ask));
+    let client = mcp_client(config(&refused_url(), McpTrust::Ask));
     let err = client.discover().unwrap_err().to_string();
     assert!(
         err.contains("unreachable - check the url in .nosis/mcp.toml"),
@@ -648,7 +661,7 @@ fn apikey_bearer_comes_from_vault_env_fallback() {
     cfg.auth = McpAuth::ApiKey {
         vault_entry: "mcp-bearer-test".into(),
     };
-    McpClient::new(cfg).list_tools().unwrap();
+    mcp_client(cfg).list_tools().unwrap();
     std::env::remove_var("NH_MCP_BEARER_TEST_KEY");
     let recorded = mock.recorded.lock().unwrap();
     assert!(
@@ -664,7 +677,7 @@ fn apikey_bearer_comes_from_vault_env_fallback() {
 #[test]
 fn auth_none_sends_no_authorization_header() {
     let mock = start_mock(|req| rpc_result(req, mock_tools_result(None)));
-    McpClient::new(config(&mock.url, McpTrust::Ask))
+    mcp_client(config(&mock.url, McpTrust::Ask))
         .list_tools()
         .unwrap();
     let recorded = mock.recorded.lock().unwrap();
@@ -685,7 +698,7 @@ fn apikey_missing_key_is_actionable() {
     cfg.auth = McpAuth::ApiKey {
         vault_entry: "mcp-missing-test".into(),
     };
-    let err = McpClient::new(cfg).list_tools().unwrap_err().to_string();
+    let err = mcp_client(cfg).list_tools().unwrap_err().to_string();
     assert!(err.contains("nh key add mcp-missing-test"), "got: {err}");
 }
 
@@ -718,7 +731,7 @@ fn oauth_refresh_refuses_redirects_without_replaying_the_form() {
         client_id: "redirect-test-client".into(),
         vault_entry: "oauth-redirect-test".into(),
     };
-    let error = McpClient::new(cfg).list_tools().unwrap_err().to_string();
+    let error = mcp_client(cfg).list_tools().unwrap_err().to_string();
     redirect_thread.join().unwrap();
 
     assert!(
@@ -777,12 +790,12 @@ fn oauth2_refreshes_on_absence_expiry_and_one_401_retry() {
         vault_entry: "mock-oauth".into(),
     };
     cfg.scopes = vec!["mcp".into()];
-    let client = McpClient::new(cfg);
+    let client = mcp_client(cfg);
 
     assert_eq!(client.call_tool("peek", json!({})).unwrap(), "ok");
     assert_eq!(mint_count.load(Ordering::SeqCst), 1);
 
-    client.expire_oauth_for_test();
+    client.expire_oauth_for_test().unwrap();
     assert_eq!(client.call_tool("peek", json!({})).unwrap(), "ok");
     assert_eq!(mint_count.load(Ordering::SeqCst), 2);
 
@@ -878,7 +891,7 @@ fn concurrent_oauth_refreshes_coalesce_to_one_token_post() {
         client_id: "cid-coalesced-test".into(),
         vault_entry: "coalesced-oauth".into(),
     };
-    let client = Arc::new(McpClient::new(cfg));
+    let client = Arc::new(mcp_client(cfg));
     let barrier = Arc::new(std::sync::Barrier::new(3));
     let mut handles = Vec::new();
     for _ in 0..2 {
@@ -929,7 +942,7 @@ fn oauth2_refresh_failure_is_one_secret_free_actionable_line() {
         vault_entry: "mock-oauth-fail".into(),
     };
 
-    let err = McpClient::new(cfg)
+    let err = mcp_client(cfg)
         .call_tool("peek", json!({}))
         .unwrap_err()
         .to_string();
@@ -1225,7 +1238,7 @@ fn blocked_adapter_execute_names_the_fix() {
             },
             read_only: false,
         },
-        client: Arc::new(McpClient::new(config(
+        client: Arc::new(mcp_client(config(
             "http://127.0.0.1:1/mcp",
             McpTrust::Block,
         ))),
@@ -1291,4 +1304,42 @@ fn approval_summary_short_args_are_shown_whole() {
 fn mcp_client_is_send_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<McpClient>();
+}
+
+#[test]
+fn poisoned_tool_cache_returns_an_error_instead_of_panicking() {
+    let client = Arc::new(mcp_client(config(&refused_url(), McpTrust::Ask)));
+    let poison = Arc::clone(&client);
+    let panicked = std::thread::spawn(move || {
+        let _guard = poison.cache.lock().unwrap();
+        panic!("poison the cache for this test");
+    })
+    .join();
+    assert!(panicked.is_err());
+
+    let error = client.list_tools().unwrap_err().to_string();
+    assert!(error.contains("tool cache"), "{error}");
+    assert!(error.contains("internal panic"), "{error}");
+}
+
+#[test]
+fn poisoned_oauth_state_returns_an_error_instead_of_panicking() {
+    let mut cfg = config(&refused_url(), McpTrust::Ask);
+    cfg.auth = McpAuth::OAuth2 {
+        token_url: "https://auth.example.invalid/token".into(),
+        client_id: "client".into(),
+        vault_entry: "mcp-test".into(),
+    };
+    let client = Arc::new(mcp_client(cfg));
+    let poison = Arc::clone(&client);
+    let panicked = std::thread::spawn(move || {
+        let _guard = poison.oauth.lock().unwrap();
+        panic!("poison OAuth state for this test");
+    })
+    .join();
+    assert!(panicked.is_err());
+
+    let error = client.oauth_access_token().unwrap_err().to_string();
+    assert!(error.contains("OAuth state"), "{error}");
+    assert!(error.contains("internal panic"), "{error}");
 }

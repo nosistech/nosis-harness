@@ -1,6 +1,8 @@
 //! Command, tool, trust, and MCP palette projection and filtering.
 
-use super::*;
+use crate::state::{McpState, PaletteAction, PaletteEntry};
+use nh_law::{Autonomy, PolicyView};
+use nh_tools::{builtin_tools, McpAuth, McpServerConfig, McpToolset, McpTrust};
 
 /// Project configured MCP servers and discovered tools into immutable palette rows.
 pub fn mcp_palette_entries(configs: &[McpServerConfig], toolset: &McpToolset) -> Vec<PaletteEntry> {

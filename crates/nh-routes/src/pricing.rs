@@ -1,6 +1,7 @@
 //! Clock-aware route pricing, currency conversion, and stable money display.
 
-use super::*;
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveTime, Utc};
+use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Currency {
@@ -70,8 +71,9 @@ pub struct PeakWindows {
 
 impl PeakWindows {
     pub(super) fn is_peak(&self, at: DateTime<Utc>) -> bool {
-        let offset =
-            FixedOffset::east_opt(self.utc_offset_secs).expect("offset validated at parse");
+        let Some(offset) = FixedOffset::east_opt(self.utc_offset_secs) else {
+            return false;
+        };
         let local = at.with_timezone(&offset).time();
         self.windows
             .iter()

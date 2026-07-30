@@ -1,6 +1,21 @@
 //! Terminal session lifecycle, worker orchestration, and shared UI helpers.
 
-use super::*;
+use crate::input::handle_input_event;
+use crate::render::render;
+use crate::state::{AgentEvent, App, Status, TuiConfig, UiDiscovery};
+use crate::terminal::{with_terminal_panic_hook, PanicAbort, TerminalGuard, TerminalStateHandle};
+use crate::timeline::apply_event;
+use crate::worker::{spawn_worker, Worker, WorkerConfig, WorkerShutdown, SHUTDOWN_TIMEOUT};
+use crate::{ConnectFn, SharedScrubber, EVENT_POLL, TASKBAR_CLEAR, TASKBAR_WAITING};
+use anyhow::Context as _;
+use crossterm::event;
+use nh_core::credential;
+use nh_core::wire::{resolve_effort, ThinkingEffort};
+use nh_routes::{ResolvedRoute, RouteClass, ThinkingDialect, ThinkingPosture, Wire};
+use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, SecretRegistry, SecretValue};
+use ratatui::{backend::CrosstermBackend, Terminal};
+use std::io::{self, Write};
+use std::sync::{mpsc::TryRecvError, Arc, RwLock};
 
 /// Run the full-screen TUI until the user quits.
 pub fn run(config: TuiConfig) -> anyhow::Result<()> {
@@ -50,6 +65,7 @@ pub(super) fn run_tui_session(
         repo_root,
         workdir,
         palette_entries,
+        credentialed_providers,
     } = config;
     let scrubber = Arc::new(RwLock::new(Scrubber::new(Vec::new())));
     let execution_policy = profiles.effective(&profile, &route);
@@ -76,7 +92,10 @@ pub(super) fn run_tui_session(
         budget,
         scrubber,
         policy_view,
-        palette_entries,
+        UiDiscovery {
+            palette_entries,
+            credentialed_providers,
+        },
         (profiles, execution_policy.profile),
     );
 

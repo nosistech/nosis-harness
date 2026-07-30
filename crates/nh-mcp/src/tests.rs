@@ -1,8 +1,11 @@
+use crate::fleet_tools::preflight_fleet_run;
+use crate::response::scrub_json;
+use crate::route_tools::{route_cost_at, why_at};
+use chrono::{TimeZone as _, Utc};
+use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::net::{Shutdown, TcpStream};
 use std::path::Path;
-
-use chrono::TimeZone as _;
 
 use super::*;
 
@@ -574,8 +577,8 @@ fn minted_token_is_required_and_host_origin_fail_closed() {
 
 #[test]
 fn minted_tokens_are_independent_csprng_values() {
-    let first = mint_token();
-    let second = mint_token();
+    let first = mint_token().expect("OS randomness is available");
+    let second = mint_token().expect("OS randomness is available");
 
     assert_eq!(first.len(), 64);
     assert_eq!(second.len(), 64);
@@ -914,7 +917,7 @@ fn fleet_run_rejects_oversized_tasks_before_creating_a_run() {
 #[test]
 fn fleet_run_preflights_undeclared_audience_and_valid_config_returns_run_id() {
     let root = tempfile::tempdir().unwrap();
-    let unique = mint_token();
+    let unique = mint_token().expect("OS randomness is available");
     let vault_entry = format!("w2-unapproved-{}", unique.as_str());
     let catalog = format!(
         r#"

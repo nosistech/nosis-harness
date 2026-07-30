@@ -1,6 +1,16 @@
 //! Fleet run and status MCP tool handlers.
 
-use super::*;
+use crate::response::{tool_error, tool_result};
+use crate::{ActiveRunGuard, Runtime, MAX_ACTIVE_RUNS, MAX_MCP_FLEET_BUDGET_TOKENS};
+use anyhow::bail;
+use nh_core::credential;
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::thread;
 
 #[derive(Deserialize)]
 struct FleetRunArgs {
@@ -134,7 +144,9 @@ pub(super) fn preflight_fleet_run(
     for task in tasks {
         let route = resolver.resolve(task.model.as_deref().unwrap_or(default_route))?;
         if route.class() == nh_routes::RouteClass::Delegate {
-            bail!("delegate routes are not available to fleet workers - pick an api route");
+            bail!(
+                "delegate routes are not available to fleet workers - pick an api or local route"
+            );
         }
         let native = task.backend.unwrap_or(nh_fleet::Backend::Native) == nh_fleet::Backend::Native;
         if native && !using_test_provider && routes.insert(route.id().to_owned()) {

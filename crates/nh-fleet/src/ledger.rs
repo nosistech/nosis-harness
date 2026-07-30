@@ -1,6 +1,17 @@
 //! Run identifiers, append-only JSONL persistence, recovery, and ledger queries.
 
-use super::*;
+use crate::engine::{escalation_outcome, Counts, DurableWriter, IndexRecord, QueuedTask, RunMeta};
+use crate::model::{LedgerEvent, RunReport};
+use crate::RUN_SEQUENCE;
+use anyhow::{bail, Context as _};
+use chrono::{SecondsFormat, Utc};
+use nh_core::receipt::{Outcome, Receipt};
+use nh_vault::SecretRegistry;
+use serde::de::DeserializeOwned;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::{self, OpenOptions};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 
 pub(super) fn now_utc() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
