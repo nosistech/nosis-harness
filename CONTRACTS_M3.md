@@ -436,14 +436,14 @@ erodes trust. Carlos's decision (2026-07-14): move to a **type-freely + slash-co
   capture on EVERY teardown (guard + panic hook) — no residue. Show a dim honest overflow hint
   (`↑ more` / `↓ more`); a full Scrollbar is drop-if-hard.
 
-  > **RETROACTIVE AMENDMENT 2026-07-25 (recording M3 Slice F, commit `3fcd00e`, 2026-07-15).**
+  > **RETROACTIVE AMENDMENT 2026-07-25 (recording M3 Slice F, commit `44f9809`, 2026-07-15).**
   > REVERSED: mouse capture is NOT enabled. `EnableMouseCapture` was removed so that **native
   > terminal click-drag copy works with no Shift held** — with capture on, the terminal never sees
   > the drag and the user cannot select text out of the transcript, which the owner judged a worse
   > daily-use failure than losing wheel-scroll. **Consequence accepted: wheel-scroll is gone.** It is
   > covered by the keyboard scroll shipped in Slice E (`↑↓` line, PageUp/PageDown page, End newest)
   > plus the `↑ more`/`↓ more` overflow hints this section already required, so no scrolling
-  > capability was lost — only the input device. Slice F was shipped in `3fcd00e` and recorded in
+  > capability was lost — only the input device. Slice F was shipped in `44f9809` and recorded in
   > BUILD_LOG:637-640 but never carried a dated contract amendment the way §7 authorized Slice D;
   > this block closes that gap. **Not recorded at the time:** whether the wheel-scroll loss was
   > explicitly weighed in the moment, or simply accepted as the cost of restoring copy — the owner

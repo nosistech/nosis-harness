@@ -1,5 +1,5 @@
 # LENS L — Ecosystem, Interop & Distribution (NOSIS Harness)
-Research date: 2026-07-17 · Analyst: Fable (Lens L) · Repo HEAD: bd35b4d (M4 Slice D uncommitted in tree)
+Research date: 2026-07-17 · Analyst: Fable (Lens L) · Repo HEAD: ebea709 (M4 Slice D uncommitted in tree)
 
 ## Framing
 
@@ -21,7 +21,7 @@ nosis already holds a rare position: it speaks **both** MCP directions (client i
 
 **Why now / why #1.** As of March 2026 the ACP registry lists 25+ agents; Zed and JetBrains are native hosts; Copilot CLI shipped ACP in public preview Jan 28, 2026 (https://github.blog/changelog/2026-01-28-acp-support-in-copilot-cli-is-now-in-public-preview/). The kicker for nosis's Windows-first wedge: **Microsoft Intelligent Terminal 0.1 (June 2026) auto-detects ACP-compatible CLIs on the system** and lists them in its agent pane next to Claude Code / Codex / Gemini. A Windows user who installs nosis would see it appear *inside the terminal Microsoft ships* — zero marketing, pure protocol conformance (https://codex.danielvaughan.com/2026/06/10/agent-client-protocol-microsoft-intelligent-terminal-codex-cli-multi-agent-ide-ecosystem/).
 
-**Cohesion.** ACP's permission model (`session/request_permission` before file writes / shell) is *exactly* nosis's law-gated approval model — the constitution stays enforced when nosis runs inside someone else's editor; the honest-identity prompt (fixed in 7faf44b to apply at every agent surface) applies here too, so this becomes the fourth surface of the same one agent loop (run/chat/tui/acp). Differentiators 6 and 7 travel into the editor rather than being TUI-only.
+**Cohesion.** ACP's permission model (`session/request_permission` before file writes / shell) is *exactly* nosis's law-gated approval model — the constitution stays enforced when nosis runs inside someone else's editor; the honest-identity prompt (fixed in d100d0d to apply at every agent surface) applies here too, so this becomes the fourth surface of the same one agent loop (run/chat/tui/acp). Differentiators 6 and 7 travel into the editor rather than being TUI-only.
 
 **Design sketch (smallest MVP).** New feature-gated crate `nh-acp` (mirroring how `nh-mcp` wraps `nh-fleet`): stdio JSON-RPC loop; `session/new` builds the same `identity_constitution`-wrapped turn as `cmd_chat` (`crates/nh-cli`, `crates/nh-tui/src/lib.rs` reducers are already headless-testable); `session/prompt` streams agent text + tool-call notifications; permission requests forward the same approval strings the CLI prints. Skip ACP extras (terminals, editor file-buffer reads) in v1 — the spec makes them optional capabilities. No tokio needed if the existing blocking loop is reused (ACP is request/response + notifications over stdio). Ship at/after M5.
 

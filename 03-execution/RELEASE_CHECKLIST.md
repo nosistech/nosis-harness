@@ -74,7 +74,7 @@ The running build history lives in [../00-start-here/BUILD_LOG.md](../00-start-h
       sources recently enough that every production `valid_until` includes the release date.
 - [x] Owner completes the Windows FEEL pass in the actual terminal used day to day.
       Passed 2026-07-29 against the rebuilt binary. Six findings came out of the pass and none
-      blocked the verdict; all six were folded into wave 4, which shipped in `90a7ce7`. Note that
+      blocked the verdict; all six were folded into wave 4, which shipped in `d80b115`. Note that
       the surfaces changed after the pass (wave 4 altered `/why`, the model-picker rows, the
       in-flight indicator and the cache line), so a short confirming re-pass on the current binary
       is worthwhile before the tag even though the gate is green.

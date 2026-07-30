@@ -12,7 +12,7 @@ remain useful for provenance, but do not execute their stale instructions.
 The owner passed the Windows FEEL gate against the rebuilt binary — the last subjective blocker. Six
 findings came out of the pass; all six are captured in wave 4 (below) and none blocked the verdict.
 
-The owner then authorized the commit. **`91e4f54 feat: complete the v0.1.0 release candidate` —
+The owner then authorized the commit. **`cba2444 feat: complete the v0.1.0 release candidate` —
 90 files, +6985/−3980. The working tree is CLEAN.** Everything that had accumulated uncommitted
 (Slice G, the responsibility refactor, and three waves) is now in git history.
 
@@ -23,7 +23,7 @@ The owner then authorized the commit. **`91e4f54 feat: complete the v0.1.0 relea
 source public at `github.com/nosistech/nosis-harness`. `continue` alone is NOT push authorization —
 the owner must say so explicitly.
 
-Pre-commit guards that were run and passed, so they need not be repeated for `91e4f54`: a six-pattern
+Pre-commit guards that were run and passed, so they need not be repeated for `cba2444`: a six-pattern
 secret-shape scan over the staged diff (`sk-`, Bearer+token, JWT, 40+ hex, AWS key, private-key
 block) returned **0 matches**; no `.nosis/`, `target/`, log, `.env`, or stray artifact was staged;
 and the gate was green at commit time. Two modules listed in the previous checkpoint
@@ -36,7 +36,7 @@ Read this file in full. Then verify with read-only commands:
 
 ```powershell
 git status --short          # expect CLEAN (zero entries)
-git log -1 --oneline        # expect 91e4f54
+git log -1 --oneline        # expect cba2444
 git remote -v               # expect https://github.com/nosistech/nosis-harness.git
 gh auth status -h github.com
 gh repo view nosistech/nosis-harness --json isEmpty,visibility   # expect isEmpty=true until pushed
@@ -64,7 +64,7 @@ Do not restart the audit, redo the refactor, create another repository, or re-ru
 
 ## Exact state
 
-- Branch `main`, HEAD **`91e4f54 feat: complete the v0.1.0 release candidate`** (parent `6b05688`)
+- Branch `main`, HEAD **`cba2444 feat: complete the v0.1.0 release candidate`** (parent `0056a07`)
 - **Working tree CLEAN — zero uncommitted entries.**
 - Remote `https://github.com/nosistech/nosis-harness.git` — **public, still empty, never pushed**.
   No `origin/main` ref exists yet.
@@ -167,7 +167,7 @@ no LLM-based repair.
 
 ## Remaining path to v0.1.0
 
-1. **Ask the owner whether to push `91e4f54`.** The commit is done; the push is the open gate.
+1. **Ask the owner whether to push `cba2444`.** The commit is done; the push is the open gate.
    Pushing is what finally runs CI and gives the first honest Linux/macOS answer — expect a real
    failure, which is better found on an untagged commit than after a tag.
 2. Launch wave 3b → gate → rebuild → second commit.

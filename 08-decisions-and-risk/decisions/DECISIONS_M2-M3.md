@@ -1,6 +1,6 @@
 # Decisions — M2 + M3 (2026-07-13 → 2026-07-15)
 
-Era file: M2 (context engine + law, commit `3155949`) and M3 (TUI, commits `f45fb02`..`d5143c5` + follow-up `9b0a8ad`). 16 entries, newest-first, bodies verbatim from the source draft.
+Era file: M2 (context engine + law, commit `c62be7a`) and M3 (TUI, commits `28708cc`..`27a6a17` + follow-up `b79c65d`). 16 entries, newest-first, bodies verbatim from the source draft.
 Index: [`DECISION_LOG.md`](../../00-start-here/DECISION_LOG.md) (`00-start-here/`). Large technical decisions also carry numbered entries in [`ARCHITECTURE_DECISIONS.md`](../../02-architecture/ARCHITECTURE_DECISIONS.md).
 "THE LAW" = the project's ten-word quality constitution (small, simple, secure, safe, lightweight, readable, auditable, modular, congruent, harmonic).
 
@@ -25,14 +25,14 @@ one-line case-fold fix landed as the immediately following commit.
 whose whole point is feel cannot be closed by an automated gate. Shipping a fail-safe nit
 rather than blocking is THE LAW: small/simple.
 
-**Immediate effect on the harness:** M3 committed as `3fcd00e` (261 tests / 0 fail / 1
-ignored, clippy clean) with the nit documented; `9b0a8ad` then made `parse_effort` trim +
+**Immediate effect on the harness:** M3 committed as `44f9809` (261 tests / 0 fail / 1
+ignored, clippy clean) with the nit documented; `b79c65d` then made `parse_effort` trim +
 ASCII-lowercase so `/effort High|MAX|None` work.
 
 **Long-term consequence:** Establishes the FEEL gate as a repeatable, owner-held release
 gate for every UX-bearing slice (it reappears in M5 Slice C and Slice F W4).
 
-**Evidence:** commits `3fcd00e`, `9b0a8ad`; 00-start-here/BUILD_LOG.md:615-663 (gate),
+**Evidence:** commits `44f9809`, `b79c65d`; 00-start-here/BUILD_LOG.md:615-663 (gate),
 648-650 (nit ruling).
 
 **Article angle:** The milestone's exit criterion was a human sitting in Windows Terminal
@@ -68,7 +68,7 @@ orchestrator fuzz proved input never held a raw `\n`/`\r` (BUILD_LOG:641-648).
 scroll, click targets) in exchange for the terminal's native selection/clipboard; any
 future mouse feature must re-litigate this.
 
-**Evidence:** commit `3fcd00e` (Slice F paragraph); 00-start-here/BUILD_LOG.md:637-640;
+**Evidence:** commit `44f9809` (Slice F paragraph); 00-start-here/BUILD_LOG.md:637-640;
 CONTRACTS_M3.md:418-422 (the reversed §9.2 spec). Note: Slice F has no contract section of
 its own — §8/§9 cover only D/E.
 
@@ -106,16 +106,16 @@ that the composed prompt contains the route id + the "never claim" instruction
 
 **Long-term consequence:** Created the identity-constitution pattern — and a latent gap:
 scoping it to the TUI config layer left `nh run`/`nh chat` uncovered until the M4-era fix
-`7faf44b` ("apply the honest-identity prompt in nh run + nh chat, not just the TUI"). The
+`d100d0d` ("apply the honest-identity prompt in nh run + nh chat, not just the TUI"). The
 standing rule since: identity constitution applies at EVERY agent surface.
 
 **Evidence:** CONTRACTS_M3.md §9.5 (lines 436-442) + §9 preamble (393-399); commit
-`3fcd00e`; gap-fix commit `7faf44b`.
+`44f9809`; gap-fix commit `d100d0d`.
 
 **Article angle:** The first identity bug wasn't in the router — the receipts proved the
 right model was answering; it was the model itself claiming to be Claude.
 
-**Review later:** no (surface-coverage rule already ratified after `7faf44b`).
+**Review later:** no (surface-coverage rule already ratified after `d100d0d`).
 
 ---
 
@@ -140,7 +140,7 @@ model (CodeWhale/Claude-Code feel) because "UX + security are the product's
 differentiators" (CONTRACTS_M3.md:398-399). Congruent with `nh chat`, which already used
 slash commands.
 
-**Immediate effect on the harness:** Slice E (committed within `3fcd00e`): slash menu,
+**Immediate effect on the harness:** Slice E (committed within `44f9809`): slash menu,
 keyboard scroll, live route/effort switch via the existing `TuiConfig.resolver`, mojibake
 fix; the colliding shortcuts are gone.
 
@@ -148,7 +148,7 @@ fix; the colliding shortcuts are gone.
 prompt-first-with-slash-commands — the same grammar as chat — so every later surface
 (M5's `/why`, profiles) slots into one model instead of a key map.
 
-**Evidence:** CONTRACTS_M3.md §9 (lines 393-399, 410-416, 424-430); commit `3fcd00e`;
+**Evidence:** CONTRACTS_M3.md §9 (lines 393-399, 410-416, 424-430); commit `44f9809`;
 00-start-here/BUILD_LOG.md:631-636.
 
 **Article angle:** The first TUI shipped keyboard shortcuts that made it impossible to
@@ -172,7 +172,7 @@ as the new safety envelope.
 
 **Alternatives considered:**
 - Close M3 as content-complete and move to M4 — that was the actual state of the tree
-  (`28e8cf6` "M3 content-complete", 239 tests green) and the owner overrode it
+  (`b3503d9` "M3 content-complete", 239 tests green) and the owner overrode it
   (CONTRACTS_M3.md §7 amendment 2026-07-14, lines 318-323; BUILD_LOG:624-627).
 
 **Why:** Carlos's binding UX directive: "without best-in-class UX/UI the product goes
@@ -180,7 +180,7 @@ unused no matter how good the engine" (CONTRACTS_M3.md:329-331). This is the pro
 UX-first/drop-if-hard doctrine applied with teeth for the first time.
 
 **Immediate effect on the harness:** Three uncommitted slices (D re-skin, E interaction
-model, F copy/paste) built on top of `28e8cf6` and committed together as `3fcd00e` only
+model, F copy/paste) built on top of `b3503d9` and committed together as `44f9809` only
 after FEEL approval; anti-bleed fixed via centered `Clear`-before-draw modals
 (CONTRACTS_M3.md §8.4, lines 371-377).
 
@@ -190,7 +190,7 @@ raised the render budget from "minimal" to "framed, within a 16-color/plain-bord
 envelope."
 
 **Evidence:** CONTRACTS_M3.md §7 amendment 2026-07-14 (lines 318-323) + §8 (327-388);
-commits `28e8cf6` (content-complete anchor), `3fcd00e` (the overhaul);
+commits `b3503d9` (content-complete anchor), `44f9809` (the overhaul);
 00-start-here/BUILD_LOG.md:615-651.
 
 **Article angle:** A milestone that passed every automated gate was rejected and rebuilt
@@ -264,8 +264,8 @@ code.
 point every later surface (MCP envelopes, W4 surfaces) routes through; the
 amendment-ledger habit carries into every later contract.
 
-**Evidence:** CONTRACTS_M3.md §7 (lines 309-317); commits `f45fb02` (lifts noted in
-message), `13c36c9` (PolicyView); 00-start-here/BUILD_LOG.md:821-823, 837-862 (the
+**Evidence:** CONTRACTS_M3.md §7 (lines 309-317); commits `28708cc` (lifts noted in
+message), `f1acaaa` (PolicyView); 00-start-here/BUILD_LOG.md:821-823, 837-862 (the
 hardening pass), 770-791.
 
 **Article angle:** The display-safety function that scrubs secrets exists exactly once in
@@ -305,7 +305,7 @@ behind an injectable sender seam with the real send left on the ledger.
 M3 close); the "build the integration, ledger the live proof" pattern becomes standard.
 
 **Evidence:** CONTRACTS_M3.md:9-15 (binding rulings), §3.1 (233-242), §6 (302-303);
-commit `21b92e4`; 00-start-here/BUILD_LOG.md:698-734.
+commit `66f5628`; 00-start-here/BUILD_LOG.md:698-734.
 
 **Article angle:** The undo button shipped as a deliberately disabled key that tells you
 it doesn't exist yet, because a visible deferral was ruled better than a silent one.
@@ -342,7 +342,7 @@ M4/M5 (the later MCP server and fleet stay thread-based); the dependency-amendme
 discipline later feeds directly into the cargo-deny supply-chain gate.
 
 **Evidence:** CONTRACTS_M3.md:41-43 (§0), 291-293 (§5.3), 160-164 (§1.5), 58-61 (§1);
-commit `f45fb02`.
+commit `28708cc`.
 
 **Article angle:** The interactive terminal UI was built with exactly two new
 dependencies and no async runtime, on the theory that a blocking agent loop plus two
@@ -380,7 +380,7 @@ empty-diff checks on frozen crates at every gate) that later milestones formaliz
 the M0/M1 public seams were sufficient for a full interactive frontend.
 
 **Evidence:** CONTRACTS_M3.md:23-26 (§0), 61-99 (§1.1, incl. the Mutex sanction at
-88-90); commit `f45fb02`; 00-start-here/BUILD_LOG.md:744-746, 673-675.
+88-90); commit `28708cc`; 00-start-here/BUILD_LOG.md:744-746, 673-675.
 
 **Article angle:** An entire interactive UI was added without changing one line of the
 agent core, using two closure hooks that had been public since M0/M1.
@@ -420,7 +420,7 @@ requirement; "bounded hardening pass with enumerated findings" becomes the stand
 review→fix loop shape.
 
 **Evidence:** 00-start-here/BUILD_LOG.md:911-931 (hardening entry), 896-898 (review
-findings, case-fold analysis); commit `3155949` (folded in).
+findings, case-fold analysis); commit `c62be7a` (folded in).
 
 **Article angle:** The security review's most valuable output was a paragraph of
 documentation: proof that a Windows case-folding bypass is unreachable today, and the
@@ -462,7 +462,7 @@ exit test proved a protected path blocked end-to-end at `--autonomy auto` with
 the same tighten-only merge shape is reused when Slice G W6a later adds the user-global
 `~/.nosis/mcp.toml` trust source ("repo tighten-only merge").
 
-**Evidence:** CONTRACTS_M2.md §1.5 (lines 152-164), §1.6 (166-187); commit `3155949`;
+**Evidence:** CONTRACTS_M2.md §1.5 (lines 152-164), §1.6 (166-187); commit `c62be7a`;
 00-start-here/BUILD_LOG.md:985-987 (implementation), 904-905 (exit proof).
 
 **Article angle:** A repository you clone can make the harness stricter about itself but
@@ -503,7 +503,7 @@ demo is literally this rule under max autonomy.
 builds on "exec always gates"; making exec auto-approvable would now require changing a
 public type's shape, not flipping config.
 
-**Evidence:** CONTRACTS_M2.md:25-26 (§0), 132-137 (§1.4), 199-239 (§2); commit `3155949`
+**Evidence:** CONTRACTS_M2.md:25-26 (§0), 132-137 (§1.4), 199-239 (§2); commit `c62be7a`
 (message: "exec is never auto-allowed"); 00-start-here/BUILD_LOG.md:897, 904-905.
 
 **Article angle:** "Can the agent run shell commands without asking?" is answered by the
@@ -547,7 +547,7 @@ are a declared revisit point — "revisit if live sessions thrash" (CONTRACTS_M2
 the mechanical-first stance held (M5 W3 later ratified DROPPING a compaction guard rather
 than adding model summarization).
 
-**Evidence:** CONTRACTS_M2.md §3.3 (lines 281-317), §6 (417); commit `3155949`;
+**Evidence:** CONTRACTS_M2.md §3.3 (lines 281-317), §6 (417); commit `c62be7a`;
 00-start-here/BUILD_LOG.md:963-965.
 
 **Article angle:** Context compaction ships as a deterministic algorithm with an in-band
@@ -597,7 +597,7 @@ profiles, W3 meter work) must preserve per-route byte-stability; the honest-metr
 pattern (display-derived, never fabricated) becomes the meter's house style.
 
 **Evidence:** CONTRACTS_M2.md §1.3 (99-116), §3.1-3.2 (249-279), §3.4 (319-333), §6
-(410-418); commit `3155949` (message: "Byte-stable prefix cache discipline … debug-asserted
+(410-418); commit `c62be7a` (message: "Byte-stable prefix cache discipline … debug-asserted
 every turn"); 00-start-here/BUILD_LOG.md:903-904, 963-965.
 
 **Article angle:** The system prompt is treated as an immutable byte string because every
@@ -643,7 +643,7 @@ latent cost: the M5 audit later found recursion-based matchers needed iterative 
 (stack-DoS, fixed in Slice F W1) — the no-dep choice meant owning that hardening.
 
 **Evidence:** CONTRACTS_M2.md:21-23, 43-46 (§1), 140-150 (§1.4 matcher), 191-196 +
-234-235 (§2), 344-351 (§4.1); commit `3155949`; 00-start-here/BUILD_LOG.md:977-996.
+234-235 (§2), 344-351 (§4.1); commit `c62be7a`; 00-start-here/BUILD_LOG.md:977-996.
 
 **Article angle:** The crate that decides what the agent may touch has three
 dependencies, all serialization, and cannot see the crates it governs.

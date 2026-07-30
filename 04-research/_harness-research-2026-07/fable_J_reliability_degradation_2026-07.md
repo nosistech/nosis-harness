@@ -1,5 +1,5 @@
 # Lens J — Reliability & Graceful Degradation ("never lose your work; it just works")
-Research pass for NOSIS HARNESS · 2026-07-17 · repo HEAD bd35b4d
+Research pass for NOSIS HARNESS · 2026-07-17 · repo HEAD ebea709
 
 ## 0. Repo grounding — what exists today (verified by reading code)
 

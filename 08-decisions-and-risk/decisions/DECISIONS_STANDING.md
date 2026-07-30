@@ -49,9 +49,9 @@ workspace lints + MIT license + cargo-deny gate + keyless CI in one commit). Ser
 **Long-term consequence:** Forecloses whole solution classes that need raw OS APIs — proven
 consequential on 2026-07-24 when a kill-on-close Windows Job Object was rejected specifically
 because it "needs raw Win32 calls, which means a new dependency AND `unsafe`, and that breaks the
-workspace `unsafe_code = "forbid"` law shipped in d1f9ad0" (`Temp/sol_wave7_prompt.txt`:121-127,
+workspace `unsafe_code = "forbid"` law shipped in cccb2dc" (`Temp/sol_wave7_prompt.txt`:121-127,
 ratified decision R1, with the accepted residual risk stated in writing).
-**Evidence:** `Cargo.toml`:20-21; commit `d1f9ad0` (2026-07-20); `Temp/sol_wave7_prompt.txt`:20-23,
+**Evidence:** `Cargo.toml`:20-21; commit `cccb2dc` (2026-07-20); `Temp/sol_wave7_prompt.txt`:20-23,
 119-127.
 **Article angle:** The no-unsafe rule was cheap to adopt and expensive to keep — four days later it
 forced the project to reject the textbook Windows containment primitive and document the residual
@@ -103,9 +103,9 @@ orchestrator runs any normalizing fmt after a Sol wave and re-gates.
   changeset up to ~19 files; even scoped `cargo fmt -p` reflowed pre-existing code because the
   workspace had never been fmt-clean (memory: cargo-fmt-all-pitfall.md).
 - Living with fmt drift — rejected: root-fixed by a one-time `cargo fmt --all` normalization
-  (commit `bc2a1b1`), then locked with the fmt-check gate step and the 1.96.0 pin (commit `a71eb23`).
+  (commit `68f71cd`), then locked with the fmt-check gate step and the 1.96.0 pin (commit `059a00e`).
 - Suppressing cargo-deny findings to get green — not done: "nothing suppressed — only added
-  CDLA-Permissive-2.0 for webpki-roots" (memory MEMORY.md, Section B; commit `d1f9ad0`).
+  CDLA-Permissive-2.0 for webpki-roots" (memory MEMORY.md, Section B; commit `cccb2dc`).
 **Why:** The gate mechanizes THE LAW's mechanical half so the human FEEL gate is the only
 subjective step; the pipe rule exists because "a pipeline's exit code is the last command's, so
 `| tail` would mask a real failure with tail's 0" (`gate.ps1`:9-11); the pin exists because "a
@@ -115,11 +115,11 @@ newer rustfmt" could "silently re-introduce the reflow drift we just cleared"
 (363/0/1 → … → 493/0/1 `--release`); fmt drift from Sol's hand-written code is caught by step 1
 and normalized by the orchestrator, never by Sol (recorded per-wave in memory:
 build-loop-resume.md and slice-g-audit-remediation.md). CI mirrors the gate keylessly on
-windows + ubuntu (commit `d1f9ad0`, `.github/workflows/ci.yml`).
+windows + ubuntu (commit `cccb2dc`, `.github/workflows/ci.yml`).
 **Long-term consequence:** "Gated PASS" is a reproducible, single-command claim; supply-chain
 policy (advisories/bans/licenses/sources) is enforced on every commit, not just at release.
-**Evidence:** `gate.ps1`:1-51 (4 steps at :36-39); `rust-toolchain.toml`:1-8; commits `bc2a1b1`,
-`a71eb23`, `d1f9ad0` (adds the deny step, `gate.ps1` +1 line); memory: cargo-fmt-all-pitfall.md.
+**Evidence:** `gate.ps1`:1-51 (4 steps at :36-39); `rust-toolchain.toml`:1-8; commits `68f71cd`,
+`059a00e`, `cccb2dc` (adds the deny step, `gate.ps1` +1 line); memory: cargo-fmt-all-pitfall.md.
 **Article angle:** A formatting incident that polluted one diff got a root-cause fix — normalize
 once, gate forever, pin the toolchain, and ban the implementer from ever running the formatter.
 **Review later:** no (the pin will need a deliberate bump eventually; that is its purpose, not a
@@ -202,7 +202,7 @@ meter, not a chat UI." Every M5 seam was required to be congruent to this identi
   demoted to an escalation-gate footnote; "full delegate adapter class cut" from v1 because the
   economics broke (Anthropic moved programmatic use to API pricing 2026-06-15; Gemini CLI died as
   an open delegate 2026-06-18) and open-weight parity made it unnecessary
-  (`00-start-here/RESEARCH_2026-07_harness.md`:37, 61, 314; commit `d3cac39`;
+  (`00-start-here/RESEARCH_2026-07_harness.md`:37, 61, 314; commit `a2c2b83`;
   `00-start-here/CURRENT_TASK.md`:13 "the delegate class is CUT from v1").
 **Why:** Two independent research engines (Fable 5 with July-2026 web citations; GPT-5.6 Sol xhigh
 over the code) converged on the same identity and the same priority — "make the meter true +
@@ -215,8 +215,8 @@ identity line was "held firm" through the release slice (`CURRENT_TASK.md`:3).
 and the counterfactual savings line the product's center of gravity; defers intelligence
 (learning router), resilience, and resume to M6 by design.
 **Evidence:** `README.md`:3; `CONTRACTS_M5.md`:12-18, 20-29;
-`00-start-here/RESEARCH_2026-07_harness.md`:45-46; commit `d3cac39` (2026-07-16, research) and
-`e2b2f02` (2026-07-17, "lock CONTRACTS_M5 'The Honest Meter'").
+`00-start-here/RESEARCH_2026-07_harness.md`:45-46; commit `a2c2b83` (2026-07-16, research) and
+`9e36a94` (2026-07-17, "lock CONTRACTS_M5 'The Honest Meter'").
 **Article angle:** Two different AI models researching independently converged on the same
 one-sentence product identity, and it was then enforced as a contract constraint on every code seam.
 **Review later:** yes — the delegate cut keeps a commented catalog schema
@@ -225,7 +225,7 @@ measured workload proves the escalation gate insufficient (`RESEARCH_2026-07_har
 
 ---
 
-## 2026-07-16 (fix `7faf44b`): the identity/honesty constitution applies at EVERY agent surface
+## 2026-07-16 (fix `d100d0d`): the identity/honesty constitution applies at EVERY agent surface
 
 **Decision:** The honest-identity system prompt (`identity_constitution` — "You are nosis …
 running on '<route>' via <provider> … never claim to be Claude, GPT, or any other assistant") is
@@ -240,7 +240,7 @@ routing, `deepseek-v4-flash`/`-pro` and `mimo-v2.5`/`-pro` answered "I am Claude
 in `nh run`/`nh chat` (training contamination); only Kimi self-identified honestly. "An agent lying
 about who it is fails the honesty bar" — honest identity was already a binding owner decision, and
 it was only half-implemented (memory: identity-guard-tui-only.md).
-**Immediate effect on the harness:** Commit `7faf44b` (2026-07-16, 3 files: cmd_chat.rs +28,
+**Immediate effect on the harness:** Commit `d100d0d` (2026-07-16, 3 files: cmd_chat.rs +28,
 cmd_run.rs +3, nh-tui lib.rs +5) made `identity_constitution` pub and applied it in both CLI
 surfaces; verified live — DeepSeek and MiMo then answered "nosis on <route> … not Claude." Current
 tree: `crates/nh-tui/src/lib.rs`:1187 (definition), `crates/nh-cli/src/cmd_run.rs`:162,
@@ -251,7 +251,7 @@ lesson recorded is the rule, not the patch: any control that exists per-surface 
 ALL surfaces. The same failure shape recurred and was caught again in Slice G W6c (H-03: the
 credential scrubber refreshed at only some route-change sites; fixed across BOTH agent surfaces —
 memory: slice-g-audit-remediation.md:35).
-**Evidence:** commit `7faf44b` + docs commit `bd35b4d`; memory: identity-guard-tui-only.md
+**Evidence:** commit `d100d0d` + docs commit `ebea709`; memory: identity-guard-tui-only.md
 (contamination map with per-model transcript results); current-code lines above.
 **Article angle:** Open-weight models tested through the harness claimed to be Claude until a
 per-surface honesty prompt was made universal — and the lasting fix was a rule about surfaces, not
@@ -277,7 +277,7 @@ parallel background workflows. One human (the owner) directs and ratifies.
   wording; the newer repo file `00-start-here/AUTONOMOUS_HANDOFF.md`:7-8 and all practice since M2
   reflect Sol-only.
 - Claude implementing directly — foreclosed by the role definition itself
-  (`AUTONOMOUS_HANDOFF.md`:7); the only recorded Claude-authored code changes are the 7faf44b
+  (`AUTONOMOUS_HANDOFF.md`:7); the only recorded Claude-authored code changes are the d100d0d
   identity bugfix ("Carlos-directed, Claude-authored bugfix — NOT a milestone/Sol slice", memory:
   identity-guard-tui-only.md) and small orchestrator glue/mechanical fixes during gating (e.g. the
   `.read(true)` OpenOptions fix in Slice G Wave 3, the 1-line cmd_chat H-03 mirror in W6c —
@@ -294,7 +294,7 @@ build-loop-resume.md).
 (`WHY_BEST_IN_CATEGORY_2026.md`:123-124, an article seed). Locks in per-wave adversarial review as
 a structural feature, not a courtesy.
 **Evidence:** `00-start-here/AUTONOMOUS_HANDOFF.md`:5-9, 23-31; `05-ai-collaboration/MODEL_ROLES.md`;
-memory: m2-m5-codex-sol-directive.md; docs commit `202bdca` ("drafted by a Fable 5 ultracode docs
+memory: m2-m5-codex-sol-directive.md; docs commit `b708b8c` ("drafted by a Fable 5 ultracode docs
 workflow — 5 writers, each independently accuracy-verified", memory: build-loop-resume.md).
 **Article angle:** Three different AI models hold three fixed, non-overlapping roles — planner/gate,
 implementer, docs writer — and the planner is contractually barred from writing the product code.
@@ -387,7 +387,7 @@ definition itself ("— native on Windows", `WHY_BEST_IN_CATEGORY_2026.md`:18).
 **Immediate effect on the harness:** Windows is the dev/test box; Windows-specific correctness
 work shipped repeatedly (Slice F W2 `raw_arg` verbatim exec on Windows, `taskkill /T /F` tree
 kill — memory: build-loop-resume.md; Slice G Wave 3's Windows `LockFileEx` fix — memory:
-slice-g-audit-remediation.md). CI runs windows + ubuntu (commit `d1f9ad0`, `.github/workflows/ci.yml`).
+slice-g-audit-remediation.md). CI runs windows + ubuntu (commit `cccb2dc`, `.github/workflows/ci.yml`).
 **Long-term consequence:** The wedge is real but the containment story evolved: Decision 8's
 promised "Job Objects + restricted tokens" was later contradicted by the ratified
 `unsafe_code = "forbid"` constitution — see the dated amendment in
@@ -426,7 +426,7 @@ break-scope-or-duplicate choice.
 CLEAN at any boundary the contract didn't open, and every stop is resolved by a written amendment
 (the "A-M4-1 lesson" is named in `CONTRACTS_M5.md`:35). The amendment trail keeps the audit intact.
 **Immediate effect on the harness:** Contracts exist for M1–M5 (`CONTRACTS_M1.md` … `CONTRACTS_M5.md`);
-locked API contracts predate M0 code (commit `dfbbf26`, 2026-07-12: "workspace scaffold with locked
+locked API contracts predate M0 code (commit `e2762da`, 2026-07-12: "workspace scaffold with locked
 API contracts"). The amendment mechanism ran hot in M5: A-M5-2 (enum-variant compile ripple),
 A-M5-5 (owner-ratified trusted audience source), A-M5-7 addendum (blanket clause so trivial
 field-add glue never stops Sol again), A-M5-8 (the ONE authorized reopening of frozen nh-fleet),
@@ -435,7 +435,7 @@ A-M5-9 (wire-aware effort) — `CONTRACTS_M5.md` §8.
 from contract + amendment + commit; frozen crates stay byte-stable across waves (verified per wave
 in memory: build-loop-resume.md).
 **Evidence:** `CONTRACTS_M1.md`:1-8; `CONTRACTS_M5.md`:1-5, 33-40, 545ff (§8 amendments A-M5-1..);
-`00-start-here/DECISION_LOG.md` (2026-07-13 entry); commits `dfbbf26`, `0bd1d7f`, `fe54e48`.
+`00-start-here/DECISION_LOG.md` (2026-07-13 entry); commits `e2762da`, `a126ee2`, `2aded2d`.
 **Article angle:** The public API of each milestone is frozen in a contract before any
 implementation model touches the code, and every deviation since is a numbered, dated amendment in
 the same file.

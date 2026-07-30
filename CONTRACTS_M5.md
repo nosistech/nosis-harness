@@ -145,7 +145,7 @@ crate (§0.4 exception below), not a hand-rolled splitter; **(Q2)** undeclared v
 | W1-13 | nit-7 | nh-law `repo_tries_to_weaken` L321 | Δ | warn only when a repo field would actually grant. |
 
 **Held for W4 (not W1):** low-16 (`from_vault` skip-signal) + medium-20 (install_client key-literal union) —
-both nh-cli display/rebuild surface. **W2 seam table appended below — SHIPPED `e903ef0` (2026-07-19), all 18 items; W5 seam table below — SHIPPED `eaadfb2` (2026-07-20), all 11 items; see §8 A-M5-8.**
+both nh-cli display/rebuild surface. **W2 seam table appended below — SHIPPED `2e09513` (2026-07-19), all 18 items; W5 seam table below — SHIPPED `441727b` (2026-07-20), all 11 items; see §8 A-M5-8.**
 
 **W3 — METER TRUTH (nh-core + nh-routes; +2-line resolve_effort glue in nh-cli/nh-tui). Owner-ratified three
 design calls 2026-07-19: (Q1) med-2 fixed via wire-aware `resolve_effort` → §8 amendment A-M5-9; (Q2) high-1
@@ -200,7 +200,7 @@ nh-fleet:1207), so W2-4's `scrubber` field is added WITHOUT touching `ToolCtx::n
 | W2-17 | nit-9 | nh-mcp `State`/`From` L34 | Δ | **ratified**: drop `State`, `Arc<ServeConfig>`, token plain `String` (deletes 2 `.expect()` + dead branch). |
 | W2-18 | nit-10 | nh-mcp `handle` routing L179 | Δ | exact-match GET `/.well-known/mcp.json` + POST `/mcp`; else 404. |
 
-**W2 SHIPPED `e903ef0` (2026-07-19)** — all 18 items W2-1..W2-18 in one Sol run; gate 395/0/1 `--release`,
+**W2 SHIPPED `2e09513` (2026-07-19)** — all 18 items W2-1..W2-18 in one Sol run; gate 395/0/1 `--release`,
 clippy `-D` clean, fmt --check clean; +18 tests; 8 files +981/−175. **nh-fleet untouched → still NO A-M5-8.**
 Public surface additive only: `ToolCtx` gained a `scrubber` field + `with_scrubber` builder (`ToolCtx::new`
 signature UNCHANGED). **Two sound deviations from the seam table (both improvements, in the commit):**
@@ -236,7 +236,7 @@ foundation; high-7 repair-under-lock depends on it):
 | W5-10 | nit-17 | nh-cli `main.rs` L122-125 (+ tests L449-480) / `cmd_fleet.rs` L47-48 | Δ | `escalate`/`defer_offpeak` → `Option<bool>` (`--flag[=true|false]`), resolve `cli.or(file).unwrap_or(false)`. |
 | W5-11 | medium-11 (surface) | nh-mcp `fleet_status` L553-568 | Δ | render `failed: <reason>` + `· N unmetered` (>0 only); byte-identical otherwise. |
 
-**W5 SHIPPED `eaadfb2` (2026-07-20)** — all 11 items W5-1..W5-11 in one Sol run (xhigh), no
+**W5 SHIPPED `441727b` (2026-07-20)** — all 11 items W5-1..W5-11 in one Sol run (xhigh), no
 deferrals; gate **410/0/1 `--release`**, clippy `-D` clean, fmt --check clean (orch ran the
 normalizing `cargo fmt` under pinned 1.96.0 post-Sol; Sol ran no fmt); +15 tests; 6 files
 +976/−76 (nh-fleet/src/lib.rs + tests/slice_b.rs + new nh-cli/tests/fleet_lock.rs + nh-cli
@@ -263,7 +263,7 @@ STOP CLEAN if any fix appears to need nh-core or nh-fleet). Four owner-ratified 
 (1) meter honesty = FULL fix (unmetered marker + honest peak-boundary marker + incomplete-total marker); (2) Esc
 legend made honest (no fake "interrupt"); (3) scroll-while-Working enabled (drop-if-hard); (4) both cross-crate
 fold-ins IN. medium-19 scope call: **honest nh-cli marker** (true per-turn pricing deferred — needs nh-core).
-Current line numbers re-grounded against HEAD `28cfee7` (audit's 2026-07-18 lines had shifted after W1/W2/W3/W5).
+Current line numbers re-grounded against HEAD `6637b45` (audit's 2026-07-18 lines had shifted after W1/W2/W3/W5).
 
 | # | Ref (audit) | Crate:seam | Tag | Change |
 |---|---|---|:--:|---|
@@ -746,7 +746,7 @@ effort identically. **Display-only:** `build_anthropic_body` never serializes th
 only the reported tier on those two surfaces. Implementation folded `cmd_run::effort_for` to take the trailing
 `Wire` and dropped the transient `effort_for_wire` wrapper (mirrors nh-tui's `effort_for`, leaves no
 test-only helper → no `clippy -D` dead-code trap). Delivered as the W3b addendum (Sol, xhigh;
-`Temp/slice-f-w3b-brief-v1.txt`; self-report `Temp/w3b-last-message.txt`). Committed with W3 in `2b68163`.
+`Temp/slice-f-w3b-brief-v1.txt`; self-report `Temp/w3b-last-message.txt`). Committed with W3 in `73d278b`.
 
 **A-M5-8 (2026-07-19, orchestrator Opus 4.8; owner-ratified — Fable 5 design direction) — Slice F W5 FLEET
 RELIABILITY: the first SUBSTANTIVE reopening of frozen nh-fleet.** Every prior nh-fleet amendment (A-M5-2/-4/-7)

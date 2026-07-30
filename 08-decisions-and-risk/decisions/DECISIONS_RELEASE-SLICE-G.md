@@ -55,13 +55,13 @@ could NOT be killed: <detail>" instead of the previous unconditional "— killed
 - Windows kill-on-close Job Object (the audit's own "minimal fix" for H-06, audit line 155:
   "create ... a kill-on-close Job Object on Windows") — rejected because it needs raw Win32 calls,
   which means a new dependency (windows-sys/winapi) AND `unsafe`, and that breaks the workspace
-  `unsafe_code = "forbid"` law shipped in d1f9ad0 (sol_wave7_prompt.txt:19-23, 121-127).
+  `unsafe_code = "forbid"` law shipped in cccb2dc (sol_wave7_prompt.txt:19-23, 121-127).
 - Keep the old fire-and-forget kill (discard `taskkill`'s exit status, unbounded `child.wait()`,
   unconditional "killed" message) — this IS the finding being fixed: a failed tree-kill was
   indistinguishable from a successful one, `terminate_child_tree` itself could hang forever, and the
   caller claimed an outcome nobody verified (sol_wave7_prompt.txt:100-106; audit H-06, lines 149-155).
 
-**Why:** The workspace-wide `unsafe_code = "forbid"` (d1f9ad0) is treated as law: the project refuses
+**Why:** The workspace-wide `unsafe_code = "forbid"` (cccb2dc) is treated as law: the project refuses
 to add the first `unsafe` block in the tree even when a security audit literally recommends the Win32
 API that requires it. The compensation is honesty rather than stronger force: verify the kill, and
 when verification fails, say so ("Honest reporting beats optimistic reporting — never claim an outcome
@@ -85,7 +85,7 @@ the tree may survive — we REPORT that honestly instead of pretending we killed
 
 **Evidence:** C:\Users\capv2\AppData\Local\Temp\sol_wave7_prompt.txt:121-127 (R1 verbatim), :100-106
 (the two holes), :177-199 (W7-7/W7-8); audit finding H-06
-(04-research/AUDIT_2026-07-21_sol-max_pre-release.md:149-155); d1f9ad0 (the forbid law); no commit
+(04-research/AUDIT_2026-07-21_sol-max_pre-release.md:149-155); cccb2dc (the forbid law); no commit
 hash yet — Wave 7 is uncommitted and in flight. Gate baseline 493/0/1.
 
 **Article angle:** When its own security audit recommended the Windows API that requires `unsafe`, the
@@ -666,7 +666,7 @@ source-install**" (2 critical / 14 high / 10 medium / 1 low / 1 nit), the owner 
 remediation BEFORE any release: **Slice G** = 7 gated BLOCKER waves in the audit's own prioritized
 order (audit lines 335-346), with **NO commit until all waves pass their gates plus the owner's FEEL
 gate**, then ONE coherent commit (the uncommitted W4-SURFACES work + all of Slice G are one lump on
-HEAD `5496b44`), then Slice H (cosmetic god-module splits, deferred), then v0.1.0
+HEAD `c9863d1`), then Slice H (cosmetic god-module splits, deferred), then v0.1.0
 (CURRENT_TASK.md:57).
 
 **Alternatives considered:**
@@ -682,7 +682,7 @@ HEAD `5496b44`), then Slice H (cosmetic god-module splits, deferred), then v0.1.
   (CURRENT_TASK.md:57; audit item 10, line 346, is the NICE-rated split work).
 
 **Why:** The audit's verdict rested on THE LAW, not on live exploitability — and the project treats
-THE LAW as the release bar. The one-commit rule keeps `main` at a known-good HEAD (`5496b44`)
+THE LAW as the release bar. The one-commit rule keeps `main` at a known-good HEAD (`c9863d1`)
 throughout: at no point does the public history contain a half-remediated state. Waves follow the
 audit's own prioritized BLOCKER order 1:1 (audit lines 335-344 → W1 credentials, W2 lifecycle, W3 fs
 trust, W4 receipts, W5 meter, W6 MCP, W7 exec). Serves secure + auditable + congruent.
@@ -740,7 +740,7 @@ shapes are now facts, not assumptions. Note for W5: the providers' `finish_reaso
 a live check before the Slice-G commit (CURRENT_TASK.md:11).
 
 **Evidence:** BUILD_LOG.md:5-45 (2026-07-20 entry, per-provider table + invariants);
-CURRENT_TASK.md:3 ("<$2/provider HARD CAP"), :75 (session-3 checkpoint); commit 28cfee7
+CURRENT_TASK.md:3 ("<$2/provider HARD CAP"), :75 (session-3 checkpoint); commit 6637b45
 ("docs(release): record LIVE provider tests — launch evidence (4 providers, ~$0.0014 total)").
 
 **Article angle:** The complete four-provider launch verification cost about a seventh of a cent, and
@@ -750,7 +750,7 @@ every number in it came off the product's own receipts.
 
 ---
 
-## 2026-07-20: Section B — `unsafe_code = "forbid"` workspace-wide, cargo-deny gated with nothing suppressed, keyless CI (d1f9ad0)
+## 2026-07-20: Section B — `unsafe_code = "forbid"` workspace-wide, cargo-deny gated with nothing suppressed, keyless CI (cccb2dc)
 
 **Decision:** The release engineering tail, metadata/config/CI only (no source logic, Cargo.lock
 unchanged): (1) unsafe forbidden via root `[workspace.lints.rust] unsafe_code = "forbid"` with
@@ -762,18 +762,18 @@ allow-list for webpki-roots trust-anchor data; (4) 27 internal path deps pinned 
 `version = "0.1.0"` because `wildcards = "deny"` treats a versionless publishable path dep as `*`;
 (5) keyless CI (`.github/workflows/ci.yml`): `contents: read`, windows+ubuntu matrix on pinned Rust
 1.96.0 running the gate's checks plus a separate cargo-deny job — no secrets, suite offline/mocked
-(git show d1f9ad0; verified in-tree: gate.ps1:38, deny.toml:6 + :26).
+(git show cccb2dc; verified in-tree: gate.ps1:38, deny.toml:6 + :26).
 
 **Alternatives considered:**
 - Per-file `#![forbid(unsafe_code)]` — "Chosen over per-file `#![forbid]` for DRY/auditability
-  (congruent with THE LAW)" (d1f9ad0 commit message): one source of truth a new crate cannot forget.
+  (congruent with THE LAW)" (cccb2dc commit message): one source of truth a new crate cannot forget.
 - Suppressing a deny finding to get green — did not arise: "NO RustSec advisory was found or ignored
-  (`[advisories] ignore` stays empty; nothing suppressed)" (d1f9ad0).
-- CI with provider secrets — rejected by construction: keyless, offline/mocked (d1f9ad0).
+  (`[advisories] ignore` stays empty; nothing suppressed)" (cccb2dc).
+- CI with provider secrets — rejected by construction: keyless, offline/mocked (cccb2dc).
 
 **Why:** Explicitly sourced in the commit: DRY/auditability, THE LAW's congruent clause. The
 forbid-unsafe line is what four days later gave Wave 7's R1 its teeth. Deferred to backlog and
-recorded as such: cargo-nextest, AV canary, frozen-surface sensor (d1f9ad0; BUILD_LOG.md:77-78).
+recorded as such: cargo-nextest, AV canary, frozen-surface sensor (cccb2dc; BUILD_LOG.md:77-78).
 
 **Immediate effect on the harness:** The gate became four steps (fmt / clippy -D / deny / test) —
 416/0/1 at commit; supply-chain policy (crates.io-only sources, wildcard deny, permissive-license
@@ -783,7 +783,7 @@ allow-list, yanked deny) is enforced on every commit and in CI (gate.ps1:36-39; 
 point, which constrains future dependency and API choices (see Wave 7 R1). "Nothing suppressed" is a
 checkable claim (`ignore = []`) usable in public material.
 
-**Evidence:** commit d1f9ad0 (13 files, +113/−35); gate.ps1:38 (`deny check` step); deny.toml:6
+**Evidence:** commit cccb2dc (13 files, +113/−35); gate.ps1:38 (`deny check` step); deny.toml:6
 (`ignore = []`), :26 (CDLA-Permissive-2.0); .github/workflows/ci.yml; BUILD_LOG.md:49-83; gate
 416/0/1.
 
@@ -794,7 +794,7 @@ zero-unsafe rule it shipped became a binding constraint on a security fix within
 
 ---
 
-## 2026-07-20: FULL MCP metered-service expansion (1d04871) — and the hard gate: loopback-preview only until the MCP final spec lands 2026-07-28
+## 2026-07-20: FULL MCP metered-service expansion (7c2b2c4) — and the hard gate: loopback-preview only until the MCP final spec lands 2026-07-28
 
 **Decision:** The loopback MCP preview server was expanded to express the product's differentiator
 ("priced, routed, receipted, and you can see why") as first-class MCP tools: three new read-only
@@ -802,7 +802,7 @@ tools — `why` (mirrors `nh why`), `route_cost`, `receipts` — plus `structure
 tools, all egressing through one scrubbing choke (`tool_result` scrubs text via `nh_vault::safe_line`
 AND `scrub_json`s the structured value, recursing strings, array elements, object values and keys).
 Additive: every existing tool's TEXT response stays byte-compatible; server stays stateless,
-loopback-only, preview (git show 1d04871). The owner ratified the FULL expansion: "do it well, test +
+loopback-only, preview (git show 7c2b2c4). The owner ratified the FULL expansion: "do it well, test +
 verify, don't assume, best-for-the-project as of 2026-07-20" (CURRENT_TASK.md:85-86). Standing HARD
 GATE: the MCP server "may be hardened now but NOT shipped publicly until the MCP final spec lands
 2026-07-28" (CURRENT_TASK.md:3) — it does not block a CLI/TUI v0.1.0 as long as `nh mcp serve` stays
@@ -815,13 +815,13 @@ the loopback preview and no docs promote it (CURRENT_TASK.md:73).
 - Silently editing the frozen test — Sol's first run STOPPED CLEAN and reverted when the frozen
   `tests/e3_korvin.rs` asserted the exact old 3-tool set; the owner then authorized widening ONLY
   that one assertion (+3/−0, alphabetical; every other assertion byte-identical) — "the only edit
-  outside src/lib.rs" (1d04871 commit message; BUILD_LOG.md:91-96).
+  outside src/lib.rs" (7c2b2c4 commit message; BUILD_LOG.md:91-96).
 - Shipping MCP publicly with v0.1.0 — foreclosed by the 2026-07-28 spec gate (CURRENT_TASK.md:3).
 
 **Why:** The MCP surface is where other agents will read the meter, so the meter semantics were made
 structural (usd_approx only on FRESH fx; savings OMITTED when naive_cost is None; "never claims a
 saving it did not compute") and everything passes the scrubber in BOTH text and structured surfaces
-(1d04871). The public-ship gate exists because the MCP final spec had not landed — building against a
+(7c2b2c4). The public-ship gate exists because the MCP final spec had not landed — building against a
 moving spec and shipping publicly would have been a compatibility bet. Serves secure + congruent +
 auditable.
 
@@ -835,7 +835,7 @@ cross-currency REFUSED, fresh-fx `usd_approx`, 10 real typed receipts, no-bearer
 and the clean-stop-on-frozen-surface protocol (an implementer halts and reverts rather than widening
 a frozen test without authorization). Public MCP timing stays coupled to the external spec.
 
-**Evidence:** commit 1d04871; CURRENT_TASK.md:3 (hard gate), :73, :77, :79-110 (sessions 1-2);
+**Evidence:** commit 7c2b2c4; CURRENT_TASK.md:3 (hard gate), :73, :77, :79-110 (sessions 1-2);
 BUILD_LOG.md:87-99; audit N-01 later confirmed the banner nit (AUDIT_2026-07-21:295-297). Gate
 416/0/1; live verification over 127.0.0.1 recorded 2026-07-20.
 
@@ -847,12 +847,12 @@ loopback-only.
 
 ---
 
-## 2026-07-20: LICENSE — MIT, copyright **nosistech LLC**, not the founder personally (b43b023)
+## 2026-07-20: LICENSE — MIT, copyright **nosistech LLC**, not the founder personally (7f4add6)
 
 **Decision:** The project is licensed MIT with "Copyright (c) 2026 nosistech LLC" (LICENSE:1-3). The
 task was owner-specified as "LICENSE = MIT © nosistech LLC (not Carlos personally)"
 (CURRENT_TASK.md:3, verbatim). License metadata followed in Section B (`license = "MIT"`
-workspace-wide, d1f9ad0), and MIT is on deny.toml's own allow-list (deny.toml:17).
+workspace-wide, cccb2dc), and MIT is on deny.toml's own allow-list (deny.toml:17).
 
 **Alternatives considered:**
 - Copyright held by Carlos Paredes Vargas personally — explicitly excluded by the owner's phrasing
@@ -872,8 +872,8 @@ and the crate metadata are consistent with the LICENSE file.
 **Long-term consequence:** Copyright sits with a company, which affects who can relicense or accept
 contributions long-term; MIT permanently permits closed-source forks.
 
-**Evidence:** commit b43b023 (LICENSE 21 lines + SECURITY.md 83 lines); LICENSE:1-3;
-CURRENT_TASK.md:3, :79-80; d1f9ad0 (metadata).
+**Evidence:** commit 7f4add6 (LICENSE 21 lines + SECURITY.md 83 lines); LICENSE:1-3;
+CURRENT_TASK.md:3, :79-80; cccb2dc (metadata).
 
 **Article angle:** The harness shipped under MIT held by the company entity rather than the founder,
 matching the permissive-only policy it enforces on its own dependency tree.
@@ -882,7 +882,7 @@ matching the permissive-only policy it enforces on its own dependency tree.
 
 ---
 
-## 2026-07-20: SECURITY.md written in ASD-STE100 Simplified Technical English (b43b023)
+## 2026-07-20: SECURITY.md written in ASD-STE100 Simplified Technical English (7f4add6)
 
 **Decision:** The security policy is written in ASD-STE100 Simplified Technical English — short
 declarative sentences, controlled vocabulary (visible in the artifact, e.g. "Do not open a public
@@ -891,7 +891,7 @@ defines: latest-release + `main`-only security fixes; private disclosure to `inf
 a 5-business-day first-response SLA (both owner-ratified, CURRENT_TASK.md:86-87); a security-model
 summary (law verdict classes / audience binding / Scrubber / fail-closed / loopback MCP preview); and
 a coordinated-disclosure safe harbor. Facts were sourced from 02-architecture/SECURITY_MODEL.md +
-CONTRACTS_M5; "no audit numbers published (states 'no critical problems')" (b43b023 commit message —
+CONTRACTS_M5; "no audit numbers published (states 'no critical problems')" (7f4add6 commit message —
 note this commit predates the 2026-07-21 audit by one day).
 
 **Alternatives considered:**
@@ -899,7 +899,7 @@ note this commit predates the 2026-07-21 audit by one day).
   was an owner-assigned requirement ("SECURITY.md in ASD-STE100 Simplified Technical English",
   CURRENT_TASK.md:3). The reason for choosing ASD-STE100 is NOT stated (see UNSOURCED).
 
-**Why (as sourced):** Drafted by Fable 5 high, orchestrator-gated (b43b023). The style's observable
+**Why (as sourced):** Drafted by Fable 5 high, orchestrator-gated (7f4add6). The style's observable
 effect in the artifact is unambiguous reporting instructions readable by non-native speakers — but
 that framing is inference from the text, not a recorded rationale.
 
@@ -911,7 +911,7 @@ commitments; the "no critical problems" phrasing became outdated one day later w
 audit found two criticals — all of which are being remediated pre-release in Slice G, so the statement
 is on track to be true again at v0.1.0 (audit AUDIT_2026-07-21:27; CURRENT_TASK.md:57).
 
-**Evidence:** commit b43b023; SECURITY.md:1-45 (style + SLA + model summary); CURRENT_TASK.md:3
+**Evidence:** commit 7f4add6; SECURITY.md:1-45 (style + SLA + model summary); CURRENT_TASK.md:3
 (assignment), :86-87 (contact + SLA ratified).
 
 **Article angle:** The security policy is written in the controlled language used for aircraft

@@ -1,5 +1,5 @@
 # LENS G — Architecture / THE LAW / Build Process — NOSIS HARNESS improvement research
-**Date:** 2026-07-16/17 · **Analyst:** Fable 5 research pass · **Repo HEAD:** `bd35b4d` (M4 Slice D implemented, uncommitted)
+**Date:** 2026-07-16/17 · **Analyst:** Fable 5 research pass · **Repo HEAD:** `ebea709` (M4 Slice D implemented, uncommitted)
 
 ## 0. Ground truth observed in the repo
 

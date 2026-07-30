@@ -40,13 +40,13 @@ Give Sol a written brief + a locked `CONTRACTS_<Mx>.md` (same pattern as `CONTRA
 
 ## State at handoff
 
-- **M0: DONE** (commits `51aef97`→`1a0eaa5`). 62 tests, hardened.
-- **M1: DONE and VERIFIED GREEN** (commits `0ed3d6d` integration → `bfdfc59` hardening → `96c46b1` docs). Full 13-route catalog, clock pricing (Beijing peak windows, all 8 boundary tests), Anthropic Messages wire, thinking dialects, stateless MCP client (no session header on wire — exit criterion met), `nh chat` REPL with /model /provider /price. **180 tests passing, 1 ignored (live-keyring), 0 failed across 10 binaries; clippy clean.** Confirmed by the orchestrator at handoff, not just the workflow's self-report. Live-pending only: real provider calls, a real 2026-07-28 MCP server, DeepSeek peak-window re-verify ~2026-07-24 (see MILESTONES.md).
+- **M0: DONE** (commits `c761473`→`c3f2404`). 62 tests, hardened.
+- **M1: DONE and VERIFIED GREEN** (commits `fa5e986` integration → `29ec70f` hardening → `588e297` docs). Full 13-route catalog, clock pricing (Beijing peak windows, all 8 boundary tests), Anthropic Messages wire, thinking dialects, stateless MCP client (no session header on wire — exit criterion met), `nh chat` REPL with /model /provider /price. **180 tests passing, 1 ignored (live-keyring), 0 failed across 10 binaries; clippy clean.** Confirmed by the orchestrator at handoff, not just the workflow's self-report. Live-pending only: real provider calls, a real 2026-07-28 MCP server, DeepSeek peak-window re-verify ~2026-07-24 (see MILESTONES.md).
 - `CONTRACTS_M1.md` exists at repo root (pattern to copy for M2+). M1 contract deviations are logged in its §7 + DECISION_LOG 2026-07-13.
 
 ## FIRST ACTIONS on resume
 
-1. `git log --oneline | head -6` — confirm HEAD is `96c46b1` (or later). M1 is already verified green, so no need to re-fix it.
+1. `git log --oneline | head -6` — confirm HEAD is `588e297` (or later). M1 is already verified green, so no need to re-fix it.
 2. `cargo test --workspace` + `cargo clippy --workspace --all-targets -- -D warnings` — quick sanity re-check (expect 180 passing / 1 ignored / clean), then move to M2.
 3. Read the latest `00-start-here/BUILD_LOG.md` + `CURRENT_TASK.md` for the M1 review outcome.
 4. Begin **M2** (context engine + nested constitution loader + mechanical write-holds; exit: cache-hit % >60% on a 50-turn session, protected path blocked in max autonomy — `MILESTONES.md`). Write `CONTRACTS_M2.md`, brief Sol, run the loop.

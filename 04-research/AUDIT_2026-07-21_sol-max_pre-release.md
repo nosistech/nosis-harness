@@ -2,7 +2,7 @@
 
 > Run 2026-07-21. Auditor: **GPT-5.6 Sol (max effort)** via `codex exec` in a **read-only** sandbox. Orchestrated + gated by Claude (Opus 4.8).
 > Trigger: the TUI left the terminal in raw / alternate-screen state after an unclean exit ("numbers flooding, could not type").
-> Scope: working tree AS-IS (HEAD `5496b44` + uncommitted M5 Slice F **W4** changes).
+> Scope: working tree AS-IS (HEAD `c9863d1` + uncommitted M5 Slice F **W4** changes).
 
 ## Gate note (Claude) — independent verification of load-bearing findings
 

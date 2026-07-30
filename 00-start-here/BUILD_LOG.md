@@ -288,7 +288,7 @@ What changed:
 
 Verification:
 
-- Ran the complete checked-in `gate.ps1` on `9856ebf`: formatting check, locked strict release
+- Ran the complete checked-in `gate.ps1` on `e42a5bc`: formatting check, locked strict release
   Clippy, `cargo deny` advisories/bans/licenses/sources, and locked release tests all PASS.
   Tests: 512 passed / 0 failed / 1 OS-keyring test ignored. The first sandboxed attempt could not
   lock the read-only user advisory cache; the identical full script passed with normal cache access.
@@ -503,7 +503,7 @@ Not exercised (out of scope for a cost smoke): identity honesty on the contamina
 
 ---
 
-## 2026-07-20: Release Slice — Section B: engineering tail (forbid-unsafe + workspace lints + MIT license + cargo-deny gate + keyless CI) — committed `d1f9ad0`
+## 2026-07-20: Release Slice — Section B: engineering tail (forbid-unsafe + workspace lints + MIT license + cargo-deny gate + keyless CI) — committed `cccb2dc`
 
 Builder:
 
@@ -541,7 +541,7 @@ before 2026-07-28.
 
 ---
 
-## 2026-07-20: Release Slice — MCP metered-service expansion (why/route_cost/receipts + structuredContent) — committed `1d04871` (feat) + `202bdca` (docs C+D)
+## 2026-07-20: Release Slice — MCP metered-service expansion (why/route_cost/receipts + structuredContent) — committed `7c2b2c4` (feat) + `b708b8c` (docs C+D)
 
 Builder:
 
@@ -578,7 +578,7 @@ unchanged; `why` == `resolve_capable`; usd_approx omitted when fx stale; `e3_kor
 names only), and committed. Docs C+D (CHANGELOG / README / PRIVACY / CONTRIBUTING / RELEASE_CHECKLIST)
 were drafted by a **Fable 5 ultracode docs workflow** (5 writers, each independently accuracy-verified
 against the real CLI), orchestrator spot-checked (gate.ps1, rust-toolchain.toml, catalog.toml) and
-committed `202bdca`.
+committed `b708b8c`.
 
 Gate: **416 pass / 0 fail / 1 ignored** (`--release`), clippy `-D warnings` clean,
 `cargo fmt --all --check` clean; +6 nh-mcp tests; nh-mcp ONLY (`src/lib.rs` +826/−19, `e3_korvin.rs`
@@ -588,7 +588,7 @@ Gate: **416 pass / 0 fail / 1 ignored** (`--release`), clippy `-D warnings` clea
 
 ---
 
-## 2026-07-20: M5 Slice F Wave 5 — FLEET RELIABILITY (audit W5-1..W5-11) — committed `eaadfb2`
+## 2026-07-20: M5 Slice F Wave 5 — FLEET RELIABILITY (audit W5-1..W5-11) — committed `441727b`
 
 Builder:
 
@@ -645,7 +645,7 @@ FEEL), now folded into the owner-directed Release Slice.
 
 ---
 
-## 2026-07-19: M5 Slice F Wave 2 — TOOL EGRESS + EXEC (audit W2-1..W2-18) — committed `e903ef0`
+## 2026-07-19: M5 Slice F Wave 2 — TOOL EGRESS + EXEC (audit W2-1..W2-18) — committed `2e09513`
 
 Builder:
 
@@ -719,7 +719,7 @@ Next: **W5 "FLEET RELIABILITY" (nh-fleet)** — the one wave that REQUIRES amend
 (nh-fleet is frozen), including the RunFailed ledger contract W2 deferred above. Order now
 W1✓→W3✓→W2✓→**W5**→W4.
 
-## 2026-07-19: M5 Slice F Wave 3 — METER TRUTH (audit W3-1..W3-14 + A-M5-9) — committed `2b68163`
+## 2026-07-19: M5 Slice F Wave 3 — METER TRUTH (audit W3-1..W3-14 + A-M5-9) — committed `73d278b`
 
 Builder:
 
@@ -832,9 +832,9 @@ Next step:
 - Ground + brief W3 "METER TRUTH" (nh-core + nh-routes), the next wave in the
   ratified order W1→W3→W2→W5→W4.
 
-## 2026-07-18: M5 Slice E — LOOP hygiene, PARTIAL (E5) — committed `bc2a1b1` + `a71eb23`
+## 2026-07-18: M5 Slice E — LOOP hygiene, PARTIAL (E5) — committed `68f71cd` + `059a00e`
 
-*Backfilled 2026-07-25 from the commit record (`bc2a1b1`, `a71eb23`, docs-close `0c14743`);
+*Backfilled 2026-07-25 from the commit record (`68f71cd`, `059a00e`, docs-close `6a11f32`);
 no BUILD_LOG entry was written at the time.*
 
 Builder:
@@ -845,29 +845,29 @@ Builder:
 
 What changed:
 
-- `bc2a1b1` — one-time `cargo fmt --all` normalization of the 37-hunk / 7-file backlog that
+- `68f71cd` — one-time `cargo fmt --all` normalization of the 37-hunk / 7-file backlog that
   had accumulated because the workspace was never fmt-clean, so any scoped `cargo fmt -p`
   reflowed pre-existing code and polluted slice diffs (it bit Slice A and Slice D). Pure
   behavior-preserving reflow across nh-cli (`cmd_init`, `cmd_key`, `m2_exit`), nh-fleet,
   nh-tools (`lib`, `mcp`), and nh-vault.
-- `bc2a1b1` — added `gate.ps1`, mechanizing the three checks that define "clean": `fmt
+- `68f71cd` — added `gate.ps1`, mechanizing the three checks that define "clean": `fmt
   --check`, `clippy -D warnings`, `test --release`, with per-step exit-code aggregation
   (never `| tail`, whose 0 would mask a real failure). This is the Slice E "fmt --check gate"
   item, pulled forward to kill the reflow pitfall at its root.
-- `a71eb23` — `rust-toolchain.toml` pins 1.96.0 + rustfmt/clippy so fmt/clippy/build are
+- `059a00e` — `rust-toolchain.toml` pins 1.96.0 + rustfmt/clippy so fmt/clippy/build are
   reproducible on every machine and in CI, and a future rustfmt cannot silently re-introduce
   the reflow drift the normalize just cleared.
-- `a71eb23` — `.gitattributes` makes line-ending handling explicit and portable (LF in repo,
+- `059a00e` — `.gitattributes` makes line-ending handling explicit and portable (LF in repo,
   native checkout; Windows scripts CRLF) so fmt never churns on EOL.
-- `a71eb23` — `deny.toml`, a DORMANT cargo-deny supply-chain policy (advisories / bans /
+- `059a00e` — `deny.toml`, a DORMANT cargo-deny supply-chain policy (advisories / bans /
   licenses / sources). cargo-deny was not installed; wiring `cargo deny check` into `gate.ps1`
   was left as follow-up. No crate source touched.
 
 Tests/checks:
 
-- After `bc2a1b1`: `cargo test --workspace --release`: **357 passed / 0 failed / 1 ignored**;
+- After `68f71cd`: `cargo test --workspace --release`: **357 passed / 0 failed / 1 ignored**;
   clippy `-D warnings` clean.
-- For `a71eb23`: no gate run is recorded — the commit touches no crate source.
+- For `059a00e`: no gate run is recorded — the commit touches no crate source.
 - Owner FEEL gate: not recorded at the time (Slice E changes no human-facing surface).
 
 Not delivered in this pass — Slice E is PARTIAL and E5 is NOT met:
@@ -876,9 +876,9 @@ Not delivered in this pass — Slice E is PARTIAL and E5 is NOT met:
   out-of-surface edit must fail the gate). `gate.ps1` as shipped here runs fmt/clippy/test only.
 - Keyless CI (windows + ubuntu); `codex exec --output-schema` structured Sol self-report;
   `cargo-nextest` + AV-canary preflight; `[workspace.lints]` + `forbid(unsafe_code)`; wiring
-  cargo-deny into the gate. All recorded as "rest of Slice E" in `0c14743`.
+  cargo-deny into the gate. All recorded as "rest of Slice E" in `6a11f32`.
 - Later record: forbid-unsafe, workspace lints, the cargo-deny gate step, and keyless CI
-  landed in the Release Slice Section B commit `d1f9ad0` (see its entry above). The
+  landed in the Release Slice Section B commit `cccb2dc` (see its entry above). The
   frozen-surface sensor, nextest/AV canary, and `--output-schema` remain undelivered.
 
 Next step:
@@ -927,9 +927,9 @@ Next step:
 - Orchestrator adversarial review and owner FEEL approval of `nh profile`, the
   `/profile` confirmation, and the HUD chip before the Slice D commit.
 
-## 2026-07-18: M5 Slice C — VISIBLE (E3 implementation) — THE FEEL GATE — committed `a0a4036`
+## 2026-07-18: M5 Slice C — VISIBLE (E3 implementation) — THE FEEL GATE — committed `a0f77be`
 
-*Backfilled 2026-07-25 from the commit record (`a0a4036`, docs-close `3a5df91`); no BUILD_LOG
+*Backfilled 2026-07-25 from the commit record (`a0f77be`, docs-close `213ed0a`); no BUILD_LOG
 entry was written at the time.*
 
 Builder:
@@ -1011,9 +1011,9 @@ Next step:
 
 - Orchestrator adversarial review and commit gate for Slice B, then Slice C VISIBLE.
 
-## 2026-07-18: M5 Slice A — TRUTH (E1 implementation) — committed `9c96259`
+## 2026-07-18: M5 Slice A — TRUTH (E1 implementation) — committed `68f91e6`
 
-*Backfilled 2026-07-25 from the commit record (`9c96259`, docs-close `70a2f9d`); no BUILD_LOG
+*Backfilled 2026-07-25 from the commit record (`68f91e6`, docs-close `7404878`); no BUILD_LOG
 entry was written at the time.*
 
 Builder:
@@ -1066,16 +1066,16 @@ Next step:
 
 - Brief Sol for Slice B "FLOOR" (E2).
 
-## 2026-07-17: M4 CLOSED (Slice D committed `aa751f4`) + M5 direction research
+## 2026-07-17: M4 CLOSED (Slice D committed `9344251`) + M5 direction research
 
-**M4 is complete.** Slice D (OAuth2 MCP client, E4) committed `aa751f4` after a clean re-gate
+**M4 is complete.** Slice D (OAuth2 MCP client, E4) committed `9344251` after a clean re-gate
 (nh-tools 56/0 incl. the E4 crux, nh-tui 46/0, clippy clean; the only red is the 2 pre-existing
 Kaspersky-AV-blocked spawn tests, os error 5, byte-identical nh-cli). CONTRACTS_M4 §8 gained the
 as-implemented A-M4-1 clarification (OAuth2 is a struct variant; forced the authorized 2-line
 `nh_tui::mcp_state` adaptation; A-M4-2 was a no-op — `Vault::set` existed since M0). All four M4
 slices (A fleet, B scheduler/ladder/swarm-seam, C nh-mcp, D OAuth2) now committed.
 
-**Deep improvement research (committed `d3cac39`).** Owner-commissioned "deepest + richest" pass on
+**Deep improvement research (committed `a2c2b83`).** Owner-commissioned "deepest + richest" pass on
 how to improve the harness (product + process), run on TWO models: **Fable 5 (high)** web-cited
 July-2026 across 13 lenses (A-M), and **GPT-5.6 Sol (xhigh)** design pass over the crate code
 (60-item backlog). 265 unique sources; exact line-number grounding. Report:
@@ -1127,7 +1127,7 @@ Tests/checks:
   fleet run id` + empty-tasks all one honest line; response headers carry no `Mcp-Session-Id`. Bind is
   127.0.0.1-only (non-loopback `--addr` hard-rejected).
 
-## 2026-07-16: M4 Slice B — off-peak scheduler + escalation ladder + Kimi swarm seam (E2 gated), commit `ecadc0a`
+## 2026-07-16: M4 Slice B — off-peak scheduler + escalation ladder + Kimi swarm seam (E2 gated), commit `25bd5b3`
 
 Builder:
 
@@ -1186,7 +1186,7 @@ What changed:
   (2) Opus 4.8 gate = **review-pause** (no live delegate). (3) nh-mcp server = **tiny_http** (no tokio).
   (4) Kimi swarm = **minimal seam + verify-live** ("don't overdo it, budget"). Sliced A(fleet) /
   D(OAuth) / B(scheduler+ladder) / C(nh-mcp).
-- **Warmup `9b0a8ad`** — `/effort` arg case-folded (`parse_effort` trims + ASCII-lowercases), so
+- **Warmup `b79c65d`** — `/effort` arg case-folded (`parse_effort` trims + ASCII-lowercases), so
   `/effort High|MAX|None` are accepted. nh-tui only. Also re-validated the `codex`/`gpt-5.6-sol`
   executor path before the big M4 briefs.
 - **M4 Slice A — new crate `crates/nh-fleet`** (std threads + channels, no async, NO new external dep):
@@ -1242,7 +1242,7 @@ What changed:
 - Carlos rejected the content-complete-but-flat TUI on UX grounds (couldn't type tasks starting with
   t/l — bare-letter shortcuts collided; overlays bled into the transcript; no scroll; model/effort
   hidden; native mouse-copy broken; paste eaten). M3 was reopened and re-skinned + interaction-fixed
-  across three slices (all had been sitting uncommitted on top of `28e8cf6`):
+  across three slices (all had been sitting uncommitted on top of `b3503d9`):
   - **Slice D** — bordered outer frame + chat transcript (`❯ you` / `◆ nosis` roles, turn separation,
     visual gaps) + framed centered modals with Clear-before-draw (anti-bleed) + welcome empty-state +
     key-hint strip. (Spec: CONTRACTS_M3 §8.)
@@ -1627,7 +1627,7 @@ What changed:
 
 Tests/checks run:
 
-- cargo build --workspace: green. cargo test --workspace: 176 passed, 0 failed, 1 ignored (keyring round-trip; nh-cli 49, nh-core lib 21 + integration 5+4+49, nh-routes 38, nh-vault 10). cargo clippy --workspace --all-targets -- -D warnings: clean. M0 smoke: `nh --help` exit 0; `echo /quit | cargo run -p nh-cli -q -- chat` exit 0 with no key configured (friendly warning to stderr, stdout empty). Committed on main as 0ed3d6d 'M1: full catalog, clock pricing, Anthropic wire, thinking dialects, MCP client, chat session'.
+- cargo build --workspace: green. cargo test --workspace: 176 passed, 0 failed, 1 ignored (keyring round-trip; nh-cli 49, nh-core lib 21 + integration 5+4+49, nh-routes 38, nh-vault 10). cargo clippy --workspace --all-targets -- -D warnings: clean. M0 smoke: `nh --help` exit 0; `echo /quit | cargo run -p nh-cli -q -- chat` exit 0 with no key configured (friendly warning to stderr, stdout empty). Committed on main as fa5e986 'M1: full catalog, clock pricing, Anthropic wire, thinking dialects, MCP client, chat session'.
 
 Next step:
 

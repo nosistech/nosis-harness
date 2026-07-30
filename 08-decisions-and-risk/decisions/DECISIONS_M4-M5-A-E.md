@@ -11,33 +11,33 @@ Source abbreviations used in entries: `00-start-here/BUILD_LOG.md` (BL), `CONTRA
 **Decision:** Ship the M5 Slice E "LOOP" hygiene items early and mechanically, in two dedicated
 commits: (1) a one-time `cargo fmt --all` normalization of the whole workspace plus a new `gate.ps1`
 that mechanizes the three checks defining "clean" (`fmt --check`, `clippy -D warnings`,
-`test --release`) with per-step exit-code aggregation (`bc2a1b1`); (2) `rust-toolchain.toml` pinning
+`test --release`) with per-step exit-code aggregation (`68f71cd`); (2) `rust-toolchain.toml` pinning
 1.96.0 (+ rustfmt/clippy), an explicit `.gitattributes` EOL policy, and a dormant `deny.toml`
-supply-chain policy (`a71eb23`). Standing process rule established at the same close: the code
+supply-chain policy (`059a00e`). Standing process rule established at the same close: the code
 implementer (Sol) must never run `cargo fmt` — formatting is now exclusively the gate's job
-(`0c14743` commit message).
+(`6a11f32` commit message).
 **Alternatives considered:**
 - Keep scoped `cargo fmt -p <crate>` inside each slice — rejected because the workspace was never
   fmt-clean, so any scoped fmt reflowed pre-existing code and polluted slice diffs; this "bit Slice A
-  and Slice D" and had accumulated a 37-hunk / 7-file backlog (`bc2a1b1` commit message; the Slice A
-  commit `9c96259` records having to revert frozen crates "to fmt-clean HEAD").
+  and Slice D" and had accumulated a 37-hunk / 7-file backlog (`68f71cd` commit message; the Slice A
+  commit `68f91e6` records having to revert frozen crates "to fmt-clean HEAD").
 - Piping gate output through `| tail` — rejected because tail's exit code 0 would mask a real failure
-  (`bc2a1b1` commit message: "never `| tail`, whose 0 would mask a real failure").
+  (`68f71cd` commit message: "never `| tail`, whose 0 would mask a real failure").
 **Why:** Reproducibility and diff-cleanliness for a multi-agent build loop where a different model
 writes the code than gates it (THE LAW: auditable, simple — the CONTRACTS_M5 Slice E rationale is
 that "the M4 finale nearly lived only in Temp", C5 §Slice E, line ~493). The pin exists so "a future
-rustfmt can't silently re-introduce the reflow drift" (`a71eb23` commit message).
+rustfmt can't silently re-introduce the reflow drift" (`059a00e` commit message).
 **Immediate effect on the harness:** No crate source behavior changed (both commits are
 behavior-preserving; gate re-verified 357/0/1 `--release`, clippy clean after the normalize,
-`bc2a1b1`). The build loop gained a single authoritative pass/fail command.
+`68f71cd`). The build loop gained a single authoritative pass/fail command.
 **Long-term consequence:** Every subsequent wave (all of Slice F, the Release Slice) is gated by
 `gate.ps1`; the "Sol never runs fmt / orchestrator runs the normalizing fmt post-run" division shows
 up in every later BUILD_LOG entry (e.g. BL:314-316, BL:174-176). Not everything in the Slice E spec
-shipped here: `deny.toml` was dormant ("cargo-deny is not installed yet", `a71eb23`), and
+shipped here: `deny.toml` was dormant ("cargo-deny is not installed yet", `059a00e`), and
 cargo-nextest + the AV canary + CI were deferred — CI/cargo-deny activation landed later in the
-Release Slice Section B (`d1f9ad0`, other writer's era), nextest/AV-canary went to backlog (BL:77-78).
-**Evidence:** commits `bc2a1b1`, `a71eb23`, `0c14743`; C5 §Slice E (lines ~491-509); C5 §0.1
-"Repo tooling (Slice E)" (line ~111); BL:404 (357/0/1); Slice A commit `9c96259` fmt note.
+Release Slice Section B (`cccb2dc`, other writer's era), nextest/AV-canary went to backlog (BL:77-78).
+**Evidence:** commits `68f71cd`, `059a00e`, `6a11f32`; C5 §Slice E (lines ~491-509); C5 §0.1
+"Repo tooling (Slice E)" (line ~111); BL:404 (357/0/1); Slice A commit `68f91e6` fmt note.
 **Article angle:** A two-model build loop forced the project to make formatting a mechanical gate
 step because letting the implementer format kept contaminating auditable diffs.
 **Review later:** no (the pitfall is recorded as RESOLVED; the deferred CI/nextest items were picked
@@ -58,24 +58,24 @@ the displays show the route-RESOLVED effort (`none/low/high/max`), not the abstr
   (held to a separate lever / M6)", C5 §8 A-M5-7).
 - Displaying the abstract posture in `nh profile`/`/profile` — rejected during the slice: displays
   were refined to the route-resolved effective effort because "the meter must not lie on
-  always-/no-thinking routes" (`d6e2c7f` commit message; BL:394-409).
+  always-/no-thinking routes" (`2564476` commit message; BL:394-409).
 **Why:** One owner of every user-selectable cost lever ("The single owner of every user-selectable
 cost lever — no cost knob lives anywhere else", C5 §Slice D, line ~482); tighten-only repo layering
 reuses the law model (THE LAW: congruent). Clamps honor route floors/ceilings so "an always-thinking
-route can't be silenced, a no-toggle route can't be forced to think" (`d6e2c7f`).
+route can't be silenced, a no-toggle route can't be forced to think" (`2564476`).
 **Immediate effect on the harness:** New `nh-routes::profiles` module (`Profiles`,
 `EffectiveExecutionPolicy`, `ThinkingPosture`), `nh-core::resolve_effort`,
 `Receipt.effective_profile` + `AgentLoop.profile` (additive, old receipts still parse), `--profile`
 on run/chat/tui, keyless `nh profile`, `/profile` live switch + HUD chip. Frozen nh-fleet gained
 exactly the pre-authorized compile glue (`profile: None`, A-M5-7 + addendum). Gate 357/0/1
-`--release`, clippy clean; FEEL-approved by the owner (`d6e2c7f`).
+`--release`, clippy clean; FEEL-approved by the owner (`2564476`).
 **Long-term consequence:** E4 exit met (frugal↔max-quality produce different built bodies on the
 same route, pinned by tests); the receipt-carried profile becomes the audit trail for "which lever
 was active when this money was spent". The M6 auto-router inherits a clean seam. The A-M5-7 addendum
 also created the "blanket glue" precedent: trivial exhaustive-literal ripples of an authorized field
 addition no longer force a stop (C5 §8 A-M5-7 addendum, "Blanket" paragraph).
-**Evidence:** commit `d6e2c7f`; C5 §Slice D (lines ~472-487) + §8 A-M5-7 and addendum (lines
-~658-705); BL:378-416; docs-close `0c14743`.
+**Evidence:** commit `2564476`; C5 §Slice D (lines ~472-487) + §8 A-M5-7 and addendum (lines
+~658-705); BL:378-416; docs-close `6a11f32`.
 **Article angle:** The cost knobs were deliberately reduced to two clamps on an already-chosen route,
 with the default profile contractually required to change nothing.
 **Review later:** yes — when the M6 auto-router takes over route selection and the deferred currency
@@ -99,7 +99,7 @@ shipped as a false claim.
   no-cache as "the honest 'our caching saved you N%'" with top-tier/peak as breakdown only (C5 §8
   A-M5-6, "Ratified FEEL/format calls").
 - Shipping "Esc to stop" while working — dropped under drop-if-hard because there was "no truthful
-  cooperative cancel path... rather than claim an interrupt that does not work" (`a0a4036` commit
+  cooperative cancel path... rather than claim an interrupt that does not work" (`a0f77be` commit
   message).
 - `/profile` + profile HUD chip in Slice C — held to Slice D because the `Profiles` module didn't
   exist yet (C5 §8 A-M5-6, last paragraph).
@@ -111,13 +111,13 @@ numbers come from the same catalog price data and the same JSONL token counts (K
 `cost_of`/`naive_cost`/`saved_pct` in nh-routes, the money HUD replacing the token-only line, `/why`
 + `nh why` backed by Slice A's `RejectionTrace`, the L6 approval fix, working heartbeat, OSC 9;4
 taskbar semáforo. Gate 339/0/1 `--release`; FEEL-approved and live-verified with a real GLM key
-(`a0a4036`; docs-close `3a5df91`).
+(`a0f77be`; docs-close `213ed0a`).
 **Long-term consequence:** These exact rules were later verified live as launch evidence
 (cross-currency refusal, usd_approx-on-fresh-fx — BL:24-39, other writers' era) and were extended by
 Slice F W3 into the resolver (stale FX → refuse to compare). The savings line is the standing
 launch-screenshot asset (K §2.3).
-**Evidence:** commit `a0a4036`; C5 §Slice C (lines ~443-468) + §8 A-M5-6 (lines ~639-656); K §2
-(lines 44-61); docs-close `3a5df91` ("FEEL-approved + live-verified with a real GLM key. Gate 339
+**Evidence:** commit `a0f77be`; C5 §Slice C (lines ~443-468) + §8 A-M5-6 (lines ~639-656); K §2
+(lines 44-61); docs-close `213ed0a` ("FEEL-approved + live-verified with a real GLM key. Gate 339
 pass / 0 fail").
 **Article angle:** The team wrote formal rules for when a currency conversion is allowed to appear
 at all, and deleted a keyboard hint rather than ship an interrupt that didn't work.
@@ -151,12 +151,12 @@ dual wires satisfy one audience entry, pinned by a test (C5 §8 A-M5-5, last par
 secure, congruent (reuses the law layering instead of a new trust mechanism).
 **Immediate effect on the harness:** `read_file` consults the guard before I/O; bundled law blocks
 env files/keys/certs from reads; unauthenticated or cross-Origin `fleet_run` refused ("it spends
-money"); gate 319/0/1 `--release` (`1a9d92a`; BL:418-449).
+money"); gate 319/0/1 `--release` (`edfcd62`; BL:418-449).
 **Long-term consequence:** The broker became the seam Slice F W1 hardened (url-crate host parity,
 fail-closed undeclared entries) — the era that followed built on this floor rather than redesigning
 it. The deferred broad-egress consult and privacy-router remained M6 commitments.
-**Evidence:** commit `1a9d92a`; C5 §Slice B (lines ~411-439) + §8 A-M5-4 (lines ~598-613) and
-A-M5-5 (lines ~615-637); BL:418-449; docs-close `b777290`.
+**Evidence:** commit `edfcd62`; C5 §Slice B (lines ~411-439) + §8 A-M5-4 (lines ~598-613) and
+A-M5-5 (lines ~615-637); BL:418-449; docs-close `918989a`.
 **Article angle:** The trust question "who may say where a credential is allowed to go" was answered
 with the same layered-law machinery that already refused repo-granted write autonomy.
 **Review later:** yes — the M6 privacy-router is the named owner of the broad egress consult site
@@ -187,18 +187,18 @@ get their own amendment with a failing test as proof.
   test `anthropic_body_roles_alternate_after_compaction` (C5 §8 A-M5-3).
 **Why:** The M5 thesis — the meter must be true before anything else is added (C5 header, "M5
 thesis"); the compaction fix alone converts a ~120× cache-miss cost bug into a cache hit (R-derived
-L7, `9c96259` commit message). THE LAW: honest/auditable (the RejectionTrace is the audit artifact
+L7, `68f91e6` commit message). THE LAW: honest/auditable (the RejectionTrace is the audit artifact
 `/why` reads).
 **Immediate effect on the harness:** nh-core + nh-routes changes confined to the §0.1 seams;
 +14 tests; gate 306/0/1 `--release`, clippy clean; no FEEL gate (no human-facing surface); two wire
 shapes (DeepSeek disable, Kimi toggle) entered the VERIFY-LIVE §7 ledger as guesses pending a real
-key (`9c96259`; docs-close `70a2f9d`).
+key (`68f91e6`; docs-close `7404878`).
 **Long-term consequence:** `resolve_capable`/`RejectionTrace` became the engine behind `/why`,
 `nh why`, and later the MCP `why` tool; the two wire guesses were confirmed live on 2026-07-20
 (BL:38-39, other writers' era). The amendment-ripple pattern (A-M5-2 style) was reused by
 A-M5-4/-7/-9 and became the project's standard way to touch frozen code.
-**Evidence:** commit `9c96259`; C5 §Slice A (lines ~359-407) + §8 A-M5-1/2/3 (lines ~547-596);
-BL:451-477 (research grounding); docs-close `70a2f9d` (306/0/1; "two [VERIFY-LIVE §7] wire shapes
+**Evidence:** commit `68f91e6`; C5 §Slice A (lines ~359-407) + §8 A-M5-1/2/3 (lines ~547-596);
+BL:451-477 (research grounding); docs-close `7404878` (306/0/1; "two [VERIFY-LIVE §7] wire shapes
 pending a live key").
 **Article angle:** The most expensive bug in the harness was a compaction routine that silently
 invalidated its own prompt cache, and the fix was constrained to keep every retained byte identical.
@@ -226,7 +226,7 @@ enumerated seams, each pinned by a new test.
 an amendment; M5 put the entire mutable surface and amendment list UP FRONT (§0.1 title: "UP FRONT —
 the A-M4-1 lesson"). THE LAW: auditable (every behavior change is a tagged [Δ] row with a pinning
 test), small (one verb — "*meter*. No second verb", C5 header).
-**Immediate effect on the harness:** CONTRACTS_M5 locked (`e2b2f02`) with per-crate seam tables,
+**Immediate effect on the harness:** CONTRACTS_M5 locked (`9e36a94`) with per-crate seam tables,
 E1–E5 exit criteria mapped to real tests, nh-fleet kept frozen; positioning doc
 `01-product/WHY_BEST_IN_CATEGORY_2026.md` written in the same commit.
 **Long-term consequence:** The seam-table + amendment mechanism carried the whole rest of the project
@@ -234,7 +234,7 @@ E1–E5 exit criteria mapped to real tests, nh-fleet kept frozen; positioning do
 routing, TOFU) became the named backlog. nh-fleet's continued freeze is what later made W5's
 reopening (A-M5-8) a formal event.
 **Evidence:** C5 header lines 1-29 ("owner scope-ratified 2026-07-17", the four rulings) + §0.1
-(lines 33-116); commit `e2b2f02`; BL:473-477.
+(lines 33-116); commit `9e36a94`; BL:473-477.
 **Article angle:** After one milestone of freezing crates whole, the project switched to freezing
 everything except an enumerated, test-pinned list of seams — published before any code was written.
 **Review later:** no (the mechanism itself; the deferred features have their own M6/M7 triggers).
@@ -250,7 +250,7 @@ GPT-5.6 Sol (xhigh) over the crate code (60-item backlog), 265 unique sources �
 ("make the meter true + visible + safe before adding autonomy or providers").
 **Alternatives considered:** The research's ranked backlog contained competing next moves that were
 explicitly sequenced OUT of M5: the learning router (moat, "off receipts already written"), privacy-
-aware routing, reliability, and ecosystem work all moved to the M6–M7 arc (`6de331a` commit message);
+aware routing, reliability, and ecosystem work all moved to the M6–M7 arc (`0039cc4` commit message);
 the report's LAW-rejection list also names whole approaches rejected outright (neural/learned router,
 a third wire, gateway dependency, LLMLingua-style compression — R:305-314).
 **Why:** The research surfaced ~12 live code issues in the shipped meter (thinking-defaults cost bug,
@@ -258,12 +258,12 @@ a third wire, gateway dependency, LLMLingua-style compression — R:305-314).
 BL:466-469); shipping intelligence on top of a lying meter would compound every one. The two-model
 convergence "is the spine" (C5 header). THE LAW: honest/congruent — every existing crate already
 serves the meter, so adopting the identity required zero new machinery (K §1, congruence test).
-**Immediate effect on the harness:** None (docs/research only — `d3cac39`, `6de331a`); the identity
+**Immediate effect on the harness:** None (docs/research only — `a2c2b83`, `0039cc4`); the identity
 sentence became the CONTRACTS_M5 preamble every seam had to be congruent with.
 **Long-term consequence:** Defined the beachhead-vs-moat split ("M5 wins the beachhead... M6 wins
 the moat", C5 header) and produced the durable research corpus (`00-start-here/
 RESEARCH_2026-07_harness.md`, 14 raw files) that later eras (audit, positioning posts) cite.
-**Evidence:** commits `d3cac39`, `6de331a`; BL:451-477; C5 header lines 7-18; K §1.
+**Evidence:** commits `a2c2b83`, `0039cc4`; BL:451-477; C5 header lines 7-18; K §1.
 **Article angle:** Two different frontier models were pointed at the same product from different
 angles — web landscape vs code — and the milestone was chosen from where their conclusions overlapped.
 **Review later:** no.
@@ -308,7 +308,7 @@ report as both a scope-discipline ruling (R:37) and item (5) of the v1 cut list 
 LAW-rejection list ("Full delegate adapter class in v1 — the economics broke (2026-06
 Anthropic/Google changes)", R:314). The new category positioning was committed with the M5 lock:
 "the honest, visible, auditable *metered* agent for open-weight models — native on Windows"
-(`01-product/WHY_BEST_IN_CATEGORY_2026.md:18`, committed in `e2b2f02`).
+(`01-product/WHY_BEST_IN_CATEGORY_2026.md:18`, committed in `9e36a94`).
 **Long-term consequence:** Deletes an entire adapter class from the launch surface and from the
 frozen-wire risk budget (no third process-spawning client class to secure); locks the product's
 frontier-model relationship to the review role only; the key-acquisition rule became "no
@@ -316,7 +316,7 @@ OpenAI/Anthropic/Google key until a measured workload proves the delegate insuff
 Re-entry condition is explicit: the economics returning (K F4).
 **Evidence:** K F4 (fable_K_product_cohesion_2026-07.md:90-92, with the five external links above);
 K §3 W3 (line 70); R:37, R:61, R:97-101, R:246-247, R:314; `catalog.toml:5,356-377`;
-`WHY_BEST_IN_CATEGORY_2026.md:18`; commits `d3cac39` (research), `e2b2f02` (positioning lock);
+`WHY_BEST_IN_CATEGORY_2026.md:18`; commits `a2c2b83` (research), `9e36a94` (positioning lock);
 `PRODUCT_BRIEF.md:9` (the superseded pitch — see UNSOURCED for its un-updated state).
 **Article angle:** Two vendor pricing moves in one June week made "borrow your subscription's agent"
 economically dead, and the project's response was to delete the feature class and rename what it was.
@@ -350,12 +350,12 @@ spend pointed at problems a better model can fix.
 across the whole ladder; default ladder `flash/none → k2.7/high → v4-pro/high → v4-pro/max → Opus
 review-pause GATE`; resume-continues-the-climb via an additive `#[serde(default)] escalate` flag on
 `RunStarted`. Gate 284/0/1 (+11), E1 kill-9 test unmodified and green; FEEL owner-approved with live
-parking captured during the actual Beijing peak window (BL:512-553; commit `ecadc0a`).
+parking captured during the actual Beijing peak window (BL:512-553; commit `25bd5b3`).
 **Long-term consequence:** Exactly-one-terminal + at-least-once invariants held through every later
 fleet change; the ladder was deliberately NOT touched by M5's resolver ("M5's resolver is *initial*
 cheapest-capable selection, a different concern from fleet fallback", C5 §0.1 frozen note) — the two
 routing mechanisms stayed separate concerns.
-**Evidence:** C4 §B.1-B.2 (lines 188-214); BL:512-553; commit `ecadc0a`; docs-close `4caad2c`.
+**Evidence:** C4 §B.1-B.2 (lines 188-214); BL:512-553; commit `25bd5b3`; docs-close `f439e17`.
 **Article angle:** The retry policy distinguishes "the model failed" from "the infrastructure
 failed" and only spends escalation money on the former, with the evidence carried as typed receipts.
 **Review later:** no.
@@ -384,13 +384,13 @@ scope and architecture, not from that market event; the market framing was added
 the research pass, which observed "the code already made the right call" (K F4).
 **Immediate effect on the harness:** `TaskGate` became a terminal ledger event (C4 §A.2) and
 `RunReport.gated` a first-class count; the ladder's top tier costs nothing until a human looks.
-Shipped and gated in Slice B (`ecadc0a`, BL:529-535).
+Shipped and gated in Slice B (`25bd5b3`, BL:529-535).
 **Long-term consequence:** Enabled the "frontier review gate" half of the post-cut positioning (K
 F4) — the review-pause is the only frontier-model touchpoint in the product, and it is human-mediated.
 Forecloses unattended frontier escalation unless a later milestone reverses it (C4 §7's "revisit").
 **Evidence:** C4:12 (ruling #2), C4 §B.2 (lines 208-214), C4 §7 (line 313); BL:565-570 (Carlos ruled
 the four decisions; line 568: "Opus 4.8 gate = **review-pause** (no live delegate)"); commit
-`ecadc0a`; K F4 (lines 90-92).
+`25bd5b3`; K F4 (lines 90-92).
 **Article angle:** At the exact moment vendors were re-pricing programmatic frontier access, the
 ladder's top rung shipped as a pause-for-human instead of an API call — for architecture reasons
 that the market news then retroactively vindicated.
@@ -419,7 +419,7 @@ final spec" security invariant (C4 §0.3).
 (`route_resolve`/`fleet_run`/`fleet_status`), `nh mcp serve` with the two-line preview banner;
 `tiny_http 0.12.0` compiled against the Cargo.lock checksum by the orchestrator on a clean registry
 (Sol's sandbox lacked network — BL:502-504). Gate 292/0/1 (+8); FEEL driven through the real binary
-over live HTTP; non-loopback `--addr` hard-rejected (BL:479-510; commit `26c6a22`).
+over live HTTP; non-loopback `--addr` hard-rejected (BL:479-510; commit `ece6bb0`).
 **Long-term consequence:** Zero-migration-debt posture for the MCP 2026-07-28 final ("nosis is
 stateless-native... while every incumbent migrates", K F8); the blocking/no-tokio choice held
 through the MCP metered-service expansion (later era) without a runtime rewrite; the plan's
@@ -427,7 +427,7 @@ through the MCP metered-service expansion (later era) without a runtime rewrite;
 the exit criteria; add only if cheap, else note as deferred (honest, not silent)", C4 §C.2) — they
 returned as `receipts`/`route_cost` in the Release Slice (other writers' era).
 **Evidence:** C4:13 (ruling #3), C4 §0.4 (lines 58-61), C4 §Slice C (lines 227-263), C4 §0.3
-(lines 50-52); BL:479-510, BL:568; commit `26c6a22`.
+(lines 50-52); BL:479-510, BL:568; commit `ece6bb0`.
 **Article angle:** The MCP server was written to the not-yet-final stateless spec using the
 project's own MCP client as its conformance test, on a blocking HTTP library chosen to keep tokio
 out of the workspace.
@@ -454,12 +454,12 @@ struct variant, forcing an authorized 2-line adaptation of non-frozen `nh_tui::m
 held as `String` in a `Mutex<OAuthState>` to avoid a Cargo edit — C4 §8 clarification, 2026-07-16).
 **Immediate effect on the harness:** `McpAuth::OAuth2 { token_url, client_id, vault_entry }` with
 refresh + single 401 retry; E4 test `oauth2_refreshes_on_absence_expiry_and_one_401_retry` replaced
-the deferral test; nh-tools 56/0, clippy clean; committed `aa751f4` (BL:451-458).
+the deferral test; nh-tools 56/0, clippy clean; committed `9344251` (BL:451-458).
 **Long-term consequence:** Established the amendment discipline that M5 §0.1 then inverted into
 up-front seam tables ("the A-M4-1 lesson") — the project's entire subsequent change-control model
 descends from this ruling and from watching Sol correctly stop at frozen boundaries.
 **Evidence:** C4:10-11 (ruling #1), C4 §Slice D (lines 267-289), C4 §8 (lines 315-333); BL:451-458,
-BL:565-567; commit `aa751f4`.
+BL:565-567; commit `9344251`.
 **Article angle:** The milestone allowed itself exactly one edit to frozen code, wrote the
 justification into the contract before the edit, and logged that half the authorization turned out
 to be unnecessary.
@@ -480,12 +480,12 @@ would need a wire change, STOP — it waits for M6" (C4 §B.3).
 is stated in the failure message rather than hidden. The live Agent-Swarm endpoint + Kimi key were
 logged as live-pending in the verify ledger (C4 §7).
 **Immediate effect on the harness:** The `Backend` enum + serde round-trip landed in Slice B
-(`ecadc0a`); fleet tasks could *name* the backend without the product pretending it worked.
+(`25bd5b3`); fleet tasks could *name* the backend without the product pretending it worked.
 **Long-term consequence:** The research's v1 cut list later LOCKED this state ("Kimi Swarm stays the
 minimal seam + honest stub it already is (owner ruling #4)", K F9); W5 (later era) preserved and
 persisted the `backend` field through resume rather than expanding it.
 **Evidence:** C4:14-15 (ruling #4), C4 §B.3 (lines 216-224), C4 §7 (line 312); BL:540-542, BL:569;
-commit `ecadc0a`; K F9 (line 111).
+commit `25bd5b3`; K F9 (line 111).
 **Article angle:** A speculative integration was shipped as one enum variant, one mock test, and an
 error message that names the milestone it actually arrives in.
 **Review later:** yes — trigger: M6, per the stub's own message ("arrives live in M6") and C4 §7's
@@ -519,7 +519,7 @@ headlessly. THE LAW: auditable (the ledger reuses `nh_core::receipt` typed recei
 **Immediate effect on the harness:** `crates/nh-fleet` + `nh fleet run/resume` CLI; the E1
 integration test spawns the real `nh` binary against an inert env-gated echo provider, kills it
 mid-run after ≥3 durable `TaskDone`, resumes, and proves all 10 tasks reach exactly one terminal
-with no committed task re-run. Gate 273/0/1 `--release` (+12); committed `347bce6` (BL:555-613).
+with no committed task re-run. Gate 273/0/1 `--release` (+12); committed `96db4f7` (BL:555-613).
 Two non-blocking notes were recorded honestly (the echo seam ships in the binary but is inert and
 cannot bypass the law gate; keyless fleet exits with an actionable line rather than opening).
 **Long-term consequence:** The ledger became the substrate for everything after it: the scheduler
@@ -528,7 +528,7 @@ and ladder append to it (Slice B), nh-mcp's `fleet_run`/`fleet_status` hand out 
 amendment event (A-M5-8, other writers' era). The exactly-one-terminal invariant survived every
 subsequent change.
 **Evidence:** C4 §A.2-A.8 (lines 91-181), §0.4 (lines 55-57), §0.5 (line 64); BL:555-613 (gate
-273/0/1; E1 PASSES); commit `347bce6`; docs-close `5889fb7`.
+273/0/1; E1 PASSES); commit `96db4f7`; docs-close `a4dd198`.
 **Article angle:** The fleet's crash-safety story is one fsync-per-event writer plus a pure function
 over the ledger — proven by a test that kills the real binary mid-run and checks nothing ran twice.
 **Review later:** no.

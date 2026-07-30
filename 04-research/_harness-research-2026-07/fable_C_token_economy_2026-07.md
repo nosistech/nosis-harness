@@ -1,5 +1,5 @@
 # LENS C — Token Economy + "Profiles" Feature (NOSIS Harness)
-**Research date: 2026-07-16/17 · Analyst: Fable 5 · Repo HEAD: bd35b4d (M4 Slice D uncommitted)**
+**Research date: 2026-07-16/17 · Analyst: Fable 5 · Repo HEAD: ebea709 (M4 Slice D uncommitted)**
 
 ---
 

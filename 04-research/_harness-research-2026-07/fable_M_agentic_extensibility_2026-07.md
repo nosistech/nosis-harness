@@ -213,7 +213,7 @@ gets a guard that blocks `Access::Write`/`Exec` outright.
 **Smallest MVP.** Parse `.nosis/agents/<name>.md` (same tiny frontmatter parser as Finding 1);
 fields: `description`, `tools` (`read-only` | `default`), `max_price_per_mtok`, `effort`. Fleet
 `Backend::Native` accepts an optional agent profile; `/fleet run reviewer: <task>` uses it. The
-agent body = the worker's system-prompt suffix (after the identity constitution — the 7faf44b
+agent body = the worker's system-prompt suffix (after the identity constitution — the d100d0d
 lesson says identity wrapping must apply at EVERY agent surface, including fleet workers).
 
 **LAW.** Modular (agents are files), simple (4 fields), secure (least-privilege guards per agent),

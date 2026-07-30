@@ -39,7 +39,7 @@ alternative TUI stacks.
 recorded comparison is consistent with that. nosis is Windows-first, which disqualifies **termion**
 outright (Unix-only). **cursive**'s mainstream backends pull ncurses C bindings — foreign code that sits
 badly with THE LAW's *auditable* and *lightweight* clauses, and which would later have collided with
-`unsafe_code = "forbid"` (`d1f9ad0`). **ratatui** is the maintained successor to the archived tui-rs, and
+`unsafe_code = "forbid"` (`cccb2dc`). **ratatui** is the maintained successor to the archived tui-rs, and
 **crossterm** is its default cross-platform backend. Under the dependency budget, ratatui+crossterm was
 the only stack satisfying every constraint.
 
@@ -73,7 +73,7 @@ revisit, so the "pinned defaults" appear to have simply held.
 what concretely defined that bar is unrecorded.
 
 **Rationale (reconstructed 2026-07-25):** The bar is recoverable from what the re-skin actually shipped
-in response to it (commit `3fcd00e`): a bordered frame, a chat transcript with distinct you/nosis roles
+in response to it (commit `44f9809`): a bordered frame, a chat transcript with distinct you/nosis roles
 and turn separation, framed centered modals with Clear-before-draw anti-bleed, a welcome screen, a
 key-hint strip, and type-freely slash commands with a live menu. Read backwards, the bar was **"it must
 read as a modern chat TUI, not a log dump."**
@@ -84,7 +84,7 @@ origin of the FEEL gate.
 
 ### 4. Slice F's mouse-wheel tradeoff
 
-**Known:** Mouse-capture removal is sourced (commit `3fcd00e`, BUILD_LOG:637-640) and reversed
+**Known:** Mouse-capture removal is sourced (commit `44f9809`, BUILD_LOG:637-640) and reversed
 CONTRACTS_M3 §9.2; no dated contract amendment recorded it.
 
 **RESOLVED 2026-07-25.** A retroactive amendment was written into `CONTRACTS_M3.md` §9.2. Sourced reason
@@ -125,7 +125,7 @@ it changed.
 ### 7. No explicit owner-ratification line for the delegate cut (K F4)
 
 **Known:** The cut is thoroughly adopted (RESEARCH:37, RESEARCH:61 v1 cut list item 5, RESEARCH:314
-LAW-rejection list; repositioning shipped in `e2b2f02`), but there is no dated "owner ratified F4"
+LAW-rejection list; repositioning shipped in `9e36a94`), but there is no dated "owner ratified F4"
 sentence.
 
 **Rationale (reconstructed 2026-07-25):** The cut is attributable by **evidence convergence**, not by a
@@ -149,8 +149,8 @@ never used (the branch rule) — and the value of auditing your own contracts ag
 ### 9. BUILD_LOG gaps for M5 Slices A, C, E
 
 **RESOLVED 2026-07-25 — backfilled.** Owner ratified backfill so BUILD_LOG is the complete public record
-before the v0.1.0 tag. Entries reconstructed strictly from commits `9c96259`, `a0a4036`, `bc2a1b1`,
-`a71eb23` and the docs commits `70a2f9d`, `3a5df91`, `0c14743`; any field not recoverable from a primary
+before the v0.1.0 tag. Entries reconstructed strictly from commits `68f91e6`, `a0f77be`, `68f71cd`,
+`059a00e` and the docs commits `7404878`, `213ed0a`, `6a11f32`; any field not recoverable from a primary
 source is marked "not recorded at the time" rather than guessed.
 
 ---
@@ -224,7 +224,7 @@ for it.
 ### 14. Why nosistech LLC (not the founder) holds the MIT copyright
 
 **Known:** The directive "(not Carlos personally)" is verbatim (CURRENT_TASK.md:3) and shipped
-(LICENSE:1-3, `b43b023`); no reason is recorded.
+(LICENSE:1-3, `7f4add6`); no reason is recorded.
 
 **Rationale (reconstructed 2026-07-25) — general practice, not a claim about the owner's reasoning:**
 entity-held copyright is conventional for three reasons: it keeps the project's IP transferable without
@@ -236,7 +236,7 @@ unrecorded, and the owner does not recall.
 
 ### 15. Why ASD-STE100 for SECURITY.md
 
-**Known:** The assignment and execution are sourced (CURRENT_TASK.md:3; `b43b023`).
+**Known:** The assignment and execution are sourced (CURRENT_TASK.md:3; `7f4add6`).
 
 **Rationale (reconstructed 2026-07-25):** ASD-STE100 is a controlled English developed for aerospace
 maintenance documentation, where a misread instruction is a safety event. It restricts vocabulary to one
@@ -420,7 +420,7 @@ onward; no single document declares it.
 
 **Rationale (reconstructed 2026-07-25):** The gate was **created by an act and named later.** It was
 created at M3 when the owner rejected a content-complete, test-passing, artifact-clean TUI purely on how
-it felt to use — reopening M3 into Slices D/E/F (`3fcd00e`). That rejection established the standing rule
+it felt to use — reopening M3 into Slices D/E/F (`44f9809`). That rejection established the standing rule
 that green tests are necessary and not sufficient. The *name* was applied retroactively once the pattern
 had repeated enough to need one. See item 3 — the "CodeWhale bar" and the FEEL gate are the same event
 viewed from two sides.
@@ -430,13 +430,13 @@ exists because a human said "no" to something that passed every automated check.
 
 ### 27. Fable 5's docs role — ratification moment
 
-**Known:** The role is well evidenced in practice (commit `202bdca`; memory: build-loop-resume) but no
+**Known:** The role is well evidenced in practice (commit `b708b8c`; memory: build-loop-resume) but no
 dated owner directive establishes it, unlike the 2026-07-13 Sol directive.
 
 **Rationale (reconstructed 2026-07-25):** The division **emerged from capability fit rather than being
 ratified**: code changes require a gate-verifiable diff against a frozen contract (Sol, one wave at a
 time, serialized), while docs are parallelizable, individually verifiable against the CLI, and carry no
-merge conflicts (Fable 5, fan-out). The clearest evidence is `202bdca`, where five writers each
+merge conflicts (Fable 5, fan-out). The clearest evidence is `b708b8c`, where five writers each
 independently accuracy-verified their output against the real CLI — a shape that only works for docs.
 
 **For a launch post: describe this as an emergent division of labour, not a decision.** There is no

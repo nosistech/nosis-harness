@@ -4,6 +4,31 @@
 
 **Canonical spec:** `NOSIS_HARNESS_Master_Plan.md` (root). Appendices A/B supersede Sections 1 and 3 where they conflict. The folders below are the working layer on top of it.
 
+## What this program does on your computer
+
+This section is for all readers. It uses short sentences and plain words on purpose.
+
+- **It runs on your computer.** There is no account, no sign-up, and no server that we operate.
+- **It sends no usage data to us.** There is no telemetry. We cannot see what you do.
+- **It speaks only to the services that you configure.** These are your AI providers, and any tool
+  servers that you add yourself. It contacts nothing else. Price data ships with the program; it is
+  not fetched.
+- **Your API keys go into the operating system credential store.** The program does not write them
+  to files. It does not print them. It removes key-shaped text from what it shows you.
+- **It asks before it runs a command.** The default answer is no. Piped input cannot approve a
+  command for you.
+- **It shows the cost of each call.** When a provider does not report a number, the program says so.
+  It does not guess and it does not fill in a zero.
+- **Files stay on your computer.** Receipts and run records go into a local `.nosis/` folder that
+  you can delete at any time.
+- **The optional MCP server is off by default.** When you start it, it listens only on your own
+  machine and it needs a token.
+- **Not yet tested on Linux or macOS.** See [Platform status](#platform-status) below. We do not
+  claim what we have not tested.
+
+For the technical detail behind each point, read [SECURITY.md](./SECURITY.md) (the security model,
+the audits, and how to report a problem) and [PRIVACY.md](./PRIVACY.md) (what leaves your machine).
+
 ## Install (from source)
 
 Prerequisites: the Rust toolchain, version **1.96.0**. The repo pins it in `rust-toolchain.toml`, so `rustup` selects the right version automatically.
