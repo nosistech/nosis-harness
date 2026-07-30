@@ -234,7 +234,11 @@ fn edits_file_passes_and_scrubs_receipt() {
     let usage = receipt.usage.expect("usage accumulated");
     assert_eq!(usage.prompt_tokens, 30);
     assert_eq!(usage.completion_tokens, 8);
-    assert_eq!(usage.cached_tokens, Some(2));
+    assert_eq!(
+        usage.cached_tokens, None,
+        "one unreported turn makes the cumulative cache measurement absent"
+    );
+    assert_eq!(receipt.cache_hit_pct, None);
 
     let edited = std::fs::read_to_string(dir.path().join("main.py")).unwrap();
     assert!(edited.contains("return 2"));

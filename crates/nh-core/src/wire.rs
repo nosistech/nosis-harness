@@ -139,9 +139,11 @@ pub struct Usage {
 
 /// Session cache-hit percentage from cumulative usage.
 ///
-/// Returns `None` when there are no prompt tokens to divide by or cached
-/// tokens cannot honestly be treated as a subset of prompt tokens.
-pub fn cache_hit_pct(prompt_tokens: u64, cached_tokens: u64) -> Option<f64> {
+/// Returns `None` when the provider did not report cached tokens, there are no
+/// prompt tokens to divide by, or cached tokens cannot honestly be treated as
+/// a subset of prompt tokens.
+pub fn cache_hit_pct(prompt_tokens: u64, cached_tokens: Option<u64>) -> Option<f64> {
+    let cached_tokens = cached_tokens?;
     if prompt_tokens == 0 || cached_tokens > prompt_tokens {
         return None;
     }

@@ -1,7 +1,5 @@
 //! Slash-command parsing and execution.
 
-use std::collections::BTreeMap;
-
 use super::{activate_palette_entry, UiAction};
 use crate::session::{effort_for, effort_name, parse_effort};
 use crate::state::{AgentEvent, App, Overlay, PaletteEntry, PickerKind, PickerRow, TranscriptKind};
@@ -180,23 +178,7 @@ fn model_picker_rows(app: &App) -> Vec<PickerRow> {
     let output_est = 1_024;
     let required = prompt_est.saturating_add(output_est);
     let ids = app.resolver.available();
-    let allowed = ids.iter().map(String::as_str).collect::<Vec<_>>();
     let at = Utc::now();
-    let comparison = app
-        .resolver
-        .resolve_capable(prompt_est, output_est, &allowed, at)
-        .ok();
-    let chosen = comparison.as_ref().map(|(route, _)| route.id().to_owned());
-    let reasons = comparison
-        .as_ref()
-        .map(|(_, trace)| {
-            trace
-                .rejections
-                .iter()
-                .map(|entry| (entry.route_id.as_str(), entry.reason.as_str()))
-                .collect::<BTreeMap<_, _>>()
-        })
-        .unwrap_or_default();
 
     ids.into_iter()
         .filter_map(|id| {
@@ -208,36 +190,37 @@ fn model_picker_rows(app: &App) -> Vec<PickerRow> {
                 });
             }
             let quote = route.price_at(at);
-            let relative = if route.class() == RouteClass::Delegate {
+            let capability = if route.class() == RouteClass::Delegate {
                 "unavailable: delegate".to_owned()
             } else if route.context().is_none() && required > 0 {
-                "relative unavailable: context unknown".to_owned()
+                "context unknown".to_owned()
             } else if route.context().is_some_and(|context| context < required) {
                 format!("not capable: context below {required} tokens")
-            } else if quote.is_none() {
-                "price unknown".to_owned()
-            } else if chosen.as_deref() == Some(id.as_str()) {
-                "cheapest capable".to_owned()
             } else {
-                reasons.get(id.as_str()).map_or_else(
-                    || "relative unavailable".to_owned(),
-                    |reason| match *reason {
-                        "same price; route id tie-break" => {
-                            "same price as cheapest capable".to_owned()
-                        }
-                        "higher price" => "higher than cheapest capable".to_owned(),
-                        other => other.to_owned(),
-                    },
-                )
+                "capable".to_owned()
             };
-            let currency = quote.as_ref().map_or_else(
-                || "currency unknown".to_owned(),
-                |price| price.currency.to_string(),
+            let price = quote.as_ref().map_or_else(
+                || "price unknown".to_owned(),
+                |quote| {
+                    cost_of(quote, prompt_est, 0, output_est).map_or_else(
+                        || "price invalid".to_owned(),
+                        |amount| {
+                            if amount == 0.0 {
+                                "free".to_owned()
+                            } else {
+                                format!(
+                                    "est {}",
+                                    money_with_gloss(amount, quote.currency, app.resolver.fx(), at)
+                                )
+                            }
+                        },
+                    )
+                },
             );
-            let price_state = quote.as_ref().map_or("", |price| {
-                if price.stale {
-                    " · price stale"
-                } else if price.confidence == PriceConfidence::VerifyLive {
+            let price_state = quote.as_ref().map_or("", |quote| {
+                if quote.stale {
+                    " · price stale · comparison refused"
+                } else if quote.confidence == PriceConfidence::VerifyLive {
                     " · price verify_live"
                 } else {
                     ""
@@ -245,7 +228,7 @@ fn model_picker_rows(app: &App) -> Vec<PickerRow> {
             });
             Some(PickerRow {
                 value: id.clone(),
-                label: format!("{id} · {relative} · {currency}{price_state}"),
+                label: format!("{id} · {capability} · {price}{price_state}"),
             })
         })
         .collect()

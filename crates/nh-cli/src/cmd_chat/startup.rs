@@ -129,7 +129,7 @@ pub(super) fn open(model: &str, profile: &str) -> anyhow::Result<ChatSession> {
         history: Vec::new(),
         session_in: 0,
         session_out: 0,
-        session_cached: 0,
+        session_cached: Some(0),
         session_cost: Vec::new(),
         unpriced_turns: 0,
         key_literals: initial.key_literals,

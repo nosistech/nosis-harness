@@ -23,6 +23,22 @@ pub enum FailureClass {
     Unreceipted,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RepairStats {
+    #[serde(default)]
+    pub tool_call_repair_attempts: u32,
+    #[serde(default)]
+    pub edit_whitespace_matches: u32,
+    #[serde(default)]
+    pub edit_indentation_matches: u32,
+}
+
+impl RepairStats {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Receipt {
     pub ts_utc: String,
@@ -35,6 +51,10 @@ pub struct Receipt {
     pub failure_class: Option<FailureClass>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<super::wire::Usage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_hit_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "RepairStats::is_empty")]
+    pub repairs: RepairStats,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_profile: Option<String>,
 }
@@ -118,6 +138,8 @@ mod tests {
             outcome: Outcome::Pass,
             failure_class: None,
             usage: None,
+            cache_hit_pct: None,
+            repairs: RepairStats::default(),
             effective_profile: None,
         }
     }
@@ -192,5 +214,35 @@ mod tests {
             .map(|line| serde_json::from_str::<Receipt>(line).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(receipts.len(), WRITERS * RECEIPTS_PER_WRITER);
+    }
+
+    #[test]
+    fn cache_percentage_serialization_distinguishes_absent_from_measured_zero() {
+        let absent = serde_json::to_value(receipt("absent")).unwrap();
+        assert!(absent.get("cache_hit_pct").is_none());
+
+        let mut measured = receipt("measured zero");
+        measured.usage = Some(crate::wire::Usage {
+            prompt_tokens: 20,
+            completion_tokens: 2,
+            cached_tokens: Some(0),
+        });
+        measured.cache_hit_pct = Some(0.0);
+        let measured = serde_json::to_value(measured).unwrap();
+        assert_eq!(measured["cache_hit_pct"], 0.0);
+        assert_eq!(measured["usage"]["cached_tokens"], 0);
+    }
+
+    #[test]
+    fn repair_counters_are_omitted_when_empty_and_persisted_when_used() {
+        let empty = serde_json::to_value(receipt("empty")).unwrap();
+        assert!(empty.get("repairs").is_none());
+
+        let mut repaired = receipt("repaired");
+        repaired.repairs.tool_call_repair_attempts = 1;
+        repaired.repairs.edit_indentation_matches = 2;
+        let repaired = serde_json::to_value(repaired).unwrap();
+        assert_eq!(repaired["repairs"]["tool_call_repair_attempts"], 1);
+        assert_eq!(repaired["repairs"]["edit_indentation_matches"], 2);
     }
 }

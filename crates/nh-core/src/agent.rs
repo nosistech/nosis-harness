@@ -2,16 +2,17 @@
 //! feed results back → repeat until final answer or max_turns (then Outcome::Timeout).
 
 mod context;
+mod tool_repair;
 
 pub use context::{effective_context, PrefixSeal};
 
-use crate::receipt::{FailureClass, Outcome, Receipt, ReceiptWriter};
+use crate::receipt::{FailureClass, Outcome, Receipt, ReceiptWriter, RepairStats};
 use crate::wire::{ChatClient, ChatMessage, ChatRequest, ThinkingEffort, ToolCallReq, Usage};
 use context::{
     compact_history, compaction_input_tokens, context_percentage, estimate_request_tokens,
     plain_msg, COMPACT_AT,
 };
-use nh_tools::{Tool, ToolCtx};
+use nh_tools::{EditMatchTier, Tool, ToolAudit, ToolCtx};
 
 pub const MAX_TASK_BYTES: usize = 64 * 1024;
 
@@ -37,6 +38,22 @@ enum FinishKind {
     Unknown,
 }
 
+struct ToolRun {
+    output: String,
+    repair_attempted: bool,
+    repair_notes: Vec<String>,
+    audit: Vec<ToolAudit>,
+}
+
+struct ReceiptFields {
+    turns: u32,
+    tool_calls: u32,
+    outcome: Outcome,
+    failure_class: Option<FailureClass>,
+    usage: Option<Usage>,
+    repairs: RepairStats,
+}
+
 fn classify_finish_reason(raw: &str) -> FinishKind {
     match raw.trim() {
         "" | "stop" | "end_turn" | "stop_sequence" => FinishKind::Normal,
@@ -56,14 +73,14 @@ fn add_usage_checked(total: &mut Usage, usage: &Usage) -> bool {
     else {
         return false;
     };
-    let cached_tokens = match usage.cached_tokens {
-        Some(cached) => {
-            let Some(total_cached) = total.cached_tokens.unwrap_or(0).checked_add(cached) else {
+    let cached_tokens = match (total.cached_tokens, usage.cached_tokens) {
+        (Some(total_cached), Some(cached)) => {
+            let Some(total_cached) = total_cached.checked_add(cached) else {
                 return false;
             };
             Some(total_cached)
         }
-        None => total.cached_tokens,
+        _ => None,
     };
 
     total.prompt_tokens = prompt_tokens;
@@ -154,7 +171,11 @@ impl AgentLoop {
 
         let mut turns: u32 = 0;
         let mut tool_calls: u32 = 0;
-        let mut usage_total = Usage::default();
+        let mut repairs = RepairStats::default();
+        let mut usage_total = Usage {
+            cached_tokens: Some(0),
+            ..Usage::default()
+        };
         let mut saw_usage = false;
         let mut usage_overflowed = false;
         let mut latest_prompt_tokens = None;
@@ -195,11 +216,14 @@ impl AgentLoop {
                     self.report_prefix_drift(&prefix_seal, history, &mut prefix_drift_reported);
                     let mut receipt = self.make_receipt(
                         task,
-                        turns,
-                        tool_calls,
-                        Outcome::Fail,
-                        Some(FailureClass::Verification),
-                        (!usage_overflowed && saw_usage).then(|| usage_total.clone()),
+                        ReceiptFields {
+                            turns,
+                            tool_calls,
+                            outcome: Outcome::Fail,
+                            failure_class: Some(FailureClass::Verification),
+                            usage: (!usage_overflowed && saw_usage).then(|| usage_total.clone()),
+                            repairs,
+                        },
                     );
                     self.append_receipt(&mut receipt);
                     return Err(e);
@@ -233,11 +257,14 @@ impl AgentLoop {
                 };
                 let mut receipt = self.make_receipt(
                     task,
-                    turns,
-                    tool_calls,
-                    outcome,
-                    failure_class,
-                    (!usage_overflowed && saw_usage).then(|| usage_total.clone()),
+                    ReceiptFields {
+                        turns,
+                        tool_calls,
+                        outcome,
+                        failure_class,
+                        usage: (!usage_overflowed && saw_usage).then(|| usage_total.clone()),
+                        repairs,
+                    },
                 );
                 self.append_receipt(&mut receipt);
                 return Ok((text, receipt));
@@ -246,9 +273,34 @@ impl AgentLoop {
                 tool_calls += 1;
                 self.emit(&progress_line(turns, call));
                 let result = self.run_tool(call);
+                if result.repair_attempted {
+                    repairs.tool_call_repair_attempts =
+                        repairs.tool_call_repair_attempts.saturating_add(1);
+                }
+                for note in &result.repair_notes {
+                    self.emit(&format!("turn {turns}: repaired tool call — {note}"));
+                }
+                for audit in &result.audit {
+                    match audit {
+                        ToolAudit::EditMatch(EditMatchTier::WhitespaceNormalized) => {
+                            repairs.edit_whitespace_matches =
+                                repairs.edit_whitespace_matches.saturating_add(1);
+                            self.emit(&format!(
+                                "turn {turns}: edit_file used whitespace-normalized match"
+                            ));
+                        }
+                        ToolAudit::EditMatch(EditMatchTier::IndentationFlexible) => {
+                            repairs.edit_indentation_matches =
+                                repairs.edit_indentation_matches.saturating_add(1);
+                            self.emit(&format!(
+                                "turn {turns}: edit_file used indentation-flexible match"
+                            ));
+                        }
+                    }
+                }
                 history.push(ChatMessage {
                     role: "tool".into(),
-                    content: Some(result),
+                    content: Some(result.output),
                     tool_calls: None,
                     tool_call_id: Some(call.id.clone()),
                     reasoning_content: None,
@@ -262,11 +314,14 @@ impl AgentLoop {
 
         let mut receipt = self.make_receipt(
             task,
-            turns,
-            tool_calls,
-            Outcome::Timeout,
-            Some(FailureClass::Constraint),
-            (!usage_overflowed && saw_usage).then(|| usage_total.clone()),
+            ReceiptFields {
+                turns,
+                tool_calls,
+                outcome: Outcome::Timeout,
+                failure_class: Some(FailureClass::Constraint),
+                usage: (!usage_overflowed && saw_usage).then(|| usage_total.clone()),
+                repairs,
+            },
         );
         self.append_receipt(&mut receipt);
         Ok((
@@ -288,22 +343,54 @@ impl AgentLoop {
     }
 
     /// Execute one tool call; every failure becomes a message the model can act on.
-    fn run_tool(&self, call: &ToolCallReq) -> String {
-        let Some(tool) = self.tools.iter().find(|t| t.spec().name == call.name) else {
-            let names: Vec<String> = self.tools.iter().map(|t| t.spec().name).collect();
-            return format!(
-                "unknown tool '{}' — available tools: {}",
-                call.name,
-                names.join(", ")
+    fn run_tool(&self, call: &ToolCallReq) -> ToolRun {
+        let (args, mut repair_notes) = match tool_repair::parse_arguments(&call.arguments) {
+            Ok(parsed) => (parsed.value, parsed.notes),
+            Err(failure) => {
+                return finish_tool_run(
+                    format!(
+                        "invalid arguments JSON for '{}': {}",
+                        call.name, failure.error
+                    ),
+                    failure.notes,
+                    Vec::new(),
+                );
+            }
+        };
+
+        let exact = self.tools.iter().find(|tool| tool.spec().name == call.name);
+        let (tool, tool_name) = if let Some(tool) = exact {
+            (Some(tool), call.name.as_str())
+        } else if let Some(alias) = tool_repair::canonical_tool_name(&call.name) {
+            repair_notes.push(format!("mapped tool name '{}' to '{alias}'", call.name));
+            (
+                self.tools.iter().find(|tool| tool.spec().name == alias),
+                alias,
+            )
+        } else {
+            (None, call.name.as_str())
+        };
+
+        let Some(tool) = tool else {
+            let names: Vec<String> = self.tools.iter().map(|tool| tool.spec().name).collect();
+            return finish_tool_run(
+                format!(
+                    "unknown tool '{}' — available tools: {}",
+                    call.name,
+                    names.join(", ")
+                ),
+                repair_notes,
+                Vec::new(),
             );
         };
-        let args: serde_json::Value = match serde_json::from_str(&call.arguments) {
-            Ok(v) => v,
-            Err(e) => return format!("invalid arguments JSON for '{}': {e}", call.name),
-        };
-        match tool.execute(args, &self.ctx) {
-            Ok(out) => out,
-            Err(e) => format!("tool '{}' failed: {e}", call.name),
+
+        match tool.execute_with_audit(args, &self.ctx) {
+            Ok(execution) => finish_tool_run(execution.output, repair_notes, execution.audit),
+            Err(error) => finish_tool_run(
+                format!("tool '{tool_name}' failed: {error}"),
+                repair_notes,
+                Vec::new(),
+            ),
         }
     }
 
@@ -325,15 +412,18 @@ impl AgentLoop {
         }
     }
 
-    fn make_receipt(
-        &self,
-        task: &str,
-        turns: u32,
-        tool_calls: u32,
-        outcome: Outcome,
-        failure_class: Option<FailureClass>,
-        usage: Option<Usage>,
-    ) -> Receipt {
+    fn make_receipt(&self, task: &str, fields: ReceiptFields) -> Receipt {
+        let ReceiptFields {
+            turns,
+            tool_calls,
+            outcome,
+            failure_class,
+            usage,
+            repairs,
+        } = fields;
+        let cache_hit_pct = usage
+            .as_ref()
+            .and_then(|usage| crate::wire::cache_hit_pct(usage.prompt_tokens, usage.cached_tokens));
         Receipt {
             ts_utc: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             model_id: self.model_id.clone(),
@@ -343,8 +433,25 @@ impl AgentLoop {
             outcome,
             failure_class,
             usage,
+            cache_hit_pct,
+            repairs,
             effective_profile: self.profile.clone(),
         }
+    }
+}
+
+fn finish_tool_run(output: String, repair_notes: Vec<String>, audit: Vec<ToolAudit>) -> ToolRun {
+    let repair_attempted = !repair_notes.is_empty();
+    let output = if repair_attempted {
+        format!("[tool-call repair: {}]\n{output}", repair_notes.join("; "))
+    } else {
+        output
+    };
+    ToolRun {
+        output,
+        repair_attempted,
+        repair_notes,
+        audit,
     }
 }
 

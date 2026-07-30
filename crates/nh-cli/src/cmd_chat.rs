@@ -97,7 +97,7 @@ struct ChatSession {
     history: Vec<ChatMessage>,
     session_in: u64,
     session_out: u64,
-    session_cached: u64,
+    session_cached: Option<u64>,
     session_cost: Vec<SessionCost>,
     unpriced_turns: usize,
     /// Every key literal this session has seen — switched-away keys stay scrubbed.
@@ -376,16 +376,18 @@ fn print_tools(s: &ChatSession, out: &mut dyn Write, err: &mut dyn Write) {
 fn footer(s: &ChatSession) -> String {
     let now = (s.now)();
     let mut line = format!(
-        "{} | {} | session {} | tokens {} in / {} out / {} cached",
+        "{} | {} | session {} | tokens {} in / {} out",
         s.route.id(),
         s.route.peak_status(now, s.local_offset),
         session_money(s, now),
         s.session_in,
-        s.session_out,
-        s.session_cached
+        s.session_out
     );
-    if let Some(pct) = cache_hit_pct(s.session_in, s.session_cached) {
-        line.push_str(&format!(" | cache {pct:.0}%"));
+    if let (Some(cached), Some(pct)) = (
+        s.session_cached,
+        cache_hit_pct(s.session_in, s.session_cached),
+    ) {
+        line.push_str(&format!(" / {cached} cached | cache {pct:.0}%"));
     }
     line
 }
@@ -399,12 +401,15 @@ fn add_session_usage(s: &mut ChatSession, usage: &nh_core::wire::Usage) -> bool 
         s.unpriced_turns = s.unpriced_turns.saturating_add(1);
         return false;
     };
-    let Some(session_cached) = s
-        .session_cached
-        .checked_add(usage.cached_tokens.unwrap_or(0))
-    else {
-        s.unpriced_turns = s.unpriced_turns.saturating_add(1);
-        return false;
+    let session_cached = match (s.session_cached, usage.cached_tokens) {
+        (Some(session_cached), Some(cached)) => {
+            let Some(session_cached) = session_cached.checked_add(cached) else {
+                s.unpriced_turns = s.unpriced_turns.saturating_add(1);
+                return false;
+            };
+            Some(session_cached)
+        }
+        _ => None,
     };
 
     s.session_in = session_in;

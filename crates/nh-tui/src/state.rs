@@ -59,12 +59,12 @@ impl TimelineEntry {
         }
     }
 
-    pub(super) fn tokens(&self) -> (u64, u64, u64) {
-        self.usage.as_ref().map_or((0, 0, 0), |usage| {
+    pub(super) fn tokens(&self) -> (u64, u64, Option<u64>) {
+        self.usage.as_ref().map_or((0, 0, None), |usage| {
             (
                 usage.prompt_tokens,
                 usage.completion_tokens,
-                usage.cached_tokens.unwrap_or(0),
+                usage.cached_tokens,
             )
         })
     }
@@ -175,6 +175,13 @@ pub(super) enum Overlay {
 /// Everything the render loop learns from the worker.
 pub enum AgentEvent {
     Progress(String),
+    ModelStarted {
+        route: String,
+        started_at: DateTime<Utc>,
+    },
+    ModelFinished {
+        route: String,
+    },
     ToolStarted {
         name: String,
         started_at: DateTime<Utc>,
@@ -236,10 +243,17 @@ pub(super) struct ActiveTool {
     pub(super) started_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ActiveModel {
+    pub(super) route: String,
+    pub(super) started_at: DateTime<Utc>,
+}
+
 /// Unit-testable state for the Slice A renderer.
 pub struct App {
     pub(super) status: Status,
     pub(super) working_since: Option<DateTime<Utc>>,
+    pub(super) active_model: Option<ActiveModel>,
     pub(super) active_tool: Option<ActiveTool>,
     pub(super) resolver: RouteResolver,
     pub(super) route: ResolvedRoute,
@@ -291,6 +305,7 @@ impl App {
                 Status::Idle
             },
             working_since: None,
+            active_model: None,
             active_tool: None,
             effort: effort_for(
                 execution_policy.posture,
@@ -303,7 +318,10 @@ impl App {
             active_profile: execution_policy.profile,
             transcript: Vec::new(),
             pending_approval: None,
-            usage: Usage::default(),
+            usage: Usage {
+                cached_tokens: Some(0),
+                ..Usage::default()
+            },
             input: String::new(),
             budget,
             scroll_back: 0,
@@ -380,6 +398,7 @@ impl App {
         }
         self.input.clear();
         self.current_task_compacted = false;
+        self.active_model = None;
         self.active_tool = None;
         self.push_line(&task, TranscriptKind::Task);
         self.set_status(Status::Working, Utc::now());
@@ -505,14 +524,13 @@ impl App {
     }
 
     pub(super) fn hud_line(&self, now: DateTime<Utc>) -> String {
-        let cached = self.usage.cached_tokens.unwrap_or(0);
         let mut line = format!(
             "session {} · in {} · out {}",
             self.session_money(now),
             self.usage.prompt_tokens,
             self.usage.completion_tokens
         );
-        if let Some(pct) = cache_hit_pct(self.usage.prompt_tokens, cached) {
+        if let Some(pct) = cache_hit_pct(self.usage.prompt_tokens, self.usage.cached_tokens) {
             line.push_str(&format!(" · cache {pct:.0}%"));
         }
         line.push_str(&format!(

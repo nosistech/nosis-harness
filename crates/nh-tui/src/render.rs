@@ -45,8 +45,11 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &App) {
 }
 pub(super) fn main_block(app: &App) -> Block<'static> {
     let now = Utc::now();
-    let (status, status_style) = match (&app.status, &app.active_tool) {
-        (Status::Working, Some(tool)) => tool_status_chip(&tool.name, tool.started_at, now),
+    let (status, status_style) = match (&app.status, &app.active_tool, &app.active_model) {
+        (Status::Working, Some(tool), _) => tool_status_chip(&tool.name, tool.started_at, now),
+        (Status::Working, None, Some(request)) => {
+            model_status_chip(&request.route, request.started_at, now)
+        }
         _ => status_chip(&app.status, app.working_since, now),
     };
     let left_title = Line::from(vec![
@@ -549,6 +552,20 @@ pub(super) fn tool_status_chip(
     let elapsed = now.signed_duration_since(started_at).num_seconds().max(0);
     (
         format!("● TOOL {name} · {elapsed}s"),
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+pub(super) fn model_status_chip(
+    route: &str,
+    started_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> (String, Style) {
+    let elapsed = now.signed_duration_since(started_at).num_seconds().max(0);
+    (
+        format!("● WAITING {route} · {elapsed}s"),
         Style::default()
             .fg(Color::Green)
             .add_modifier(Modifier::BOLD),

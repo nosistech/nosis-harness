@@ -172,6 +172,31 @@ fn add_usage_reports_overflow_without_partially_mutating_totals() {
 }
 
 #[test]
+fn add_usage_keeps_absent_cache_measurement_sticky() {
+    let mut total = Usage {
+        cached_tokens: Some(0),
+        ..Usage::default()
+    };
+    assert!(!add_usage(
+        &mut total,
+        &Usage {
+            prompt_tokens: 10,
+            completion_tokens: 1,
+            cached_tokens: None,
+        }
+    ));
+    assert!(!add_usage(
+        &mut total,
+        &Usage {
+            prompt_tokens: 10,
+            completion_tokens: 1,
+            cached_tokens: Some(5),
+        }
+    ));
+    assert_eq!(total.cached_tokens, None);
+}
+
+#[test]
 fn tracked_tool_emits_exact_start_and_finish_events() {
     struct TestTool;
 
@@ -202,5 +227,108 @@ fn tracked_tool_emits_exact_start_and_finish_events() {
     match received.recv().unwrap() {
         AgentEvent::ToolFinished { name } => assert_eq!(name, "test_tool"),
         _ => panic!("second event must finish the tool"),
+    }
+}
+
+#[test]
+fn tracked_tool_preserves_inner_audit_metadata() {
+    struct AuditedTool;
+
+    impl Tool for AuditedTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "edit_file".into(),
+                description: "test only".into(),
+                parameters: ToolArgs::default(),
+            }
+        }
+
+        fn execute(&self, _args: ToolArgs, _ctx: &ToolCtx) -> anyhow::Result<String> {
+            Ok("edited".into())
+        }
+
+        fn execute_with_audit(
+            &self,
+            _args: ToolArgs,
+            _ctx: &ToolCtx,
+        ) -> anyhow::Result<ToolExecution> {
+            Ok(ToolExecution {
+                output: "edited".into(),
+                audit: vec![nh_tools::ToolAudit::EditMatch(
+                    nh_tools::EditMatchTier::IndentationFlexible,
+                )],
+            })
+        }
+    }
+
+    let (events, received) = mpsc::channel();
+    let mut tools = tracked_tools(vec![Box::new(AuditedTool)], &events);
+    let execution = tools
+        .remove(0)
+        .execute_with_audit(
+            ToolArgs::default(),
+            &ToolCtx::new(PathBuf::from("."), Box::new(|_| false)),
+        )
+        .unwrap();
+
+    assert_eq!(
+        execution.audit,
+        vec![nh_tools::ToolAudit::EditMatch(
+            nh_tools::EditMatchTier::IndentationFlexible
+        )]
+    );
+    assert!(matches!(
+        received.recv().unwrap(),
+        AgentEvent::ToolStarted { .. }
+    ));
+    assert!(matches!(
+        received.recv().unwrap(),
+        AgentEvent::ToolFinished { .. }
+    ));
+}
+
+#[test]
+fn tracked_client_emits_start_and_finish_on_success_and_failure() {
+    struct FixedClient {
+        fail: bool,
+    }
+
+    impl ChatClient for FixedClient {
+        fn complete(&self, _request: &ChatRequest) -> anyhow::Result<ChatResponse> {
+            if self.fail {
+                anyhow::bail!("provider failed");
+            }
+            Ok(ChatResponse {
+                message: ChatMessage {
+                    role: "assistant".into(),
+                    content: Some("done".into()),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                },
+                finish_reason: "stop".into(),
+                usage: None,
+            })
+        }
+    }
+
+    let request = ChatRequest {
+        model: "model".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+        thinking: ThinkingEffort::None,
+    };
+    for fail in [false, true] {
+        let (events, received) = mpsc::channel();
+        let client = tracked_client(Box::new(FixedClient { fail }), "route-id", &events);
+        assert_eq!(client.complete(&request).is_err(), fail);
+        match received.recv().unwrap() {
+            AgentEvent::ModelStarted { route, .. } => assert_eq!(route, "route-id"),
+            _ => panic!("first event must start the model request"),
+        }
+        match received.recv().unwrap() {
+            AgentEvent::ModelFinished { route } => assert_eq!(route, "route-id"),
+            _ => panic!("second event must finish the model request"),
+        }
     }
 }
