@@ -1,269 +1,229 @@
 # Continue Here — authoritative checkpoint
 
-**Updated:** 2026-07-29 America/Guatemala
+**Updated:** 2026-07-30 America/Guatemala
 **Resume phrase:** `continue`
 **Works for:** Codex or Claude in `C:\Users\capv2\Desktop\nosis-Harness`
 
 This file supersedes every older checkpoint and "next task" in `CURRENT_TASK.md`. Historical records
 remain useful for provenance, but do not execute their stale instructions.
 
-## THE HEADLINE: FEEL PASSED and the release candidate is COMMITTED (2026-07-29)
+## THE HEADLINE: the product work is DONE through wave 4. The repo is public. CI is 3/4 green.
 
-The owner passed the Windows FEEL gate against the rebuilt binary — the last subjective blocker. Six
-findings came out of the pass; all six are captured in wave 4 (below) and none blocked the verdict.
+All planned feature work for v0.1.0 has shipped and is gated. The source is public at
+`github.com/nosistech/nosis-harness`, HEAD `5b4cefb`, working tree **CLEAN**, local and remote **in
+sync**. Gate: **`GATE: PASS` — 579 passed / 0 failed / 1 ignored `--release`**, with `fmt --check`,
+`clippy -D warnings`, `rustdoc -D warnings` and `cargo deny --locked check` all green.
 
-The owner then authorized the commit. **`cba2444 feat: complete the v0.1.0 release candidate` —
-90 files, +6985/−3980. The working tree is CLEAN.** Everything that had accumulated uncommitted
-(Slice G, the responsibility refactor, and three waves) is now in git history.
+**What is left is not feature work.** It is: the owner's Linux/macOS verification, three small
+decisions, and the tag.
 
-**NOTHING HAS BEEN PUSHED.** The remote is still an empty public repository, so there is no
-`origin/main` ref yet (`git log origin/main..HEAD` fails — that is expected, not a fault).
+## ⚠ EVERY COMMIT SHA CHANGED ON 2026-07-30
 
-**The next action is to ask the owner whether to push.** Pushing is outward-facing and makes the
-source public at `github.com/nosistech/nosis-harness`. `continue` alone is NOT push authorization —
-the owner must say so explicitly.
+History was rewritten to remove the owner's personal email from the author and committer fields of
+all 74 commits. **No file content changed** — the tree object was byte-identical (`eac1553`) before
+and after. The rewrite was force-pushed.
 
-Pre-commit guards that were run and passed, so they need not be repeated for `cba2444`: a six-pattern
-secret-shape scan over the staged diff (`sk-`, Bearer+token, JWT, 40+ hex, AWS key, private-key
-block) returned **0 matches**; no `.nosis/`, `target/`, log, `.env`, or stray artifact was staged;
-and the gate was green at commit time. Two modules listed in the previous checkpoint
-(`nh-routes/src/profiles/compile.rs`, `nh-tui/src/worker/session.rs`) were **consolidated away by the
-waves, not lost** — neither exists on disk, neither is ignored, and the gate passes.
+**To resolve ANY old SHA quoted in an older note, an article draft, or a commit message, use the full
+74-entry map in `08-decisions-and-risk/HISTORY_REWRITE_2026-07-30.md`.** 315 stale references across
+20 documents were repaired (zero residual). **Commit messages still quote old SHAs and were left
+alone deliberately** — repairing them needs a second rewrite for a cosmetic gain.
+
+`git config --local user.email` is now `98294098+arparvar@users.noreply.github.com`. **Do not reset
+it.** **Do not rewrite history again** without an explicit owner decision; a second rewrite would
+invalidate the published map.
 
 ## First action on `continue`
 
 Read this file in full. Then verify with read-only commands:
 
 ```powershell
-git status --short          # expect CLEAN (zero entries)
-git log -1 --oneline        # expect cba2444
-git remote -v               # expect https://github.com/nosistech/nosis-harness.git
-gh auth status -h github.com
-gh repo view nosistech/nosis-harness --json isEmpty,visibility   # expect isEmpty=true until pushed
+git status --short                  # expect CLEAN
+git log -1 --oneline                # expect 5b4cefb
+git log origin/main..HEAD --oneline # expect empty (in sync)
+git config --local user.email       # expect 98294098+arparvar@users.noreply.github.com
+gh run list --repo nosistech/nosis-harness --limit 3
 Get-Process -Name nh,codex -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,StartTime,Path
 ```
 
-If `git status` is dirty, someone has worked since this checkpoint — read the diff before acting.
-
-Do not restart the audit, redo the refactor, create another repository, or re-run any completed wave.
+Then ask the owner which of the three open decisions below to take, or proceed with the Linux work if
+the owner is ready for it.
 
 ## Hard constraints
 
-- Preserve the entire uncommitted tree.
-- **Do not commit, push, or tag until the owner explicitly authorizes it.** FEEL passing does not
-  authorize the commit; only an explicit owner "yes" does.
-- **Do not run write-mode `cargo fmt`.** `cargo fmt --all --check` is allowed and is a gate step.
+- **Do not commit, push, or tag without owner authorization.** The orchestrator commits gated work;
+  pushing and tagging are outward-facing.
+- **Do not run write-mode `cargo fmt`.** `cargo fmt --all --check` is a gate step.
+- **Do not rewrite git history again.** See the warning above.
 - Do not expose MCP publicly. Loopback-only, bearer-guarded, preview.
 - Do not delete or truncate `.nosis/` receipts or Fleet state.
-- Do not add dependencies or broaden scope to continue the release.
-- Never print, persist, or upload credentials. GitHub auth lives in the OS keyring.
-- **Never run two nosis codexes.** The owner runs his own (e.g. PIDs 30868, 5160).
+- Do not add dependencies or broaden scope to finish the release.
+- Never print, persist, or upload credentials. `nh key` has no read subcommand by design.
+- **Never run two nosis codexes.** The owner runs his own; check `--working-dir` before assuming a
+  codex process is yours. On 2026-07-29 three unrelated codexes were running on a different project.
 - Roles: **Sol max = executor** (all code, one wave at a time, via `codex exec`), **Opus 5 =
   orchestrator** (briefs, gates, review, commits; writes no feature code), **Fable 5 = research**.
+- **Sol launch shape** (PS 5.1 mangles big multiline args, so the prompt goes via STDIN):
+  `Get-Content -Raw <brief>.txt | codex exec -m gpt-5.6-sol -c 'model_reasoning_effort=max' -s workspace-write --color never -C <repo> -o <out>.md *> <run>.log`
+- **The background-command timeout ceiling is 10 minutes.** A 7-item wave exceeded it and Sol was
+  killed mid-verification (no work was lost, but no self-report either). For long waves, launch codex
+  detached rather than as a timed background command, or split the wave.
+- **Write commit messages to a file and use `git commit -F`.** A here-string containing `|` or `%`
+  broke PowerShell parsing. Use `[System.IO.File]::WriteAllText` with `UTF8Encoding($false)` —
+  `Set-Content -Encoding utf8` writes a BOM that lands in the commit subject.
 - Follow root `AGENTS.md`, `05-ai-collaboration/AGENTS.md`, and THE LAW.
 
 ## Exact state
 
-- Branch `main`, HEAD **`cba2444 feat: complete the v0.1.0 release candidate`** (parent `0056a07`)
-- **Working tree CLEAN — zero uncommitted entries.**
-- Remote `https://github.com/nosistech/nosis-harness.git` — **public, still empty, never pushed**.
-  No `origin/main` ref exists yet.
-- Committed on `main` deliberately: branch protection cannot be configured until `main` exists on the
-  remote, so the release plan requires main. Do not retroactively rewrite this onto a branch.
-- **Gate: `GATE: PASS` — 546 passed / 0 failed / 1 ignored `--release`**; clippy `-D warnings` clean;
-  `fmt --check` clean; `cargo deny --locked check` green (advisories/bans/licenses/sources), nothing
-  suppressed. Baseline was 514 — 32 tests added this session.
-- Binary `target\release\nh.exe` is current with the source as of the wave-3 gate.
+- Branch `main`, HEAD **`5b4cefb`**, tree **CLEAN**, `origin/main` identical.
+- Remote `github.com/nosistech/nosis-harness` — **PUBLIC**, one branch (`main`), no tags.
+- Gate **PASS 579/0/1 `--release`**; all five steps green (`gate.ps1` is five steps: fmt, clippy,
+  rustdoc, deny, test — not four).
+- `target\release\nh.exe` is current with the source.
+- Identity on every commit: `Carlos Paredes Vargas <98294098+arparvar@users.noreply.github.com>`.
 
-## What shipped this session (2026-07-28 → 29), all gated
+## CI — the first honest cross-platform answer, now reproduced twice
 
-Three Sol waves, each verified by the orchestrator running `.\gate.ps1` independently.
+| Job | Result |
+|---|---|
+| Checks (windows-latest) | **success** |
+| Checks (macos-latest) | **success** — passed clean on the very first attempt, never built before |
+| Supply chain | **success** |
+| Checks (ubuntu-latest) | **HANGS** — `Test` step never finishes, hits the 30-minute ceiling |
 
-**Wave 1 — FEEL fixes, 8/8** (`GATE: PASS` 529/0/1)
-- F-1 free GLM routes got `context` + `max_out` with dated z.ai sources — they are now selectable
-  candidates instead of being skipped as "unknown context". **`context` and `max_out` had to land
-  together**: `glm-4.6v-flash` has a 32K output cap and the client's `DEFAULT_MAX_TOKENS` is 65,536.
-- F-2 bare `/model`, `/provider`, `/profile` open pickers (arrows/Enter/Esc). `/provider` lists only
-  providers with usable credentials, checked before terminal takeover.
-- F-3 `TOOL <name> · <elapsed>s` indicator — **tool calls only, not model turns** (see W4-7).
-- F-4 tool-result authority rule in `agent.rs:74`, shared by `nh run`, `nh chat`, TUI.
-- F-5 `mcp serve --help` names all six tools. F-6 `--max-turns` range 1–100 with readable refusal.
-- F-7 `approve_on_stdin` checks `IsTerminal` — piped input cannot approve a shell command.
-- F-8 `nh run` metering to stderr; stdout is answer-only.
+**Linux compiles and lints fine.** `fmt`, `clippy` and `rustdoc` all pass on Ubuntu. The failure is a
+**runtime hang in the test suite**, not a portability problem. The hanging test is **unnamed**:
+GitHub does not archive logs for a timed-out job (`gh run view --log` → `log not found`).
 
-**Wave 2 — provider truth, 7/8** (`GATE: PASS` 538/0/1)
-- All three reasoning-dishonesty bugs closed: MiMo now sends an explicit thinking toggle; DeepSeek
-  preserves reasoning while thinking and disables default thinking on its Anthropic wire; GLM
-  disables thinking at `none` and sends truthful normalized High/Max effort.
-- K2.6 sends `thinking.keep = "all"`. `kimi-k3` added (1,048,576 ctx, $0.30/$3.00/$15.00,
-  `price_confidence = confirmed`, `valid_until = 2026-08-02`). GLM finish reasons classified.
-- **P-4 deliberately NOT implemented** — the Kimi cache-hit live probe was not run. Kimi documents
-  top-level `usage.cached_tokens`; `WireUsage` parses only two other names. If Kimi uses only the
-  documented shape, every Kimi input token is metered at cache-miss (~5× overstatement). **Do not
-  implement this from documentation alone — it is only correct if the field is actually populated.**
+Two things already ruled out, do not re-investigate:
 
-**Wave 3 — local lane, 5/5** (`GATE: PASS` 546/0/1)
-- `class = "local"`: selectable via `--model`/`/model`; excluded from `resolve_capable`,
-  cheapest-capable, provider defaults, automatic escalation, and the `top_tier` anchor. Enforced to
-  the OpenAI wire and a loopback origin.
-- Meter copy: `Local: no billed tokens; hardware and power are not metered.`
-- L-1 `#[serde(alias = "reasoning")]` on `WireMessage.reasoning_content` — Ollama's field name. **The
-  only wire-client change the local lane needed.**
-- L-2 commented llama.cpp/Ollama catalog templates; `model_id`/`context`/`max_out` left as
-  user-filled placeholders per the catalog's "never guessed" rule.
-- L-3/L-4/L-5 `06-operations/LOCAL_MODELS.md` — verification procedure, licence traps, sizing, and
-  **the Ollama silent-truncation hazard**; llama.cpp documented as the fail-closed reference path.
+- **Keyring / D-Bus is NOT the cause.** The only keyring-touching test is `#[ignore]`d (it is the
+  "1 ignored"); every other vault test uses trait fakes.
+- **It is Linux-specific, not Unix-generic.** macOS passed, so every `#[cfg(unix)]` path — including
+  `exec.rs`'s `kill -KILL -pgid` process-group teardown — executes correctly. Prime suspects:
+  `nh-fleet`'s std `File::try_lock`/flock semantics, or Linux process-group timing.
 
-## Live verifications performed (real API calls, ~$0.0002 total)
+**Owner decision 2026-07-29: Linux and Apple verification is THE LAST THING before the tag.** The
+owner will run the Ubuntu VM himself. Leave the red badge (it is honest). Do not burn CI cycles on
+it. Note `RELEASE_CHECKLIST.md` line 37 requires green Windows + Ubuntu + macOS, so **the tag is
+gated behind this.**
 
-- **F-8 confirmed**: `nh run "say hi" --model deepseek-v4-flash > out.txt` → `out.txt` contained
-  exactly one line, the answer. All progress/turn/cost lines went to stderr.
-- **F-7 confirmed**: same run produced `approval refused: stdin is not a terminal; piped input cannot
-  approve shell commands` on a real exec attempt.
-- **F-4 confirmed**: the model reported the refusal honestly instead of claiming success.
-- **Identity correct in a fresh session**: "I'm nosis on deepseek-v4-flash".
-- **GLM free tier returned HTTP 429** on the first attempt — free-tier limits are real and
-  unpublished. This also confirmed live that there are **zero retries anywhere**: one 429 killed the run.
+## What shipped this session (2026-07-29 → 30), all gated
 
-## QUEUED WORK — briefs written, in `<scratchpad>\`
+- **`0c838d5` wave 3b** — dropped both `deepseek-*-anthropic` catalog routes; catalog 14 → 12 routes.
+  `wire/anthropic.rs`, the `Wire` enum, the `deepseek-nhm` dialect and `effort_for`'s wire-awareness
+  are **retained deliberately as unused capability** (no dead-code warning: they are `pub` in a lib
+  crate). The anthropic route test was rebased onto an inline test-local fixture keeping all five
+  assertions.
+- **`cf6569e` wave A** — `NH_DEBUG_USAGE=1` prints a provider's **verbatim** `usage` value to stderr,
+  scrubbed and route-tagged, on both wires. Uses `serde_json`'s `RawValue` so unknown field names
+  survive. Display-only. Documented in `06-operations/ENVIRONMENT.md`.
+- **`d80b115` wave 4 — all 7 items.** W4-1 tolerant edit cascade (exact → whitespace-normalised →
+  indentation-flexible, ambiguity is failure, nearest-candidate on total failure); W4-2 bounded
+  mechanical tool-call repair + closed alias table through the identical guard path; **W4-3 the
+  meter-honesty fix (below)**; W4-4 `--jinja`/`--cache-reuse` docs; W4-5 factual route-change note in
+  history; W4-6 absolute prices everywhere; W4-7 `WAITING <route> · <elapsed>s` indicator.
+- **`10d3c57`** — corrected three stale `RELEASE_CHECKLIST` boxes against live state.
+- **`5b4cefb`** — the history rewrite record, the SHA repair, and the README safety section.
 
-Scratchpad root:
-`C:\Users\capv2\AppData\Local\Temp\claude\C--Users-capv2-Desktop-nosis-Harness\a5323c10-de58-40bd-9eff-f92a1441ca56\scratchpad`
+## The two findings that mattered most
 
-**`wave3b-drop-anthropic-routes-brief.md` — AUTHORIZED, NOT LAUNCHED.** Owner said "if we don't need
-them, remove them" (2026-07-29). Removes `deepseek-v4-flash-anthropic` and
-`deepseek-v4-pro-anthropic` from `catalog.toml`. **Retains `wire/anthropic.rs` and the `Wire` enum
-unchanged** — deleting the client is a separate post-1.0 decision. Was not launched only because the
-owner was about to `/clear`; a Sol run would have been orphaned. **Launch this when work resumes**,
-then gate, then rebuild.
+**1. P-4 was a FALSE ALARM and needs no fix. Do not "fix" it.** The fear was that Moonshot documents
+a top-level `usage.cached_tokens` the harness does not read, causing ~5x Kimi input overstatement.
+Measured live: **Kimi sends BOTH shapes**, and the harness already reads the nested
+`prompt_tokens_details.cached_tokens` correctly:
 
-**`wave4-repair-brief.md` — 7 items, PREPARED, NOT AUTHORIZED.** Do not launch before v0.1.0 ships
-unless the owner directs otherwise. W4-1 tolerant edit-match cascade + nearest-match failure message;
-W4-2 malformed tool-call repair cascade + name aliases through the same guard path; W4-3 surface
-cache-hit %; W4-4 local runtime flags doc; W4-5 route-switch note in history; W4-6 absolute price
-display; W4-7 model-turn wait indicator. It carries an evidence-backed **DO NOT** list — no
-grammar-constrained decoding, no temperature lowering, no udiff/whole-file edit format, no new tools,
-no LLM-based repair.
+    kimi-k2.6 hit → {"prompt_tokens":1053,...,"cached_tokens":1053,
+                     "prompt_tokens_details":{"cached_tokens":1053}}
+    meter said    → 1053 cached | cache 100% | cost $0.0002 — saved 82% vs no-cache
 
-**`provider-truth-brief.md`** — reference for the deferred P-4.
+MiMo sends only the nested form, also parsed correctly. This is exactly why the rule is *never
+implement a wire fix from documentation alone*.
 
-## The six FEEL findings (all in wave 4, none blocked the pass)
+**2. The probes exposed a REAL meter-honesty bug, now fixed in `d80b115`.** On a cache **miss**,
+Kimi and K3 send **no cached-token field at all** — yet the meter printed `0 cached | cache 0%`,
+asserting a measured zero the provider never reported. Fixed and verified live:
 
-1. **Model confabulated its identity after a mid-conversation route switch.** Status line was correct;
-   `worker.rs:382-384` correctly rebuilds the constitution and replaces the system message. **The
-   harness is right — do not "fix" the switch path.** Proof: `identity_constitution` derives id and
-   provider from one route, and `glm-4.7-flash`+`mimo` is not a valid pairing, so the harness cannot
-   emit it. The model blended its own stale self-description from preserved history. Gap = the model
-   gets no in-context signal that the route changed → W4-5.
-2. **`/why` and picker rows collapsed to bare "higher price".** `resolver.rs:422-425` cannot compute a
-   ratio when the chosen route costs `0.0`, and after F-1 the cheapest is usually free. F-1 silently
-   destroyed the price ladder's information content → W4-6.
-3. **Model turns are an unindicated blank screen.** `wire/openai.rs:35` — no streaming. F-3 covered
-   tool calls only → W4-7.
-4. Four DeepSeek picker rows where two would do → wave 3b.
-5. FEEL script errors (mine): A2 claimed "reply streams in" (it does not); B3 was written as one
-   malformed line. Script at `C:\Users\capv2\AppData\Local\Temp\feel-gate.ps1` is corrected.
-6. `mcp serve` appearing "stuck" is correct behaviour — it is a server; Ctrl+C exits.
+    call 1 (miss, no field in wire) → tokens 1076 in / 11 out          (no cache segment)
+    call 2 (hit,  field present)    → ... / 1076 cached | cache 100%
+
+Receipts gained `cache_hit_pct: Option<f64>`, serialised only when measured.
+
+**Also settled live, make no change:** MiMo accepts `max_tokens` (no `max_completion_tokens`
+migration). `kimi-k3` accepted `max_tokens = 1048576` with no error, so its catalog `max_out` stands
+— verified only at a ~1,200-token prompt; the large-prompt interaction is untested and was judged not
+worth real money to probe.
+
+Total live spend this session ≈ **$0.007**.
+
+## THREE OPEN DECISIONS — ask the owner, do not decide these alone
+
+**1. Branch protection.** `main` is unprotected. Note the mechanics: **required status checks and
+direct pushes are the same lever** — enabling required checks blocks direct pushes entirely, because
+a new commit cannot have passing checks before it exists. Orchestrator recommendation: apply
+**force-push and deletion protection now** (prevents the two irreversible accidents, costs no
+velocity), and add **required checks at tag time** once Ubuntu is green and all four contexts can be
+required together. Requiring a knowingly-red Ubuntu check would force routine admin overrides.
+
+**2. Is `info@nosistech.com` monitored** for the five-business-day target stated in `SECURITY.md`?
+This gates a checklist box. GitHub private vulnerability reporting is **already enabled**, so it is
+the working intake path either way. Record an accurate gap rather than a response time nobody
+watches.
+
+**3. Commit-author email.** The owner asked that "only `info@nosistech.com` shows". That is already
+true of every readable file — `SECURITY.md:17` and `PRIVACY.md:67` both point there, and the only
+other addresses in the repo are a Xiaomi business contact, the Anthropic co-author trailer, and a
+`.invalid` fixture. The remaining appearance is commit authorship. **Orchestrator recommendation:
+leave it.** The noreply address is non-deliverable by design, creates no contact surface, and reveals
+only a GitHub username that is already public as the repo's owner. Switching commits to
+`info@nosistech.com` would (a) likely lose GitHub attribution unless that address is verified on the
+account, (b) invalidate the published SHA map via a second rewrite, and (c) mean two public
+force-pushes. **Zero-churn alternative if the owner still wants it: verify `info@nosistech.com` on
+the GitHub account, then set it as the commit email going forward only.**
 
 ## Remaining path to v0.1.0
 
-1. **Ask the owner whether to push `cba2444`.** The commit is done; the push is the open gate.
-   Pushing is what finally runs CI and gives the first honest Linux/macOS answer — expect a real
-   failure, which is better found on an untagged commit than after a tag.
-2. Launch wave 3b → gate → rebuild → second commit.
-3. **Live probes still owed** (sub-cent each): Kimi cache-hit field name (unblocks P-4); MiMo
-   cached-tokens field name and whether it accepts `max_tokens` or `max_completion_tokens`; **K3
-   `max_out`** — Moonshot documents `max_completion_tokens` default 131072, max 1048576, and the
-   catalog declares 1048576, but `wire/openai.rs:117` sends it on every request and prompt + 1M may
-   exceed the 1M context. Consider 131072. (The DeepSeek Anthropic-downgrade probe becomes moot once
-   wave 3b lands.)
-4. Inspect the full staged diff; repeat the secret guard without printing candidate values; confirm
-   all new modules are staged and that `.nosis/`, `target/`, and stray artifacts are not.
-5. **One coherent commit + push.** This is the real risk reduction — Slice G plus three waves exist
-   only on this laptop.
-6. Monitor GitHub Actions → **first honest Linux/macOS answer ever**. CI has never run (no remote
-   history). Expect real work; better before the tag than after.
-7. Protected `main` with the actual job contexts; verify direct pushes are blocked.
-8. Recheck the MCP final spec (2026-07-28) before any public MCP statement. Its headline change —
-   stateless request/response — already matches this design. **Skip the OAuth 2.0/OIDC work**: it
-   targets enterprise identity, and this server is loopback + bearer by design. Extensions framework
-   is optional. Stay loopback-preview through v0.1.0.
-9. Confirm `info@nosistech.com` is monitored.
-10. Only with explicit owner approval: tag `v0.1.0`, publish notes, verify the tag points at the
-    tested commit.
+1. Resolve the three decisions above.
+2. **Owner runs the Ubuntu VM** (VirtualBox Ubuntu 26.04 Desktop; `libdbus-1-dev` required) and finds
+   the hanging test. Suspects and exclusions are listed in the CI section above.
+3. Fix the Linux hang (Sol wave), gate, commit, push, confirm CI goes 4/4 green.
+4. **A short confirming FEEL re-pass on the current binary.** The owner's 2026-07-29 pass was against
+   the *old* binary; wave 4 changed the exact surfaces it exercised — `/why`, the model-picker rows,
+   the in-flight indicator, the cache line. The checklist box is ticked with this caveat recorded.
+5. Enable required status checks with all four contexts; verify the rule.
+6. Final gate + secret guard, then **tag `v0.1.0`** with explicit owner approval, source-install only.
+7. Publish release notes from the `[0.1.0]` CHANGELOG entry.
 
 ## DEADLINE
 
-**All 14 price blocks carry `valid_until = "2026-08-02"`.** After that the harness's own freshness
-discipline flags every price as stale. Ship before then, or budget a day to re-verify 14 price blocks.
+**All 14 price blocks carry `valid_until = "2026-08-02"`.** That is three days out and the Linux work
+sits in front of it. **Expect to miss it and budget a day to re-verify 14 price blocks** — that is
+the honest plan. Do not rush the Linux fix to beat the date.
 
-## Settled decisions — do not reopen
+## Settled — do not reopen
 
-Recorded in full, with rejected alternatives and evidence, in `00-start-here/DECISION_LOG.md`
-(2026-07-29 entries):
-
-- **Provider scope is DeepSeek + Kimi + GLM + MiMo + local.** No Anthropic/OpenAI/Gemini API routes.
-  Keep the commented `class = "delegate"` stubs at `catalog.toml:344-356`.
-- **Never add a frontier price row as a `top_tier` anchor.** Verified at `resolver.rs:228-238` that
-  one USD row inflates every savings line 3–6×. That is the fabricated-savings behaviour this product
-  refuses.
-- **Zero-price routes are a selectable tier, not a routing winner.**
-- **The "router inside the harness" moat claim is retired.** The harness does not auto-route:
-  `resolve_capable` is called only from `cmd_why.rs:51`, `input/commands.rs:190`,
-  `route_tools.rs:101`. Positioning is the honest-meter bundle. Do-not-claim list is in the log.
-- **Do not auto-route.** An advisory router that explains is more congruent with an auditability
-  product than an automatic one that decides.
-- **Do not add a quality axis to routing** — 0 of 104 small-model SWE-bench figures surveyed were
-  independently verified.
-
-## Chosen categories (positioning)
-
-1. **Provable cost / auditability.** Still unbuilt and needed for the claim: receipts store only an
-   ambiguous `model_id` and raw usage — **no `route_id`, no price snapshot** — so history silently
-   reprices as the catalog changes. Plus `nh savings` from the counterfactuals already computed and
-   discarded, and cache-aware comparison (`resolver.rs:359-361` prices all prompt tokens at
-   `cache_miss`, blind to DeepSeek's ~120× hit/miss spread).
-2. **Honest behaviour under failure.** Waves 1–3 are this.
-3. **Getting the most out of cheap open-weight models.** Wave 4. Note the research finding: nosis is
-   *already correct* on edit format (native tool-call search/replace) and tool minimalism (three flat
-   tools). Both gaps are in the failure path. Also: **compaction never fires for single-turn runs**
-   (`context.rs:112-114`, `nh run` has one user turn), and there are **zero retries anywhere**.
-
-## Research corpus (this session) — `<scratchpad>\research\`
-
-`01-ux-ui.md`, `02-engine.md`, `03-market.md`, `04-competitive.md`,
-`05-providers-deepseek-mimo.md`, `06-providers-kimi-glm.md`, `07-providers-frontier.md`,
-`08-local-models.md`, `09-local-runtimes.md`, `10-other-runtimes.md`, `11-huggingface.md`,
-`12-hardware.md`, `13-competitor-patterns.md`, `14-weak-model-performance.md`.
-
-Highlights worth not re-deriving:
-- Every DeepSeek/MiMo/Kimi/GLM-5.2 price re-verified **exact** first-party 2026-07-28. **Do not
-  "fix" them.** MiMo correctly has no off-peak block — its 0.8× discount is Token-Plan-exclusive on a
-  different host; the 2026-07-17 F3 proposal is disproven and stays dead.
-- Reference hardware: RTX 5070 Ti **Laptop** = 12 GB, 192-bit, **672 GB/s** (same bandwidth as the
-  desktop RTX 5070; desktop 5070 Ti figures do NOT apply). Real budget ~10.5 GB after WDDM. Dense 14B
-  Q4 is the resident ceiling; dense 20–24B is a cliff; MoE ~30–35B-A3B with `--n-cpu-moe` works. AC
-  power required. The Core Ultra NPU is unusable for this.
-- Local runtime: **llama.cpp is the reference path** — Ollama silently truncates history on context
-  overflow with no client signal and no `/v1` opt-out. llama.cpp fails closed (HTTP 400). Run
-  `llama-server --jinja --cache-reuse`.
-- Do **not** add a Hugging Face token to the vault. HF disclosed a production breach 2026-07-16.
-- Licence traps for a distributed product: **Gemma** (flow-down obligation + remote-restriction
-  reservation), **Llama 4** (branding/agreement obligations), **Kimi K3 weights** (MaaS clause — note
-  it governs the weights, NOT calling Moonshot's API). Safe: Apache-2.0 (Qwen3.x), MIT (DeepSeek V4,
-  GLM-5.x).
-- **Reject hooks.** Arbitrary code execution from config, two CVEs, a silent-exfiltration issue, and
-  it inverts nh-law's tighten-only model. The useful 80% is an operator-configured verification
-  command through the existing approval gate.
-- On **native Windows** the sandbox gap is small: Codex's needs restricted tokens, local user
-  creation, elevation and unsafe Win32 FFI (would cost `forbid(unsafe)`); Claude Code's is WSL2-only.
+- Provider scope is **DeepSeek + Kimi + GLM + MiMo + local**. No Anthropic/OpenAI/Gemini API routes.
+- Never add a frontier price row as a `top_tier` anchor — it inflates every savings line 3–6x.
+- Zero-price routes are a selectable tier, not a routing winner.
+- **The harness does not auto-route.** The "router inside the harness" moat claim is retired.
+- Do not add a quality axis to routing.
+- **The route-switch path is correct.** W4-5 added evidence for the model; it did not fix a bug.
+- Do not change the edit format, add tools, restructure the prompt, lower temperature, or use
+  grammar-constrained decoding — each is evidence-backed in the wave-4 brief's DO NOT list.
+- **ASD-STE100 is scoped, not repo-wide** (owner discussion 2026-07-30): apply it to user-facing and
+  safety-critical text — `SECURITY.md`, `PRIVACY.md`, the README safety section, install steps,
+  `06-operations` runbooks, and CLI error strings. Keep `DECISION_LOG`, `ARCHITECTURE_DECISIONS`,
+  research and articles in normal prose. Describe it as **"STE-informed", never claim conformance** —
+  real conformance needs a commercial checker, and an unverifiable claim would violate THE LAW.
 
 ## Do not redo
 
-- The five-lane audit, the Telegram removal, the responsibility refactor, the GitHub bootstrap.
-- Any of waves 1, 2, or 3.
-- Do not claim the empty remote has run CI. Do not claim Linux or macOS support.
-- Do not clean receipts or add pruning.
+- The five-lane audit, the responsibility refactor, the GitHub bootstrap, Slice G.
+- Waves 1, 2, 3, 3b, A, or 4.
+- The three live probes. Their results are recorded above.
+- The history rewrite.
+- Do not claim Linux support. macOS **is** now verified green, but no support claim ships without the
+  owner's sign-off.
 
 Newest-first detail is in `00-start-here/BUILD_LOG.md`; the release truth table is
-`03-execution/RELEASE_CHECKLIST.md`.
+`03-execution/RELEASE_CHECKLIST.md`; the SHA map is
+`08-decisions-and-risk/HISTORY_REWRITE_2026-07-30.md`.
