@@ -37,8 +37,8 @@ invalidate the published map.
 Read this file in full. Then verify with read-only commands:
 
 ```powershell
-git status --short                  # expect CLEAN
-git log -1 --oneline                # expect 5b4cefb
+git status --short                  # expect CLEAN (this is the real signal)
+git log -1 --oneline                # expect the newest docs(checkpoint) commit, or later
 git log origin/main..HEAD --oneline # expect empty (in sync)
 git config --local user.email       # expect 98294098+arparvar@users.noreply.github.com
 gh run list --repo nosistech/nosis-harness --limit 3
