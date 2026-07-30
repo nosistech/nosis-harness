@@ -2,13 +2,13 @@
 
 > ## ⇒ RESUMING? START HERE: `00-start-here/CONTINUE_HERE.md`
 > If the owner typed **`continue`**, read that file FIRST and in full, before any other action.
-> It is the self-contained handoff written 2026-07-26 by the outgoing orchestrator (Claude Opus 5)
-> for the incoming one (GPT-5.6 Sol max), followed by a status banner recording completion of the
-> audit, hardening, Telegram removal, modularization, and owner commit gate. The older detailed
-> checkpoints below that banner are retained as historical context.
+> It is the authoritative self-contained checkpoint refreshed 2026-07-27 after the A+ refactor
+> and public GitHub repository bootstrap. It records the exact uncommitted tree, empty secured
+> remote, process state, verification evidence, owner-only gates, and continuation sequence.
 >
-> **Do not create another commit unless the owner explicitly requests it. Do not run `cargo fmt`.**
-> The owner explicitly passed the previous FEEL/commit gate on 2026-07-26.
+> **Do not commit, push, tag, publish, stop the open harness, or run write-mode `cargo fmt` merely
+> because the owner typed `continue`.** The current post-refactor FEEL gate and explicit owner
+> authorization are still required.
 
 Instructions for any coding agent working in this repo. Project-level detail: `05-ai-collaboration/AGENTS.md`. Canonical spec: `NOSIS_HARNESS_Master_Plan.md` (Appendices A/B supersede §1/§3).
 

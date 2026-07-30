@@ -199,11 +199,13 @@ context = 128000
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
         stdout.contains("blocked by law: protected path (.nosis/**) — held even at max autonomy"),
         "stdout: {stdout}"
     );
-    assert!(stdout.contains("| cache 82%"), "stdout: {stdout}");
+    assert!(!stdout.contains("| cache 82%"), "stdout: {stdout}");
+    assert!(stderr.contains("| cache 82%"), "stderr: {stderr}");
     assert_eq!(std::fs::read_to_string(&protected).unwrap(), before);
 
     let requests = requests.recv().unwrap();

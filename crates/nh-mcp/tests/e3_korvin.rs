@@ -58,7 +58,7 @@ fn e3_korvin_starts_and_polls_a_stateless_fleet_run() -> anyhow::Result<()> {
         default_mode: None,
         trust: nh_tools::mcp::McpTrust::Ask,
     };
-    let client = nh_tools::mcp::McpClient::new(cfg);
+    let client = nh_tools::mcp::McpClient::new(cfg).expect("test HTTP clients initialize");
 
     let names: BTreeSet<_> = client
         .list_tools()?

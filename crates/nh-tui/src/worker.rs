@@ -14,19 +14,68 @@ use nh_core::receipt::{FailureClass, Outcome, Receipt, ReceiptWriter};
 use nh_core::wire::{ChatClient, ChatMessage, ChatRequest, ChatResponse, ThinkingEffort, Usage};
 use nh_law::{Law, Verdict};
 use nh_routes::{Profiles, ResolvedRoute};
-use nh_tools::{builtin_tools, Access, Guard, ToolCtx};
+use nh_tools::{builtin_tools, Access, Guard, Tool, ToolArgs, ToolCtx, ToolSpec};
 #[cfg(test)]
 use nh_vault::Scrubber;
 use nh_vault::{SecretRegistry, SecretValue};
 
-use super::{
-    effort_for, identity_constitution, install_literal, safe_line, scrub_full_line, AgentEvent,
-    ConnectFn, SharedScrubber, TimelineSummary,
+use crate::session::{
+    effort_for, identity_constitution, install_literal, safe_line, scrub_full_line,
 };
+use crate::{AgentEvent, ConnectFn, SharedScrubber, TimelineSummary};
 
 const APPROVAL_WAIT_POLL: Duration = Duration::from_millis(10);
 const JOIN_POLL: Duration = Duration::from_millis(2);
 pub(super) const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
+
+struct TrackedTool {
+    inner: Box<dyn Tool>,
+    events: Sender<AgentEvent>,
+}
+
+impl Tool for TrackedTool {
+    fn spec(&self) -> ToolSpec {
+        self.inner.spec()
+    }
+
+    fn execute(&self, args: ToolArgs, ctx: &ToolCtx) -> anyhow::Result<String> {
+        let name = self.inner.spec().name;
+        let _ = self.events.send(AgentEvent::ToolStarted {
+            name: name.clone(),
+            started_at: Utc::now(),
+        });
+        let _finished = ToolFinishedGuard {
+            events: &self.events,
+            name,
+        };
+        self.inner.execute(args, ctx)
+    }
+}
+
+struct ToolFinishedGuard<'a> {
+    events: &'a Sender<AgentEvent>,
+    name: String,
+}
+
+impl Drop for ToolFinishedGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.events.send(AgentEvent::ToolFinished {
+            name: self.name.clone(),
+        });
+    }
+}
+
+fn tracked_tools(tools: Vec<Box<dyn Tool>>, events: &Sender<AgentEvent>) -> Vec<Box<dyn Tool>> {
+    tools
+        .into_iter()
+        .map(|inner| {
+            Box::new(TrackedTool {
+                inner,
+                events: events.clone(),
+            }) as Box<dyn Tool>
+        })
+        .collect()
+}
 
 fn apply_new_credential(
     shared: &SharedScrubber,
@@ -93,12 +142,13 @@ impl Worker {
 
         loop {
             if self.join.as_ref().is_some_and(JoinHandle::is_finished) {
-                let join = self.join.take().expect("join handle checked above");
-                return if join.join().is_ok() {
-                    WorkerShutdown::Clean
-                } else {
-                    WorkerShutdown::Panicked
-                };
+                if let Some(join) = self.join.take() {
+                    return if join.join().is_ok() {
+                        WorkerShutdown::Clean
+                    } else {
+                        WorkerShutdown::Panicked
+                    };
+                }
             }
             let now = Instant::now();
             if now >= deadline {
@@ -162,216 +212,289 @@ fn worker_loop(
     events: Sender<AgentEvent>,
     shutdown: Arc<AtomicBool>,
 ) {
-    let WorkerConfig {
-        mut route,
-        profiles,
-        mut active_profile,
-        law,
-        repo_root,
-        workdir,
-        scrubber,
-        connect,
-        initial,
-    } = config;
-    let initial_policy = profiles.effective(&active_profile, &route);
-    active_profile = initial_policy.profile.clone();
-    let connection = match initial {
-        Some(connection) => connection,
-        None => connect(&route, initial_policy.output_cap),
-    };
-    let (client, mut key_literals, mut connected) = match connection {
-        Ok((client, literal)) => {
-            let mut literals = SecretRegistry::new();
-            install_literal(&scrubber, &mut literals, literal);
-            (shutdown_aware(client, &shutdown), literals, true)
-        }
-        Err(error) => (
-            Box::new(NotConnected {
-                message: error.to_string(),
-            }) as Box<dyn ChatClient>,
-            SecretRegistry::new(),
-            false,
-        ),
-    };
+    WorkerSession::new(config, events, shutdown).run(commands);
+}
 
-    let approval_events = events.clone();
-    let approval_scrubber = Arc::clone(&scrubber);
-    let approval_shutdown = Arc::clone(&shutdown);
-    let approve = Box::new(move |prompt: &str| {
-        if approval_shutdown.load(Ordering::Acquire) {
-            return false;
-        }
-        let (reply, answers) = mpsc::channel();
-        let request = ApprovalRequest {
-            prompt: scrub_full_line(&approval_scrubber, prompt),
-            reply,
+enum CommandAction {
+    Run(String),
+    Continue,
+    Stop,
+}
+
+struct WorkerSession {
+    route: ResolvedRoute,
+    profiles: Profiles,
+    active_profile: String,
+    law_constitution: String,
+    agent: AgentLoop,
+    history: Vec<ChatMessage>,
+    session_usage: Usage,
+    scrubber: SharedScrubber,
+    connect: ConnectFn,
+    key_literals: SecretRegistry,
+    connected: bool,
+    events: Sender<AgentEvent>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl WorkerSession {
+    fn new(config: WorkerConfig, events: Sender<AgentEvent>, shutdown: Arc<AtomicBool>) -> Self {
+        let WorkerConfig {
+            route,
+            profiles,
+            mut active_profile,
+            law,
+            repo_root,
+            workdir,
+            scrubber,
+            connect,
+            initial,
+        } = config;
+
+        let initial_policy = profiles.effective(&active_profile, &route);
+        active_profile = initial_policy.profile.clone();
+        let connection = match initial {
+            Some(connection) => connection,
+            None => connect(&route, initial_policy.output_cap),
         };
-        if approval_events.send(AgentEvent::Approval(request)).is_err() {
-            return false;
-        }
-        wait_for_approval(&answers, &approval_shutdown)
-    });
-
-    let policy = law.policy.clone();
-    let event_scrubber = Arc::clone(&scrubber);
-    let progress_events = events.clone();
-    let ctx = ToolCtx::new(workdir, approve)
-        .with_scrubber(key_literals.scrubber())
-        .with_guard(Box::new(move |access| match access {
-            Access::Read(path) => verdict_to_guard(policy.read_verdict(path)),
-            Access::Write(path) => verdict_to_guard(policy.write_verdict(path)),
-            Access::Exec(command) => verdict_to_guard(policy.exec_verdict(command)),
-            Access::Send(target) => verdict_to_guard(policy.send_verdict(target)),
-        }));
-    let law_constitution = law.constitution;
-    let mut agent = AgentLoop {
-        client,
-        tools: builtin_tools(),
-        ctx,
-        receipts: ReceiptWriter::project(repo_root.clone(), key_literals.scrubber()),
-        model_id: route.model_id().to_owned(),
-        max_turns: 20,
-        thinking: effort_for(
-            initial_policy.posture,
-            route.thinking_dialect(),
-            route.wire(),
-        ),
-        profile: Some(active_profile.clone()),
-        constitution: Some(identity_constitution(&law_constitution, &route)),
-        context_limit: route.context(),
-        on_event: Some(Box::new(move |line| {
-            let _ = progress_events.send(AgentEvent::Progress(safe_line(&event_scrubber, line)));
-        })),
-    };
-
-    let mut history: Vec<ChatMessage> = Vec::new();
-    let mut session_usage = Usage::default();
-    loop {
-        if shutdown.load(Ordering::Acquire) {
-            break;
-        }
-        let Ok(command) = commands.recv() else {
-            break;
+        let (client, key_literals, connected) = match connection {
+            Ok((client, literal)) => {
+                let mut literals = SecretRegistry::new();
+                install_literal(&scrubber, &mut literals, literal);
+                (shutdown_aware(client, &shutdown), literals, true)
+            }
+            Err(error) => (
+                Box::new(NotConnected {
+                    message: error.to_string(),
+                }) as Box<dyn ChatClient>,
+                SecretRegistry::new(),
+                false,
+            ),
         };
-        if shutdown.load(Ordering::Acquire) {
-            break;
+
+        let approval_events = events.clone();
+        let approval_scrubber = Arc::clone(&scrubber);
+        let approval_shutdown = Arc::clone(&shutdown);
+        let approve = Box::new(move |prompt: &str| {
+            if approval_shutdown.load(Ordering::Acquire) {
+                return false;
+            }
+            let (reply, answers) = mpsc::channel();
+            let request = ApprovalRequest {
+                prompt: scrub_full_line(&approval_scrubber, prompt),
+                reply,
+            };
+            if approval_events.send(AgentEvent::Approval(request)).is_err() {
+                return false;
+            }
+            wait_for_approval(&answers, &approval_shutdown)
+        });
+
+        let policy = law.policy.clone();
+        let event_scrubber = Arc::clone(&scrubber);
+        let progress_events = events.clone();
+        let ctx = ToolCtx::new(workdir, approve)
+            .with_scrubber(key_literals.scrubber())
+            .with_guard(Box::new(move |access| match access {
+                Access::Read(path) => verdict_to_guard(policy.read_verdict(path)),
+                Access::Write(path) => verdict_to_guard(policy.write_verdict(path)),
+                Access::Exec(command) => verdict_to_guard(policy.exec_verdict(command)),
+                Access::Send(target) => verdict_to_guard(policy.send_verdict(target)),
+            }));
+        let law_constitution = law.constitution;
+        let agent = AgentLoop {
+            client,
+            tools: tracked_tools(builtin_tools(), &events),
+            ctx,
+            receipts: ReceiptWriter::project(repo_root, key_literals.scrubber()),
+            model_id: route.model_id().to_owned(),
+            max_turns: 20,
+            thinking: effort_for(
+                initial_policy.posture,
+                route.thinking_dialect(),
+                route.wire(),
+            ),
+            profile: Some(active_profile.clone()),
+            constitution: Some(identity_constitution(&law_constitution, &route)),
+            context_limit: route.context(),
+            on_event: Some(Box::new(move |line| {
+                let _ =
+                    progress_events.send(AgentEvent::Progress(safe_line(&event_scrubber, line)));
+            })),
+        };
+
+        Self {
+            route,
+            profiles,
+            active_profile,
+            law_constitution,
+            agent,
+            history: Vec::new(),
+            session_usage: Usage::default(),
+            scrubber,
+            connect,
+            key_literals,
+            connected,
+            events,
+            shutdown,
         }
-        let task = match command {
-            WorkerCommand::Task(task) => task,
-            WorkerCommand::SwitchRoute(next_route) => {
-                let execution_policy = profiles.effective(&active_profile, &next_route);
-                let connection = connect(&next_route, execution_policy.output_cap);
-                match connection {
-                    Ok((client, literal)) => {
-                        apply_new_credential(&scrubber, &mut key_literals, literal, &mut agent);
-                        agent.client = shutdown_aware(client, &shutdown);
-                        connected = true;
-                    }
-                    Err(error) => {
-                        agent.client = Box::new(NotConnected {
-                            message: error.to_string(),
-                        });
-                        connected = false;
+    }
+
+    fn run(mut self, commands: Receiver<WorkerCommand>) {
+        while !self.stopped() {
+            let Ok(command) = commands.recv() else {
+                break;
+            };
+            if self.stopped() {
+                break;
+            }
+            match self.handle_command(command) {
+                CommandAction::Run(task) => {
+                    if !self.run_task(task) {
+                        break;
                     }
                 }
-                agent.model_id = next_route.model_id().to_owned();
-                agent.thinking = effort_for(
+                CommandAction::Continue => {}
+                CommandAction::Stop => break,
+            }
+        }
+    }
+
+    fn stopped(&self) -> bool {
+        self.shutdown.load(Ordering::Acquire)
+    }
+
+    fn handle_command(&mut self, command: WorkerCommand) -> CommandAction {
+        match command {
+            WorkerCommand::Task(task) => CommandAction::Run(task),
+            WorkerCommand::SwitchRoute(next_route) => {
+                let execution_policy = self.profiles.effective(&self.active_profile, &next_route);
+                let connection = (self.connect)(&next_route, execution_policy.output_cap);
+                self.replace_connection(connection);
+                self.agent.model_id = next_route.model_id().to_owned();
+                self.agent.thinking = effort_for(
                     execution_policy.posture,
                     next_route.thinking_dialect(),
                     next_route.wire(),
                 );
-                agent.profile = Some(execution_policy.profile.clone());
-                active_profile = execution_policy.profile;
-                let constitution = identity_constitution(&law_constitution, &next_route);
-                agent.constitution = Some(constitution.clone());
-                replace_system_message(&mut history, constitution);
-                agent.context_limit = next_route.context();
-                route = *next_route;
-                continue;
+                self.agent.profile = Some(execution_policy.profile.clone());
+                self.active_profile = execution_policy.profile;
+                let constitution = identity_constitution(&self.law_constitution, &next_route);
+                self.agent.constitution = Some(constitution.clone());
+                replace_system_message(&mut self.history, constitution);
+                self.agent.context_limit = next_route.context();
+                self.route = *next_route;
+                CommandAction::Continue
             }
             WorkerCommand::SetEffort(effort) => {
-                agent.thinking = effort;
-                continue;
+                self.agent.thinking = effort;
+                CommandAction::Continue
             }
             WorkerCommand::SetProfile(name) => {
-                let execution_policy = profiles.effective(&name, &route);
-                let connection = connect(&route, execution_policy.output_cap);
-                match connection {
-                    Ok((client, literal)) => {
-                        apply_new_credential(&scrubber, &mut key_literals, literal, &mut agent);
-                        agent.client = shutdown_aware(client, &shutdown);
-                        connected = true;
-                    }
-                    Err(error) => {
-                        agent.client = Box::new(NotConnected {
-                            message: error.to_string(),
-                        });
-                        connected = false;
-                    }
-                }
-                agent.thinking = effort_for(
+                let execution_policy = self.profiles.effective(&name, &self.route);
+                let connection = (self.connect)(&self.route, execution_policy.output_cap);
+                self.replace_connection(connection);
+                self.agent.thinking = effort_for(
                     execution_policy.posture,
-                    route.thinking_dialect(),
-                    route.wire(),
+                    self.route.thinking_dialect(),
+                    self.route.wire(),
                 );
-                agent.profile = Some(execution_policy.profile.clone());
-                active_profile = execution_policy.profile;
-                continue;
+                self.agent.profile = Some(execution_policy.profile.clone());
+                self.active_profile = execution_policy.profile;
+                CommandAction::Continue
             }
-            WorkerCommand::Stop => break,
-        };
-        if !connected {
-            let execution_policy = profiles.effective(&active_profile, &route);
-            match connect(&route, execution_policy.output_cap) {
-                Ok((client, literal)) => {
-                    apply_new_credential(&scrubber, &mut key_literals, literal, &mut agent);
-                    agent.client = shutdown_aware(client, &shutdown);
-                    connected = true;
-                }
-                Err(error) => {
-                    if shutdown.load(Ordering::Acquire) {
-                        break;
-                    }
-                    let reason = safe_line(&scrubber, &error.to_string());
-                    let _ = events.send(AgentEvent::Failed(reason.clone()));
-                    let _ = events.send(AgentEvent::TaskReceipt(failed_timeline_summary(
-                        route.model_id(),
-                        &task,
-                        &reason,
-                    )));
-                    continue;
-                }
+            WorkerCommand::Stop => CommandAction::Stop,
+        }
+    }
+
+    fn replace_connection(
+        &mut self,
+        connection: anyhow::Result<(Box<dyn ChatClient>, SecretValue)>,
+    ) {
+        match connection {
+            Ok((client, literal)) => self.install_connection(client, literal),
+            Err(error) => {
+                self.agent.client = Box::new(NotConnected {
+                    message: error.to_string(),
+                });
+                self.connected = false;
             }
         }
-        match agent.run_with_history(&mut history, &task) {
+    }
+
+    fn install_connection(&mut self, client: Box<dyn ChatClient>, literal: SecretValue) {
+        apply_new_credential(
+            &self.scrubber,
+            &mut self.key_literals,
+            literal,
+            &mut self.agent,
+        );
+        self.agent.client = shutdown_aware(client, &self.shutdown);
+        self.connected = true;
+    }
+
+    fn ensure_connected(&mut self) -> anyhow::Result<()> {
+        if self.connected {
+            return Ok(());
+        }
+        let execution_policy = self.profiles.effective(&self.active_profile, &self.route);
+        let (client, literal) = (self.connect)(&self.route, execution_policy.output_cap)?;
+        self.install_connection(client, literal);
+        Ok(())
+    }
+
+    /// Returns false only when shutdown should stop the command loop.
+    fn run_task(&mut self, task: String) -> bool {
+        if let Err(error) = self.ensure_connected() {
+            if self.stopped() {
+                return false;
+            }
+            self.send_failure(&task, &error.to_string(), false);
+            return true;
+        }
+
+        match self.agent.run_with_history(&mut self.history, &task) {
             Ok((answer, receipt)) => {
-                if shutdown.load(Ordering::Acquire) {
-                    break;
+                if self.stopped() {
+                    return false;
                 }
                 if let Some(usage) = &receipt.usage {
-                    if add_usage(&mut session_usage, usage) {
-                        let _ = events.send(AgentEvent::MeterIncomplete);
+                    if add_usage(&mut self.session_usage, usage) {
+                        let _ = self.events.send(AgentEvent::MeterIncomplete);
                     } else {
-                        let _ = events.send(AgentEvent::Usage(session_usage.clone()));
+                        let _ = self
+                            .events
+                            .send(AgentEvent::Usage(self.session_usage.clone()));
                     }
                 }
-                let _ = events.send(AgentEvent::Answer(answer.clone()));
-                let _ = events.send(AgentEvent::TaskReceipt(TimelineSummary { receipt, answer }));
+                let _ = self.events.send(AgentEvent::Answer(answer.clone()));
+                let _ = self
+                    .events
+                    .send(AgentEvent::TaskReceipt(TimelineSummary { receipt, answer }));
             }
             Err(error) => {
-                if shutdown.load(Ordering::Acquire) {
-                    break;
+                if self.stopped() {
+                    return false;
                 }
-                let reason = safe_line(&scrubber, &error.to_string());
-                let _ = events.send(AgentEvent::MeterIncomplete);
-                let _ = events.send(AgentEvent::Failed(reason.clone()));
-                let _ = events.send(AgentEvent::TaskReceipt(failed_timeline_summary(
-                    route.model_id(),
-                    &task,
-                    &reason,
-                )));
+                self.send_failure(&task, &error.to_string(), true);
             }
         }
+        true
+    }
+
+    fn send_failure(&self, task: &str, error: &str, meter_incomplete: bool) {
+        let reason = safe_line(&self.scrubber, error);
+        if meter_incomplete {
+            let _ = self.events.send(AgentEvent::MeterIncomplete);
+        }
+        let _ = self.events.send(AgentEvent::Failed(reason.clone()));
+        let _ = self
+            .events
+            .send(AgentEvent::TaskReceipt(failed_timeline_summary(
+                self.route.model_id(),
+                task,
+                &reason,
+            )));
     }
 }
 
@@ -481,177 +604,4 @@ fn verdict_to_guard(verdict: Verdict) -> Guard {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn worker_around(join: JoinHandle<()>, shutdown: Arc<AtomicBool>) -> Worker {
-        let (commands, _command_rx) = mpsc::channel();
-        let (_event_tx, events) = mpsc::channel();
-        Worker {
-            commands,
-            events,
-            join: Some(join),
-            shutdown,
-        }
-    }
-
-    #[test]
-    fn apply_new_credential_refreshes_every_scrubber() {
-        struct PanicClient;
-
-        impl ChatClient for PanicClient {
-            fn complete(&self, _request: &ChatRequest) -> anyhow::Result<ChatResponse> {
-                panic!("credential test must not call the provider")
-            }
-        }
-
-        let shared = Arc::new(std::sync::RwLock::new(Scrubber::new(Vec::new())));
-        let mut key_literals = SecretRegistry::new();
-        let mut agent = AgentLoop {
-            client: Box::new(PanicClient),
-            tools: Vec::new(),
-            ctx: ToolCtx::new(PathBuf::from("."), Box::new(|_| false)),
-            receipts: ReceiptWriter::for_path(
-                PathBuf::from("."),
-                PathBuf::from("unused-receipts.jsonl"),
-                Scrubber::new(Vec::new()),
-            ),
-            model_id: "test".into(),
-            max_turns: 1,
-            thinking: ThinkingEffort::None,
-            profile: None,
-            constitution: None,
-            context_limit: None,
-            on_event: None,
-        };
-        let literal = "fake-route-credential";
-
-        apply_new_credential(
-            &shared,
-            &mut key_literals,
-            nh_vault::secret(literal),
-            &mut agent,
-        );
-
-        assert_eq!(key_literals.len(), 1);
-        assert!(key_literals.contains(literal));
-        assert_eq!(agent.ctx.scrubber.scrub(literal), "[REDACTED]");
-        assert_eq!(agent.receipts.scrubber().scrub(literal), "[REDACTED]");
-        let shared_output = match shared.read() {
-            Ok(guard) => guard.scrub(literal),
-            Err(poisoned) => poisoned.into_inner().scrub(literal),
-        };
-        assert_eq!(shared_output, "[REDACTED]");
-    }
-
-    #[test]
-    fn worker_drop_unblocks_a_parked_approval() {
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let worker_shutdown = Arc::clone(&shutdown);
-        let (reply, answers) = mpsc::channel();
-        let (parked_tx, parked_rx) = mpsc::channel();
-        let join = thread::spawn(move || {
-            parked_tx.send(()).unwrap();
-            assert!(!wait_for_approval(&answers, &worker_shutdown));
-        });
-        parked_rx.recv().unwrap();
-
-        let (commands, _command_rx) = mpsc::channel();
-        let (event_tx, events) = mpsc::channel();
-        event_tx
-            .send(AgentEvent::Approval(ApprovalRequest {
-                prompt: "parked".into(),
-                reply,
-            }))
-            .unwrap();
-        drop(event_tx);
-        let worker = Worker {
-            commands,
-            events,
-            join: Some(join),
-            shutdown,
-        };
-
-        let started = Instant::now();
-        drop(worker);
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "approval shutdown exceeded its bound: {:?}",
-            started.elapsed()
-        );
-    }
-
-    #[test]
-    fn worker_drop_detaches_an_uninterruptible_operation_at_deadline() {
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let release = Arc::new(AtomicBool::new(false));
-        let worker_release = Arc::clone(&release);
-        let (finished_tx, finished_rx) = mpsc::channel();
-        let join = thread::spawn(move || {
-            while !worker_release.load(Ordering::Acquire) {
-                thread::sleep(Duration::from_millis(1));
-            }
-            finished_tx.send(()).unwrap();
-        });
-        let worker = worker_around(join, shutdown);
-
-        let started = Instant::now();
-        drop(worker);
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed >= SHUTDOWN_TIMEOUT.saturating_sub(Duration::from_millis(10)),
-            "detached before its deadline"
-        );
-        assert!(
-            elapsed < Duration::from_secs(1),
-            "uninterruptible operation exceeded its bound: {elapsed:?}"
-        );
-
-        release.store(true, Ordering::Release);
-        finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-    }
-
-    #[test]
-    fn shutdown_aware_client_refuses_a_new_provider_call() {
-        struct PanicClient;
-
-        impl ChatClient for PanicClient {
-            fn complete(&self, _request: &ChatRequest) -> anyhow::Result<ChatResponse> {
-                panic!("provider must not be called after shutdown")
-            }
-        }
-
-        let shutdown = Arc::new(AtomicBool::new(true));
-        let client = shutdown_aware(Box::new(PanicClient), &shutdown);
-        let request = ChatRequest {
-            model: "test".into(),
-            messages: Vec::new(),
-            tools: Vec::new(),
-            thinking: ThinkingEffort::None,
-        };
-
-        assert_eq!(
-            client.complete(&request).unwrap_err().to_string(),
-            "agent worker stopped"
-        );
-    }
-
-    #[test]
-    fn add_usage_reports_overflow_without_partially_mutating_totals() {
-        let mut total = Usage {
-            prompt_tokens: u64::MAX,
-            completion_tokens: 7,
-            cached_tokens: Some(3),
-        };
-        let usage = Usage {
-            prompt_tokens: 1,
-            completion_tokens: 2,
-            cached_tokens: Some(1),
-        };
-
-        assert!(add_usage(&mut total, &usage));
-        assert_eq!(total.prompt_tokens, u64::MAX);
-        assert_eq!(total.completion_tokens, 7);
-        assert_eq!(total.cached_tokens, Some(3));
-    }
-}
+mod tests;

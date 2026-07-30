@@ -1,6 +1,15 @@
 //! Event reduction, timeline projection, and session cost accounting.
 
-use super::*;
+use crate::session::safe_line;
+use crate::state::{AgentEvent, App, Status, TimelineEntry, TranscriptKind};
+use crate::{APPROVAL_LEGEND, BUDGET_REASON};
+use chrono::{DateTime, Utc};
+use nh_core::receipt::{FailureClass, Outcome};
+use nh_core::wire::Usage;
+use nh_routes::{
+    cost_of, money, money_with_gloss, saved_pct, PriceConfidence, ResolvedRoute, RouteClass,
+    RouteResolver, LOCAL_METER_COPY,
+};
 
 pub(super) fn outcome_name(outcome: Outcome) -> &'static str {
     match outcome {
@@ -69,6 +78,18 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
             }
             app.push_line(&line, TranscriptKind::Progress);
         }
+        AgentEvent::ToolStarted { name, started_at } => {
+            app.active_tool = Some(crate::state::ActiveTool { name, started_at });
+        }
+        AgentEvent::ToolFinished { name } => {
+            if app
+                .active_tool
+                .as_ref()
+                .is_some_and(|tool| tool.name == name)
+            {
+                app.active_tool = None;
+            }
+        }
         AgentEvent::Approval(request) => {
             if app.session_allow.contains(&request.prompt) {
                 let _ = request.reply.send(true);
@@ -91,7 +112,9 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
             }
         }
         AgentEvent::TaskReceipt(summary) => {
-            if let (Some(usage), Ok(at)) = (
+            if app.route.class() == RouteClass::Local {
+                app.push_line(LOCAL_METER_COPY, TranscriptKind::Progress);
+            } else if let (Some(usage), Ok(at)) = (
                 summary.receipt.usage.as_ref(),
                 DateTime::parse_from_rfc3339(&summary.receipt.ts_utc),
             ) {
@@ -107,6 +130,7 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
             ));
         }
         AgentEvent::Answer(answer) => {
+            app.active_tool = None;
             app.push_text("", &answer, TranscriptKind::Answer);
             let status = if app.budget_reached() {
                 Status::Blocked(BUDGET_REASON.into())
@@ -117,6 +141,7 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
         }
         AgentEvent::MeterIncomplete => app.has_failed_turn = true,
         AgentEvent::Failed(reason) => {
+            app.active_tool = None;
             let status_reason = safe_line(&app.scrubber, &reason);
             let what = reason
                 .lines()
@@ -135,6 +160,10 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
 }
 
 pub(super) fn record_turn_cost(app: &mut App, usage: &Usage, at: DateTime<Utc>) {
+    if app.route.class() == RouteClass::Local {
+        app.push_line(LOCAL_METER_COPY, TranscriptKind::Progress);
+        return;
+    }
     let Some(quote) = app.route.price_at(at) else {
         return;
     };
@@ -156,6 +185,9 @@ pub(super) fn savings_lines(
     usage: &Usage,
     at: DateTime<Utc>,
 ) -> Vec<String> {
+    if route.class() == RouteClass::Local {
+        return vec![LOCAL_METER_COPY.to_owned()];
+    }
     let Some(quote) = route.price_at(at) else {
         return Vec::new();
     };

@@ -27,8 +27,10 @@ The running build history lives in [../00-start-here/BUILD_LOG.md](../00-start-h
       The gate runs, in order, each step's real exit code captured (never piped through `tail`):
   - [x] `cargo fmt --all --check` — zero formatting drift (contributors format with `cargo fmt`).
   - [x] `cargo clippy --locked --workspace --all-targets --release -- -D warnings` — zero warnings.
+  - [x] `RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps` — public
+        documentation builds with zero warnings.
   - [x] `cargo deny --locked check` — supply-chain gate green (advisories / bans / licenses / sources).
-  - [x] `cargo test --locked --workspace --release` — full suite, **512 passed / 0 failed**
+  - [x] `cargo test --locked --workspace --release` — full suite, **515 passed / 0 failed**
         (1 OS-keyring test ignored).
 - [x] Supply-chain policy (`deny.toml`) is green and enforced by the gate; no RustSec advisory is
       `ignore`d without a documented rationale.

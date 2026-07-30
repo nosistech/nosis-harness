@@ -1,6 +1,8 @@
 //! Scrubbed MCP tool results and HTTP JSON responses.
 
-use super::*;
+use crate::Runtime;
+use serde_json::{json, Value};
+use tiny_http::{Header, Request, Response, StatusCode};
 
 pub(super) fn tool_error(runtime: &Runtime, message: &str) -> Value {
     tool_text(runtime, message, true)
@@ -34,11 +36,11 @@ pub(super) fn respond_json(request: Request, runtime: &Runtime, status: u16, val
     scrub_json(&mut value, &runtime.scrubber);
     let body = serde_json::to_string(&value).unwrap_or_else(|_| "{}".into());
     let body = runtime.scrubber.scrub(&body);
-    let content_type =
-        Header::from_bytes("Content-Type", "application/json").expect("static content-type header");
-    let response = Response::from_string(body)
-        .with_status_code(StatusCode(status))
-        .with_header(content_type);
+    let response = Response::from_string(body).with_status_code(StatusCode(status));
+    let response = match Header::from_bytes("Content-Type", "application/json") {
+        Ok(content_type) => response.with_header(content_type),
+        Err(()) => response,
+    };
     let _ = request.respond(response);
 }
 

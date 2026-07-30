@@ -35,6 +35,10 @@ their own policies.
 - **Receipts** — the cost/usage ledger — are written locally to `.nosis/receipts.jsonl`
   and are not automatically uploaded by `nh`.
 - **Fleet state** lives under `.nosis/fleet/`.
+- **Retention** is operator-controlled. Receipt and Fleet records are append-only and are
+  not automatically pruned; they grow until the operator deletes them. Other than the
+  configuration and Git hook created by an explicit `nh init`, `nh` creates no source-code
+  or cache artifacts of its own.
 - **Redaction** is applied to application-controlled terminal, receipt, tool-result, and
   MCP-result paths using known key shapes plus active literal credentials. Redaction lowers
   risk but is not a reason to put secrets in prompts or task text.

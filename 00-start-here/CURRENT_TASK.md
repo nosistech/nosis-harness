@@ -1,5 +1,16 @@
 # Current Task
 
+## Current override — continuation saved 2026-07-27
+
+The authoritative current state and next-action sequence is
+[`CONTINUE_HERE.md`](./CONTINUE_HERE.md). The public empty repository now exists at
+`nosistech/nosis-harness`; the A+ responsibility refactor remains deliberately uncommitted; the
+old release process has exited and its canonical executable must be rebuilt; the current-source
+Windows FEEL gate, first push, remote CI, branch protection, and publication are still pending.
+
+Everything below this override is historical provenance. Do not execute an older “NOW” or
+“ON continue” block when it conflicts with `CONTINUE_HERE.md`.
+
 ## Current state — owner commit approval (2026-07-26)
 
 The whole-project audit, public-v0.1 hardening, Telegram removal, and responsibility-boundary

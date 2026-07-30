@@ -15,8 +15,11 @@ pub fn connect<V: Vault>(
     approved_origins: &[String],
     output_cap: Option<u64>,
 ) -> anyhow::Result<CredentialedConnection> {
-    if route.class() != RouteClass::Api {
-        anyhow::bail!("delegate routes do not accept provider credentials");
+    match route.class() {
+        RouteClass::Api | RouteClass::Local => {}
+        RouteClass::Delegate => {
+            anyhow::bail!("delegate routes do not accept provider credentials");
+        }
     }
     let secret = nh_vault::get_scoped(
         vault,
@@ -26,7 +29,7 @@ pub fn connect<V: Vault>(
     )?;
     let literal = secret.clone();
     let output_cap = min_cap(route.max_out(), output_cap);
-    Ok((make_client(route, secret, output_cap), literal))
+    Ok((make_client(route, secret, output_cap)?, literal))
 }
 
 fn min_cap(route_cap: Option<u64>, requested_cap: Option<u64>) -> Option<u64> {
@@ -49,6 +52,18 @@ mod tests {
     impl Vault for PanicVault {
         fn get(&self, _entry: &str) -> anyhow::Result<Zeroizing<String>> {
             panic!("a refused route must not materialize its credential")
+        }
+
+        fn set(&self, _entry: &str, _value: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct PlaceholderVault;
+
+    impl Vault for PlaceholderVault {
+        fn get(&self, _entry: &str) -> anyhow::Result<Zeroizing<String>> {
+            Ok(Zeroizing::new("ollama".to_owned()))
         }
 
         fn set(&self, _entry: &str, _value: &str) -> anyhow::Result<()> {
@@ -93,5 +108,33 @@ mod tests {
         assert_eq!(min_cap(Some(20), Some(10)), Some(10));
         assert_eq!(min_cap(Some(20), None), Some(20));
         assert_eq!(min_cap(None, Some(10)), Some(10));
+    }
+
+    #[test]
+    fn local_route_uses_the_existing_scoped_vault_flow() {
+        let route = RouteResolver::from_toml(
+            r#"
+            [routes.local-test]
+            provider = "ollama"
+            model_id = "user-filled-model"
+            base_url = "http://127.0.0.1:11434/v1"
+            wire = "openai"
+            vault_entry = "ollama-local"
+            class = "local"
+            max_out = 4096
+            "#,
+        )
+        .unwrap()
+        .resolve("local-test")
+        .unwrap();
+
+        let (_, literal) = connect(
+            &PlaceholderVault,
+            &route,
+            &["http://127.0.0.1:11434".to_owned()],
+            None,
+        )
+        .unwrap();
+        assert_eq!(literal.as_str(), "ollama");
     }
 }

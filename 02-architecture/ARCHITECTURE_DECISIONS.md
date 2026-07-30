@@ -68,6 +68,13 @@ Tradeoffs:
 
 **Amendment 2026-07-24:** The delegate-adapter class (Class 2) was CUT from v1 and demoted to an escalation-gate footnote; only a commented catalog schema stub remains (`[routes.claude-opus-4-8]` in `catalog.toml`) so the class can return if a measured workload proves the escalation gate insufficient — the economics broke (Anthropic moved programmatic Claude use to API pricing 2026-06-15; Gemini CLI died as an open delegate 2026-06-18) and open-weight parity made the class unnecessary — evidence: `00-start-here/RESEARCH_2026-07_harness.md`:37, :61, :314 (ratified in the `d3cac39` research cycle), `00-start-here/CURRENT_TASK.md`:13 ("the delegate class is CUT from v1"), revisit trigger at `RESEARCH_2026-07_harness.md`:101 ("no OpenAI/Anthropic/Google key until a measured workload proves the delegate insufficient").
 
+**Amendment 2026-07-29:** A third `local` class covers user-configured Ollama and llama.cpp
+loopback routes. It reuses the OpenAI wire and normal exact-origin vault flow, is selectable only
+through an explicit model choice, and is excluded from provider defaults, `resolve_capable`,
+cheapest-capable advice, automatic escalation, and the `top_tier` cost anchor. This preserves the
+skip ladder: a zero-token-price local route cannot win every comparison by construction. Local
+turns carry the qualifier “Local: no billed tokens; hardware and power are not metered.”
+
 ## Decision 5: MCP targets the 2026-07-28 stateless spec from commit one
 
 Decision:

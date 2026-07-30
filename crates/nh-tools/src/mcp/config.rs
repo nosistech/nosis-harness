@@ -1,6 +1,8 @@
 //! MCP server configuration, authentication, and trust policy.
 
-use super::*;
+use super::client::{SPEC_DEFAULT, SPEC_FALLBACK};
+use anyhow::bail;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpAuth {

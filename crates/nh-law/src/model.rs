@@ -1,6 +1,7 @@
 //! Compiled immutable session policy and public policy views.
 
-use super::*;
+use crate::matcher::{exec_pattern_matches, first_match};
+use std::collections::BTreeMap;
 
 /// Session autonomy. Repository law cannot set this value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

@@ -1,5 +1,6 @@
 use super::*;
-use chrono::TimeZone;
+use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone, Utc};
+use std::collections::BTreeMap;
 
 const CATALOG: &str = include_str!("../../../catalog.toml");
 
@@ -108,12 +109,17 @@ fn priced_route(
     output: f64,
 ) -> String {
     let context = context.map_or_else(String::new, |value| format!("context = {value}"));
+    let base_url = if class == "local" {
+        "http://127.0.0.1:11434/v1"
+    } else {
+        "https://example.invalid"
+    };
     format!(
         r#"
         [routes."{id}"]
         provider = "p"
         model_id = "{id}"
-        base_url = "https://example.invalid"
+        base_url = "{base_url}"
         wire = "openai"
         vault_entry = "p"
         class = "{class}"
@@ -137,6 +143,7 @@ fn capable_resolver() -> RouteResolver {
         priced_route("fit-expensive", "api", Some(64_000), 4.0, 4.0),
         priced_route("unknown-context", "api", None, 0.1, 0.1),
         priced_route("delegated", "delegate", Some(64_000), 0.0, 0.0),
+        priced_route("local-zero", "local", Some(64_000), 0.0, 0.0),
         r#"
         [routes.unpriced]
         provider = "p"
@@ -216,6 +223,7 @@ fn parses_repo_catalog_with_all_class1_routes() {
             "kimi-k2.6",
             "kimi-k2.7-code",
             "kimi-k2.7-code-highspeed",
+            "kimi-k3",
             "mimo-v2.5",
             "mimo-v2.5-pro",
         ]
@@ -249,11 +257,29 @@ fn anthropic_wire_variant_keeps_model_id_and_changes_base_url() {
 
 #[test]
 fn deepseek_routes_carry_dialect_quirk_and_limits() {
-    let route = resolver().resolve("deepseek-v4-pro").unwrap();
-    assert_eq!(route.thinking_dialect(), ThinkingDialect::DeepseekNhm);
-    assert!(route.has_quirk("empty-reasoning-content-on-tool-replay"));
-    assert!(!route.has_quirk("no-such-quirk"));
-    assert!(!route.preserve_reasoning());
+    let resolver = resolver();
+    for id in [
+        "deepseek-v4-pro",
+        "deepseek-v4-pro-anthropic",
+        "deepseek-v4-flash",
+        "deepseek-v4-flash-anthropic",
+    ] {
+        let route = resolver.resolve(id).unwrap();
+        assert_eq!(
+            route.thinking_dialect(),
+            ThinkingDialect::DeepseekNhm,
+            "{id}"
+        );
+        assert!(
+            route.has_quirk("empty-reasoning-content-on-tool-replay"),
+            "{id}"
+        );
+        assert!(!route.has_quirk("no-such-quirk"), "{id}");
+        assert!(!route.preserve_reasoning(), "{id}");
+        assert!(route.preserve_when_thinking(), "{id}");
+    }
+
+    let route = resolver.resolve("deepseek-v4-pro").unwrap();
     assert_eq!(route.context(), Some(1_000_000));
     assert_eq!(route.max_out(), Some(384_000));
     assert_eq!(route.modality(), vec!["text"]);
@@ -321,11 +347,55 @@ fn kimi_k26_uses_toggle_and_state_aware_reasoning_replay() {
 }
 
 #[test]
+fn kimi_k3_has_verified_capacity_price_and_effort_control() {
+    let resolver = resolver();
+    let route = resolver.resolve("kimi-k3").unwrap();
+    assert_eq!(
+        route.thinking_dialect(),
+        ThinkingDialect::AlwaysThinkingEffort
+    );
+    assert_eq!(route.thinking_dialect().as_str(), "always-thinking-effort");
+    assert!(route.preserve_reasoning());
+    assert_eq!(route.modality(), vec!["text", "image", "video"]);
+    assert_eq!(route.context(), Some(1_048_576));
+    assert_eq!(route.max_out(), Some(1_048_576));
+
+    let quote = route.price_at(utc(2026, 7, 28, 12, 0, 0)).unwrap();
+    assert_eq!(quote.currency, Currency::Usd);
+    assert_eq!(quote.confidence, PriceConfidence::Confirmed);
+    assert!(close(quote.cache_hit, 0.30));
+    assert!(close(quote.cache_miss, 3.00));
+    assert!(close(quote.output, 15.00));
+
+    let (candidate, trace) = resolver
+        .resolve_capable(
+            300_000,
+            10_000,
+            &["kimi-k2.6", "kimi-k2.7-code", "kimi-k3"],
+            utc(2026, 7, 28, 12, 0, 0),
+        )
+        .unwrap();
+    assert_eq!(candidate.id(), "kimi-k3");
+    assert!(
+        trace
+            .rejections
+            .iter()
+            .any(|entry| entry.route_id == "kimi-k2.6" && entry.reason.starts_with("ctx ")),
+        "{trace}"
+    );
+}
+
+#[test]
 fn mimo_routes_preserve_reasoning_and_are_omni_modal() {
     let r = resolver();
     for id in ["mimo-v2.5", "mimo-v2.5-pro"] {
         let route = r.resolve(id).unwrap();
         assert!(route.preserve_reasoning(), "{id}");
+        assert_eq!(
+            route.thinking_dialect(),
+            ThinkingDialect::KimiToggle,
+            "{id}"
+        );
         assert_eq!(
             route.modality(),
             vec!["text", "image", "video", "audio"],
@@ -340,6 +410,34 @@ fn glm_52_uses_glm_hm_dialect() {
     let route = resolver().resolve("glm-5.2").unwrap();
     assert_eq!(route.thinking_dialect(), ThinkingDialect::GlmHm);
     assert_eq!(route.max_out(), Some(128_000));
+}
+
+#[test]
+fn free_glm_routes_have_documented_caps_and_are_capable_candidates() {
+    let resolver = resolver();
+    let cases = [
+        ("glm-4.7-flash", 200_000, 128_000),
+        ("glm-4.6v-flash", 128_000, 32_000),
+        ("glm-4.5-flash", 128_000, 96_000),
+    ];
+
+    for (id, context, max_out) in cases {
+        let route = resolver.resolve(id).unwrap();
+        assert_eq!(route.context(), Some(context), "{id}");
+        assert_eq!(route.max_out(), Some(max_out), "{id}");
+
+        let (candidate, trace) = resolver
+            .resolve_capable(1_000, 1_000, &[id], utc(2026, 7, 28, 12, 0, 0))
+            .unwrap();
+        assert_eq!(candidate.id(), id);
+        assert!(
+            trace
+                .rejections
+                .iter()
+                .all(|entry| entry.reason != "unknown context"),
+            "{id}: {trace}"
+        );
+    }
 }
 
 #[test]
@@ -365,6 +463,58 @@ fn delegate_class_parses() {
         r.resolve("test-model").unwrap().class(),
         RouteClass::Delegate
     );
+}
+
+#[test]
+fn local_class_parses_for_an_explicit_loopback_route() {
+    let route = RouteResolver::from_toml(
+        r#"
+        [routes.local-test]
+        provider = "local"
+        model_id = "user-filled-model"
+        base_url = "http://127.0.0.1:11434/v1"
+        wire = "openai"
+        vault_entry = "local-test"
+        class = "local"
+        "#,
+    )
+    .unwrap()
+    .resolve("local-test")
+    .unwrap();
+
+    assert_eq!(route.class(), RouteClass::Local);
+    assert_eq!(
+        route.peak_status(utc(2026, 7, 29, 0, 0, 0), FixedOffset::east_opt(0).unwrap()),
+        "local"
+    );
+}
+
+#[test]
+fn local_class_is_confined_to_loopback_on_the_openai_wire() {
+    let remote = route_toml(r#"class = "local""#);
+    let error = RouteResolver::from_toml(&remote)
+        .err()
+        .expect("remote local route must fail")
+        .to_string();
+    assert!(
+        error.contains("requires a literal-loopback base_url"),
+        "{error}"
+    );
+
+    let anthropic = r#"
+        [routes.local-test]
+        provider = "local"
+        model_id = "user-filled-model"
+        base_url = "http://127.0.0.1:8080/v1"
+        wire = "anthropic"
+        vault_entry = "local-test"
+        class = "local"
+    "#;
+    let error = RouteResolver::from_toml(anthropic)
+        .err()
+        .expect("non-OpenAI local route must fail")
+        .to_string();
+    assert!(error.contains("must reuse wire = \"openai\""), "{error}");
 }
 
 // ---------------------------------------------------------------- pricing
@@ -618,6 +768,21 @@ fn naive_top_tier_never_crosses_currency() {
         cache_miss = 99.0
         output = 99.0
         price_confidence = "confirmed"
+
+        [routes.local-not-an-anchor]
+        provider = "p"
+        model_id = "local-not-an-anchor"
+        base_url = "http://127.0.0.1:8080/v1"
+        wire = "openai"
+        vault_entry = "local-test"
+        class = "local"
+        [routes.local-not-an-anchor.price]
+        currency = "CNY"
+        unit = "per_million_tokens"
+        cache_hit = 100.0
+        cache_miss = 100.0
+        output = 100.0
+        price_confidence = "confirmed"
     "#;
     let resolver = RouteResolver::from_toml(catalog).unwrap();
     let route = resolver.resolve("actual").unwrap();
@@ -625,6 +790,8 @@ fn naive_top_tier_never_crosses_currency() {
         .naive_cost(&route, 1_000_000, 0, 0, utc(2026, 7, 15, 0, 0, 0))
         .unwrap();
     assert_eq!(costs.currency, Currency::Cny);
+    // The USD route cannot be compared, and the higher-priced local route is
+    // deliberately not a top-tier API anchor.
     assert!(close(costs.top_tier, 3.0));
 }
 
@@ -750,6 +917,7 @@ fn resolve_capable_picks_cheapest_fitting_route_and_explains_every_skip() {
         "cheap-small",
         "fit-b",
         "delegated",
+        "local-zero",
         "fit-a",
         "unknown-context",
         "unpriced",
@@ -767,6 +935,7 @@ fn resolve_capable_picks_cheapest_fitting_route_and_explains_every_skip() {
     assert_eq!(reasons.len(), allowed.len() - 1);
     assert_eq!(reasons["cheap-small"], "ctx 32K < 45K");
     assert_eq!(reasons["delegated"], "delegate");
+    assert_eq!(reasons["local-zero"], "local");
     assert_eq!(reasons["unknown-context"], "unknown context");
     assert_eq!(reasons["unpriced"], "no price");
     assert_eq!(reasons["missing"], "unknown route");
@@ -948,6 +1117,15 @@ fn available_by_provider_groups_and_sorts() {
             "deepseek-v4-pro-anthropic",
         ]
     );
+    assert_eq!(
+        map["kimi"],
+        vec![
+            "kimi-k2.6",
+            "kimi-k2.7-code",
+            "kimi-k2.7-code-highspeed",
+            "kimi-k3",
+        ]
+    );
     assert_eq!(map["mimo"], vec!["mimo-v2.5", "mimo-v2.5-pro"]);
 }
 
@@ -1076,6 +1254,7 @@ fn unknown_class_is_rejected() {
         .expect("must fail")
         .to_string();
     assert!(msg.contains("bogus"), "got: {msg}");
+    assert!(msg.contains("local"), "must say valid values: {msg}");
     assert!(msg.contains("delegate"), "must say valid values: {msg}");
 }
 
@@ -1087,7 +1266,7 @@ fn unknown_dialect_is_rejected() {
         .to_string();
     assert!(msg.contains("vibes"), "got: {msg}");
     assert!(
-        msg.contains("always-thinking"),
+        msg.contains("always-thinking-effort"),
         "must say valid values: {msg}"
     );
 }
@@ -1245,4 +1424,8 @@ fn display_strings_match_catalog_vocabulary() {
     assert_eq!(PriceConfidence::Confirmed.to_string(), "confirmed");
     assert_eq!(PriceConfidence::VerifyLive.to_string(), "verify_live");
     assert_eq!(ThinkingDialect::DeepseekNhm.as_str(), "deepseek-nhm");
+    assert_eq!(
+        ThinkingDialect::AlwaysThinkingEffort.as_str(),
+        "always-thinking-effort"
+    );
 }
