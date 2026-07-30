@@ -427,6 +427,45 @@ fn missing_usage_is_reported_without_a_zero_cost() {
 }
 
 #[test]
+fn local_run_meter_uses_the_ratified_qualifier_with_or_without_usage() {
+    let resolver = RouteResolver::from_toml(
+        r#"
+        [routes.local-test]
+        provider = "ollama"
+        model_id = "user-filled-model"
+        base_url = "http://127.0.0.1:11434/v1"
+        wire = "openai"
+        vault_entry = "ollama-local"
+        class = "local"
+        context = 8192
+        max_out = 2048
+        [routes.local-test.price]
+        currency = "USD"
+        unit = "per_million_tokens"
+        cache_hit = 0.0
+        cache_miss = 0.0
+        output = 0.0
+        price_confidence = "confirmed"
+        "#,
+    )
+    .unwrap();
+    let route = resolver.resolve("local-test").unwrap();
+    let at = Utc.with_ymd_and_hms(2026, 7, 29, 0, 0, 0).unwrap();
+    let usage = Usage {
+        prompt_tokens: 100,
+        completion_tokens: 20,
+        cached_tokens: None,
+    };
+
+    let reported = run_meter_lines(&resolver, &route, Some(&usage), 1, 0, at, at);
+    assert_eq!(reported[1], nh_routes::LOCAL_METER_COPY);
+    assert!(!reported.iter().any(|line| line.contains("$0.00")));
+
+    let missing = run_meter_lines(&resolver, &route, None, 1, 0, at, at);
+    assert_eq!(missing[1], nh_routes::LOCAL_METER_COPY);
+}
+
+#[test]
 fn run_cost_marks_only_a_peak_boundary_crossing() {
     let resolver = RouteResolver::from_toml(PEAK_CATALOG).unwrap();
     let route = resolver.resolve("peak-route").unwrap();
@@ -444,4 +483,69 @@ fn run_cost_marks_only_a_peak_boundary_crossing() {
 
     let steady = turn_cost_line_for_run(&resolver, &route, &usage, in_peak, later_in_peak).unwrap();
     assert!(!steady.contains("spans a peak boundary"));
+}
+
+#[test]
+fn non_terminal_stdin_cannot_approve_even_when_it_contains_yes() {
+    let mut input = std::io::Cursor::new(b"y\n".to_vec());
+    let mut stderr = Vec::new();
+
+    assert!(!approve_with_io(
+        "echo safe",
+        false,
+        &mut input,
+        &mut stderr
+    ));
+    assert_eq!(input.position(), 0, "piped input must not be consumed");
+    let stderr = String::from_utf8(stderr).unwrap();
+    assert!(stderr.contains("stdin is not a terminal"), "got: {stderr}");
+    assert!(stderr.contains("cannot approve"), "got: {stderr}");
+}
+
+#[test]
+fn terminal_stdin_keeps_the_existing_explicit_yes_path() {
+    let mut input = std::io::Cursor::new(b"yes\n".to_vec());
+    let mut stderr = Vec::new();
+
+    assert!(approve_with_io("echo safe", true, &mut input, &mut stderr));
+    assert_eq!(
+        String::from_utf8(stderr).unwrap(),
+        "  approve? echo safe  [y/N] "
+    );
+}
+
+#[test]
+fn run_stdout_contains_only_the_answer_and_metering_uses_stderr() {
+    let scrubber = Scrubber::new(Vec::new());
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let meter = vec!["tokens 12 in / 7 out".to_owned(), "cost $0.01".to_owned()];
+
+    write_run_output(&mut stdout, &mut stderr, &scrubber, "the answer", &meter).unwrap();
+
+    assert_eq!(String::from_utf8(stdout).unwrap(), "the answer\n");
+    assert_eq!(
+        String::from_utf8(stderr).unwrap(),
+        "tokens 12 in / 7 out\ncost $0.01\n"
+    );
+}
+
+#[test]
+fn run_constitution_contains_the_authoritative_tool_result_rule() {
+    let resolver = RouteResolver::from_toml(PEAK_CATALOG).unwrap();
+    let route = resolver.resolve("peak-route").unwrap();
+    let constitution = agent_constitution("law bytes", &route);
+
+    assert!(
+        constitution.contains(nh_core::agent::TOOL_RESULT_STATE_RULE),
+        "got: {constitution}"
+    );
+}
+
+#[test]
+fn timeout_guidance_never_suggests_more_than_the_cli_limit() {
+    assert!(max_turns_timeout_message(60).contains("--max-turns 100"));
+    let at_limit = max_turns_timeout_message(MAX_RUN_TURNS);
+    assert!(at_limit.contains("split the task"), "got: {at_limit}");
+    assert!(!at_limit.contains("--max-turns 200"), "got: {at_limit}");
 }

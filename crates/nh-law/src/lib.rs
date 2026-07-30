@@ -11,19 +11,10 @@ pub use load::{assemble_constitution, load, user_home_dir};
 
 pub use model::{Autonomy, ConstitutionSources, Law, LoadOptions, Policy, PolicyView, Verdict};
 
-use matcher::{exec_pattern_matches, first_match};
-
 #[cfg(test)]
 use load::{compile_policy, load_with_home, parse_law};
 #[cfg(test)]
 use matcher::glob_matches;
-
-use std::collections::BTreeMap;
-use std::fs;
-use std::io::Read as _;
-use std::path::{Path, PathBuf};
-
-use serde::Deserialize;
 
 const SECTION_JOINER: &str = "\n\n";
 const OPERATING_LAW_LABEL: &str = "## Operating law";

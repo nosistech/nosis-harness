@@ -1,6 +1,6 @@
 # Nosis Harness — Project OS
 
-**nh** is an honest, metered, multi-model terminal agent (Rust) for open-weight models — DeepSeek V4, Kimi K2.x, MiMo V2.5, and GLM. You select the execution route explicitly; `nh why` independently estimates the **cheapest capable** catalog route. Every accepted run produces a local receipt with reported token usage and price-derived cost context. It is a harness with a meter, not an automatic router.
+**nh** is an honest, metered, multi-model terminal agent (Rust) for open-weight models — DeepSeek V4, Kimi K2.x, MiMo V2.5, GLM, and explicitly configured local runtimes. You select the execution route explicitly; `nh why` independently estimates the **cheapest capable API** catalog route. Every accepted run produces a local receipt with reported token usage and price-derived cost context. It is a harness with a meter, not an automatic router.
 
 **Canonical spec:** `NOSIS_HARNESS_Master_Plan.md` (root). Appendices A/B supersede Sections 1 and 3 where they conflict. The folders below are the working layer on top of it.
 
@@ -19,6 +19,10 @@ The binary lands at `target/release/nh` (`target\release\nh.exe` on Windows). Ad
 - `nh init` — scaffold `.nosis/` in the current repo: the receipts dir, a `.gitignore`, a secret-pattern pre-commit hook, and the trusted bundled `catalog.toml`. A changed repository catalog is refused unless the operator has placed an exact reviewed copy at `~/.nosis/catalog.toml`. Existing Git hooks are preserved and reported for manual chaining.
 - `nh key add deepseek` — prompt for your DeepSeek API key and store it in the OS-native vault (never echoed, never written to files). For CI/headless use, the env fallback is `NH_<ENTRY>_KEY` with the entry uppercased — here, `NH_DEEPSEEK_KEY`.
 - `nh key remove deepseek` — remove that entry from the OS-native vault. Environment fallbacks must be unset separately.
+- Local Ollama and llama.cpp routes are user-filled, loopback-only, and selected only through
+  `--model` or `/model`; they never become cheapest-capable candidates. See
+  [Local models](./06-operations/LOCAL_MODELS.md) for setup, the Ollama truncation warning, model
+  verification, licensing, and hardware sizing.
 - `nh run "fix the failing test" --model deepseek-v4-flash` — run one agent task. Every shell command stops at a y/N approval prompt (default **deny**), and each turn is logged to `.nosis/receipts.jsonl`. Defaults: `--model deepseek-v4-flash`, `--max-turns 20`, `--profile balanced`. Optional: `--think none|low|high|max` (absent = per-route-dialect default: High on always-thinking dialects, None on non-thinking) and `--autonomy ask|auto` (absent = the law-file default).
 - `nh why "review the diff"` — explain the cheapest capable route for a rough token estimate of the task; add `--model <id>` to compare a specific route against it.
 - `nh chat` — interactive session. `/model` and `/provider` switch routes mid-session (history and cumulative usage preserved); `/price` evaluates the catalog price at the current clock time and flags stale data.
@@ -34,6 +38,14 @@ Windows is built and tested. Linux and macOS paths exist but have not yet been e
 ## Privacy
 
 `nh` has no Nosis-operated telemetry, analytics, beacons, or crash reporting. Model requests go directly to the provider route you select; approved MCP calls and shell commands can create additional network traffic. Receipts are local by default. Exact boundaries and deletion steps are in [PRIVACY.md](./PRIVACY.md).
+
+## Runtime files
+
+Apart from the configuration and Git hook created by an explicit `nh init`, the harness
+does not generate source code or caches of its own. Normal runs append the intentional,
+gitignored audit state in `.nosis/receipts.jsonl`; Fleet additionally uses `.nosis/fleet/`.
+These append-only records grow until the operator deletes them. Agent-requested edits and
+approved shell commands can change other workspace files by design.
 
 ## License & contributing
 

@@ -1,6 +1,21 @@
 //! Keyboard, paste, command, and overlay input reduction.
 
-use super::*;
+mod commands;
+
+#[cfg(test)]
+pub(super) use commands::teaching_error;
+pub(super) use commands::{command_matches, execute_command_menu, explain_why};
+use commands::{resolved_route_action, set_profile};
+
+use crate::palette::filter_palette;
+use crate::state::{
+    AgentEvent, App, Overlay, PaletteAction, PaletteEntry, PickerKind, PickerRow, Status,
+};
+use crate::timeline::apply_event;
+use crate::worker::{Worker, WorkerCommand};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use nh_core::agent::MAX_TASK_BYTES;
+use nh_core::wire::ThinkingEffort;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum UiAction {
@@ -11,7 +26,6 @@ pub(super) enum UiAction {
     SetProfile(String),
     Quit,
 }
-
 pub(super) fn handle_input_event(app: &mut App, worker: &mut Worker, input: Event) -> bool {
     let action = reduce_input_event(app, input);
     handle_action(app, worker, action)
@@ -31,10 +45,16 @@ pub(super) fn handle_action(app: &mut App, worker: &mut Worker, action: UiAction
             false
         }
         UiAction::SwitchRoute(route_id) => {
-            let route = app
-                .resolver
-                .resolve(&route_id)
-                .expect("a command action only carries a resolved route");
+            let route = match app.resolver.resolve(&route_id) {
+                Ok(route) => route,
+                Err(error) => {
+                    apply_event(
+                        app,
+                        AgentEvent::Failed(format!("could not switch route: {error}")),
+                    );
+                    return false;
+                }
+            };
             if worker
                 .commands
                 .send(WorkerCommand::SwitchRoute(Box::new(route.clone())))
@@ -228,6 +248,32 @@ pub(super) fn reduce_overlay_key(app: &mut App, key: KeyEvent) -> UiAction {
         return UiAction::None;
     }
 
+    let picked = match &mut app.overlay {
+        Overlay::Picker {
+            kind,
+            selected,
+            rows,
+        } => picker_key(*kind, rows, selected, key),
+        _ => None,
+    };
+    if let Some((kind, value)) = picked {
+        app.overlay = Overlay::None;
+        return match kind {
+            PickerKind::Model => {
+                let resolved = app.resolver.resolve(&value);
+                resolved_route_action(app, resolved)
+            }
+            PickerKind::Provider => {
+                let resolved = app.resolver.provider_default(&value);
+                resolved_route_action(app, resolved)
+            }
+            PickerKind::Profile => set_profile(app, &value),
+        };
+    }
+    if matches!(app.overlay, Overlay::Picker { .. }) {
+        return UiAction::None;
+    }
+
     let activated = match &mut app.overlay {
         Overlay::Palette {
             filter,
@@ -237,12 +283,32 @@ pub(super) fn reduce_overlay_key(app: &mut App, key: KeyEvent) -> UiAction {
         Overlay::None
         | Overlay::CommandMenu { .. }
         | Overlay::TrustDial
-        | Overlay::Timeline { .. } => None,
+        | Overlay::Timeline { .. }
+        | Overlay::Picker { .. } => None,
     };
     let Some(entry) = activated else {
         return UiAction::None;
     };
     activate_palette_entry(app, entry)
+}
+
+pub(super) fn picker_key(
+    kind: PickerKind,
+    rows: &[PickerRow],
+    selected: &mut usize,
+    key: KeyEvent,
+) -> Option<(PickerKind, String)> {
+    match key.code {
+        KeyCode::Up => *selected = selected.saturating_sub(1),
+        KeyCode::Down if !rows.is_empty() => {
+            *selected = selected.saturating_add(1).min(rows.len() - 1);
+        }
+        KeyCode::Enter => {
+            return rows.get(*selected).map(|row| (kind, row.value.clone()));
+        }
+        _ => {}
+    }
+    None
 }
 
 pub(super) fn reduce_command_menu_key(app: &mut App, key: KeyEvent) -> UiAction {
@@ -285,241 +351,6 @@ pub(super) fn reduce_command_menu_key(app: &mut App, key: KeyEvent) -> UiAction 
             }
         }
         _ => {}
-    }
-    UiAction::None
-}
-
-pub(super) fn execute_command_menu(app: &mut App) -> UiAction {
-    let command_text = app.input.strip_prefix('/').unwrap_or("");
-    let typed = command_text.split_whitespace().next().unwrap_or("");
-    let expected = format!("/{typed}");
-    let exact = app.palette_entries.iter().any(|entry| {
-        entry.kind == "command" && entry.name.split_whitespace().next().unwrap_or("") == expected
-    });
-    if !command_text.chars().any(char::is_whitespace) && (typed.is_empty() || !exact) {
-        let selected = match app.overlay {
-            Overlay::CommandMenu { selected } => selected,
-            _ => 0,
-        };
-        if let Some(entry) = command_matches(app).get(selected).copied().cloned() {
-            return activate_palette_entry(app, entry);
-        }
-    }
-    execute_command(app)
-}
-
-pub(super) fn command_matches(app: &App) -> Vec<&PaletteEntry> {
-    let query = app
-        .input
-        .strip_prefix('/')
-        .unwrap_or("")
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
-    app.palette_entries
-        .iter()
-        .filter(|entry| {
-            entry.kind == "command"
-                && (query.is_empty()
-                    || entry.name.to_lowercase().contains(&query)
-                    || entry.description.to_lowercase().contains(&query))
-        })
-        .collect()
-}
-
-pub(super) fn execute_command(app: &mut App) -> UiAction {
-    let input = std::mem::take(&mut app.input);
-    app.overlay = Overlay::None;
-    let mut parts = input.strip_prefix('/').unwrap_or("").split_whitespace();
-    let name = parts.next().unwrap_or("");
-    let arg = parts.next();
-    match (name, arg) {
-        ("help" | "?", _) => {
-            app.overlay = Overlay::Palette {
-                filter: String::new(),
-                selected: 0,
-                detail: None,
-            };
-            UiAction::None
-        }
-        ("trust", _) => {
-            app.overlay = Overlay::TrustDial;
-            UiAction::None
-        }
-        ("timeline", _) => {
-            app.overlay = Overlay::Timeline {
-                selected: app.timeline.len().saturating_sub(1),
-                inspecting: false,
-                note: None,
-            };
-            UiAction::None
-        }
-        ("why", None) => explain_why(app),
-        ("why", Some(_)) => command_error(app, "/why takes no arguments", "run /why by itself"),
-        ("profile", Some(name)) => set_profile(app, name),
-        ("profile", None) => command_error(
-            app,
-            "profile name is required",
-            "use /profile <frugal|balanced|max-quality>",
-        ),
-        ("model", Some(id)) => resolved_route_action(app, app.resolver.resolve(id)),
-        ("model", None) => command_error(app, "model id is required", "use /model <id>"),
-        ("provider", Some(provider)) => {
-            resolved_route_action(app, app.resolver.provider_default(provider))
-        }
-        ("provider", None) => {
-            command_error(app, "provider name is required", "use /provider <name>")
-        }
-        ("effort", Some(value)) => match parse_effort(value) {
-            Some(effort) => UiAction::SetEffort(effort),
-            None => command_error(
-                app,
-                "unknown reasoning effort",
-                "use /effort <none|low|high|max>",
-            ),
-        },
-        ("effort", None) => command_error(
-            app,
-            "reasoning effort is required",
-            "use /effort <none|low|high|max>",
-        ),
-        ("quit", _) => UiAction::Quit,
-        _ => command_error(app, "unknown command", "type / to see all"),
-    }
-}
-
-pub(super) fn resolved_route_action(
-    app: &mut App,
-    resolved: anyhow::Result<ResolvedRoute>,
-) -> UiAction {
-    match resolved {
-        Ok(route) if route.class() == RouteClass::Delegate => command_error(
-            app,
-            "delegate routes are not available here",
-            "pick an api route with /model",
-        ),
-        Ok(route) => UiAction::SwitchRoute(route.id().to_owned()),
-        Err(error) => command_error(app, &error.to_string(), "run /model to list routes"),
-    }
-}
-
-pub(super) fn teaching_error(cause: &str, next: &str) -> String {
-    format!("{cause} — {next}")
-}
-
-pub(super) fn command_error(app: &mut App, cause: &str, next: &str) -> UiAction {
-    app.push_line(&teaching_error(cause, next), TranscriptKind::Error);
-    UiAction::None
-}
-
-pub(super) fn set_profile(app: &mut App, name: &str) -> UiAction {
-    if !app.profiles.contains(name) {
-        return command_error(
-            app,
-            &format!("unknown profile '{name}'"),
-            "use /profile <frugal|balanced|max-quality>",
-        );
-    }
-    let policy = app.profiles.effective(name, &app.route);
-    app.active_profile = policy.profile.clone();
-    app.effort = effort_for(
-        policy.posture,
-        app.route.thinking_dialect(),
-        app.route.wire(),
-    );
-    let cap = policy
-        .output_cap
-        .map_or_else(|| "route default".to_owned(), |cap| cap.to_string());
-    app.push_line(
-        &format!(
-            "profile {} — next turn: thinking {} · max output {}",
-            policy.profile,
-            effort_name(app.effort),
-            cap
-        ),
-        TranscriptKind::Progress,
-    );
-    UiAction::SetProfile(policy.profile)
-}
-
-pub(super) fn explain_why(app: &mut App) -> UiAction {
-    let prompt_est = app
-        .timeline
-        .last()
-        .and_then(|entry| entry.usage.as_ref())
-        .map_or(0, |usage| usage.prompt_tokens);
-    let cached_est = app
-        .timeline
-        .last()
-        .and_then(|entry| entry.usage.as_ref())
-        .and_then(|usage| usage.cached_tokens)
-        .unwrap_or(0)
-        .min(prompt_est);
-    let output_est = 1_024;
-    let available = app.resolver.available();
-    let allowed: Vec<&str> = available
-        .iter()
-        .filter(|id| {
-            app.resolver
-                .resolve(id)
-                .is_ok_and(|route| route.class() == RouteClass::Api)
-        })
-        .map(String::as_str)
-        .collect();
-    let at = Utc::now();
-    let resolved = app
-        .resolver
-        .resolve_capable(prompt_est, output_est, &allowed, at);
-    let (route, trace) = match resolved {
-        Ok(result) => result,
-        Err(error) => {
-            return command_error(
-                app,
-                &error.to_string(),
-                "add a priced api route with enough context",
-            )
-        }
-    };
-
-    app.push_line(
-        &format!(
-            "route: {} (cheapest capable at ~{} tokens, est)",
-            route.id(),
-            prompt_est.saturating_add(output_est)
-        ),
-        TranscriptKind::Progress,
-    );
-    if let Some(quote) = route.price_at(at) {
-        let mut line = match cost_of(&quote, prompt_est, cached_est, output_est) {
-            Some(estimate) => format!(
-                "  {} this turn (est)",
-                money_with_gloss(estimate, quote.currency, app.resolver.fx(), at)
-            ),
-            None => {
-                let _ = apply_event(app, AgentEvent::MeterIncomplete);
-                "  unpriced this turn (est) — meter incomplete".into()
-            }
-        };
-        if quote.stale {
-            line.push_str(" · *price stale");
-        } else if quote.confidence == PriceConfidence::VerifyLive {
-            line.push_str(" · *price verify_live");
-        }
-        app.push_line(&line, TranscriptKind::Progress);
-    }
-    for line in trace.lines() {
-        app.push_line(&line, TranscriptKind::Progress);
-    }
-    if app.route.id() != route.id() {
-        app.push_line(
-            &format!(
-                "current route {} was selected explicitly; cheapest capable is {}",
-                app.route.id(),
-                route.id()
-            ),
-            TranscriptKind::Progress,
-        );
     }
     UiAction::None
 }

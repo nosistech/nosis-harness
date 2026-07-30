@@ -304,7 +304,7 @@ pub fn normalized_host(value: &str) -> Option<String> {
 }
 
 /// Bare lowercased host of a URL, for policy matching. Accepts scheme-less input
-/// (treated as "https://<value>"). IPv6 hosts come back without brackets. Any scheme
+/// (treated as `https://<value>`). IPv6 hosts come back without brackets. Any scheme
 /// is accepted (this does NOT enforce transport — callers apply their own policy).
 pub fn host_of(value: &str) -> Option<String> {
     let value = value.trim();

@@ -2,6 +2,224 @@
 
 Record every meaningful session here.
 
+## 2026-07-29: Explicit local-model lane wave
+
+What changed:
+
+- Added the ratified `local` route class. Local routes remain explicitly selectable through
+  `--model` and `/model`, while API-only defaulting, capable-route resolution, cheapest-capable
+  comparison, escalation, and the top-tier cost anchor exclude them.
+- Restricted local routes to the existing OpenAI wire at literal-loopback origins and kept the
+  normal exact-origin vault lookup. No listener, credential bypass, discovery, or new wire was
+  added.
+- Accepted Ollama's `message.reasoning` as an additive alias for the existing
+  `reasoning_content` field, with coverage for both response shapes.
+- Rendered the ratified local meter copy verbatim instead of presenting unmetered hardware cost as
+  `$0.00`, across run, chat, price, session, and TUI surfaces.
+- Added commented llama.cpp and Ollama catalog templates. Machine-dependent `model_id`, `context`,
+  and mandatory `max_out` remain symbolic for the user to fill rather than guessed.
+- Added `06-operations/LOCAL_MODELS.md` covering the existing vault flow, llama.cpp as the
+  fail-closed reference path, Ollama's undetectable silent-truncation hazard, manual artefact
+  verification and licensing, reference-machine sizing, KV-cache math, dated model-selection
+  examples, and the owner-run live checks.
+
+Verification:
+
+- Focused affected-crate suites — PASS.
+- `cargo fmt --all --check` — PASS. Write-mode `cargo fmt` was not run.
+- `cargo test --locked --workspace` — PASS: 546 passed / 0 failed / 1 OS-keyring test ignored.
+- `cargo clippy --locked --workspace --all-targets -- -D warnings` — PASS.
+- `git diff --check` — PASS; existing line-ending warnings remain informational.
+- No dependency, commit, push, tag, release, or frozen `crates/nh-mcp/tests/e3_korvin.rs` change was
+  made by this wave.
+
+Next step:
+
+- The owner fills one commented local template with the exact loaded model limits, copies the
+  trusted catalog into the user-global catalog, grants its exact loopback origin in the user-global
+  law, and runs the five documented live checks against the chosen server.
+
+## 2026-07-28: Provider-truth metering wave
+
+What changed:
+
+- Reclassified both MiMo routes to the existing exact Kimi thinking-toggle wire shape, so the
+  normal no-thinking posture explicitly disables MiMo's provider-default thinking.
+- Enabled state-aware reasoning replay on all four DeepSeek routes and explicitly disabled
+  provider-default thinking on DeepSeek's Anthropic wire.
+- Added GLM-5.2 disable and normalized High/Max effort controls, and made the effective effort
+  resolver report the tier actually sent.
+- Engaged K2.6 preserved thinking with `thinking.keep = "all"` only while thinking is enabled;
+  MiMo's shared toggle dialect deliberately emits no `keep` field.
+- Classified GLM sensitive/context/network finish reasons and DeepSeek resource interruption into
+  the existing filtered, context, and constraint receipt classes.
+- Added the first-party-verified `kimi-k3` route with its dated 1,048,576-token limits, multimodal
+  capability, always-thinking Low/High/Max effort dialect, preserved reasoning, and confirmed
+  $0.30/$3.00/$15.00 per-million-token price data.
+- Left P-4 completely unchanged: no live Kimi cache-hit probe was supplied, so the documented
+  top-level `usage.cached_tokens` field remains intentionally unimplemented.
+
+Verification:
+
+- Focused `nh-routes`, `nh-core`, and `nh-fleet` suites — PASS.
+- `cargo fmt --all --check` — PASS. Write-mode `cargo fmt` was not run.
+- `cargo test --locked --workspace` — PASS: 537 passed / 0 failed / 1 OS-keyring test ignored.
+- `cargo clippy --locked --workspace --all-targets -- -D warnings` — PASS.
+- No dependency, commit, push, tag, release, or frozen `crates/nh-mcp/tests/e3_korvin.rs` change was
+  made by this wave.
+
+Next step:
+
+- The owner runs the three sub-cent live probes. A confirmed Kimi cache hit is required before
+  implementing P-4; the MiMo token-field and DeepSeek Anthropic model-identity probes remain
+  separate provider verification items.
+
+## 2026-07-28: Owner FEEL wave v0.1.0 blockers fixed
+
+What changed:
+
+- Added the supplied conservative `context` and `max_out` caps for all three free GLM routes,
+  keeping each pair together and adding a resolver regression for capability selection.
+- Added reusable TUI model/provider/profile pickers. Model rows keep every catalog route and mark
+  relative price, currency, stale or unknown price, and unknown context honestly. Provider
+  discovery checks route-scoped credential usability before terminal takeover and lists only
+  usable providers. Typed slash-command behavior and model-switch history remain unchanged.
+- Wrapped TUI tools with exact start/finish events and render the active tool name plus elapsed
+  seconds while it is running; no percentage or synthetic progress is shown.
+- Centralized a tool-result authority rule in the agent identity constitution: contradicted
+  process/server/file/system state cannot be asserted, and timeout, kill, and non-zero exits must
+  be reported as failures. `nh run`, `nh chat`, route switches, and the TUI share the rule.
+- Corrected `nh mcp serve --help` to list all six runtime tools and replaced the raw integer
+  `--max-turns` bound with the designed inclusive range 1–100.
+- Made CLI shell approval fail closed before reading when stdin is not a terminal. Interactive
+  explicit yes remains unchanged. This is defense-in-depth: exploitation required
+  attacker-influenced content to already be piped into `nh run`.
+- Moved `nh run` metering to stderr, leaving stdout answer-only, and updated its end-to-end
+  contract test.
+
+Verification:
+
+- Focused nh-routes regression, full nh-tui suite, and full nh-cli suite — PASS.
+- `cargo fmt --all --check` — PASS. Write-mode `cargo fmt` was not run.
+- `cargo test --locked --workspace` — PASS; one OS-keyring test remains intentionally ignored.
+- `cargo clippy --locked --workspace --all-targets -- -D warnings` — PASS.
+- No dependency, commit, push, tag, release, or frozen `crates/nh-mcp/tests/e3_korvin.rs` change was
+  made by this wave.
+
+Next step:
+
+- Rebuild the optimized executable and repeat the owner FEEL gate before any release authorization.
+
+## 2026-07-27: Cross-client continuation checkpoint saved
+
+What changed:
+
+- Replaced the stale 2026-07-26 `CONTINUE_HERE.md` with one authoritative, self-contained
+  checkpoint covering the exact uncommitted tree, completed A+ work, verification evidence,
+  public-empty GitHub repository/security state, release-process state, remaining owner gates, and
+  ordered release continuation.
+- Updated the repo-root `AGENTS.md` resume banner and added a minimal root `CLAUDE.md`, so typing
+  `continue` in either Codex or Claude routes to the same checkpoint before any action.
+- Added a current override to `CURRENT_TASK.md`; its older checkpoints remain historical provenance
+  and no longer compete with the continuation instructions.
+- No product code, dependency, Git commit, remote content, tag, or release changed. The agent did
+  not stop the open harness; during final validation PID 91116 had exited independently, and no
+  `nh` process remained.
+
+Verification:
+
+- `cargo test --workspace` — PASS: 514 passed / 0 failed / 1 OS-keyring test ignored.
+- `cargo clippy --workspace --all-targets -- -D warnings` — PASS.
+- Continuation pointers were read back as UTF-8 and checked for the required state, constraints,
+  owner-only gates, and exact next sequence.
+
+Next step:
+
+- The owner can return in Codex or Claude and type `continue`. The next agent must read
+  `CONTINUE_HERE.md` first, preserve the tree, verify no `nh` process has reopened, rebuild the
+  canonical release, and launch the post-refactor Windows FEEL window. If a new harness is open,
+  ask before stopping it.
+
+## 2026-07-27: Public GitHub repository bootstrap
+
+What changed:
+
+- Reauthenticated GitHub CLI as `arparvar` and verified membership in the `nosistech`
+  organization.
+- Created the empty public repository `nosistech/nosis-harness` and attached it locally as
+  `origin`. Verified the repository is public, empty, and administered by the authenticated
+  account. No source, commit, tag, release, or secret was pushed.
+- Enabled private vulnerability reporting, Dependabot vulnerability alerts and automated
+  security updates, secret scanning, and secret-scanning push protection before the first push.
+- Kept Issues enabled, disabled unused Wiki/Projects/Discussions surfaces, selected squash-only
+  merges with automatic branch cleanup, and added accurate Rust/CLI/agent/metering topics.
+- Left the existing release harness process open. Branch protection and required checks remain
+  pending because the empty repository does not yet have a `main` branch.
+
+Verification:
+
+- `gh repo view nosistech/nosis-harness` — public, empty, `viewerPermission: ADMIN`.
+- `origin` — `https://github.com/nosistech/nosis-harness.git` for fetch and push.
+- GitHub API — private vulnerability reporting, Dependabot security updates, secret scanning,
+  and push protection all enabled.
+- `.github/dependabot.yml` — Cargo and GitHub Actions weekly update ecosystems are configured
+  locally and will activate after the first push.
+- `cargo test --workspace` — PASS: 514 passed / 0 failed / 1 OS-keyring test ignored.
+- `cargo clippy --workspace --all-targets -- -D warnings` — PASS.
+
+Next step:
+
+- Replace the open stale release executable with a canonical build, complete the owner's Windows
+  FEEL pass, then obtain explicit authorization to commit and push. After `main` exists, run remote
+  CI and enforce its green jobs with branch protection before tagging.
+
+## 2026-07-27: A+ readability, auditability, and release-mode hardening
+
+What changed:
+
+- Preserved every public command, wire shape, receipt/ledger shape, and route decision while
+  splitting mixed implementation files at responsibility boundaries:
+  - `nh-core::wire::{http,openai,anthropic}` and `agent::context`;
+  - `nh-routes::resolver::catalog`;
+  - `nh-cli::cmd_run::{config,meter}` and `cmd_chat::startup`;
+  - `nh-tools::mcp::client::oauth`;
+  - `nh-fleet::scheduler`;
+  - `nh-tui::input::commands`, `render::transcript`, and a `WorkerSession` state machine.
+- Moved remaining large inline test bodies out of production modules and replaced production
+  wildcard imports with explicit imports. Crate roots remain thin public facades.
+- Removed every Rust `#[allow(...)]` exception. Named callback types replace repeated trait-object
+  signatures; Fleet dispatch and budget transitions now live with the scheduler state they mutate.
+- Removed avoidable runtime panics at HTTP-client construction, MCP token creation, poisoned
+  synchronization boundaries, worker joins, route ordering, terminal input queues, and process
+  result handling. Added poisoned MCP cache/OAuth regression tests. Static compiled-data
+  invariants remain explicit `expect` sites.
+- Kept `unsafe_code = "forbid"` workspace-wide; no first-party `unsafe` block exists.
+- Added strict rustdoc to CI and `gate.ps1`, and removed two stale unused license allowances from
+  `deny.toml`.
+- Documented the exact module ownership map and runtime-file behavior. Normal execution creates no
+  generated source or cache: only intentional, gitignored append-only receipts/Fleet audit state,
+  which remains operator-retained until deletion.
+- The release gate exposed and fixed one refactor regression: debug-only Fleet test-provider
+  constants were imported in optimized non-test builds. Imports are now gated identically to the
+  seam, and the release-only test proves the switch is unavailable.
+- Added no dependency. No automatic artifact pruning was introduced because it would weaken the
+  durable audit trail.
+
+Verification:
+
+- `cargo fmt --all --check` — PASS. Write-mode `cargo fmt` was not run.
+- `cargo test --workspace` — PASS: 514 passed / 0 failed / 1 OS-keyring test ignored.
+- `cargo clippy --workspace --all-targets -- -D warnings` — PASS with zero local lint allowances.
+- `cargo clippy --locked --workspace --all-targets --release -- -D warnings` — PASS.
+- `cargo test --locked --workspace --release` — PASS: 515 passed / 0 failed / 1 ignored, including
+  the release-only test-provider refusal. The live `target/release/nh.exe` was left untouched; the
+  suite used an isolated ignored target directory, which was deleted immediately afterward.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps` — PASS.
+- `cargo deny --locked check --hide-inclusion-graph` — advisories, bans, licenses, and sources
+  PASS. Remaining notices are upstream transitive duplicate versions already governed as warnings.
+- The live harness process remained open and responsive throughout verification. No commit was
+  created.
+
 ## 2026-07-26: v0.1.0 local release-candidate evidence
 
 What changed:

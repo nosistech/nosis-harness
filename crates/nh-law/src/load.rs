@@ -1,6 +1,15 @@
 //! Layered law loading, guarded source reads, constitution assembly, and policy compilation.
 
-use super::*;
+use crate::model::{Autonomy, ConstitutionSources, Law, LoadOptions, Policy};
+use crate::{
+    AGENTS_LABEL, BUNDLED_LAW, MAX_CONSTITUTION_BYTES, MEMORY_LABEL, OPERATING_LAW_LABEL,
+    PROJECT_LAW_LABEL, REPO_RESTRICTION_WARNING, SECTION_JOINER, USER_LAW_LABEL,
+};
+use serde::Deserialize;
+use std::collections::BTreeMap;
+use std::fs;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
 
 /// Load every law source. Missing files are optional; malformed or unreadable files
 /// become warnings and the remaining safe defaults stay active.
@@ -373,8 +382,8 @@ pub(super) struct CredentialRule {
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct ExecRules {
     // Parsed for law-file compatibility; execution already asks by default.
-    #[allow(dead_code)]
-    pub(super) ask: Option<Vec<String>>,
+    #[serde(rename = "ask")]
+    pub(super) _ask: Option<Vec<String>>,
     pub(super) block: Option<Vec<String>>,
 }
 

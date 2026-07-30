@@ -1,3 +1,4 @@
+use super::context::{estimate_tokens, message_bytes};
 use super::*;
 use std::sync::{Arc, Mutex};
 
@@ -257,13 +258,42 @@ fn truncated_finish_reasons_return_the_answer_as_partial() {
 }
 
 #[test]
-fn content_filter_returns_the_answer_as_a_filtered_failure() {
-    let (answer, receipt, emitted) = run_finish_reason("content_filter");
+fn filter_finish_reasons_return_the_answer_as_a_filtered_failure() {
+    for reason in ["content_filter", "sensitive"] {
+        let (answer, receipt, emitted) = run_finish_reason(reason);
+        assert_eq!(answer, "usable answer", "{reason}");
+        assert_eq!(receipt.outcome, Outcome::Fail, "{reason}");
+        assert_eq!(
+            receipt.failure_class,
+            Some(FailureClass::Filtered),
+            "{reason}"
+        );
+        assert!(emitted.is_empty(), "{reason}: {emitted:?}");
+    }
+}
 
+#[test]
+fn context_window_finish_reason_is_a_context_partial() {
+    let (answer, receipt, emitted) = run_finish_reason("model_context_window_exceeded");
     assert_eq!(answer, "usable answer");
-    assert_eq!(receipt.outcome, Outcome::Fail);
-    assert_eq!(receipt.failure_class, Some(FailureClass::Filtered));
+    assert_eq!(receipt.outcome, Outcome::Partial);
+    assert_eq!(receipt.failure_class, Some(FailureClass::Context));
     assert!(emitted.is_empty());
+}
+
+#[test]
+fn provider_interrupt_finish_reasons_are_constraint_partials() {
+    for reason in ["network_error", "insufficient_system_resource"] {
+        let (answer, receipt, emitted) = run_finish_reason(reason);
+        assert_eq!(answer, "usable answer", "{reason}");
+        assert_eq!(receipt.outcome, Outcome::Partial, "{reason}");
+        assert_eq!(
+            receipt.failure_class,
+            Some(FailureClass::Constraint),
+            "{reason}"
+        );
+        assert!(emitted.is_empty(), "{reason}: {emitted:?}");
+    }
 }
 
 #[test]

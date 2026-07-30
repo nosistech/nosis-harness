@@ -1,6 +1,20 @@
 //! TUI domain state, immutable configuration, and application state transitions.
 
-use super::*;
+use crate::palette::{builtin_palette_entries, short_text};
+use crate::render::budget_bar;
+use crate::session::{effort_for, effort_name, safe_line, scrub_full_line};
+use crate::worker::ApprovalRequest;
+use crate::{SharedScrubber, BUDGET_REASON};
+use chrono::{DateTime, FixedOffset, Utc};
+use nh_core::receipt::{FailureClass, Outcome, Receipt};
+use nh_core::wire::{cache_hit_pct, ThinkingEffort, Usage};
+use nh_law::{Law, PolicyView};
+use nh_routes::{
+    money, money_with_gloss, Currency, PriceConfidence, Profiles, ResolvedRoute, RouteClass,
+    RouteResolver,
+};
+use std::cell::Cell;
+use std::path::PathBuf;
 
 /// The single status shown by the semáforo.
 #[derive(Debug, Clone, PartialEq)]
@@ -103,6 +117,37 @@ pub(super) enum PaletteAction {
     Describe,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PickerKind {
+    Model,
+    Provider,
+    Profile,
+}
+
+impl PickerKind {
+    pub(super) fn title(self) -> &'static str {
+        match self {
+            Self::Model => " Select model ",
+            Self::Provider => " Select provider ",
+            Self::Profile => " Select profile ",
+        }
+    }
+
+    pub(super) fn empty_message(self) -> &'static str {
+        match self {
+            Self::Model => "no catalog routes",
+            Self::Provider => "no providers with usable credentials",
+            Self::Profile => "no profiles",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PickerRow {
+    pub(super) value: String,
+    pub(super) label: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Overlay {
     None,
@@ -120,11 +165,23 @@ pub(super) enum Overlay {
         selected: usize,
         detail: Option<String>,
     },
+    Picker {
+        kind: PickerKind,
+        selected: usize,
+        rows: Vec<PickerRow>,
+    },
 }
 
 /// Everything the render loop learns from the worker.
 pub enum AgentEvent {
     Progress(String),
+    ToolStarted {
+        name: String,
+        started_at: DateTime<Utc>,
+    },
+    ToolFinished {
+        name: String,
+    },
     Approval(ApprovalRequest),
     Usage(Usage),
     TaskReceipt(TimelineSummary),
@@ -144,6 +201,12 @@ pub struct TuiConfig {
     pub repo_root: PathBuf,
     pub workdir: PathBuf,
     pub palette_entries: Vec<PaletteEntry>,
+    pub credentialed_providers: Vec<String>,
+}
+
+pub(super) struct UiDiscovery {
+    pub(super) palette_entries: Vec<PaletteEntry>,
+    pub(super) credentialed_providers: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -167,10 +230,17 @@ pub(super) struct SessionCost {
     pub(super) uncertain: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ActiveTool {
+    pub(super) name: String,
+    pub(super) started_at: DateTime<Utc>,
+}
+
 /// Unit-testable state for the Slice A renderer.
 pub struct App {
     pub(super) status: Status,
     pub(super) working_since: Option<DateTime<Utc>>,
+    pub(super) active_tool: Option<ActiveTool>,
     pub(super) resolver: RouteResolver,
     pub(super) route: ResolvedRoute,
     pub(super) profiles: Profiles,
@@ -187,6 +257,7 @@ pub struct App {
     pub(super) local_offset: FixedOffset,
     pub(super) policy_view: PolicyView,
     pub(super) palette_entries: Vec<PaletteEntry>,
+    pub(super) credentialed_providers: Vec<String>,
     pub(super) overlay: Overlay,
     pub(super) timeline: Vec<TimelineEntry>,
     pub(super) current_task_compacted: bool,
@@ -202,10 +273,14 @@ impl App {
         budget: Option<u64>,
         scrubber: SharedScrubber,
         policy_view: PolicyView,
-        mcp_entries: Vec<PaletteEntry>,
+        discovery: UiDiscovery,
         profile_config: (Profiles, String),
     ) -> Self {
         let (profiles, active_profile) = profile_config;
+        let UiDiscovery {
+            palette_entries: mcp_entries,
+            credentialed_providers,
+        } = discovery;
         let mut palette_entries = builtin_palette_entries();
         palette_entries.extend(mcp_entries);
         let execution_policy = profiles.effective(&active_profile, &route);
@@ -216,6 +291,7 @@ impl App {
                 Status::Idle
             },
             working_since: None,
+            active_tool: None,
             effort: effort_for(
                 execution_policy.posture,
                 route.thinking_dialect(),
@@ -236,6 +312,7 @@ impl App {
             local_offset: *chrono::Local::now().offset(),
             policy_view,
             palette_entries,
+            credentialed_providers,
             overlay: Overlay::None,
             timeline: Vec::new(),
             current_task_compacted: false,
@@ -303,6 +380,7 @@ impl App {
         }
         self.input.clear();
         self.current_task_compacted = false;
+        self.active_tool = None;
         self.push_line(&task, TranscriptKind::Task);
         self.set_status(Status::Working, Utc::now());
         Some(task)
@@ -377,17 +455,21 @@ impl App {
 
     pub(super) fn session_money(&self, now: DateTime<Utc>) -> String {
         let mut display = if self.session_cost.is_empty() {
-            self.route.price_at(now).map_or_else(
-                || "—".into(),
-                |quote| {
-                    let mut display =
-                        money_with_gloss(0.0, quote.currency, self.resolver.fx(), now);
-                    if quote.stale || quote.confidence == PriceConfidence::VerifyLive {
-                        display.push('*');
-                    }
-                    display
-                },
-            )
+            if self.route.class() == RouteClass::Local {
+                "no billed tokens".into()
+            } else {
+                self.route.price_at(now).map_or_else(
+                    || "—".into(),
+                    |quote| {
+                        let mut display =
+                            money_with_gloss(0.0, quote.currency, self.resolver.fx(), now);
+                        if quote.stale || quote.confidence == PriceConfidence::VerifyLive {
+                            display.push('*');
+                        }
+                        display
+                    },
+                )
+            }
         } else {
             let mixed = self.session_cost.len() > 1;
             [Currency::Cny, Currency::Usd]

@@ -1,4 +1,11 @@
+use super::anthropic::{
+    build_body as build_anthropic_body, endpoint as anthropic_endpoint,
+    parse_response as parse_anthropic_response,
+};
+use super::http::{scrub_snippet, send_error_line, CONNECT_TIMEOUT, REQUEST_TIMEOUT};
+use super::openai::{build_body, endpoint, parse_response, OpenAiPolicy};
 use super::*;
+use std::time::Duration;
 
 #[test]
 fn cache_hit_percentage_is_optional_and_rejects_inconsistent_usage() {
@@ -61,7 +68,7 @@ fn anthropic_body_roles_alternate_after_compaction() {
         msg("user", Some("retained question")),
         msg("assistant", Some("retained answer")),
     ]);
-    let body = build_anthropic_body(&request, 1024);
+    let body = build_anthropic_body(&request, 1024, ThinkingDialect::None);
     let roles: Vec<String> = body["messages"]
         .as_array()
         .expect("messages array")
@@ -93,7 +100,7 @@ fn anthropic_body_merges_user_role_blocks_in_order() {
         },
         msg("user", Some("follow-up")),
     ]);
-    let body = build_anthropic_body(&request, 1024);
+    let body = build_anthropic_body(&request, 1024, ThinkingDialect::None);
     let messages = body["messages"].as_array().expect("messages array");
 
     assert_eq!(messages.len(), 1);
@@ -226,6 +233,27 @@ fn deepseek_dialect_maps_every_effort_tier() {
 }
 
 #[test]
+fn deepseek_replays_reasoning_only_while_thinking_is_active() {
+    let mut conditional = policy(ThinkingDialect::DeepseekNhm, false, false);
+    conditional.preserve_when_thinking = true;
+    let history = vec![ChatMessage {
+        reasoning_content: Some("required chain".into()),
+        tool_calls: Some(vec![tool_call("c1", "read_file", "{}")]),
+        ..msg("assistant", None)
+    }];
+
+    let mut request = req(history.clone());
+    request.thinking = ThinkingEffort::High;
+    let active = build_body(&request, conditional);
+    assert_eq!(active["messages"][0]["reasoning_content"], "required chain");
+
+    request.messages = history;
+    request.thinking = ThinkingEffort::None;
+    let inactive = build_body(&request, conditional);
+    assert!(inactive["messages"][0].get("reasoning_content").is_none());
+}
+
+#[test]
 fn kimi_toggle_replays_reasoning_only_while_thinking_is_active() {
     let mut conditional = policy(ThinkingDialect::KimiToggle, false, false);
     conditional.preserve_when_thinking = true;
@@ -240,6 +268,7 @@ fn kimi_toggle_replays_reasoning_only_while_thinking_is_active() {
     request.thinking = ThinkingEffort::High;
     let active = build_body(&request, conditional);
     assert_eq!(active["thinking"]["type"], "enabled");
+    assert_eq!(active["thinking"]["keep"], "all");
     assert_eq!(active["messages"][0]["reasoning_content"], "required chain");
     assert_eq!(active["max_tokens"], 123_456);
 
@@ -247,23 +276,78 @@ fn kimi_toggle_replays_reasoning_only_while_thinking_is_active() {
     request.thinking = ThinkingEffort::None;
     let inactive = build_body(&request, conditional);
     assert_eq!(inactive["thinking"]["type"], "disabled");
+    assert!(inactive["thinking"].get("keep").is_none());
     assert!(inactive["messages"][0].get("reasoning_content").is_none());
 }
 
 #[test]
-fn non_deepseek_dialects_send_no_thinking_toggle() {
-    for dialect in [
-        ThinkingDialect::AlwaysThinking,
-        ThinkingDialect::GlmHm,
-        ThinkingDialect::None,
-    ] {
+fn kimi_toggle_without_conditional_replay_emits_only_the_toggle_shape() {
+    let mut request = req(vec![msg("user", Some("hi"))]);
+    let mimo_policy = policy(ThinkingDialect::KimiToggle, true, false);
+
+    request.thinking = ThinkingEffort::None;
+    assert_eq!(
+        build_body(&request, mimo_policy)["thinking"],
+        serde_json::json!({ "type": "disabled" })
+    );
+
+    request.thinking = ThinkingEffort::High;
+    assert_eq!(
+        build_body(&request, mimo_policy)["thinking"],
+        serde_json::json!({ "type": "enabled" })
+    );
+}
+
+#[test]
+fn fixed_or_absent_thinking_dialects_send_no_control() {
+    for dialect in [ThinkingDialect::AlwaysThinking, ThinkingDialect::None] {
         let mut request = req(vec![msg("user", Some("hi"))]);
         request.thinking = ThinkingEffort::Max;
         let body = build_body(&request, policy(dialect, false, false));
         assert!(
             body.get("reasoning_effort").is_none(),
-            "dialect {dialect:?} must not send a toggle"
+            "dialect {dialect:?} must not send effort"
         );
+        assert!(body.get("thinking").is_none(), "dialect {dialect:?}");
+    }
+}
+
+#[test]
+fn glm_dialect_disables_thinking_or_sends_normalized_effort() {
+    for (effort, expected) in [
+        (ThinkingEffort::Low, "high"),
+        (ThinkingEffort::High, "high"),
+        (ThinkingEffort::Max, "max"),
+    ] {
+        let mut request = req(vec![msg("user", Some("hi"))]);
+        request.thinking = effort;
+        let body = build_body(&request, policy(ThinkingDialect::GlmHm, false, false));
+        assert_eq!(body["reasoning_effort"], expected, "effort {effort:?}");
+        assert!(body.get("thinking").is_none());
+    }
+
+    let request = req(vec![msg("user", Some("hi"))]);
+    let body = build_body(&request, policy(ThinkingDialect::GlmHm, false, false));
+    assert_eq!(body["thinking"]["type"], "disabled");
+    assert!(body.get("reasoning_effort").is_none());
+}
+
+#[test]
+fn always_thinking_effort_dialect_sends_every_legal_tier() {
+    for (effort, expected) in [
+        (ThinkingEffort::None, "low"),
+        (ThinkingEffort::Low, "low"),
+        (ThinkingEffort::High, "high"),
+        (ThinkingEffort::Max, "max"),
+    ] {
+        let mut request = req(vec![msg("user", Some("hi"))]);
+        request.thinking = effort;
+        let body = build_body(
+            &request,
+            policy(ThinkingDialect::AlwaysThinkingEffort, true, false),
+        );
+        assert_eq!(body["reasoning_effort"], expected, "effort {effort:?}");
+        assert!(body.get("thinking").is_none());
     }
 }
 
@@ -354,14 +438,19 @@ fn stored_reasoning_wins_over_quirk_empty_string() {
 }
 
 #[test]
-fn parses_reasoning_content_from_response() {
-    let body = r#"{"choices":[{"message":{"role":"assistant","content":"hi",
-        "reasoning_content":"thought hard"},"finish_reason":"stop"}]}"#;
-    let resp = parse_response(body).unwrap();
-    assert_eq!(
-        resp.message.reasoning_content.as_deref(),
-        Some("thought hard")
-    );
+fn parses_both_openai_and_ollama_reasoning_field_names() {
+    for field in ["reasoning_content", "reasoning"] {
+        let body = format!(
+            r#"{{"choices":[{{"message":{{"role":"assistant","content":"hi",
+                "{field}":"thought hard"}},"finish_reason":"stop"}}]}}"#
+        );
+        let response = parse_response(&body).unwrap();
+        assert_eq!(
+            response.message.reasoning_content.as_deref(),
+            Some("thought hard"),
+            "{field}"
+        );
+    }
 }
 
 #[test]
@@ -380,7 +469,7 @@ fn anthropic_body_lifts_system_and_wraps_text() {
         msg("assistant", Some("hello")),
     ]);
     request.thinking = ThinkingEffort::Max;
-    let body = build_anthropic_body(&request, 8192);
+    let body = build_anthropic_body(&request, 8192, ThinkingDialect::None);
     assert_eq!(body["model"], "mock-model");
     assert_eq!(body["max_tokens"], 8192);
     assert_eq!(body["system"], "be brief");
@@ -396,9 +485,16 @@ fn anthropic_body_lifts_system_and_wraps_text() {
     assert_eq!(messages[1]["role"], "assistant");
     assert_eq!(messages[1]["content"][0]["text"], "hello");
     assert!(body.get("tools").is_none());
-    // M1: no thinking toggle on this wire, whatever the requested effort.
+    // Generic Anthropic routes do not inherit provider-specific controls.
     let raw = body.to_string();
     assert!(!raw.contains("reasoning_effort") && !raw.contains("thinking"));
+}
+
+#[test]
+fn deepseek_anthropic_body_explicitly_disables_default_thinking() {
+    let request = req(vec![msg("user", Some("hi"))]);
+    let body = build_anthropic_body(&request, 8192, ThinkingDialect::DeepseekNhm);
+    assert_eq!(body["thinking"]["type"], "disabled");
 }
 
 #[test]
@@ -427,7 +523,7 @@ fn anthropic_body_maps_tool_use_and_merges_tool_results() {
         description: "read a file".into(),
         parameters: serde_json::json!({"type": "object"}),
     }];
-    let body = build_anthropic_body(&request, 4096);
+    let body = build_anthropic_body(&request, 4096, ThinkingDialect::None);
 
     let assistant = &body["messages"][1];
     assert_eq!(assistant["content"][0]["type"], "text");
@@ -461,7 +557,7 @@ fn anthropic_body_never_serializes_reasoning_content() {
         tool_calls: Some(vec![tool_call("c1", "read_file", "{}")]),
         ..msg("assistant", None)
     }]);
-    let raw = build_anthropic_body(&request, 8192).to_string();
+    let raw = build_anthropic_body(&request, 8192, ThinkingDialect::None).to_string();
     assert!(!raw.contains("reasoning_content") && !raw.contains("chain"));
 }
 
@@ -618,24 +714,29 @@ fn snippet_redacts_key_and_truncates() {
 
 #[test]
 fn resolve_effort_covers_every_posture_dialect_cell() {
-    use ThinkingDialect::{AlwaysThinking, DeepseekNhm, GlmHm, KimiToggle, None as NoToggle};
-    use ThinkingEffort::{High, None as NoEffort};
+    use ThinkingDialect::{
+        AlwaysThinking, AlwaysThinkingEffort, DeepseekNhm, GlmHm, KimiToggle, None as NoToggle,
+    };
+    use ThinkingEffort::{High, Low, Max, None as NoEffort};
     use ThinkingPosture::{Ceiling, Default, Floor};
 
     let cases = [
         (Floor, DeepseekNhm, NoEffort),
         (Floor, KimiToggle, NoEffort),
         (Floor, AlwaysThinking, High),
-        (Floor, GlmHm, High),
+        (Floor, AlwaysThinkingEffort, Low),
+        (Floor, GlmHm, NoEffort),
         (Floor, NoToggle, NoEffort),
         (Default, DeepseekNhm, NoEffort),
         (Default, KimiToggle, NoEffort),
         (Default, AlwaysThinking, High),
+        (Default, AlwaysThinkingEffort, High),
         (Default, GlmHm, High),
         (Default, NoToggle, NoEffort),
         (Ceiling, DeepseekNhm, High),
         (Ceiling, KimiToggle, High),
         (Ceiling, AlwaysThinking, High),
+        (Ceiling, AlwaysThinkingEffort, Max),
         (Ceiling, GlmHm, High),
         (Ceiling, NoToggle, NoEffort),
     ];
@@ -674,6 +775,33 @@ fn explicit_effort_wins_but_stays_route_legal() {
             Some(ThinkingEffort::Max),
             ThinkingPosture::Ceiling,
             ThinkingDialect::None,
+            Wire::OpenAi,
+        ),
+        ThinkingEffort::None
+    );
+    assert_eq!(
+        resolve_effort(
+            Some(ThinkingEffort::None),
+            ThinkingPosture::Default,
+            ThinkingDialect::AlwaysThinkingEffort,
+            Wire::OpenAi,
+        ),
+        ThinkingEffort::Low
+    );
+    assert_eq!(
+        resolve_effort(
+            Some(ThinkingEffort::Low),
+            ThinkingPosture::Default,
+            ThinkingDialect::GlmHm,
+            Wire::OpenAi,
+        ),
+        ThinkingEffort::High
+    );
+    assert_eq!(
+        resolve_effort(
+            Some(ThinkingEffort::None),
+            ThinkingPosture::Default,
+            ThinkingDialect::GlmHm,
             Wire::OpenAi,
         ),
         ThinkingEffort::None

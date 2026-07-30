@@ -1,6 +1,14 @@
 //! Receipt tail loading, JSONL recovery, and MCP projection.
 
-use super::*;
+use crate::response::{tool_error, tool_result};
+use crate::{Runtime, MAX_RECEIPT_TAIL_BYTES};
+use anyhow::{bail, Context as _};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::collections::VecDeque;
+use std::fs::File;
+use std::io::{Read as _, Seek as _, SeekFrom};
+use std::path::Path;
 
 #[derive(Deserialize)]
 struct ReceiptsArgs {
@@ -103,7 +111,7 @@ pub(super) fn parse_receipt_jsonl(bytes: &[u8], limit: usize) -> anyhow::Result<
         }))
         .with_context(|| format!("receipts line {} is invalid", index + 1))?;
         let nh_fleet::LedgerEvent::TaskReceipt { receipt, .. } = event else {
-            unreachable!("static wrapper always selects task_receipt");
+            bail!("internal receipt wrapper did not produce a task receipt");
         };
         if receipts.len() == limit {
             receipts.pop_front();

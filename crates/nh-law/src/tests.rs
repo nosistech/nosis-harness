@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
+use std::collections::BTreeMap;
 
 const TEST_BUNDLED_TEXT: &str = "operating";
 

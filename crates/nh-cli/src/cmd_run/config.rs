@@ -1,0 +1,250 @@
+//! Trusted catalog discovery and restrict-only MCP configuration assembly.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
+
+use nh_tools::{McpAuth, McpServerConfig, McpTrust};
+
+pub(super) const BUNDLED_CATALOG: &str = include_str!("../../../../catalog.toml");
+const MAX_CATALOG_BYTES: usize = 1024 * 1024;
+
+/// Walk up from `start` looking for the project marker `catalog.toml`.
+/// Repository route data is accepted only when it is byte-identical to the
+/// bundled catalog or to the operator-trusted `~/.nosis/catalog.toml`.
+pub(crate) fn find_catalog(start: &Path) -> anyhow::Result<(PathBuf, String)> {
+    let home = nh_law::user_home_dir();
+    find_catalog_with_home(start, home.as_deref())
+}
+
+pub(super) fn find_catalog_with_home(
+    start: &Path,
+    home: Option<&Path>,
+) -> anyhow::Result<(PathBuf, String)> {
+    for dir in start.ancestors() {
+        let candidate = dir.join("catalog.toml");
+        if candidate.is_file() {
+            let text = read_catalog_file(&candidate)?;
+            if text == BUNDLED_CATALOG {
+                return Ok((dir.to_path_buf(), text));
+            }
+
+            if let Some(home) = home {
+                let trusted_path = home.join(".nosis").join("catalog.toml");
+                match trusted_path.try_exists() {
+                    Ok(true) => {
+                        let trusted = read_catalog_file(&trusted_path)?;
+                        if text == trusted {
+                            return Ok((dir.to_path_buf(), trusted));
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        anyhow::bail!(
+                            "could not inspect trusted catalog {}: {error}",
+                            trusted_path.display()
+                        )
+                    }
+                }
+            }
+
+            anyhow::bail!(
+                "repository catalog.toml is not trusted — it can change credential destinations and spend; review it, then copy the exact file to ~/.nosis/catalog.toml to trust it"
+            );
+        }
+    }
+    anyhow::bail!("no catalog.toml found - run `nh init` to create one")
+}
+
+fn read_catalog_file(path: &Path) -> anyhow::Result<String> {
+    let file = fs::File::open(path)
+        .map_err(|error| anyhow::anyhow!("could not read {}: {error}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take((MAX_CATALOG_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| anyhow::anyhow!("could not read {}: {error}", path.display()))?;
+    if bytes.len() > MAX_CATALOG_BYTES {
+        anyhow::bail!(
+            "{} is too large — catalogs are limited to {} bytes",
+            path.display(),
+            MAX_CATALOG_BYTES
+        );
+    }
+    String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("{} is not valid UTF-8", path.display()))
+}
+
+/// Assemble the effective MCP server set. User-global `~/.nosis/mcp.toml` is the trust source;
+/// the repository `.nosis/mcp.toml` is RESTRICT-ONLY: it may only tighten trust and may not
+/// redirect a user-global server's url/auth or introduce a new destination. Finally, drop any
+/// server whose credential audience is unapproved. Each drop contributes one secret-free warning.
+pub(crate) fn load_and_vet_mcp_configs(
+    repo_root: &Path,
+    home: Option<&Path>,
+    policy: &nh_law::Policy,
+    warnings: &mut Vec<String>,
+) -> Vec<McpServerConfig> {
+    let user_global = home.map_or_else(Vec::new, |home| {
+        read_optional_mcp_config(
+            &home.join(".nosis").join("mcp.toml"),
+            "user-global ~/.nosis/mcp.toml",
+            warnings,
+        )
+    });
+    let repo = read_optional_mcp_config(
+        &repo_root.join(".nosis").join("mcp.toml"),
+        "repository .nosis/mcp.toml",
+        warnings,
+    );
+    merge_and_vet(
+        user_global,
+        repo,
+        |entry| policy.approved_audiences(entry),
+        warnings,
+    )
+}
+
+fn read_optional_mcp_config(
+    path: &Path,
+    label: &str,
+    warnings: &mut Vec<String>,
+) -> Vec<McpServerConfig> {
+    match path.try_exists() {
+        Ok(false) => return Vec::new(),
+        Ok(true) => {}
+        Err(error) => {
+            warnings.push(format!(
+                "could not inspect {label} ({error}) — continuing without MCP from that file"
+            ));
+            return Vec::new();
+        }
+    }
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) => {
+            warnings.push(format!(
+                "could not read {label} ({error}) — continuing without MCP from that file"
+            ));
+            return Vec::new();
+        }
+    };
+    match nh_tools::load_mcp_config(&text) {
+        Ok(configs) => configs,
+        Err(error) => {
+            warnings.push(format!(
+                "{label}: {error} — continuing without MCP from that file"
+            ));
+            Vec::new()
+        }
+    }
+}
+
+pub(super) fn merge_and_vet(
+    user_global: Vec<McpServerConfig>,
+    repo: Vec<McpServerConfig>,
+    approved_for: impl Fn(&str) -> Vec<String>,
+    warnings: &mut Vec<String>,
+) -> Vec<McpServerConfig> {
+    let mut user_by_name: BTreeMap<_, _> = user_global
+        .into_iter()
+        .map(|config| (config.name.clone(), config))
+        .collect();
+    let mut repo_by_name: BTreeMap<_, _> = repo
+        .into_iter()
+        .map(|config| (config.name.clone(), config))
+        .collect();
+    let names = user_by_name
+        .keys()
+        .chain(repo_by_name.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut merged = Vec::with_capacity(names.len());
+
+    for name in names {
+        match (user_by_name.remove(&name), repo_by_name.remove(&name)) {
+            (Some(mut user_config), Some(repo_config)) => {
+                user_config.trust =
+                    more_restrictive_mcp_trust(user_config.trust, repo_config.trust);
+                merged.push(user_config);
+            }
+            (Some(user_config), None) => merged.push(user_config),
+            (None, Some(_repo_config)) => {
+                warnings.push(format!(
+                    "mcp server \"{name}\": repository config cannot introduce a destination — declare it in ~/.nosis/mcp.toml first; dropped"
+                ));
+            }
+            (None, None) => continue,
+        }
+    }
+
+    filter_mcp_audiences_with(merged, warnings, approved_for)
+}
+
+fn more_restrictive_mcp_trust(left: McpTrust, right: McpTrust) -> McpTrust {
+    fn rank(trust: McpTrust) -> u8 {
+        match trust {
+            McpTrust::Block => 0,
+            McpTrust::Ask => 1,
+            McpTrust::Auto => 2,
+        }
+    }
+
+    if rank(left) <= rank(right) {
+        left
+    } else {
+        right
+    }
+}
+
+pub(super) fn unapproved_mcp_target<'a>(
+    config: &'a McpServerConfig,
+    approved: &[String],
+) -> Option<(&'a str, &'a str)> {
+    match &config.auth {
+        McpAuth::None => None,
+        McpAuth::ApiKey { vault_entry } => (!nh_vault::audience_allows(&config.url, approved))
+            .then_some((vault_entry.as_str(), config.url.as_str())),
+        McpAuth::OAuth2 {
+            token_url,
+            vault_entry,
+            ..
+        } => {
+            if !nh_vault::audience_allows(&config.url, approved) {
+                Some((vault_entry.as_str(), config.url.as_str()))
+            } else if !nh_vault::audience_allows(token_url, approved) {
+                Some((vault_entry.as_str(), token_url.as_str()))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+pub(super) fn filter_mcp_audiences_with(
+    configs: Vec<McpServerConfig>,
+    warnings: &mut Vec<String>,
+    approved_for: impl Fn(&str) -> Vec<String>,
+) -> Vec<McpServerConfig> {
+    configs
+        .into_iter()
+        .filter_map(|config| {
+            let entry = match &config.auth {
+                McpAuth::None => return Some(config),
+                McpAuth::ApiKey { vault_entry } | McpAuth::OAuth2 { vault_entry, .. } => {
+                    vault_entry
+                }
+            };
+            let approved = approved_for(entry);
+            if let Some((entry, target)) = unapproved_mcp_target(&config, &approved) {
+                warnings.push(format!(
+                    "mcp server \"{}\" dropped — credential \"{entry}\" is not approved for {}",
+                    config.name,
+                    nh_vault::normalized_host(target).as_deref().unwrap_or("")
+                ));
+                None
+            } else {
+                Some(config)
+            }
+        })
+        .collect()
+}

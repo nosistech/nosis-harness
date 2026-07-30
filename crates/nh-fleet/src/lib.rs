@@ -7,10 +7,22 @@ mod engine;
 mod ledger;
 mod model;
 mod prepare;
+mod scheduler;
 
-use engine::*;
-use ledger::*;
-use prepare::*;
+use engine::{
+    append_run_failed, Counts, DurableWriter, IndexRecord, PreparedTask, RunLock, Runtime,
+};
+use ledger::{
+    append_index, attempts_by_task, checked_fleet_root, ensure_single_terminal,
+    failure_receipts_by_task, finish_index, has_finished, latest_incomplete_run,
+    ledger_has_committed_events, now_utc, queued_tasks, read_ledger, receipt_tokens,
+    repair_uncommitted_tail, run_meta, terminal_counts, validate_run_id,
+};
+use prepare::{
+    effective_workers, emit, preflight_keys, prepare_new_tasks, scrub_prepared_tasks,
+    test_provider_from_env,
+};
+use scheduler::{execute_tasks, ExecutionRequest};
 
 pub use ledger::{new_run_id, read_run_ledger};
 pub use model::{
@@ -20,29 +32,14 @@ pub use model::{
     MAX_FLEET_TASKS, MAX_TASK_ID_BYTES,
 };
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::Write as _;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{bail, Context as _};
-#[cfg(test)]
-use chrono::DateTime;
-use chrono::{FixedOffset, Local, SecondsFormat, Utc};
-use nh_core::agent::{identity_constitution, AgentLoop};
-use nh_core::credential;
-use nh_core::receipt::{FailureClass, Outcome, Receipt, ReceiptWriter};
-use nh_core::wire::{ChatClient, ChatMessage, ChatRequest, ChatResponse, ThinkingEffort, Usage};
-use nh_law::Law;
-use nh_routes::{RouteClass, RouteResolver, ThinkingDialect};
-use nh_tools::{builtin_tools, Access, Guard, ToolCtx};
-use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, SecretRegistry};
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use nh_vault::SecretRegistry;
 
 const DEFAULT_MAX_WORKERS: usize = 4;
 const MAX_TURNS: u32 = 20;
@@ -207,20 +204,20 @@ fn run_with_id_inner(
             .swarm
             .unwrap_or_else(|| Arc::new(PendingSwarmClient) as Arc<dyn SwarmClient>),
     });
-    let report = execute_tasks(
-        &run_id,
+    let report = execute_tasks(ExecutionRequest {
+        run_id: &run_id,
         tasks,
         max_workers,
-        config.budget_tokens,
-        0,
-        Counts::default(),
+        budget_tokens: config.budget_tokens,
+        used_tokens: 0,
+        counts: Counts::default(),
         runtime,
-        &ledger,
-        &config.on_event,
-        ladder.as_ref(),
-        config.escalate_on_partial,
-        HashMap::new(),
-    )?;
+        ledger: &ledger,
+        on_event: &config.on_event,
+        ladder: ladder.as_ref(),
+        escalate_on_partial: config.escalate_on_partial,
+        failed_attempts: HashMap::new(),
+    })?;
     finish_index(
         fleet_root,
         &created_utc,
@@ -382,20 +379,20 @@ fn resume_inner(
     });
     let used_tokens = receipt_tokens(&events);
     let failed_attempts = failure_receipts_by_task(&events, config.escalate_on_partial);
-    let report = execute_tasks(
-        &run_id,
+    let report = execute_tasks(ExecutionRequest {
+        run_id: &run_id,
         tasks,
         max_workers,
         budget_tokens,
         used_tokens,
         counts,
         runtime,
-        &ledger,
-        &config.on_event,
-        effective_ladder.as_ref(),
-        config.escalate_on_partial,
+        ledger: &ledger,
+        on_event: &config.on_event,
+        ladder: effective_ladder.as_ref(),
+        escalate_on_partial: config.escalate_on_partial,
         failed_attempts,
-    )?;
+    })?;
     finish_index(
         fleet_root,
         &meta.created_utc,

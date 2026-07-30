@@ -85,6 +85,12 @@ No changes yet.
   lifecycle now live behind shared modules instead of being duplicated across UI surfaces.
 - TUI, Core, Fleet, MCP, tools, routing, law, CLI, and vault tests are organized into named
   responsibility modules while preserving public commands, APIs, wire formats, and ledgers.
+- Provider wire formats, catalog validation, cache-safe context compaction, trusted CLI
+  configuration, OAuth refresh, Fleet scheduling, and TUI input/render/worker state now live in
+  explicit responsibility modules behind the same public facades.
+- Recoverable HTTP-construction, synchronization-poisoning, process-result, token-generation, and
+  worker-join failures now return bounded errors instead of panicking. Strict warning-free rustdoc
+  is part of both CI and the local release gate.
 
 ### Removed
 

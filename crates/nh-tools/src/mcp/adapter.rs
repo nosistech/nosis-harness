@@ -1,6 +1,10 @@
 //! Tool adapters that project remote MCP tools into the Nosis approval model.
 
-use super::*;
+use super::client::{McpClient, ToolEntry, ARGS_SUMMARY_MAX};
+use super::config::{McpServerConfig, McpTrust};
+use crate::{Tool, ToolCtx, ToolSpec};
+use serde_json::Value;
+use std::sync::Arc;
 
 /// Adapters for every configured server, plus one friendly warning line per
 /// server whose tools could not be listed (never a hard failure).
@@ -32,7 +36,13 @@ pub fn mcp_tools(configs: &[McpServerConfig], send_allowed: &dyn Fn(&str) -> boo
             continue;
         }
         let trust = config.trust;
-        let client = Arc::new(McpClient::new(config.clone()));
+        let client = match McpClient::new(config.clone()) {
+            Ok(client) => Arc::new(client),
+            Err(error) => {
+                warnings.push(format!("mcp server \"{server}\": {error}"));
+                continue;
+            }
+        };
         match client.list_tools_full() {
             Ok(entries) => {
                 for entry in entries {
