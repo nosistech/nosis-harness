@@ -213,9 +213,7 @@ fn parses_repo_catalog_with_all_class1_routes() {
         r.available(),
         vec![
             "deepseek-v4-flash",
-            "deepseek-v4-flash-anthropic",
             "deepseek-v4-pro",
-            "deepseek-v4-pro-anthropic",
             "glm-4.5-flash",
             "glm-4.6v-flash",
             "glm-4.7-flash",
@@ -243,12 +241,20 @@ fn resolves_route_with_openai_wire() {
 }
 
 #[test]
-fn anthropic_wire_variant_keeps_model_id_and_changes_base_url() {
-    // The deepclaude-proven path: same model, Anthropic Messages wire.
-    let route = resolver()
-        .resolve("deepseek-v4-pro-anthropic")
+fn anthropic_wire_route_parses_from_test_fixture() {
+    let catalog = r#"
+        [routes.anthropic-fixture]
+        provider = "deepseek"
+        model_id = "deepseek-v4-pro"
+        base_url = "https://api.deepseek.com/anthropic"
+        wire = "anthropic"
+        vault_entry = "deepseek"
+    "#;
+    let route = RouteResolver::from_toml(catalog)
+        .expect("Anthropic-wire fixture must parse")
+        .resolve("anthropic-fixture")
         .expect("known id");
-    assert_eq!(route.id(), "deepseek-v4-pro-anthropic");
+    assert_eq!(route.id(), "anthropic-fixture");
     assert_eq!(route.model_id(), "deepseek-v4-pro");
     assert_eq!(route.wire(), Wire::AnthropicMessages);
     assert_eq!(route.base_url(), "https://api.deepseek.com/anthropic");
@@ -258,12 +264,7 @@ fn anthropic_wire_variant_keeps_model_id_and_changes_base_url() {
 #[test]
 fn deepseek_routes_carry_dialect_quirk_and_limits() {
     let resolver = resolver();
-    for id in [
-        "deepseek-v4-pro",
-        "deepseek-v4-pro-anthropic",
-        "deepseek-v4-flash",
-        "deepseek-v4-flash-anthropic",
-    ] {
+    for id in ["deepseek-v4-pro", "deepseek-v4-flash"] {
         let route = resolver.resolve(id).unwrap();
         assert_eq!(
             route.thinking_dialect(),
@@ -1110,12 +1111,7 @@ fn available_by_provider_groups_and_sorts() {
     );
     assert_eq!(
         map["deepseek"],
-        vec![
-            "deepseek-v4-flash",
-            "deepseek-v4-flash-anthropic",
-            "deepseek-v4-pro",
-            "deepseek-v4-pro-anthropic",
-        ]
+        vec!["deepseek-v4-flash", "deepseek-v4-pro"]
     );
     assert_eq!(
         map["kimi"],
