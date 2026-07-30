@@ -10,11 +10,11 @@ use std::time::{Duration, Instant};
 use anyhow::Context as _;
 use chrono::Utc;
 use nh_core::agent::AgentLoop;
-use nh_core::receipt::{FailureClass, Outcome, Receipt, ReceiptWriter};
+use nh_core::receipt::{FailureClass, Outcome, Receipt, ReceiptWriter, RepairStats};
 use nh_core::wire::{ChatClient, ChatMessage, ChatRequest, ChatResponse, ThinkingEffort, Usage};
 use nh_law::{Law, Verdict};
 use nh_routes::{Profiles, ResolvedRoute};
-use nh_tools::{builtin_tools, Access, Guard, Tool, ToolArgs, ToolCtx, ToolSpec};
+use nh_tools::{builtin_tools, Access, Guard, Tool, ToolArgs, ToolCtx, ToolExecution, ToolSpec};
 #[cfg(test)]
 use nh_vault::Scrubber;
 use nh_vault::{SecretRegistry, SecretValue};
@@ -50,6 +50,19 @@ impl Tool for TrackedTool {
         };
         self.inner.execute(args, ctx)
     }
+
+    fn execute_with_audit(&self, args: ToolArgs, ctx: &ToolCtx) -> anyhow::Result<ToolExecution> {
+        let name = self.inner.spec().name;
+        let _ = self.events.send(AgentEvent::ToolStarted {
+            name: name.clone(),
+            started_at: Utc::now(),
+        });
+        let _finished = ToolFinishedGuard {
+            events: &self.events,
+            name,
+        };
+        self.inner.execute_with_audit(args, ctx)
+    }
 }
 
 struct ToolFinishedGuard<'a> {
@@ -75,6 +88,51 @@ fn tracked_tools(tools: Vec<Box<dyn Tool>>, events: &Sender<AgentEvent>) -> Vec<
             }) as Box<dyn Tool>
         })
         .collect()
+}
+
+struct TrackedClient {
+    inner: Box<dyn ChatClient>,
+    route: String,
+    events: Sender<AgentEvent>,
+}
+
+impl ChatClient for TrackedClient {
+    fn complete(&self, request: &ChatRequest) -> anyhow::Result<ChatResponse> {
+        let _ = self.events.send(AgentEvent::ModelStarted {
+            route: self.route.clone(),
+            started_at: Utc::now(),
+        });
+        let _finished = ModelFinishedGuard {
+            events: &self.events,
+            route: &self.route,
+        };
+        self.inner.complete(request)
+    }
+}
+
+struct ModelFinishedGuard<'a> {
+    events: &'a Sender<AgentEvent>,
+    route: &'a str,
+}
+
+impl Drop for ModelFinishedGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.events.send(AgentEvent::ModelFinished {
+            route: self.route.to_owned(),
+        });
+    }
+}
+
+fn tracked_client(
+    client: Box<dyn ChatClient>,
+    route: &str,
+    events: &Sender<AgentEvent>,
+) -> Box<dyn ChatClient> {
+    Box::new(TrackedClient {
+        inner: client,
+        route: route.to_owned(),
+        events: events.clone(),
+    })
 }
 
 fn apply_new_credential(
@@ -261,7 +319,11 @@ impl WorkerSession {
             Ok((client, literal)) => {
                 let mut literals = SecretRegistry::new();
                 install_literal(&scrubber, &mut literals, literal);
-                (shutdown_aware(client, &shutdown), literals, true)
+                (
+                    tracked_client(shutdown_aware(client, &shutdown), route.id(), &events),
+                    literals,
+                    true,
+                )
             }
             Err(error) => (
                 Box::new(NotConnected {
@@ -330,7 +392,10 @@ impl WorkerSession {
             law_constitution,
             agent,
             history: Vec::new(),
-            session_usage: Usage::default(),
+            session_usage: Usage {
+                cached_tokens: Some(0),
+                ..Usage::default()
+            },
             scrubber,
             connect,
             key_literals,
@@ -368,9 +433,11 @@ impl WorkerSession {
         match command {
             WorkerCommand::Task(task) => CommandAction::Run(task),
             WorkerCommand::SwitchRoute(next_route) => {
+                let previous_route = self.route.id().to_owned();
+                let next_route_id = next_route.id().to_owned();
                 let execution_policy = self.profiles.effective(&self.active_profile, &next_route);
                 let connection = (self.connect)(&next_route, execution_policy.output_cap);
-                self.replace_connection(connection);
+                self.replace_connection(connection, &next_route_id);
                 self.agent.model_id = next_route.model_id().to_owned();
                 self.agent.thinking = effort_for(
                     execution_policy.posture,
@@ -382,6 +449,17 @@ impl WorkerSession {
                 let constitution = identity_constitution(&self.law_constitution, &next_route);
                 self.agent.constitution = Some(constitution.clone());
                 replace_system_message(&mut self.history, constitution);
+                if !self.history.is_empty() && previous_route != next_route_id {
+                    self.history.push(ChatMessage {
+                        role: "system".into(),
+                        content: Some(format!(
+                            "Route changed: {previous_route} → {next_route_id}."
+                        )),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        reasoning_content: None,
+                    });
+                }
                 self.agent.context_limit = next_route.context();
                 self.route = *next_route;
                 CommandAction::Continue
@@ -393,7 +471,8 @@ impl WorkerSession {
             WorkerCommand::SetProfile(name) => {
                 let execution_policy = self.profiles.effective(&name, &self.route);
                 let connection = (self.connect)(&self.route, execution_policy.output_cap);
-                self.replace_connection(connection);
+                let route_id = self.route.id().to_owned();
+                self.replace_connection(connection, &route_id);
                 self.agent.thinking = effort_for(
                     execution_policy.posture,
                     self.route.thinking_dialect(),
@@ -410,9 +489,10 @@ impl WorkerSession {
     fn replace_connection(
         &mut self,
         connection: anyhow::Result<(Box<dyn ChatClient>, SecretValue)>,
+        route: &str,
     ) {
         match connection {
-            Ok((client, literal)) => self.install_connection(client, literal),
+            Ok((client, literal)) => self.install_connection(client, literal, route),
             Err(error) => {
                 self.agent.client = Box::new(NotConnected {
                     message: error.to_string(),
@@ -422,14 +502,20 @@ impl WorkerSession {
         }
     }
 
-    fn install_connection(&mut self, client: Box<dyn ChatClient>, literal: SecretValue) {
+    fn install_connection(
+        &mut self,
+        client: Box<dyn ChatClient>,
+        literal: SecretValue,
+        route: &str,
+    ) {
         apply_new_credential(
             &self.scrubber,
             &mut self.key_literals,
             literal,
             &mut self.agent,
         );
-        self.agent.client = shutdown_aware(client, &self.shutdown);
+        self.agent.client =
+            tracked_client(shutdown_aware(client, &self.shutdown), route, &self.events);
         self.connected = true;
     }
 
@@ -439,7 +525,8 @@ impl WorkerSession {
         }
         let execution_policy = self.profiles.effective(&self.active_profile, &self.route);
         let (client, literal) = (self.connect)(&self.route, execution_policy.output_cap)?;
-        self.install_connection(client, literal);
+        let route_id = self.route.id().to_owned();
+        self.install_connection(client, literal, &route_id);
         Ok(())
     }
 
@@ -562,14 +649,14 @@ fn add_usage(total: &mut Usage, usage: &Usage) -> bool {
     else {
         return true;
     };
-    let cached_tokens = match usage.cached_tokens {
-        Some(cached) => {
-            let Some(total_cached) = total.cached_tokens.unwrap_or(0).checked_add(cached) else {
+    let cached_tokens = match (total.cached_tokens, usage.cached_tokens) {
+        (Some(total_cached), Some(cached)) => {
+            let Some(total_cached) = total_cached.checked_add(cached) else {
                 return true;
             };
             Some(total_cached)
         }
-        None => total.cached_tokens,
+        _ => None,
     };
 
     total.prompt_tokens = prompt_tokens;
@@ -589,6 +676,8 @@ fn failed_timeline_summary(model_id: &str, task: &str, reason: &str) -> Timeline
             outcome: Outcome::Fail,
             failure_class: Some(FailureClass::Verification),
             usage: None,
+            cache_hit_pct: None,
+            repairs: RepairStats::default(),
             effective_profile: None,
         },
         answer: format!("error: {reason}"),

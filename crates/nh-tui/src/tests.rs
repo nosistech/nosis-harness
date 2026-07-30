@@ -1,6 +1,7 @@
 use super::*;
 use crate::palette::trust_dial_lines;
 use crate::state::{Overlay, PickerKind, UiDiscovery};
+use crate::timeline::{timeline_detail_lines, timeline_row};
 use crate::worker::WorkerCommand;
 use chrono::{DateTime, Utc};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -349,6 +350,8 @@ fn receipt(task: &str, outcome: Outcome, usage: Option<Usage>) -> Receipt {
         outcome,
         failure_class: (outcome != Outcome::Pass).then_some(FailureClass::Constraint),
         usage,
+        cache_hit_pct: None,
+        repairs: Default::default(),
         effective_profile: None,
     }
 }
@@ -798,7 +801,7 @@ fn timeline_entry_projects_receipt_outcome_and_tokens() {
 
     assert_eq!(entry.turn, 7);
     assert_eq!(entry.outcome, Outcome::Partial);
-    assert_eq!(entry.tokens(), (120, 30, 50));
+    assert_eq!(entry.tokens(), (120, 30, Some(50)));
     assert_eq!(entry.turns, 3);
     assert_eq!(entry.tool_calls, 2);
     assert_eq!(entry.answer, "partial answer");
@@ -998,24 +1001,31 @@ fn bare_model_opens_an_honest_catalog_picker_and_uses_the_typed_switch_action() 
         other => panic!("expected model picker, got {other:?}"),
     };
     assert_eq!(labels.len(), 6);
-    assert!(labels[0].contains("a-cheap · cheapest capable · USD"));
-    assert!(labels[1].contains("b-expensive · 2.0x price · USD"));
+    assert_eq!(labels[0], "a-cheap · capable · est $0.0001");
+    assert_eq!(labels[1], "b-expensive · capable · est $0.0002");
     assert!(
-        labels[2].contains("relative unavailable: context unknown · USD"),
+        labels[2].contains("c-unknown-context · context unknown · free"),
         "got: {}",
         labels[2]
     );
     assert!(
-        labels[3].contains("price unknown · currency unknown"),
+        labels[3].contains("d-unknown-price · capable · price unknown"),
         "got: {}",
         labels[3]
     );
-    assert!(labels[4].contains("price stale"), "got: {}", labels[4]);
+    assert!(
+        labels[4].contains("est $0.0003 · price stale · comparison refused"),
+        "got: {}",
+        labels[4]
+    );
     assert!(
         labels[5].contains("local · explicit selection only · no billed tokens"),
         "got: {}",
         labels[5]
     );
+    assert!(labels
+        .iter()
+        .all(|label| !label.contains("cheapest") && !label.contains("x price")));
     let rendered = buffer_text(&render_buffer(&app, 100, 24));
     assert!(rendered.contains("Select model"), "got: {rendered}");
 
@@ -1501,6 +1511,45 @@ fn cost_hud_omits_cache_before_usage_and_shows_it_after() {
 }
 
 #[test]
+fn cost_hud_and_timeline_distinguish_absent_cache_from_measured_zero() {
+    let mut app = test_app(None);
+    app.usage = Usage {
+        prompt_tokens: 20,
+        completion_tokens: 2,
+        cached_tokens: None,
+    };
+    let absent_hud = app.hud_line(Utc::now());
+    assert!(!absent_hud.contains("cache 0%"), "got: {absent_hud}");
+
+    let absent_entry = TimelineEntry::from_receipt(
+        1,
+        receipt("absent", Outcome::Pass, Some(app.usage.clone())),
+        "done".into(),
+        false,
+    );
+    assert_eq!(timeline_row(&absent_entry), "#1  pass  20/2");
+    assert_eq!(
+        timeline_detail_lines(&absent_entry)[8],
+        "tokens: 20 in / 2 out"
+    );
+
+    app.usage.cached_tokens = Some(0);
+    let measured_hud = app.hud_line(Utc::now());
+    assert!(measured_hud.contains("cache 0%"), "got: {measured_hud}");
+    let measured_entry = TimelineEntry::from_receipt(
+        1,
+        receipt("zero", Outcome::Pass, Some(app.usage.clone())),
+        "done".into(),
+        false,
+    );
+    assert_eq!(timeline_row(&measured_entry), "#1  pass  20/2/0 cache 0%");
+    assert_eq!(
+        timeline_detail_lines(&measured_entry)[8],
+        "tokens: 20 in / 2 out / 0 cached | cache 0%"
+    );
+}
+
+#[test]
 fn money_hud_uses_accumulated_turn_cost_in_native_currency() {
     let mut app = meter_app();
     let usage = Usage {
@@ -1627,6 +1676,43 @@ fn in_flight_tool_event_shows_name_and_elapsed_seconds_until_finish() {
         },
     );
     assert!(app.active_tool.is_none());
+}
+
+#[test]
+fn in_flight_model_event_shows_route_and_factual_elapsed_time_until_finish() {
+    let mut app = test_app(None);
+    let started_at = fixed_at();
+    app.set_status(Status::Working, started_at);
+    apply_event(
+        &mut app,
+        AgentEvent::ModelStarted {
+            route: "other-route".into(),
+            started_at,
+        },
+    );
+
+    let (label, _) = model_status_chip(
+        "other-route",
+        started_at,
+        started_at + chrono::Duration::seconds(34),
+    );
+    assert_eq!(label, "● WAITING other-route · 34s");
+    assert!(!label.contains('%'));
+    assert!(!label.to_ascii_lowercase().contains("estimated"));
+    assert_eq!(
+        app.active_model
+            .as_ref()
+            .map(|request| request.route.as_str()),
+        Some("other-route")
+    );
+
+    apply_event(
+        &mut app,
+        AgentEvent::ModelFinished {
+            route: "other-route".into(),
+        },
+    );
+    assert!(app.active_model.is_none());
 }
 
 #[test]
@@ -1818,6 +1904,7 @@ struct RecordedRequest {
     model: String,
     message_count: usize,
     system: String,
+    history: Vec<(String, String)>,
     effort: ThinkingEffort,
 }
 
@@ -1839,6 +1926,16 @@ impl ChatClient for RecordingClient {
             model: request.model.clone(),
             message_count: request.messages.len(),
             system: request.messages[0].content.clone().unwrap_or_default(),
+            history: request
+                .messages
+                .iter()
+                .map(|message| {
+                    (
+                        message.role.clone(),
+                        message.content.clone().unwrap_or_default(),
+                    )
+                })
+                .collect(),
             effort: request.thinking,
         });
         let mut message = request.messages.last().cloned().expect("user message");
@@ -2044,9 +2141,26 @@ fn model_switch_keeps_worker_history_transcript_and_updates_route_identity() {
     assert!(requests[0].system.contains("nosis on test-route"));
     assert_eq!(requests[0].effort, ThinkingEffort::None);
     assert_eq!(requests[1].model, "other-route");
-    assert_eq!(requests[1].message_count, 4, "history was not kept");
+    assert_eq!(requests[1].message_count, 5, "history was not kept");
     assert!(requests[1].system.contains("nosis on other-route"));
     assert!(requests[1].system.contains("never claim to be Claude"));
+    assert_eq!(requests[1].history[0].0, "system");
+    assert!(requests[1].history[0].1.contains("nosis on other-route"));
+    assert_eq!(
+        requests[1].history[3],
+        (
+            "system".into(),
+            "Route changed: test-route → other-route.".into()
+        )
+    );
+    assert_eq!(
+        requests[1]
+            .history
+            .iter()
+            .filter(|(role, _)| role == "system")
+            .count(),
+        2
+    );
     assert_eq!(requests[1].effort, ThinkingEffort::High);
     drop(requests);
     std::fs::remove_dir_all(root).unwrap();
@@ -2159,6 +2273,8 @@ fn worker_uses_injected_client_and_keeps_one_history_across_tasks() {
                 }
                 AgentEvent::Usage(_)
                 | AgentEvent::Progress(_)
+                | AgentEvent::ModelStarted { .. }
+                | AgentEvent::ModelFinished { .. }
                 | AgentEvent::ToolStarted { .. }
                 | AgentEvent::ToolFinished { .. } => {}
                 AgentEvent::MeterIncomplete => panic!("successful worker lost meter data"),
@@ -2217,6 +2333,8 @@ fn worker_profile_change_reconnects_with_clamp_and_records_next_turn() {
             AgentEvent::Usage(_)
             | AgentEvent::Answer(_)
             | AgentEvent::Progress(_)
+            | AgentEvent::ModelStarted { .. }
+            | AgentEvent::ModelFinished { .. }
             | AgentEvent::ToolStarted { .. }
             | AgentEvent::ToolFinished { .. } => {}
             AgentEvent::MeterIncomplete => panic!("successful worker lost meter data"),

@@ -1,5 +1,6 @@
 use super::context::{estimate_tokens, message_bytes};
 use super::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 fn message(role: &str, content: impl Into<String>) -> ChatMessage {
@@ -130,6 +131,24 @@ struct ProviderErrorClient;
 impl ChatClient for ProviderErrorClient {
     fn complete(&self, _req: &ChatRequest) -> anyhow::Result<crate::wire::ChatResponse> {
         anyhow::bail!("provider returned HTTP 500: original failure")
+    }
+}
+
+struct UsageFinishClient {
+    cached_tokens: Option<u64>,
+}
+
+impl ChatClient for UsageFinishClient {
+    fn complete(&self, _req: &ChatRequest) -> anyhow::Result<crate::wire::ChatResponse> {
+        Ok(crate::wire::ChatResponse {
+            message: message("assistant", "metered"),
+            finish_reason: "stop".into(),
+            usage: Some(Usage {
+                prompt_tokens: 20,
+                completion_tokens: 2,
+                cached_tokens: self.cached_tokens,
+            }),
+        })
     }
 }
 
@@ -331,6 +350,54 @@ fn usage_overflow_omits_receipt_usage_but_keeps_the_answer() {
 }
 
 #[test]
+fn receipt_cache_percentage_distinguishes_absent_from_measured_zero() {
+    for (cached_tokens, expected) in [(None, None), (Some(0), Some(0.0))] {
+        let dir = tempfile::tempdir().unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut agent = agent_with_receipt_path(
+            dir.path(),
+            dir.path().join("receipts.jsonl"),
+            Box::new(UsageFinishClient { cached_tokens }),
+            events,
+        );
+
+        let (_, receipt) = agent.run("meter").unwrap();
+
+        assert_eq!(receipt.cache_hit_pct, expected);
+        assert_eq!(
+            receipt.usage.as_ref().and_then(|usage| usage.cached_tokens),
+            cached_tokens
+        );
+    }
+}
+
+#[test]
+fn cumulative_cache_measurement_is_absent_if_any_turn_omits_it() {
+    let mut total = Usage {
+        cached_tokens: Some(0),
+        ..Usage::default()
+    };
+    assert!(add_usage_checked(
+        &mut total,
+        &Usage {
+            prompt_tokens: 10,
+            completion_tokens: 1,
+            cached_tokens: None,
+        }
+    ));
+    assert!(add_usage_checked(
+        &mut total,
+        &Usage {
+            prompt_tokens: 10,
+            completion_tokens: 1,
+            cached_tokens: Some(5),
+        }
+    ));
+    assert_eq!(total.prompt_tokens, 20);
+    assert_eq!(total.cached_tokens, None);
+}
+
+#[test]
 fn receipt_failure_marks_answer_unreceipted_without_discarding_it_or_shadowing_errors() {
     let dir = tempfile::tempdir().unwrap();
 
@@ -469,4 +536,251 @@ fn progress_line_survives_bad_json() {
         arguments: "{oops".into(),
     };
     assert_eq!(progress_line(1, &call), "turn 1: read_file");
+}
+
+struct RepairingToolCallClient {
+    calls: Mutex<u8>,
+    observed_tool_result: Arc<Mutex<Option<String>>>,
+}
+
+impl ChatClient for RepairingToolCallClient {
+    fn complete(&self, req: &ChatRequest) -> anyhow::Result<crate::wire::ChatResponse> {
+        let mut calls = self.calls.lock().unwrap();
+        let call = *calls;
+        *calls += 1;
+        drop(calls);
+
+        if call == 0 {
+            return Ok(crate::wire::ChatResponse {
+                message: ChatMessage {
+                    role: "assistant".into(),
+                    content: None,
+                    tool_calls: Some(vec![ToolCallReq {
+                        id: "repair-1".into(),
+                        name: "view_file".into(),
+                        arguments: "```json\n{path: 'note.txt',}\n```".into(),
+                    }]),
+                    tool_call_id: None,
+                    reasoning_content: None,
+                },
+                finish_reason: "tool_calls".into(),
+                usage: None,
+            });
+        }
+
+        *self.observed_tool_result.lock().unwrap() = req
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "tool")
+            .and_then(|message| message.content.clone());
+        Ok(crate::wire::ChatResponse {
+            message: message("assistant", "done"),
+            finish_reason: "stop".into(),
+            usage: None,
+        })
+    }
+}
+
+#[test]
+fn repaired_tool_call_is_visible_in_history_events_and_receipt_counter() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("note.txt"), "evidence").unwrap();
+    let observed = Arc::new(Mutex::new(None));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = agent_with_receipt_path(
+        dir.path(),
+        dir.path().join("receipts.jsonl"),
+        Box::new(RepairingToolCallClient {
+            calls: Mutex::new(0),
+            observed_tool_result: Arc::clone(&observed),
+        }),
+        Arc::clone(&events),
+    );
+    agent.max_turns = 2;
+    agent.tools = vec![Box::new(nh_tools::ReadFile)];
+
+    let (answer, receipt) = agent.run("read it").unwrap();
+
+    assert_eq!(answer, "done");
+    assert_eq!(receipt.repairs.tool_call_repair_attempts, 1);
+    let transcript = observed.lock().unwrap().clone().unwrap();
+    assert!(transcript.starts_with("[tool-call repair: stripped JSON markdown fence; normalized single-quoted JSON strings; quoted unquoted JSON object keys; removed trailing JSON commas; mapped tool name 'view_file' to 'read_file']\n"));
+    assert!(transcript.ends_with("evidence"));
+    let emitted = events.lock().unwrap();
+    assert!(emitted
+        .iter()
+        .any(|line| line.contains("mapped tool name 'view_file' to 'read_file'")));
+    assert!(emitted
+        .iter()
+        .any(|line| line.contains("removed trailing JSON commas")));
+}
+
+struct AuditedEditClient {
+    calls: Mutex<u8>,
+    observed_tool_result: Arc<Mutex<Option<String>>>,
+}
+
+impl ChatClient for AuditedEditClient {
+    fn complete(&self, req: &ChatRequest) -> anyhow::Result<crate::wire::ChatResponse> {
+        let mut calls = self.calls.lock().unwrap();
+        let call = *calls;
+        *calls += 1;
+        drop(calls);
+        if call == 0 {
+            return Ok(crate::wire::ChatResponse {
+                message: ChatMessage {
+                    role: "assistant".into(),
+                    content: None,
+                    tool_calls: Some(vec![ToolCallReq {
+                        id: "audit-edit".into(),
+                        name: "edit_file".into(),
+                        arguments: "{}".into(),
+                    }]),
+                    tool_call_id: None,
+                    reasoning_content: None,
+                },
+                finish_reason: "tool_calls".into(),
+                usage: None,
+            });
+        }
+        *self.observed_tool_result.lock().unwrap() = req
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "tool")
+            .and_then(|message| message.content.clone());
+        Ok(crate::wire::ChatResponse {
+            message: message("assistant", "done"),
+            finish_reason: "stop".into(),
+            usage: None,
+        })
+    }
+}
+
+struct AuditedEditTool;
+
+impl Tool for AuditedEditTool {
+    fn spec(&self) -> nh_tools::ToolSpec {
+        nh_tools::ToolSpec {
+            name: "edit_file".into(),
+            description: "test audited edit".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    fn execute(&self, _args: serde_json::Value, _ctx: &ToolCtx) -> anyhow::Result<String> {
+        Ok("edited using indentation-flexible match".into())
+    }
+
+    fn execute_with_audit(
+        &self,
+        _args: serde_json::Value,
+        _ctx: &ToolCtx,
+    ) -> anyhow::Result<nh_tools::ToolExecution> {
+        Ok(nh_tools::ToolExecution {
+            output: "edited using indentation-flexible match".into(),
+            audit: vec![ToolAudit::EditMatch(EditMatchTier::IndentationFlexible)],
+        })
+    }
+}
+
+#[test]
+fn tolerant_edit_tier_is_visible_in_transcript_events_and_receipt() {
+    let dir = tempfile::tempdir().unwrap();
+    let observed = Arc::new(Mutex::new(None));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = agent_with_receipt_path(
+        dir.path(),
+        dir.path().join("receipts.jsonl"),
+        Box::new(AuditedEditClient {
+            calls: Mutex::new(0),
+            observed_tool_result: Arc::clone(&observed),
+        }),
+        Arc::clone(&events),
+    );
+    agent.max_turns = 2;
+    agent.tools = vec![Box::new(AuditedEditTool)];
+
+    let (_, receipt) = agent.run("edit").unwrap();
+
+    assert_eq!(receipt.repairs.edit_indentation_matches, 1);
+    assert_eq!(receipt.repairs.edit_whitespace_matches, 0);
+    assert_eq!(
+        observed.lock().unwrap().as_deref(),
+        Some("edited using indentation-flexible match")
+    );
+    assert!(events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|line| line.contains("edit_file used indentation-flexible match")));
+}
+
+#[test]
+fn shell_alias_uses_the_real_exec_approval_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let approvals = Arc::new(AtomicUsize::new(0));
+    let approvals_seen = Arc::clone(&approvals);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = agent_with_receipt_path(
+        dir.path(),
+        dir.path().join("receipts.jsonl"),
+        Box::new(FinalAnswerClient),
+        events,
+    );
+    agent.tools = vec![Box::new(nh_tools::ExecShell)];
+    agent.ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(move |_| {
+            approvals_seen.fetch_add(1, Ordering::SeqCst);
+            false
+        }),
+    )
+    .with_guard(Box::new(|_| nh_tools::Guard::Allow));
+
+    let run = agent.run_tool(&ToolCallReq {
+        id: "alias-exec".into(),
+        name: "shell".into(),
+        arguments: r#"{"command":"echo should-not-run"}"#.into(),
+    });
+
+    assert_eq!(approvals.load(Ordering::SeqCst), 1);
+    assert!(run.repair_attempted);
+    assert!(run
+        .output
+        .contains("mapped tool name 'shell' to 'exec_shell'"));
+    assert!(run.output.ends_with("user denied: echo should-not-run"));
+}
+
+#[test]
+fn malformed_call_gets_one_bounded_repair_annotation_then_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = agent_with_receipt_path(
+        dir.path(),
+        dir.path().join("receipts.jsonl"),
+        Box::new(FinalAnswerClient),
+        events,
+    );
+    agent.tools = vec![Box::new(nh_tools::ReadFile)];
+
+    let run = agent.run_tool(&ToolCallReq {
+        id: "bad-json".into(),
+        name: "read_file".into(),
+        arguments: "{path => nope".into(),
+    });
+
+    assert!(run.repair_attempted);
+    assert_eq!(run.repair_notes.len(), 1);
+    assert_eq!(
+        run.output
+            .matches("[tool-call repair:")
+            .collect::<Vec<_>>()
+            .len(),
+        1
+    );
+    assert!(run
+        .output
+        .contains("invalid arguments JSON for 'read_file'"));
 }

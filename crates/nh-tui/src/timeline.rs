@@ -5,7 +5,7 @@ use crate::state::{AgentEvent, App, Status, TimelineEntry, TranscriptKind};
 use crate::{APPROVAL_LEGEND, BUDGET_REASON};
 use chrono::{DateTime, Utc};
 use nh_core::receipt::{FailureClass, Outcome};
-use nh_core::wire::Usage;
+use nh_core::wire::{cache_hit_pct, Usage};
 use nh_routes::{
     cost_of, money, money_with_gloss, saved_pct, PriceConfidence, ResolvedRoute, RouteClass,
     RouteResolver, LOCAL_METER_COPY,
@@ -40,8 +40,15 @@ pub(super) fn is_compaction_progress(line: &str) -> bool {
 pub(super) fn timeline_row(entry: &TimelineEntry) -> String {
     let (input, output, cached) = entry.tokens();
     let compacted = if entry.compacted { "  [compact]" } else { "" };
+    let mut tokens = format!("{input}/{output}");
+    if let Some(cached) = cached {
+        tokens.push_str(&format!("/{cached}"));
+        if let Some(pct) = cache_hit_pct(input, Some(cached)) {
+            tokens.push_str(&format!(" cache {pct:.0}%"));
+        }
+    }
     format!(
-        "#{}  {}  {input}/{output}/{cached}{compacted}",
+        "#{}  {}  {tokens}{compacted}",
         entry.turn,
         outcome_name(entry.outcome)
     )
@@ -53,6 +60,13 @@ pub(super) fn timeline_detail_lines(entry: &TimelineEntry) -> Vec<String> {
         .failure_class
         .map(failure_class_name)
         .unwrap_or("none");
+    let mut tokens = format!("tokens: {input} in / {output} out");
+    if let Some(cached) = cached {
+        tokens.push_str(&format!(" / {cached} cached"));
+        if let Some(pct) = cache_hit_pct(input, Some(cached)) {
+            tokens.push_str(&format!(" | cache {pct:.0}%"));
+        }
+    }
     vec![
         format!("TURN #{}", entry.turn),
         format!("timestamp: {}", entry.ts_utc),
@@ -62,7 +76,7 @@ pub(super) fn timeline_detail_lines(entry: &TimelineEntry) -> Vec<String> {
         format!("agent turns: {}", entry.turns),
         format!("tool calls: {}", entry.tool_calls),
         format!("failure class: {failure}"),
-        format!("tokens: {input} in / {output} out / {cached} cached"),
+        tokens,
         format!("compacted: {}", if entry.compacted { "yes" } else { "no" }),
         String::new(),
         format!("answer: {}", entry.answer),
@@ -78,7 +92,20 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
             }
             app.push_line(&line, TranscriptKind::Progress);
         }
+        AgentEvent::ModelStarted { route, started_at } => {
+            app.active_model = Some(crate::state::ActiveModel { route, started_at });
+        }
+        AgentEvent::ModelFinished { route } => {
+            if app
+                .active_model
+                .as_ref()
+                .is_some_and(|request| request.route == route)
+            {
+                app.active_model = None;
+            }
+        }
         AgentEvent::ToolStarted { name, started_at } => {
+            app.active_model = None;
             app.active_tool = Some(crate::state::ActiveTool { name, started_at });
         }
         AgentEvent::ToolFinished { name } => {
@@ -130,6 +157,7 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
             ));
         }
         AgentEvent::Answer(answer) => {
+            app.active_model = None;
             app.active_tool = None;
             app.push_text("", &answer, TranscriptKind::Answer);
             let status = if app.budget_reached() {
@@ -141,6 +169,7 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
         }
         AgentEvent::MeterIncomplete => app.has_failed_turn = true,
         AgentEvent::Failed(reason) => {
+            app.active_model = None;
             app.active_tool = None;
             let status_reason = safe_line(&app.scrubber, &reason);
             let what = reason

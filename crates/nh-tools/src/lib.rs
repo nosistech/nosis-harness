@@ -9,6 +9,7 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
+mod edit;
 mod exec;
 pub mod mcp;
 
@@ -49,6 +50,41 @@ pub struct ToolSpec {
 
 /// JSON arguments passed across the tool boundary.
 pub type ToolArgs = serde_json::Value;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditMatchTier {
+    WhitespaceNormalized,
+    IndentationFlexible,
+}
+
+impl EditMatchTier {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::WhitespaceNormalized => "whitespace-normalized",
+            Self::IndentationFlexible => "indentation-flexible",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolAudit {
+    EditMatch(EditMatchTier),
+}
+
+#[derive(Debug)]
+pub struct ToolExecution {
+    pub output: String,
+    pub audit: Vec<ToolAudit>,
+}
+
+impl ToolExecution {
+    pub fn plain(output: String) -> Self {
+        Self {
+            output,
+            audit: Vec::new(),
+        }
+    }
+}
 
 pub struct ToolCtx {
     pub workdir: PathBuf,
@@ -92,6 +128,10 @@ impl ToolCtx {
 pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
     fn execute(&self, args: ToolArgs, ctx: &ToolCtx) -> anyhow::Result<String>;
+
+    fn execute_with_audit(&self, args: ToolArgs, ctx: &ToolCtx) -> anyhow::Result<ToolExecution> {
+        self.execute(args, ctx).map(ToolExecution::plain)
+    }
 }
 
 /// args: {"path": string} - read file relative to workdir, refuse escapes above workdir.
@@ -311,8 +351,9 @@ impl Tool for EditFile {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "edit_file".into(),
-            description: "Replace one exact occurrence of old_string with new_string in a file."
-                .into(),
+            description:
+                "Replace one unique occurrence of old_string with new_string in a file. Exact matching is preferred; whitespace-only drift may be tolerated and reported."
+                    .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -322,7 +363,7 @@ impl Tool for EditFile {
                     },
                     "old_string": {
                         "type": "string",
-                        "description": "Exact text to replace. Must appear exactly once in the file."
+                        "description": "Text to replace. It must identify exactly one region in the file."
                     },
                     "new_string": {
                         "type": "string",
@@ -335,6 +376,11 @@ impl Tool for EditFile {
     }
 
     fn execute(&self, args: serde_json::Value, ctx: &ToolCtx) -> anyhow::Result<String> {
+        self.execute_with_audit(args, ctx)
+            .map(|execution| execution.output)
+    }
+
+    fn execute_with_audit(&self, args: ToolArgs, ctx: &ToolCtx) -> anyhow::Result<ToolExecution> {
         let path = str_arg(&args, "path")?;
         let old = str_arg(&args, "old_string")?;
         let new = str_arg(&args, "new_string")?;
@@ -343,11 +389,13 @@ impl Tool for EditFile {
         }
         let (resolved, relative) = resolve_in_workdir(&ctx.workdir, path)?;
         match (ctx.guard)(&Access::Write(&relative)) {
-            Guard::Block(reason) => return Ok(format!("blocked by law: {reason}")),
+            Guard::Block(reason) => {
+                return Ok(ToolExecution::plain(format!("blocked by law: {reason}")))
+            }
             Guard::Ask => {
                 let action = format!("edit {relative}");
                 if !(ctx.approve)(&action) {
-                    return Ok(format!("user denied: {action}"));
+                    return Ok(ToolExecution::plain(format!("user denied: {action}")));
                 }
             }
             Guard::Allow => {}
@@ -372,12 +420,32 @@ impl Tool for EditFile {
         }
         let content = String::from_utf8(bytes)
             .with_context(|| format!("could not read {path} - is it UTF-8 text?"))?;
-        match content.matches(old).count() {
-            0 => bail!("old_string not found in {path}"),
-            1 => {}
-            n => bail!("old_string appears {n} times in {path} - provide more context"),
-        }
-        let edited = content.replacen(old, new, 1);
+        let matched = match edit::locate(&content, old, new) {
+            Ok(matched) => matched,
+            Err(edit::MatchFailure::Ambiguous { tier, count }) => {
+                if tier == edit::MatchTier::Exact {
+                    bail!("old_string appears {count} times in {path} - provide more context");
+                }
+                bail!(
+                    "old_string has {count} {} matches in {path} - provide more context",
+                    tier.label()
+                );
+            }
+            Err(edit::MatchFailure::NotFound(candidate)) => {
+                let actual = ctx.scrubber.scrub(&candidate.text);
+                bail!(
+                    "old_string not found in {path}\nnearest candidate: {path}:{}-{}\nactual text:\n{actual}",
+                    candidate.first_line,
+                    candidate.last_line
+                )
+            }
+        };
+        let mut edited = String::with_capacity(
+            content.len() - (matched.range.end - matched.range.start) + matched.replacement.len(),
+        );
+        edited.push_str(&content[..matched.range.start]);
+        edited.push_str(&matched.replacement);
+        edited.push_str(&content[matched.range.end..]);
         let parent = resolved.parent().ok_or_else(|| {
             anyhow::anyhow!("could not write {path}: file has no parent directory")
         })?;
@@ -442,7 +510,19 @@ impl Tool for EditFile {
             let _ = std::fs::remove_file(&temp_path);
             return Err(error).with_context(|| format!("could not replace {path}"));
         }
-        Ok(format!("edited {path}"))
+        let tier = match matched.tier {
+            edit::MatchTier::Exact => None,
+            edit::MatchTier::WhitespaceNormalized => Some(EditMatchTier::WhitespaceNormalized),
+            edit::MatchTier::IndentationFlexible => Some(EditMatchTier::IndentationFlexible),
+        };
+        let output = tier.map_or_else(
+            || format!("edited {path}"),
+            |tier| format!("edited {path} using {} match", tier.label()),
+        );
+        Ok(ToolExecution {
+            output,
+            audit: tier.into_iter().map(ToolAudit::EditMatch).collect(),
+        })
     }
 }
 

@@ -11,11 +11,13 @@ use std::time::Duration;
 
 #[test]
 fn cache_hit_percentage_is_optional_and_rejects_inconsistent_usage() {
-    assert_eq!(cache_hit_pct(0, 10), None);
-    assert_eq!(cache_hit_pct(20, 5), Some(25.0));
-    assert_eq!(cache_hit_pct(10, 20), None);
-    assert_eq!(cache_hit_pct(20, 21), None);
-    assert_eq!(cache_hit_pct(20, 20), Some(100.0));
+    assert_eq!(cache_hit_pct(0, Some(10)), None);
+    assert_eq!(cache_hit_pct(20, None), None);
+    assert_eq!(cache_hit_pct(20, Some(0)), Some(0.0));
+    assert_eq!(cache_hit_pct(20, Some(5)), Some(25.0));
+    assert_eq!(cache_hit_pct(10, Some(20)), None);
+    assert_eq!(cache_hit_pct(20, Some(21)), None);
+    assert_eq!(cache_hit_pct(20, Some(20)), Some(100.0));
 }
 
 fn msg(role: &str, content: Option<&str>) -> ChatMessage {

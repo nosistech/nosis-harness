@@ -423,9 +423,16 @@ impl RouteResolver {
             } else if candidate.native_cost == chosen.native_cost {
                 "same price; route id tie-break".to_string()
             } else if chosen.native_cost == 0.0 {
-                "higher price".to_string()
+                format!(
+                    "{} estimated; chosen route is free",
+                    money(candidate.native_cost, candidate.currency)
+                )
             } else {
-                format!("{:.1}x price", candidate.native_cost / chosen.native_cost)
+                format!(
+                    "{:.1}x price - {} estimated",
+                    candidate.native_cost / chosen.native_cost,
+                    money(candidate.native_cost, candidate.currency)
+                )
             };
             trace.push(candidate.route.id.clone(), reason);
         }

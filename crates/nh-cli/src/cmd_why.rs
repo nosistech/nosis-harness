@@ -176,4 +176,51 @@ mod tests {
             .iter()
             .any(|line| line.starts_with("route: local-test")));
     }
+
+    #[test]
+    fn free_winner_rejections_show_absolute_cost_not_a_bare_relative_phrase() {
+        let resolver = RouteResolver::from_toml(
+            r#"
+            [routes.free]
+            provider = "free-provider"
+            model_id = "free"
+            base_url = "https://example.invalid"
+            wire = "openai"
+            vault_entry = "free-provider"
+            context = 100000
+            [routes.free.price]
+            currency = "USD"
+            unit = "per_million_tokens"
+            cache_hit = 0.0
+            cache_miss = 0.0
+            output = 0.0
+            price_confidence = "confirmed"
+
+            [routes.paid]
+            provider = "paid-provider"
+            model_id = "paid"
+            base_url = "https://example.invalid"
+            wire = "openai"
+            vault_entry = "paid-provider"
+            context = 100000
+            [routes.paid.price]
+            currency = "USD"
+            unit = "per_million_tokens"
+            cache_hit = 2.0
+            cache_miss = 2.0
+            output = 2.0
+            price_confidence = "confirmed"
+            "#,
+        )
+        .unwrap();
+        let at = Utc.with_ymd_and_hms(2026, 7, 30, 12, 0, 0).unwrap();
+
+        let lines = render(&resolver, None, None, at).unwrap();
+
+        assert!(lines[0].starts_with("route: free"), "got: {lines:?}");
+        assert!(lines
+            .iter()
+            .any(|line| line == "skipped paid: $0.0020 estimated; chosen route is free"));
+        assert!(!lines.iter().any(|line| line.ends_with("higher price")));
+    }
 }

@@ -207,7 +207,7 @@ fn test_session(model: &str, tmp: &Path) -> (ChatSession, Arc<AtomicUsize>) {
         history: Vec::new(),
         session_in: 0,
         session_out: 0,
-        session_cached: 0,
+        session_cached: Some(0),
         session_cost: Vec::new(),
         unpriced_turns: 0,
         scrubber: Arc::new(RwLock::new(test_scrubber)),
@@ -572,7 +572,7 @@ fn session_usage_overflow_is_atomic_and_marks_the_meter_incomplete() {
     let (mut s, _calls) = test_session("deepseek-v4-flash", tmp.path());
     s.session_in = u64::MAX;
     s.session_out = 7;
-    s.session_cached = 3;
+    s.session_cached = Some(3);
     let usage = Usage {
         prompt_tokens: 1,
         completion_tokens: 2,
@@ -582,7 +582,7 @@ fn session_usage_overflow_is_atomic_and_marks_the_meter_incomplete() {
     assert!(!add_session_usage(&mut s, &usage));
     assert_eq!(s.session_in, u64::MAX);
     assert_eq!(s.session_out, 7);
-    assert_eq!(s.session_cached, 3);
+    assert_eq!(s.session_cached, Some(3));
     assert_eq!(s.unpriced_turns, 1);
 }
 
@@ -591,8 +591,43 @@ fn footer_omits_cache_chip_before_any_usage() {
     let tmp = tempfile::tempdir().unwrap();
     let (s, _calls) = test_session("deepseek-v4-flash", tmp.path());
     let line = footer(&s);
-    assert!(line.contains("session ¥0.00 (≈$0.00) | tokens 0 in / 0 out / 0 cached"));
+    assert!(line.contains("session ¥0.00 (≈$0.00) | tokens 0 in / 0 out"));
+    assert!(!line.contains("cached"), "got: {line}");
     assert!(!line.contains("| cache"), "got: {line}");
+}
+
+#[test]
+fn footer_distinguishes_absent_cache_measurement_from_measured_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut s, _calls) = test_session("deepseek-v4-flash", tmp.path());
+
+    assert!(add_session_usage(
+        &mut s,
+        &Usage {
+            prompt_tokens: 20,
+            completion_tokens: 2,
+            cached_tokens: None,
+        }
+    ));
+    let absent = footer(&s);
+    assert!(!absent.contains("cached"), "got: {absent}");
+    assert!(!absent.contains("| cache"), "got: {absent}");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut s, _calls) = test_session("deepseek-v4-flash", tmp.path());
+    assert!(add_session_usage(
+        &mut s,
+        &Usage {
+            prompt_tokens: 20,
+            completion_tokens: 2,
+            cached_tokens: Some(0),
+        }
+    ));
+    let measured_zero = footer(&s);
+    assert!(
+        measured_zero.contains("tokens 20 in / 2 out / 0 cached | cache 0%"),
+        "got: {measured_zero}"
+    );
 }
 
 // ------------------------------------------------------------- loop basics

@@ -458,11 +458,43 @@ fn local_run_meter_uses_the_ratified_qualifier_with_or_without_usage() {
     };
 
     let reported = run_meter_lines(&resolver, &route, Some(&usage), 1, 0, at, at);
+    assert!(
+        reported[0].contains("tokens 100 in / 20 out"),
+        "got: {:?}",
+        reported
+    );
+    assert!(!reported[0].contains("cached"), "got: {:?}", reported);
+    assert!(!reported[0].contains("cache 0%"), "got: {:?}", reported);
     assert_eq!(reported[1], nh_routes::LOCAL_METER_COPY);
     assert!(!reported.iter().any(|line| line.contains("$0.00")));
 
     let missing = run_meter_lines(&resolver, &route, None, 1, 0, at, at);
     assert_eq!(missing[1], nh_routes::LOCAL_METER_COPY);
+}
+
+#[test]
+fn run_meter_distinguishes_absent_cache_measurement_from_measured_zero() {
+    let resolver = RouteResolver::from_toml(PEAK_CATALOG).unwrap();
+    let route = resolver.resolve("peak-route").unwrap();
+    let at = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+    let absent = Usage {
+        prompt_tokens: 100,
+        completion_tokens: 20,
+        cached_tokens: None,
+    };
+    let measured_zero = Usage {
+        cached_tokens: Some(0),
+        ..absent.clone()
+    };
+
+    let absent = run_meter_lines(&resolver, &route, Some(&absent), 1, 0, at, at);
+    assert_eq!(absent[0], "turns 1 | tool calls 0 | tokens 100 in / 20 out");
+
+    let measured_zero = run_meter_lines(&resolver, &route, Some(&measured_zero), 1, 0, at, at);
+    assert_eq!(
+        measured_zero[0],
+        "turns 1 | tool calls 0 | tokens 100 in / 20 out / 0 cached | cache 0%"
+    );
 }
 
 #[test]

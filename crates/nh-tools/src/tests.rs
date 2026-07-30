@@ -144,16 +144,18 @@ fn read_missing_file_names_the_path() {
 #[test]
 fn edit_old_string_not_found() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("a.txt"), "abc").unwrap();
+    std::fs::write(dir.path().join("a.txt"), "first line\nabc\nlast line").unwrap();
     let ctx = ctx_with(dir.path(), true);
     let err = EditFile
         .execute(
-            json!({"path": "a.txt", "old_string": "zzz", "new_string": "y"}),
+            json!({"path": "a.txt", "old_string": "abd", "new_string": "y"}),
             &ctx,
         )
         .unwrap_err()
         .to_string();
-    assert_eq!(err, "old_string not found in a.txt");
+    assert!(err.starts_with("old_string not found in a.txt\n"));
+    assert!(err.contains("nearest candidate: a.txt:2-2"), "got: {err}");
+    assert!(err.ends_with("actual text:\nabc"), "got: {err}");
 }
 
 #[test]
@@ -172,6 +174,115 @@ fn edit_non_unique_old_string() {
         err,
         "old_string appears 2 times in a.txt - provide more context"
     );
+}
+
+#[test]
+fn edit_uses_and_audits_whitespace_normalized_match() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.txt");
+    std::fs::write(&path, "let answer   =  41;\n").unwrap();
+
+    let execution = EditFile
+        .execute_with_audit(
+            json!({
+                "path": "a.txt",
+                "old_string": "let answer = 41;",
+                "new_string": "let answer = 42;"
+            }),
+            &ctx_with(dir.path(), true),
+        )
+        .unwrap();
+
+    assert_eq!(
+        execution.output,
+        "edited a.txt using whitespace-normalized match"
+    );
+    assert_eq!(
+        execution.audit,
+        vec![ToolAudit::EditMatch(EditMatchTier::WhitespaceNormalized)]
+    );
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "let answer = 42;\n");
+}
+
+#[test]
+fn edit_uses_and_audits_indentation_flexible_match() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.txt");
+    std::fs::write(&path, "    if ready {\n        run();\n    }\n").unwrap();
+
+    let execution = EditFile
+        .execute_with_audit(
+            json!({
+                "path": "a.txt",
+                "old_string": "if ready {\n  run();\n}",
+                "new_string": "if ready {\n  finish();\n}"
+            }),
+            &ctx_with(dir.path(), true),
+        )
+        .unwrap();
+
+    assert_eq!(
+        execution.output,
+        "edited a.txt using indentation-flexible match"
+    );
+    assert_eq!(
+        execution.audit,
+        vec![ToolAudit::EditMatch(EditMatchTier::IndentationFlexible)]
+    );
+    assert_eq!(
+        std::fs::read_to_string(path).unwrap(),
+        "    if ready {\n        finish();\n    }\n"
+    );
+}
+
+#[test]
+fn tolerant_match_ambiguity_fails_without_editing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.txt");
+    let original = "alpha   beta\nalpha  beta\n";
+    std::fs::write(&path, original).unwrap();
+
+    let error = EditFile
+        .execute(
+            json!({
+                "path": "a.txt",
+                "old_string": "alpha beta",
+                "new_string": "changed"
+            }),
+            &ctx_with(dir.path(), true),
+        )
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!(
+        error,
+        "old_string has 2 whitespace-normalized matches in a.txt - provide more context"
+    );
+    assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+}
+
+#[test]
+fn nearest_candidate_is_scrubbed_before_returning_to_the_model() {
+    let dir = tempfile::tempdir().unwrap();
+    const SECRET: &str = "fixture-secret-value";
+    std::fs::write(dir.path().join("a.txt"), format!("prefix {SECRET} suffix")).unwrap();
+    let ctx =
+        ctx_with(dir.path(), true).with_scrubber(nh_vault::Scrubber::new(vec![SECRET.to_string()]));
+
+    let error = EditFile
+        .execute(
+            json!({
+                "path": "a.txt",
+                "old_string": "prefix changed suffix",
+                "new_string": "replacement"
+            }),
+            &ctx,
+        )
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("prefix [REDACTED] suffix"), "got: {error}");
+    assert!(!error.contains(SECRET));
 }
 
 #[test]

@@ -306,7 +306,7 @@ fn stable_constitution_exceeds_sixty_percent_cache_hits_over_fifty_turns() {
     }
 
     let state = state.lock().unwrap();
-    let pct = cache_hit_pct(state.prompt_tokens, state.cached_tokens).unwrap();
+    let pct = cache_hit_pct(state.prompt_tokens, Some(state.cached_tokens)).unwrap();
     eprintln!("observed cache-hit percentage: {pct:.2}%");
     assert!(pct > 60.0, "observed cache-hit percentage was {pct:.2}%");
     assert_eq!(

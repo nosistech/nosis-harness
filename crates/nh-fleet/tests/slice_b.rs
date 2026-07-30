@@ -454,6 +454,8 @@ impl SwarmClient for MockSwarm {
                 completion_tokens: 2,
                 cached_tokens: None,
             }),
+            cache_hit_pct: None,
+            repairs: Default::default(),
             effective_profile: None,
         })
     }
@@ -540,6 +542,8 @@ fn failed_receipt(route_id: &str) -> Receipt {
             completion_tokens: 2,
             cached_tokens: None,
         }),
+        cache_hit_pct: None,
+        repairs: Default::default(),
         effective_profile: None,
     }
 }
