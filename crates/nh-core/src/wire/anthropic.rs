@@ -4,6 +4,7 @@ use nh_routes::ThinkingDialect;
 use zeroize::Zeroizing;
 
 use super::http::{client, provider_error, read_body_capped, send_error, MAX_PROVIDER_BODY_BYTES};
+use super::usage_debug::UsageDebug;
 use super::{ChatClient, ChatMessage, ChatRequest, ChatResponse, ToolCallReq, Usage};
 
 /// Blocking client for `POST {base_url}/v1/messages`.
@@ -13,6 +14,7 @@ pub struct AnthropicMessagesClient {
     max_tokens: u64,
     dialect: ThinkingDialect,
     http: reqwest::blocking::Client,
+    usage_debug: Option<UsageDebug>,
 }
 
 impl AnthropicMessagesClient {
@@ -21,13 +23,16 @@ impl AnthropicMessagesClient {
         api_key: Zeroizing<String>,
         max_tokens: u64,
         dialect: ThinkingDialect,
+        route_id: &str,
     ) -> anyhow::Result<Self> {
+        let usage_debug = UsageDebug::from_env(route_id, "anthropic", api_key.as_str());
         Ok(Self {
             base_url,
             api_key,
             max_tokens,
             dialect,
             http: client()?,
+            usage_debug,
         })
     }
 }
@@ -45,6 +50,9 @@ impl ChatClient for AnthropicMessagesClient {
             .map_err(|error| send_error(&url, &error))?;
         let status = response.status();
         let body = read_body_capped(response, MAX_PROVIDER_BODY_BYTES)?;
+        if let Some(debug) = &self.usage_debug {
+            debug.emit(&body);
+        }
         if !status.is_success() {
             return Err(provider_error(status, &body, self.api_key.as_str()));
         }

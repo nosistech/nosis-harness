@@ -27,6 +27,7 @@ Do not put real values in this file, shell history, issue reports, or test fixtu
 | Name | Purpose | Notes |
 |---|---|---|
 | `NH_<ENTRY>_KEY` | CI/headless fallback when the OS vault has no entry | Replace hyphens with underscores and uppercase the entry. Prefer the OS vault interactively. |
+| `NH_DEBUG_USAGE` | Raw provider-usage diagnostic | Set exactly to `1` to print the scrubbed, route-tagged raw `usage` value to stderr. Display-only and off by default. |
 | `HOME` | User-global config root on Linux/macOS | `~/.nosis/law.toml`, `catalog.toml`, and `mcp.toml` may live below it. |
 | `USERPROFILE` | User-global config root on Windows | Same purpose as `HOME`. |
 

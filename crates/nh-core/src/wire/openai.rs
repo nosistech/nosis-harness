@@ -4,6 +4,7 @@ use nh_routes::ThinkingDialect;
 use zeroize::Zeroizing;
 
 use super::http::{client, provider_error, read_body_capped, send_error, MAX_PROVIDER_BODY_BYTES};
+use super::usage_debug::UsageDebug;
 use super::{
     ChatClient, ChatMessage, ChatRequest, ChatResponse, ThinkingEffort, ToolCallReq, Usage,
 };
@@ -39,15 +40,22 @@ pub struct OpenAiCompatClient {
     api_key: Zeroizing<String>,
     http: reqwest::blocking::Client,
     pub(super) policy: OpenAiPolicy,
+    usage_debug: Option<UsageDebug>,
 }
 
 impl OpenAiCompatClient {
-    pub(crate) fn new(base_url: String, api_key: Zeroizing<String>) -> anyhow::Result<Self> {
+    pub(crate) fn new(
+        base_url: String,
+        api_key: Zeroizing<String>,
+        route_id: &str,
+    ) -> anyhow::Result<Self> {
+        let usage_debug = UsageDebug::from_env(route_id, "openai", api_key.as_str());
         Ok(Self {
             base_url,
             api_key,
             http: client()?,
             policy: OpenAiPolicy::default(),
+            usage_debug,
         })
     }
 }
@@ -64,6 +72,9 @@ impl ChatClient for OpenAiCompatClient {
             .map_err(|error| send_error(&url, &error))?;
         let status = response.status();
         let body = read_body_capped(response, MAX_PROVIDER_BODY_BYTES)?;
+        if let Some(debug) = &self.usage_debug {
+            debug.emit(&body);
+        }
         if !status.is_success() {
             return Err(provider_error(status, &body, self.api_key.as_str()));
         }
