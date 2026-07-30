@@ -4,7 +4,9 @@ use super::anthropic::{
 };
 use super::http::{scrub_snippet, send_error_line, CONNECT_TIMEOUT, REQUEST_TIMEOUT};
 use super::openai::{build_body, endpoint, parse_response, OpenAiPolicy};
+use super::usage_debug::{UsageDebug, DEBUG_USAGE_ENV};
 use super::*;
+use std::ffi::OsStr;
 use std::time::Duration;
 
 #[test]
@@ -692,6 +694,105 @@ fn parses_plain_content_without_usage() {
     assert_eq!(resp.message.content.as_deref(), Some("done"));
     assert_eq!(resp.finish_reason, "");
     assert!(resp.usage.is_none());
+}
+
+#[test]
+fn raw_usage_debug_preserves_unknown_fields_without_changing_metering() {
+    let raw_usage = r#"{ "prompt_tokens": 12,  "completion_tokens": 7, "cached_tokens": 4, "future_counter": {"opaque": true} }"#;
+    let body = format!(
+        r#"{{"choices":[{{"message":{{"role":"assistant","content":"do not dump this"}}}}],"usage":{raw_usage}}}"#
+    );
+    let before = parse_response(&body).unwrap().usage.unwrap();
+    assert_eq!(before.cached_tokens, None);
+
+    let debug = UsageDebug::from_test_setting(
+        Some(OsStr::new("1")),
+        "kimi-probe",
+        "openai",
+        "fixture-sensitive-value",
+    )
+    .unwrap();
+    let rendered = debug.render_for_test(1, &body);
+
+    assert_eq!(
+        rendered,
+        format!("[{DEBUG_USAGE_ENV} route=kimi-probe wire=openai request=1] {raw_usage}")
+    );
+    assert!(!rendered.contains("do not dump this"));
+
+    let after = parse_response(&body).unwrap().usage.unwrap();
+    assert_eq!(after.prompt_tokens, before.prompt_tokens);
+    assert_eq!(after.completion_tokens, before.completion_tokens);
+    assert_eq!(after.cached_tokens, before.cached_tokens);
+}
+
+#[test]
+fn raw_usage_debug_reports_absence_explicitly() {
+    let debug = UsageDebug::from_test_setting(
+        Some(OsStr::new("1")),
+        "anthropic-probe",
+        "anthropic",
+        "fixture-sensitive-value",
+    )
+    .unwrap();
+    let body = r#"{"content":[{"type":"text","text":"answer only"}]}"#;
+
+    assert_eq!(
+        debug.render_for_test(3, body),
+        format!("[{DEBUG_USAGE_ENV} route=anthropic-probe wire=anthropic request=3] usage absent")
+    );
+}
+
+#[test]
+fn raw_usage_debug_scrubs_the_complete_line() {
+    let secret = "fixture-sensitive-value";
+    let debug =
+        UsageDebug::from_test_setting(Some(OsStr::new("1")), "scrub-probe", "openai", secret)
+            .unwrap();
+    let body = format!(r#"{{"usage":{{"provider_note":"{secret}","future_tokens":9}}}}"#);
+    let rendered = debug.render_for_test(1, &body);
+
+    assert!(!rendered.contains(secret));
+    assert!(rendered.contains(r#""provider_note":"[REDACTED]""#));
+    assert!(rendered.contains(r#""future_tokens":9"#));
+}
+
+#[test]
+fn raw_usage_debug_unset_leaves_both_wire_parsers_unchanged() {
+    assert!(UsageDebug::from_test_setting(None, "openai-probe", "openai", "unused").is_none());
+    assert!(UsageDebug::from_test_setting(
+        Some(OsStr::new("0")),
+        "anthropic-probe",
+        "anthropic",
+        "unused",
+    )
+    .is_none());
+
+    let openai_body = r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1}}"#;
+    let openai_before = parse_response(openai_body).unwrap();
+    let openai_after = parse_response(openai_body).unwrap();
+    assert_eq!(openai_after.message.content, openai_before.message.content);
+    assert_eq!(openai_after.finish_reason, openai_before.finish_reason);
+    assert_eq!(
+        openai_after.usage.unwrap().prompt_tokens,
+        openai_before.usage.unwrap().prompt_tokens
+    );
+
+    let anthropic_body = r#"{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":9,"output_tokens":4}}"#;
+    let anthropic_before = parse_anthropic_response(anthropic_body).unwrap();
+    let anthropic_after = parse_anthropic_response(anthropic_body).unwrap();
+    assert_eq!(
+        anthropic_after.message.content,
+        anthropic_before.message.content
+    );
+    assert_eq!(
+        anthropic_after.finish_reason,
+        anthropic_before.finish_reason
+    );
+    assert_eq!(
+        anthropic_after.usage.unwrap().prompt_tokens,
+        anthropic_before.usage.unwrap().prompt_tokens
+    );
 }
 
 #[test]

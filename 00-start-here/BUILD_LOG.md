@@ -2,6 +2,41 @@
 
 Record every meaningful session here.
 
+## 2026-07-29: Env-gated raw provider-usage diagnostic
+
+What changed:
+
+- Added the display-only `NH_DEBUG_USAGE=1` diagnostic to both OpenAI-compatible and Anthropic
+  Messages clients. Each response writes one stderr record prefixed with route, wire, and
+  request sequence, followed by the provider's raw top-level `usage` value.
+- Preserved the raw JSON value through serde's borrowed `RawValue`, so unknown fields, ordering,
+  spacing, and nested provider data survive without changing `WireUsage`, `Usage`, metering,
+  pricing, receipts, routing, or control flow.
+- Routed the complete diagnostic line through `nh_vault::Scrubber` with the active credential
+  literal before stderr. Only the `usage` value is observed; response content and headers are
+  never included. Missing usage renders the explicit `usage absent` message.
+- Kept the disabled path allocation-, parsing-, and formatting-free at request time. Route and
+  scrubber state are created only when the environment value is exactly `1`, and stderr write
+  failures are ignored so the observer cannot replace a provider result.
+- Documented the switch in the existing operator environment-variable table. No new dependency
+  was added; the existing `serde_json` dependency enables its `raw_value` feature, and
+  `Cargo.lock` is unchanged.
+
+Verification:
+
+- Focused raw-usage diagnostics â€” PASS: 4 passed / 0 failed.
+- `cargo fmt --all --check` â€” PASS. Write-mode `cargo fmt` was not run.
+- `cargo test --locked --workspace` â€” PASS: 550 passed / 0 failed / 1 OS-keyring test ignored.
+- `cargo clippy --locked --workspace --all-targets -- -D warnings` â€” PASS.
+- `git diff --check` â€” PASS.
+- No commit, push, tag, release, pricing change, usage-field acceptance change, or frozen
+  `crates/nh-mcp/tests/e3_korvin.rs` edit was made.
+
+Next step:
+
+- Run the three owner-controlled live provider probes with `NH_DEBUG_USAGE=1`, then use the
+  measured raw field shapes as the sole evidence for the separate metering-fix wave.
+
 ## 2026-07-29: Explicit local-model lane wave
 
 What changed:
