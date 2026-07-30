@@ -7,26 +7,43 @@
 This file supersedes every older checkpoint and "next task" in `CURRENT_TASK.md`. Historical records
 remain useful for provenance, but do not execute their stale instructions.
 
-## THE HEADLINE: the Windows FEEL gate PASSED (2026-07-29)
+## THE HEADLINE: FEEL PASSED and the release candidate is COMMITTED (2026-07-29)
 
-The owner ran the FEEL gate against the rebuilt binary and **passed it**. That was the last
-subjective blocker. Six findings came out of the pass; all six are captured in wave 4 (below) and
-none of them blocked the verdict.
+The owner passed the Windows FEEL gate against the rebuilt binary — the last subjective blocker. Six
+findings came out of the pass; all six are captured in wave 4 (below) and none blocked the verdict.
 
-**The next action is to ask the owner for explicit authorization to commit and push.** The tree is
-still 100% uncommitted. `continue` alone is NOT commit authorization — the owner must say so.
+The owner then authorized the commit. **`91e4f54 feat: complete the v0.1.0 release candidate` —
+90 files, +6985/−3980. The working tree is CLEAN.** Everything that had accumulated uncommitted
+(Slice G, the responsibility refactor, and three waves) is now in git history.
+
+**NOTHING HAS BEEN PUSHED.** The remote is still an empty public repository, so there is no
+`origin/main` ref yet (`git log origin/main..HEAD` fails — that is expected, not a fault).
+
+**The next action is to ask the owner whether to push.** Pushing is outward-facing and makes the
+source public at `github.com/nosistech/nosis-harness`. `continue` alone is NOT push authorization —
+the owner must say so explicitly.
+
+Pre-commit guards that were run and passed, so they need not be repeated for `91e4f54`: a six-pattern
+secret-shape scan over the staged diff (`sk-`, Bearer+token, JWT, 40+ hex, AWS key, private-key
+block) returned **0 matches**; no `.nosis/`, `target/`, log, `.env`, or stray artifact was staged;
+and the gate was green at commit time. Two modules listed in the previous checkpoint
+(`nh-routes/src/profiles/compile.rs`, `nh-tui/src/worker/session.rs`) were **consolidated away by the
+waves, not lost** — neither exists on disk, neither is ignored, and the gate passes.
 
 ## First action on `continue`
 
 Read this file in full. Then verify with read-only commands:
 
 ```powershell
-git status --short          # expect ~89 entries, all uncommitted
-git log -1 --oneline        # expect 6b05688
+git status --short          # expect CLEAN (zero entries)
+git log -1 --oneline        # expect 91e4f54
 git remote -v               # expect https://github.com/nosistech/nosis-harness.git
 gh auth status -h github.com
+gh repo view nosistech/nosis-harness --json isEmpty,visibility   # expect isEmpty=true until pushed
 Get-Process -Name nh,codex -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,StartTime,Path
 ```
+
+If `git status` is dirty, someone has worked since this checkpoint — read the diff before acting.
 
 Do not restart the audit, redo the refactor, create another repository, or re-run any completed wave.
 
@@ -47,9 +64,12 @@ Do not restart the audit, redo the refactor, create another repository, or re-ru
 
 ## Exact state
 
-- Branch `main`, HEAD `6b05688 chore(release): prepare v0.1.0 candidate`
-- Remote `https://github.com/nosistech/nosis-harness.git` — **public, still empty, never pushed**
-- ~89 uncommitted entries. Only new untracked file from this session: `06-operations/LOCAL_MODELS.md`
+- Branch `main`, HEAD **`91e4f54 feat: complete the v0.1.0 release candidate`** (parent `6b05688`)
+- **Working tree CLEAN — zero uncommitted entries.**
+- Remote `https://github.com/nosistech/nosis-harness.git` — **public, still empty, never pushed**.
+  No `origin/main` ref exists yet.
+- Committed on `main` deliberately: branch protection cannot be configured until `main` exists on the
+  remote, so the release plan requires main. Do not retroactively rewrite this onto a branch.
 - **Gate: `GATE: PASS` — 546 passed / 0 failed / 1 ignored `--release`**; clippy `-D warnings` clean;
   `fmt --check` clean; `cargo deny --locked check` green (advisories/bans/licenses/sources), nothing
   suppressed. Baseline was 514 — 32 tests added this session.
@@ -147,8 +167,10 @@ no LLM-based repair.
 
 ## Remaining path to v0.1.0
 
-1. **Ask the owner for explicit commit+push authorization.** FEEL has passed; this is the gate.
-2. Launch wave 3b → gate → rebuild.
+1. **Ask the owner whether to push `91e4f54`.** The commit is done; the push is the open gate.
+   Pushing is what finally runs CI and gives the first honest Linux/macOS answer — expect a real
+   failure, which is better found on an untagged commit than after a tag.
+2. Launch wave 3b → gate → rebuild → second commit.
 3. **Live probes still owed** (sub-cent each): Kimi cache-hit field name (unblocks P-4); MiMo
    cached-tokens field name and whether it accepts `max_tokens` or `max_completion_tokens`; **K3
    `max_out`** — Moonshot documents `max_completion_tokens` default 131072, max 1048576, and the
