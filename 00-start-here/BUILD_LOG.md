@@ -2,6 +2,71 @@
 
 Record every meaningful session here.
 
+## 2026-07-31: Wave M3 "PRICES DON'T EXPIRE" — the freshness apparatus is deleted
+
+What changed (`223217a`, 17 files, +82/−158 — a net DELETION):
+
+- `catalog.toml`: all 12 route-price `valid_until` lines removed, **nothing put in their place.**
+  `price_confidence` and the per-route first-party citation comments stay — static claims that never
+  expire and cost nothing to keep.
+- `nh-routes`: `PriceQuote.stale`, the staleness computation, the route-price `valid_until` field
+  and its parsing are gone. The raw serde structs do not `deny_unknown_fields`, so an old
+  `valid_until` in a user's catalog is ignored rather than becoming a parse error.
+- `usd_compare_key` lost its `stale` parameter. Cross-currency comparability now depends solely on
+  fx freshness — the thing that actually determines whether a conversion is right. The path was
+  dormant regardless: all 12 shipped routes are `currency = "USD"`, so the mixed-currency branch at
+  `resolver.rs:379` never runs.
+- Display: six `*price stale` markers deleted, nothing in their place. `uncertain` is now simply
+  `confidence == VerifyLive`.
+- `nh-mcp`: the `"stale"` member is gone from the `route_cost` payload, and a test now **pins its
+  absence**. The output schema lives in `protocol.rs`, not `route_tools.rs`, and never declared the
+  property — so the schema was correctly left alone rather than "tightened" unasked.
+
+**Prices are NOT removed.** Metering, receipts, `nh why` and cheapest-capable selection are
+unchanged. Only the machinery that ages was deleted.
+
+fx staleness is deliberately untouched and still refuses. The asymmetry is the point: an old PRICE
+is a number a reader can judge; an old EXCHANGE RATE silently mis-converts CNY into USD and yields a
+confidently wrong number the reader cannot judge at all. It costs no maintenance — there is no
+`[fx]` block in `catalog.toml`, so the path is dormant, held for a future CNY route.
+
+The obligation also lived in DOCUMENTS, and removing the field alone would have removed the
+enforcement while keeping the chore. Six active documents swept:
+
+- `03-execution/RELEASE_CHECKLIST.md:73` made rechecking prices a **release blocker**. It now states
+  in bold that it can never block a release again.
+- `05-ai-collaboration/PROMPT_LIBRARY.md:21` instructed future research agents to record a
+  `valid_until` for every route — it would have quietly rebuilt the machinery. It now says
+  explicitly not to add an expiry key.
+- `01-product/PRODUCT_BRIEF.md`, `06-operations/COSTS.md`, `ENVIRONMENT.md`, `VENDOR_MAP.md`:
+  deadlines and "must be rechecked" language removed.
+- Historical records (`ARCHITECTURE_DECISIONS`, `CONTRACTS_*`, master plan, changelog) left
+  **untouched**. They record what was true then; the DECISION_LOG entry explains the change.
+
+Accepted tradeoff, stated plainly: receipts carry no freshness signal, so a silent provider price
+change is metered wrong until a human notices. Chosen knowingly in exchange for never maintaining a
+price calendar.
+
+Verification:
+
+- `GATE: PASS` — **619 passed / 0 failed / 1 ignored, `--release`**, all five steps green.
+- 620 → 619: two obsolete expiry tests removed, one fx-boundary guard added (last-valid second and
+  first-expired second). A further test pins that a price block with **no freshness key** loads
+  normally, so an expiry cannot be reintroduced by accident.
+
+Process note — a **fifth clean stop**, and the most valuable one. The executor was briefed to write
+`verified_on = "2026-07-26"` on all 12 routes. It refused: `catalog.toml:153` records Kimi K3's
+prices re-verified **2026-07-28**, so the instruction would have backdated one route into a knowingly
+false provenance claim — inside the very wave about honest provenance. The brief had guarded only
+against dates that were too FRESH. The corrected rule: a route's own citation decides its date, and
+where uncertain take the OLDER one, because understating freshness is safe while overstating is the
+failure being prevented. That design was then dropped entirely when the owner rejected per-route
+dates, but the lesson stands.
+
+Known cruft, non-blocking: three `nh-fleet` test fixtures still carry route-price `valid_until`
+lines. They are dead keys — serde ignores them and behaviour is identical. `nh-fleet` is frozen, so
+they were left for a future sweep rather than reopening it for cosmetics.
+
 ## 2026-07-31: Wave M2 "TOOL FLOOR" — write_file, grep_files, glob_files
 
 What changed (`2e0fea0`, 9 files, +1317/−14, all 9 items, no deferrals):

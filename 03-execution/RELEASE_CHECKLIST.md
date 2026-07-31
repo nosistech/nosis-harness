@@ -42,10 +42,12 @@ The running build history lives in [../00-start-here/BUILD_LOG.md](../00-start-h
       live repository: `dependabot_security_updates` is `enabled`, as are `secret_scanning` and
       `secret_scanning_push_protection`. Still `disabled` and available if wanted:
       `secret_scanning_non_provider_patterns` and `secret_scanning_validity_checks`.
-- [x] **No test fixture can age out.** No `valid_until` (or similar date) in a `#[cfg(test)]` fixture
-      is a near-future real date. Fixtures that must read "fresh" use the far-future sentinel
-      `2099-01-01` (convention set in `crates/nh-mcp/src/lib.rs`); fixtures that must read "stale" use
-      an explicitly past date and/or an injected clock. Rationale: on 2026-07-25 the `METER_CATALOG`
+- [x] **No test fixture can age out.** Route prices no longer expire at all, so this now applies
+      only to `[fx]` fixtures, which are the sole remaining dated data. No `valid_until` in a
+      `#[cfg(test)]` fixture is a near-future real date. Fixtures that must read "fresh" use the
+      far-future sentinel `2099-01-01` (convention set in `crates/nh-mcp/src/lib.rs`); fixtures that
+      must read "stale" use an explicitly past date and/or an injected clock. Rationale: on
+      2026-07-25 the `METER_CATALOG`
       fixture in `crates/nh-tui/src/lib.rs` aged out at its hardcoded `2026-07-24` and turned the gate
       red — the product was correct (fail-closed on stale FX), the fixture was a time bomb, and CI
       would have gone red daily. `cmd_chat.rs` deliberately keeps an injected-clock freshness
@@ -70,8 +72,13 @@ The running build history lives in [../00-start-here/BUILD_LOG.md](../00-start-h
       accurate for this release.
 - [x] Current product/architecture documents do not claim automatic routing, delegate execution,
       snapshot restore, OS sandboxing, remote notifications, or telemetry that the build does not have.
-- [x] `catalog.toml` prices, limits, URLs, and free/paid status were rechecked against first-party
-      sources recently enough that every production `valid_until` includes the release date.
+- [x] `catalog.toml` prices carry a `price_confidence` label and a first-party citation comment.
+      **There is no recheck deadline and no expiry to satisfy** — route prices no longer carry
+      `valid_until`, and nothing in the build ages, expires, or warns about a price. Removed
+      deliberately (see `DECISION_LOG`, 2026-07-31): a weekly hand-serviced deadline for providers
+      that move prices two to four times a year cost more than it bought. The accepted tradeoff is
+      that a silent provider price change is metered wrong until a human notices.
+      **This item can never block a release again.**
 - [x] Owner completes the Windows FEEL pass in the actual terminal used day to day.
       Passed 2026-07-29 against the rebuilt binary. Six findings came out of the pass and none
       blocked the verdict; all six were folded into wave 4, which shipped in `d80b115`. Note that

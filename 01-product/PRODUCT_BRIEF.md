@@ -39,7 +39,7 @@ What v0.1 does now:
 
 ## Why Now
 
-- Provider pricing and model limits are changing quickly; a data-driven catalog with short recheck deadlines avoids hard-coded cost claims.
+- Provider pricing and model limits are changing quickly; a data-driven catalog keeps cost claims out of the code. Each price carries a confidence label and a first-party citation, and the harness never asserts that a price is currently fresh.
 - MCP 2026-07-28 spec finalizes in days; incumbents must migrate, a greenfield harness starts clean.
 - GPT-5.6 (July 9) + Opus 5 make the Claude-plans/Codex-builds/Opus-gates loop strong enough to build this with one person.
 

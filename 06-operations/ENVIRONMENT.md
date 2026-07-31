@@ -49,6 +49,8 @@ configuration surface.
 - Linux keyring errors: confirm a Secret Service implementation and D-Bus session are active.
 - Catalog refused: restore the bundled catalog or put the exact reviewed replacement at
   `~/.nosis/catalog.toml`.
-- Stale price warning: reverify first-party provider data and advance `valid_until`; do not
-  suppress the warning.
+- Stale **fx** refusal (cross-currency comparison declined): reverify the first-party exchange rate
+  and advance the `[fx]` `valid_until`; do not suppress it. A stale rate silently mis-converts and
+  produces a confidently wrong number. Route **prices** have no equivalent warning — they do not
+  expire.
 - MCP bind refusal: v0.1 accepts only `127.0.0.1`; this is intentional.

@@ -18,7 +18,7 @@ Review for bugs, security risks, missing tests, data leaks, and maintainability.
 
 ## Catalog Verification Prompt (M1, recurring)
 
-Verify live pricing and model availability for every route in catalog.toml against the provider's own pricing page (not aggregators). Record per route: price, output cap, quantization if disclosed, `price_confidence`, `valid_until`. Flag any entry where sources conflict (known: MiMo first-party rates). Do not invent numbers — stale data gets flagged, never guessed (honest-cost rule).
+Verify live pricing and model availability for every route in catalog.toml against the provider's own pricing page (not aggregators). Record per route: price, output cap, quantization if disclosed, `price_confidence`, and the source URL with the date you read it. Do **not** add a `valid_until` or any other expiry key — route prices deliberately do not expire (see `DECISION_LOG`, 2026-07-31). Flag any entry where sources conflict (known: MiMo first-party rates). Do not invent numbers — uncertain data gets labelled, never guessed (honest-cost rule).
 
 ## Research Prompt
 

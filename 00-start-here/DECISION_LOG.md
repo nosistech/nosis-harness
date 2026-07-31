@@ -2,14 +2,82 @@
 
 Use this for fast decisions. Large technical decisions live in `../02-architecture/ARCHITECTURE_DECISIONS.md`.
 
-## 2026-07-31: Price freshness becomes provenance, not a deadline
+## 2026-07-31: Route prices do not expire — the freshness apparatus is deleted
+
+**This entry supersedes the `verified_on` design drafted earlier the same day. `verified_on` was
+never implemented.** The owner, asked to choose, rejected a per-route date as well: any date in a
+file he owns still reads as something to keep current, and the whole point was to stop being pulled
+back to it. Shipped as `223217a`, wave M3 "PRICES DON'T EXPIRE".
 
 Decision:
 
-Replace `valid_until` with `verified_on` in every `catalog.toml` price block. Delete the recheck
-deadline and the `stale` boolean that hangs off it. Receipts disclose **when a human last verified
-the price**, and let the reader judge. Keep the separate **fx-rate staleness refusal** exactly as it
-is. Scheduled as wave M3 "NO DEADLINES".
+Delete `valid_until` from all 12 route-price blocks and add nothing in its place. Delete
+`PriceQuote.stale`, the staleness computation, the catalog parsing, the `stale` parameter on
+`usd_compare_key`, all six `*price stale` display markers, and the `stale` member of the MCP
+`route_cost` payload. **Prices themselves are untouched** — metering, receipts, `nh why` and
+cheapest-capable selection all work exactly as before. Keep `price_confidence` and the per-route
+first-party citation comments: static claims that never expire and cost nothing. Keep the **fx-rate
+staleness refusal** exactly as it is.
+
+Why:
+
+`catalog.toml:3` described the key in the project's own words as "Nosis's short recheck deadline,
+not a provider guarantee" — prices verified 2026-07-26, expiring 2026-08-02, **a seven-day window**
+for providers that change published prices perhaps two to four times a year. The cadence modelled
+volatility that does not exist, and the entire cost landed on one person, who said plainly that it
+would keep dragging him back to the product.
+
+The deadline also lived in **process, not just code**: `RELEASE_CHECKLIST.md:73` made rechecking
+prices a release blocker, and `PROMPT_LIBRARY.md:21` instructed future research agents to record a
+`valid_until` for every route — which would have quietly rebuilt the machinery after it was deleted.
+Removing the field without sweeping the documents would have removed the enforcement and kept the
+obligation.
+
+Rejected alternatives:
+
+- `verified_on`, a provenance date replacing the deadline. Genuinely better than an expiry — a date
+  carries more information than a boolean — but still a per-route date in a file the owner owns.
+  Rejected by the owner after being drafted and briefed.
+- Widen the window to 90 or 180 days — reduces toil without removing it.
+- Delete `valid_until` and change nothing else. **A trap:** `resolver.rs:116` read
+  `price.valid_until.is_none_or(|d| at.date_naive() > d)`, so an absent date made every quote
+  permanently stale. Deleting the field alone would have pinned the flag ON.
+- A scheduled CI watcher diffing provider pricing pages. Good design, offered, dropped: it existed
+  to backstop a long window, and with no window there is nothing to backstop. Recorded because it is
+  the right answer if freshness ever needs a guarantee again — and it must never write prices into
+  the catalog, since `price_confidence = "confirmed"` means a person checked, and a scraper that
+  could set it would make the word a lie.
+- Remove prices entirely — never on the table. Honest metering is the product.
+
+Consequences:
+
+- Immediate: no calendar, no expiry, no recurring task, in code or in process. The
+  release-checklist item now states in bold that it can never block a release again.
+- **Accepted tradeoff, stated plainly:** receipts carry no freshness signal at all, so a silent
+  provider price change is metered wrong until a human notices and edits `catalog.toml`. This is a
+  real regression in the honesty story and was chosen knowingly, three times, in exchange for never
+  maintaining a price calendar.
+- A test now pins that a price block with no freshness key loads normally, so an expiry cannot be
+  reintroduced by accident.
+- **Unchanged:** fx staleness still refuses. An old price is a number a reader can judge; an old
+  exchange rate silently mis-converts CNY to USD and yields a confidently wrong number the reader
+  cannot judge at all. Different failure, different answer. It costs nothing to keep — there is no
+  `[fx]` block in `catalog.toml`, so the path is dormant, held for a future CNY route.
+
+Review later:
+
+Only if someone starts running a business on nosis receipts.
+
+## 2026-07-31: Superseded — price freshness as provenance (`verified_on`)
+
+Superseded the same day by the entry above, and recorded because the reasoning is still sound and
+the trap it documents is still real. The design: replace `valid_until` with `verified_on`, so
+receipts disclose when a human last verified a price instead of flagging a boolean. `valid_until` is
+a promise about the future that expires and demands action; `verified_on` is a fact about the past
+that never does. It was briefed to the executor, which correctly refused to backdate one route's
+provenance (Kimi K3 was verified 2026-07-28, not 2026-07-26) — a reminder that a brief written from
+reading can be wrong about facts the file already records. The owner then rejected per-route dates
+outright.
 
 Why:
 
