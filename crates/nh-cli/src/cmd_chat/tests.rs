@@ -142,6 +142,7 @@ impl ChatClient for MockClient {
                 completion_tokens: 7,
                 cached_tokens: Some(4),
             }),
+            retries: Default::default(),
         })
     }
 }

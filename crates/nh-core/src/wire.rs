@@ -7,10 +7,12 @@
 mod anthropic;
 mod http;
 mod openai;
+mod retry;
 mod usage_debug;
 
 pub use anthropic::AnthropicMessagesClient;
 pub use openai::OpenAiCompatClient;
+pub use retry::RetryExhausted;
 
 use nh_routes::{ThinkingDialect, ThinkingPosture, Wire};
 use openai::{OpenAiPolicy, DEFAULT_MAX_TOKENS};
@@ -145,6 +147,20 @@ pub struct Usage {
     pub cached_tokens: Option<u64>,
 }
 
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RetryStats {
+    #[serde(default)]
+    pub retries: u32,
+    #[serde(default)]
+    pub rate_limited: u32,
+}
+
+impl RetryStats {
+    pub fn is_empty(&self) -> bool {
+        self.retries == 0 && self.rate_limited == 0
+    }
+}
+
 /// Session cache-hit percentage from cumulative usage.
 ///
 /// Returns `None` when the provider did not report cached tokens, there are no
@@ -163,6 +179,7 @@ pub struct ChatResponse {
     pub message: ChatMessage,
     pub finish_reason: String,
     pub usage: Option<Usage>,
+    pub retries: RetryStats,
 }
 
 /// Provider abstraction. Tests inject a mock; production constructs a client

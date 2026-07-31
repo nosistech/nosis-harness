@@ -2,6 +2,97 @@
 
 Record every meaningful session here.
 
+## 2026-07-31: Wave M4b — retry jitter domain and first-failure UX corrections
+
+What changed (uncommitted, no new dependency):
+
+- Defined the retry jitter input domain as `[0, 1_000_000_000)` beside the delay math and added
+  one named `system_jitter` source in `wire/retry.rs`. Both wire clients now use that source
+  instead of duplicating the wall-clock nanosecond closure.
+- Divided the jitter interpolation by the matching scale rather than `u32::MAX`, so production
+  realizes the ratified `[0.5, 1.0]` span instead of only approximately `[0.5, 0.616]`.
+- Updated every delay test to use an in-domain sample. Added regressions proving that the top
+  sample makes the first retry exactly one nanosecond short of two seconds and that the production
+  source always returns below the scale.
+- Changed `RetryExhausted` display only: one attempt renders the underlying provider failure
+  byte-for-byte, while two or more attempts retain the existing retry narration. One exact test
+  pins both branches.
+
+Implementation detail selected where the brief left mechanics open:
+
+- An out-of-domain injected jitter value trips a debug assertion rather than being clamped. The
+  only production source is now colocated and range-pinned; silently clamping a future mismatch
+  would hide the same class of contract bug this wave corrects.
+
+Verification:
+
+- Focused pure retry suite — PASS: 12 passed / 0 failed.
+- `cargo build --workspace` — PASS.
+- `cargo clippy --workspace --all-targets -- -D warnings` — PASS.
+- `cargo test --workspace --release` — PASS: **636 passed / 0 failed / 1 ignored** (M4's 633
+  preserved, plus three regressions).
+- `git diff --check` — PASS.
+- `cargo fmt` was not run.
+
+Next step:
+
+- Orchestrator runs the scoped normalize and adversarial review. No retry-policy number, retry
+  classification, usage accounting, receipt shape, or behavior outside `nh-core` changed.
+
+## 2026-07-31: Wave M4 "RESILIENCE" — bounded HTTP retry with honest receipts
+
+What changed (uncommitted, no new dependency):
+
+- Added the pure `nh-core::wire::retry` state machine. The single production policy is four
+  attempts maximum, 2-second exponential backoff, 20-second per-delay cap, 45-second total retry
+  budget, delta-seconds `Retry-After`, and full jitter in `[0.5, 1.0]`. Sleep, jitter, attempt
+  duration, and attempt execution are injected, so policy and full-loop tests use no socket and
+  never sleep.
+- Retry classification is exact: non-timeout transport failures plus HTTP 429/500/502/503/504.
+  Request timeouts, 400/401/403/404, and every other status stop after the current attempt. The
+  code comment preserves the billing reason: a timeout may hide a completed, billed response, so
+  retrying it could silently double-charge.
+- Routed both OpenAI-compatible and Anthropic Messages clients through that state machine. Each
+  request body remains stable across attempts, redirects remain disabled, capped body reads and
+  per-attempt `NH_DEBUG_USAGE` output remain in place, and 429 errors no longer tell the human to
+  "retry later" after the harness already tried.
+- Added wire-specific best-effort usage extraction for retryable error bodies. Only usage blocks
+  actually observed are summed into a later successful response or typed `RetryExhausted`; an
+  absent block contributes zero. No token is estimated.
+- Added `RetryStats { retries, rate_limited }` to `ChatResponse` and receipts. Empty stats are
+  serde-defaulted and omitted, preserving old receipt deserialization and byte-identical
+  no-retry JSON. The agent saturating-accumulates stats across turns, folds typed failure usage
+  before writing a failed receipt, and emits one line such as
+  `turn 2: 3 attempts, 2 rate-limited` after a recovered call.
+- Mechanical-only changes outside `nh-core` add `retries: Default::default()` to affected
+  `ChatResponse` and `Receipt` literals. No non-core behavior changed.
+
+Implementation details selected where the brief left mechanics open:
+
+- A valid delta-seconds `Retry-After` replaces that retry's exponential delay, then receives the
+  required 20-second clamp and jitter.
+- The 45-second elapsed value includes measured failed-attempt time plus scheduled sleeps. A
+  response-body or parse failure uses its known HTTP status for classification; a 2xx parse/read
+  failure is not retried.
+- `RetryExhausted` is the typed terminal error even when a non-retryable first attempt stops
+  immediately, so its display can truthfully say one attempt while the receipt path stays uniform.
+
+Verification:
+
+- `cargo build --workspace` — PASS.
+- `cargo clippy --workspace --all-targets -- -D warnings` — PASS.
+- `cargo test --workspace --release` — PASS: **633 passed / 0 failed / 1 ignored**.
+- `cargo test --workspace` — PASS: **633 passed / 0 failed / 1 ignored**.
+- Focused pure retry/receipt/agent tests — 12 passed; full `nh-core` suite — PASS.
+- `git diff --check` — PASS before the log entry; final check pending below.
+- `cargo fmt` was not run.
+
+Next step:
+
+- Orchestrator runs the scoped normalize/review gate. No live provider call, failover,
+  availability re-resolve, cooldown/circuit breaker, config knob, or in-flight retry notice was
+  added in this wave.
+
 ## 2026-07-31: Wave M3 "PRICES DON'T EXPIRE" — the freshness apparatus is deleted
 
 What changed (`223217a`, 17 files, +82/−158 — a net DELETION):

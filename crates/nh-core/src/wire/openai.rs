@@ -1,13 +1,22 @@
 //! OpenAI-compatible request encoding, response parsing, and client.
 
+use std::time::Instant;
+
 use nh_routes::ThinkingDialect;
 use zeroize::Zeroizing;
 
-use super::http::{client, provider_error, read_body_capped, send_error, MAX_PROVIDER_BODY_BYTES};
+use super::http::{
+    client, is_request_timeout, provider_error, read_body_capped, send_error,
+    MAX_PROVIDER_BODY_BYTES,
+};
+use super::retry::{
+    combine_usage, is_retryable, parse_retry_after, run_with_retry, system_jitter, AttemptOutcome,
+    AttemptResult, RetryPolicy,
+};
 use super::usage_debug::UsageDebug;
 use super::{
-    ChatClient, ChatMessage, ChatRequest, ChatResponse, ContentPart, ThinkingEffort, ToolCallReq,
-    Usage,
+    ChatClient, ChatMessage, ChatRequest, ChatResponse, ContentPart, RetryStats, ThinkingEffort,
+    ToolCallReq, Usage,
 };
 
 pub(super) const DEFAULT_MAX_TOKENS: u64 = 65_536;
@@ -64,22 +73,88 @@ impl OpenAiCompatClient {
 impl ChatClient for OpenAiCompatClient {
     fn complete(&self, request: &ChatRequest) -> anyhow::Result<ChatResponse> {
         let url = endpoint(&self.base_url);
-        let response = self
-            .http
-            .post(&url)
-            .bearer_auth(self.api_key.as_str())
-            .json(&build_body(request, self.policy))
-            .send()
-            .map_err(|error| send_error(&url, &error))?;
-        let status = response.status();
-        let body = read_body_capped(response, MAX_PROVIDER_BODY_BYTES)?;
-        if let Some(debug) = &self.usage_debug {
-            debug.emit(&body);
-        }
-        if !status.is_success() {
-            return Err(provider_error(status, &body, self.api_key.as_str()));
-        }
-        parse_response(&body)
+        let request_body = build_body(request, self.policy);
+        let output = run_with_retry(
+            RetryPolicy::DEFAULT,
+            &std::thread::sleep,
+            &system_jitter,
+            |_| {
+                let started = Instant::now();
+                let response = match self
+                    .http
+                    .post(&url)
+                    .bearer_auth(self.api_key.as_str())
+                    .json(&request_body)
+                    .send()
+                {
+                    Ok(response) => response,
+                    Err(error) => {
+                        return AttemptResult::Failure {
+                            outcome: AttemptOutcome::TransportFailure {
+                                timed_out: is_request_timeout(&error),
+                            },
+                            retry_after: None,
+                            detail: send_error(&url, &error).to_string(),
+                            usage: None,
+                            elapsed: started.elapsed(),
+                        };
+                    }
+                };
+                let status = response.status();
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(parse_retry_after);
+                let body = match read_body_capped(response, MAX_PROVIDER_BODY_BYTES) {
+                    Ok(body) => body,
+                    Err(error) => {
+                        return AttemptResult::Failure {
+                            outcome: AttemptOutcome::HttpStatus(status.as_u16()),
+                            retry_after,
+                            detail: format!(
+                                "could not read provider HTTP {} response: {error}",
+                                status.as_u16()
+                            ),
+                            usage: None,
+                            elapsed: started.elapsed(),
+                        };
+                    }
+                };
+                if let Some(debug) = &self.usage_debug {
+                    debug.emit(&body);
+                }
+                if !status.is_success() {
+                    let outcome = AttemptOutcome::HttpStatus(status.as_u16());
+                    return AttemptResult::Failure {
+                        outcome,
+                        retry_after,
+                        detail: provider_error(status, &body, self.api_key.as_str()).to_string(),
+                        usage: if is_retryable(outcome) {
+                            extract_usage(&body)
+                        } else {
+                            None
+                        },
+                        elapsed: started.elapsed(),
+                    };
+                }
+                match parse_response(&body) {
+                    Ok(response) => AttemptResult::Success(response),
+                    Err(error) => AttemptResult::Failure {
+                        outcome: AttemptOutcome::HttpStatus(status.as_u16()),
+                        retry_after: None,
+                        detail: error.to_string(),
+                        usage: extract_usage(&body),
+                        elapsed: started.elapsed(),
+                    },
+                }
+            },
+        )
+        .map_err(anyhow::Error::new)?;
+        let mut response = output.value;
+        response.retries = output.stats;
+        response.usage = combine_usage(output.salvaged_usage, response.usage);
+        Ok(response)
     }
 }
 
@@ -315,6 +390,25 @@ struct WirePromptDetails {
     cached_tokens: Option<u64>,
 }
 
+fn usage_from_wire(usage: WireUsage) -> Usage {
+    let cached_tokens = usage
+        .prompt_tokens_details
+        .and_then(|details| details.cached_tokens)
+        .or(usage.prompt_cache_hit_tokens);
+    Usage {
+        prompt_tokens: usage.prompt_tokens,
+        completion_tokens: usage.completion_tokens,
+        cached_tokens,
+    }
+}
+
+pub(super) fn extract_usage(body: &str) -> Option<Usage> {
+    serde_json::from_str::<WireResponse>(body)
+        .ok()?
+        .usage
+        .map(usage_from_wire)
+}
+
 pub(super) fn parse_response(body: &str) -> anyhow::Result<ChatResponse> {
     let wire: WireResponse = serde_json::from_str(body)
         .map_err(|error| anyhow::anyhow!("could not parse provider response: {error}"))?;
@@ -343,16 +437,7 @@ pub(super) fn parse_response(body: &str) -> anyhow::Result<ChatResponse> {
             reasoning_content: choice.message.reasoning_content,
         },
         finish_reason: choice.finish_reason.unwrap_or_default(),
-        usage: wire.usage.map(|usage| {
-            let cached_tokens = usage
-                .prompt_tokens_details
-                .and_then(|details| details.cached_tokens)
-                .or(usage.prompt_cache_hit_tokens);
-            Usage {
-                prompt_tokens: usage.prompt_tokens,
-                completion_tokens: usage.completion_tokens,
-                cached_tokens,
-            }
-        }),
+        usage: wire.usage.map(usage_from_wire),
+        retries: RetryStats::default(),
     })
 }

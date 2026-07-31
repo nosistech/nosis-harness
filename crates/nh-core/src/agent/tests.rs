@@ -2,6 +2,7 @@ use super::context::{estimate_tokens, message_bytes, IMAGE_ESTIMATE_TOKENS};
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 fn message(role: &str, content: impl Into<String>) -> ChatMessage {
     plain_msg(role, content.into())
@@ -123,6 +124,7 @@ impl ChatClient for FinalAnswerClient {
             message: message("assistant", "paid answer"),
             finish_reason: "stop".into(),
             usage: None,
+            retries: Default::default(),
         })
     }
 }
@@ -132,6 +134,73 @@ struct ProviderErrorClient;
 impl ChatClient for ProviderErrorClient {
     fn complete(&self, _req: &ChatRequest) -> anyhow::Result<crate::wire::ChatResponse> {
         anyhow::bail!("provider returned HTTP 500: original failure")
+    }
+}
+
+struct RetryFailureClient;
+
+impl ChatClient for RetryFailureClient {
+    fn complete(&self, _req: &ChatRequest) -> anyhow::Result<crate::wire::ChatResponse> {
+        Err(anyhow::Error::new(RetryExhausted {
+            stats: RetryStats {
+                retries: 2,
+                rate_limited: 2,
+            },
+            usage: Some(Usage {
+                prompt_tokens: 18,
+                completion_tokens: 3,
+                cached_tokens: Some(4),
+            }),
+            last_failure: "provider returned HTTP 429 — rate limited".into(),
+            attempts: 3,
+            elapsed: Duration::from_secs(6),
+        }))
+    }
+}
+
+struct RetriedTurnsClient {
+    calls: Mutex<u8>,
+}
+
+impl ChatClient for RetriedTurnsClient {
+    fn complete(&self, _req: &ChatRequest) -> anyhow::Result<crate::wire::ChatResponse> {
+        let mut calls = self.calls.lock().unwrap();
+        let call = *calls;
+        *calls += 1;
+        drop(calls);
+
+        if call == 0 {
+            return Ok(crate::wire::ChatResponse {
+                message: ChatMessage {
+                    role: "assistant".into(),
+                    content: None,
+                    parts: None,
+                    tool_calls: Some(vec![ToolCallReq {
+                        id: "retry-tool".into(),
+                        name: "missing_tool".into(),
+                        arguments: "{}".into(),
+                    }]),
+                    tool_call_id: None,
+                    reasoning_content: None,
+                },
+                finish_reason: "tool_calls".into(),
+                usage: None,
+                retries: RetryStats {
+                    retries: 1,
+                    rate_limited: 1,
+                },
+            });
+        }
+
+        Ok(crate::wire::ChatResponse {
+            message: message("assistant", "done after retries"),
+            finish_reason: "stop".into(),
+            usage: None,
+            retries: RetryStats {
+                retries: 2,
+                rate_limited: 1,
+            },
+        })
     }
 }
 
@@ -149,6 +218,7 @@ impl ChatClient for UsageFinishClient {
                 completion_tokens: 2,
                 cached_tokens: self.cached_tokens,
             }),
+            retries: Default::default(),
         })
     }
 }
@@ -163,6 +233,7 @@ impl ChatClient for FinishReasonClient {
             message: message("assistant", "usable answer"),
             finish_reason: self.finish_reason.clone(),
             usage: None,
+            retries: Default::default(),
         })
     }
 }
@@ -198,6 +269,7 @@ impl ChatClient for OverflowUsageClient {
                     completion_tokens: u64::MAX,
                     cached_tokens: Some(u64::MAX),
                 }),
+                retries: Default::default(),
             });
         }
 
@@ -209,6 +281,7 @@ impl ChatClient for OverflowUsageClient {
                 completion_tokens: 1,
                 cached_tokens: Some(1),
             }),
+            retries: Default::default(),
         })
     }
 }
@@ -485,6 +558,72 @@ fn writable_receipt_path_keeps_pass_and_persists_the_receipt() {
 }
 
 #[test]
+fn retry_exhaustion_stats_and_salvaged_usage_reach_failed_receipt() {
+    let dir = tempfile::tempdir().unwrap();
+    let receipt_path = dir.path().join("receipts.jsonl");
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = agent_with_receipt_path(
+        dir.path(),
+        receipt_path.clone(),
+        Box::new(RetryFailureClient),
+        events,
+    );
+
+    let error = agent.run("retry failure").unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("3 attempts over 6s; last provider failure"));
+
+    let line = std::fs::read_to_string(receipt_path).unwrap();
+    let receipt: Receipt = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(receipt.outcome, Outcome::Fail);
+    assert_eq!(
+        receipt.retries,
+        RetryStats {
+            retries: 2,
+            rate_limited: 2,
+        }
+    );
+    let usage = receipt.usage.unwrap();
+    assert_eq!(usage.prompt_tokens, 18);
+    assert_eq!(usage.completion_tokens, 3);
+    assert_eq!(usage.cached_tokens, Some(4));
+}
+
+#[test]
+fn successful_retry_stats_accumulate_across_turns_and_emit_one_line_per_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let receipt_path = dir.path().join("receipts.jsonl");
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = agent_with_receipt_path(
+        dir.path(),
+        receipt_path,
+        Box::new(RetriedTurnsClient {
+            calls: Mutex::new(0),
+        }),
+        Arc::clone(&events),
+    );
+    agent.max_turns = 2;
+
+    let (answer, receipt) = agent.run("retry success").unwrap();
+    assert_eq!(answer, "done after retries");
+    assert_eq!(
+        receipt.retries,
+        RetryStats {
+            retries: 3,
+            rate_limited: 2,
+        }
+    );
+    let events = events.lock().unwrap();
+    assert!(events
+        .iter()
+        .any(|line| line == "turn 1: 2 attempts, 1 rate-limited"));
+    assert!(events
+        .iter()
+        .any(|line| line == "turn 2: 3 attempts, 1 rate-limited"));
+}
+
+#[test]
 fn request_estimate_counts_preserved_reasoning_and_tool_specs() {
     let messages = vec![ChatMessage {
         reasoning_content: Some("r".repeat(40)),
@@ -594,6 +733,7 @@ impl ChatClient for RepairingToolCallClient {
                 },
                 finish_reason: "tool_calls".into(),
                 usage: None,
+                retries: Default::default(),
             });
         }
 
@@ -607,6 +747,7 @@ impl ChatClient for RepairingToolCallClient {
             message: message("assistant", "done"),
             finish_reason: "stop".into(),
             usage: None,
+            retries: Default::default(),
         })
     }
 }
@@ -672,6 +813,7 @@ impl ChatClient for AuditedEditClient {
                 },
                 finish_reason: "tool_calls".into(),
                 usage: None,
+                retries: Default::default(),
             });
         }
         *self.observed_tool_result.lock().unwrap() = req
@@ -684,6 +826,7 @@ impl ChatClient for AuditedEditClient {
             message: message("assistant", "done"),
             finish_reason: "stop".into(),
             usage: None,
+            retries: Default::default(),
         })
     }
 }

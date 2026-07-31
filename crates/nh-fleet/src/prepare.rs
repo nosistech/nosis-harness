@@ -219,6 +219,7 @@ impl ChatClient for EchoClient {
                 completion_tokens: 1,
                 cached_tokens: None,
             }),
+            retries: Default::default(),
         })
     }
 }

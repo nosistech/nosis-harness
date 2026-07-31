@@ -350,6 +350,7 @@ fn receipt(task: &str, outcome: Outcome, usage: Option<Usage>) -> Receipt {
         usage,
         cache_hit_pct: None,
         repairs: Default::default(),
+        retries: Default::default(),
         effective_profile: None,
     }
 }
@@ -1950,6 +1951,7 @@ impl ChatClient for RecordingClient {
                 completion_tokens: 2,
                 cached_tokens: Some(4),
             }),
+            retries: Default::default(),
         })
     }
 }
@@ -1974,6 +1976,7 @@ impl ChatClient for MockClient {
                 completion_tokens: 2,
                 cached_tokens: Some(4),
             }),
+            retries: Default::default(),
         })
     }
 }

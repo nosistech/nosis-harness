@@ -2,6 +2,8 @@
 
 use anyhow::Context as _;
 
+use crate::wire::RetryStats;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Outcome {
@@ -55,6 +57,8 @@ pub struct Receipt {
     pub cache_hit_pct: Option<f64>,
     #[serde(default, skip_serializing_if = "RepairStats::is_empty")]
     pub repairs: RepairStats,
+    #[serde(default, skip_serializing_if = "RetryStats::is_empty")]
+    pub retries: RetryStats,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_profile: Option<String>,
 }
@@ -140,6 +144,7 @@ mod tests {
             usage: None,
             cache_hit_pct: None,
             repairs: RepairStats::default(),
+            retries: RetryStats::default(),
             effective_profile: None,
         }
     }
@@ -244,5 +249,23 @@ mod tests {
         let repaired = serde_json::to_value(repaired).unwrap();
         assert_eq!(repaired["repairs"]["tool_call_repair_attempts"], 1);
         assert_eq!(repaired["repairs"]["edit_indentation_matches"], 2);
+    }
+
+    #[test]
+    fn retry_counters_preserve_empty_json_and_persist_when_used() {
+        let empty = serde_json::to_string(&receipt("empty")).unwrap();
+        assert_eq!(
+            empty,
+            r#"{"ts_utc":"2026-07-22T00:00:00Z","model_id":"test-model","task":"empty","turns":1,"tool_calls":0,"outcome":"pass"}"#
+        );
+
+        let mut retried = receipt("retried");
+        retried.retries = crate::wire::RetryStats {
+            retries: 2,
+            rate_limited: 2,
+        };
+        let retried = serde_json::to_value(retried).unwrap();
+        assert_eq!(retried["retries"]["retries"], 2);
+        assert_eq!(retried["retries"]["rate_limited"], 2);
     }
 }

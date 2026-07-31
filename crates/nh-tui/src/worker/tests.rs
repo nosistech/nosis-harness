@@ -309,6 +309,7 @@ fn tracked_client_emits_start_and_finish_on_success_and_failure() {
                 },
                 finish_reason: "stop".into(),
                 usage: None,
+                retries: Default::default(),
             })
         }
     }
