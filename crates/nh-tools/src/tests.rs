@@ -190,17 +190,569 @@ fn specs_have_expected_names_and_required_args() {
     let tools = builtin_tools();
     let specs: Vec<ToolSpec> = tools.iter().map(|t| t.spec()).collect();
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-    assert_eq!(names, ["read_file", "edit_file", "exec_shell"]);
-    assert_eq!(specs[0].parameters["required"], json!(["path"]));
     assert_eq!(
-        specs[1].parameters["required"],
+        names,
+        [
+            "read_file",
+            "write_file",
+            "edit_file",
+            "grep_files",
+            "glob_files",
+            "exec_shell"
+        ]
+    );
+    assert_eq!(specs[0].parameters["required"], json!(["path"]));
+    assert_eq!(specs[1].parameters["required"], json!(["path", "content"]));
+    assert_eq!(
+        specs[2].parameters["required"],
         json!(["path", "old_string", "new_string"])
     );
-    assert_eq!(specs[2].parameters["required"], json!(["command"]));
+    assert_eq!(specs[3].parameters["required"], json!(["pattern"]));
+    assert_eq!(specs[4].parameters["required"], json!(["pattern"]));
+    assert_eq!(specs[5].parameters["required"], json!(["command"]));
+    assert!(specs[3]
+        .description
+        .contains("literal substring, not a regular expression"));
+    for spec in [&specs[3], &specs[4]] {
+        for directory in ["target", "node_modules", ".venv", "dist", "build"] {
+            assert!(
+                spec.description.contains(directory),
+                "{:?}",
+                spec.description
+            );
+        }
+    }
     for spec in &specs {
         assert_eq!(spec.parameters["type"], "object");
         assert!(!spec.description.is_empty());
     }
+}
+
+#[test]
+fn write_file_creates_a_new_file_without_temp_artifacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("src");
+    std::fs::create_dir(&source).unwrap();
+
+    let result = WriteFile
+        .execute(
+            json!({"path": "src/new_module.rs", "content": "pub fn new() {}\n"}),
+            &ctx_with(dir.path(), true),
+        )
+        .unwrap();
+
+    assert_eq!(result, "created src/new_module.rs (16 bytes)");
+    assert_eq!(
+        std::fs::read_to_string(source.join("new_module.rs")).unwrap(),
+        "pub fn new() {}\n"
+    );
+    assert!(std::fs::read_dir(source).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".nh-write-")
+    }));
+}
+
+#[test]
+fn write_file_refuses_existing_file_and_names_edit_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("note.txt");
+    std::fs::write(&path, "before").unwrap();
+
+    let result = WriteFile
+        .execute(
+            json!({"path": "note.txt", "content": "after"}),
+            &ctx_with(dir.path(), true),
+        )
+        .unwrap();
+
+    assert_eq!(
+        result,
+        "refused: note.txt already exists — use edit_file to change it"
+    );
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "before");
+}
+
+#[test]
+fn write_file_refuses_missing_parent_without_creating_it() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let result = WriteFile
+        .execute(
+            json!({"path": "missing/note.txt", "content": "hello"}),
+            &ctx_with(dir.path(), true),
+        )
+        .unwrap();
+
+    assert_eq!(
+        result,
+        "refused: parent directory does not exist: missing — create it first"
+    );
+    assert!(!dir.path().join("missing").exists());
+}
+
+#[test]
+fn write_file_refuses_workdir_escape() {
+    let dir = tempfile::tempdir().unwrap();
+    let workdir = dir.path().join("inner");
+    std::fs::create_dir(&workdir).unwrap();
+
+    let error = WriteFile
+        .execute(
+            json!({"path": "../outside.txt", "content": "no"}),
+            &ctx_with(&workdir, true),
+        )
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        error.contains("escapes the working directory"),
+        "got: {error}"
+    );
+    assert!(!dir.path().join("outside.txt").exists());
+}
+
+#[test]
+fn write_file_case_folds_guard_paths_and_still_allows_normal_creation() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".GIT")).unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    let approvals = Arc::new(AtomicUsize::new(0));
+    let approvals_seen = Arc::clone(&approvals);
+    let ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(move |_| {
+            approvals_seen.fetch_add(1, Ordering::SeqCst);
+            true
+        }),
+    )
+    .with_guard(Box::new(|access| match access {
+        Access::Write(path)
+            if nh_law::glob_matches(".git/**", path) || nh_law::glob_matches("**/.env*", path) =>
+        {
+            Guard::Block("protected creation path".into())
+        }
+        _ => Guard::Allow,
+    }));
+
+    for path in [".GIT/x", ".ENV", ".Env.local"] {
+        let result = WriteFile
+            .execute(json!({"path": path, "content": "blocked"}), &ctx)
+            .unwrap();
+        assert_eq!(result, "blocked by law: protected creation path");
+        assert!(!dir.path().join(path).exists(), "{path} was created");
+    }
+
+    let allowed = WriteFile
+        .execute(
+            json!({"path": "src/new_module.rs", "content": "safe"}),
+            &ctx,
+        )
+        .unwrap();
+    assert_eq!(allowed, "created src/new_module.rs (4 bytes)");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("src/new_module.rs")).unwrap(),
+        "safe"
+    );
+    assert_eq!(approvals.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn write_file_lowercase_ask_beats_typed_allow_and_denial_is_ok_shaped() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("Notes")).unwrap();
+    let actions = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let actions_seen = Arc::clone(&actions);
+    let ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(move |action| {
+            actions_seen.lock().unwrap().push(action.to_owned());
+            false
+        }),
+    )
+    .with_guard(Box::new(|access| match access {
+        Access::Write("notes/new.txt") => Guard::Ask,
+        _ => Guard::Allow,
+    }));
+
+    let result = WriteFile
+        .execute(json!({"path": "Notes/New.txt", "content": "no"}), &ctx)
+        .unwrap();
+
+    assert_eq!(result, "user denied: create Notes/New.txt");
+    assert_eq!(*actions.lock().unwrap(), ["create Notes/New.txt"]);
+    assert!(!dir.path().join("Notes/New.txt").exists());
+}
+
+#[test]
+fn oversized_write_is_refused_without_a_file_or_temp_artifact() {
+    let dir = tempfile::tempdir().unwrap();
+    let content = "x".repeat(MAX_TOOL_READ_BYTES + 1);
+
+    let error = WriteFile
+        .execute(
+            json!({"path": "large.txt", "content": content}),
+            &ctx_with(dir.path(), true),
+        )
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!(
+        error,
+        format!("content too large to write safely (> {MAX_TOOL_READ_BYTES} bytes)")
+    );
+    assert!(!dir.path().join("large.txt").exists());
+    assert!(std::fs::read_dir(dir.path()).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".nh-write-")
+    }));
+}
+
+#[test]
+fn glob_files_returns_sorted_workdir_relative_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src/nested")).unwrap();
+    std::fs::create_dir(dir.path().join("docs")).unwrap();
+    std::fs::write(dir.path().join("src/z.rs"), "").unwrap();
+    std::fs::write(dir.path().join("src/a.rs"), "").unwrap();
+    std::fs::write(dir.path().join("src/nested/m.rs"), "").unwrap();
+    std::fs::write(dir.path().join("docs/ignored.rs"), "").unwrap();
+
+    let result = GlobFiles
+        .execute(
+            json!({"pattern": "src/**/*.rs"}),
+            &ctx_with(dir.path(), true),
+        )
+        .unwrap();
+    let lines: Vec<&str> = result.lines().collect();
+
+    assert_eq!(&lines[..3], ["src/a.rs", "src/nested/m.rs", "src/z.rs"]);
+    assert!(lines[3].starts_with("— 3 matches; 4 files visited;"));
+    assert!(lines[3].contains("0 files excluded by law"));
+    assert!(lines[3].contains("0 symlinks skipped"));
+}
+
+#[test]
+fn glob_files_refuses_scope_escape() {
+    let dir = tempfile::tempdir().unwrap();
+    let workdir = dir.path().join("inner");
+    std::fs::create_dir(&workdir).unwrap();
+    std::fs::write(dir.path().join("outside.txt"), "outside").unwrap();
+
+    let error = GlobFiles
+        .execute(
+            json!({"pattern": "**", "path": ".."}),
+            &ctx_with(&workdir, true),
+        )
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        error.contains("escapes the working directory"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn glob_files_excludes_blocked_and_ask_files_without_approval() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["allowed.txt", "asked.txt", "blocked.txt"] {
+        std::fs::write(dir.path().join(name), name).unwrap();
+    }
+    let approvals = Arc::new(AtomicUsize::new(0));
+    let approvals_seen = Arc::clone(&approvals);
+    let ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(move |_| {
+            approvals_seen.fetch_add(1, Ordering::SeqCst);
+            true
+        }),
+    )
+    .with_guard(Box::new(|access| match access {
+        Access::Read("asked.txt") => Guard::Ask,
+        Access::Read("blocked.txt") => Guard::Block("protected".into()),
+        _ => Guard::Allow,
+    }));
+
+    let result = GlobFiles.execute(json!({"pattern": "**"}), &ctx).unwrap();
+    let lines: Vec<&str> = result.lines().collect();
+
+    assert_eq!(lines[0], "allowed.txt");
+    assert!(lines[1].starts_with("— 1 matches; 3 files visited;"));
+    assert!(lines[1].contains("2 files excluded by law"));
+    assert_eq!(approvals.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn glob_files_discloses_law_and_default_directory_pruning() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::create_dir(dir.path().join("target")).unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join(".git/config"), "hidden").unwrap();
+    std::fs::write(dir.path().join("target/cache"), "hidden").unwrap();
+    std::fs::write(dir.path().join("src/lib.rs"), "visible").unwrap();
+    let ctx = ctx_with(dir.path(), true).with_guard(Box::new(|access| match access {
+        Access::Read(path) if nh_law::glob_matches(".git/**", path) => {
+            Guard::Block("protected".into())
+        }
+        _ => Guard::Allow,
+    }));
+
+    let result = GlobFiles.execute(json!({"pattern": "**"}), &ctx).unwrap();
+
+    assert!(result.starts_with("src/lib.rs\n— 1 matches;"));
+    assert!(result.contains("1 directories pruned by law"));
+    assert!(result.contains(
+        "1 build/vendor directories pruned by default (target, node_modules, .venv, dist, build)"
+    ));
+    assert!(!result.contains(".git/config"));
+    assert!(!result.contains("target/cache"));
+}
+
+#[test]
+fn glob_files_stops_at_the_match_cap_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    const MATCH_CAP: usize = 500;
+    for index in 0..=MATCH_CAP {
+        std::fs::write(dir.path().join(format!("f{index:03}.rs")), "").unwrap();
+    }
+
+    let result = GlobFiles
+        .execute(json!({"pattern": "*.rs"}), &ctx_with(dir.path(), true))
+        .unwrap();
+    let lines: Vec<&str> = result.lines().collect();
+
+    assert_eq!(lines.len(), MATCH_CAP + 1);
+    assert_eq!(lines[0], "f000.rs");
+    assert_eq!(lines[MATCH_CAP - 1], "f499.rs");
+    assert!(lines[MATCH_CAP].contains("stopped after the 500-match cap"));
+}
+
+#[test]
+fn glob_files_file_visit_cap_is_honest() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        std::fs::write(dir.path().join(name), "").unwrap();
+    }
+
+    let result = super::search::glob_files_with_limits(
+        &json!({"pattern": "*.rs"}),
+        &ctx_with(dir.path(), true),
+        super::search::SearchLimits {
+            files: 2,
+            matches: 10,
+        },
+    )
+    .unwrap();
+
+    assert!(result.starts_with("— 0 matches; 2 files visited;"));
+    assert!(result.contains("stopped after the 2-file visit cap"));
+}
+
+#[test]
+fn grep_files_finds_literal_matches_with_glob_and_case_controls() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/a.rs"), "Alpha needle\nbeta NEEDLE\n").unwrap();
+    std::fs::write(dir.path().join("src/z.rs"), "needle last\n").unwrap();
+    std::fs::write(dir.path().join("src/ignored.txt"), "needle ignored\n").unwrap();
+
+    let result = GrepFiles
+        .execute(
+            json!({
+                "pattern": "needle",
+                "path": "src",
+                "glob": "**/*.rs",
+                "case_insensitive": true
+            }),
+            &ctx_with(dir.path(), true),
+        )
+        .unwrap();
+    let lines: Vec<&str> = result.lines().collect();
+
+    assert_eq!(
+        &lines[..3],
+        [
+            "src/a.rs:1:Alpha needle",
+            "src/a.rs:2:beta NEEDLE",
+            "src/z.rs:1:needle last"
+        ]
+    );
+    assert!(lines[3].starts_with("— 3 matches in 2 files; 3 files visited;"));
+    assert!(lines[3].contains("0 files excluded by law"));
+    assert!(lines[3].contains("0 binary files skipped"));
+}
+
+#[test]
+fn grep_files_treats_regex_syntax_as_literal_text() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("values.txt"),
+        "number 123\nliteral \\\\d+\n",
+    )
+    .unwrap();
+
+    let result = GrepFiles
+        .execute(json!({"pattern": "\\d+"}), &ctx_with(dir.path(), true))
+        .unwrap();
+
+    assert!(result.starts_with("values.txt:2:literal \\\\d+\n— 1 matches"));
+    assert!(!result.contains("number 123"));
+}
+
+#[test]
+fn grep_files_refuses_scope_escape() {
+    let dir = tempfile::tempdir().unwrap();
+    let workdir = dir.path().join("inner");
+    std::fs::create_dir(&workdir).unwrap();
+    std::fs::write(dir.path().join("outside.txt"), "needle").unwrap();
+
+    let error = GrepFiles
+        .execute(
+            json!({"pattern": "needle", "path": ".."}),
+            &ctx_with(&workdir, true),
+        )
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        error.contains("escapes the working directory"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn grep_files_excludes_law_files_without_prompting_and_discloses_pruning() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["allowed.txt", "asked.txt", "blocked.txt"] {
+        std::fs::write(dir.path().join(name), "needle").unwrap();
+    }
+    std::fs::create_dir(dir.path().join("target")).unwrap();
+    std::fs::write(dir.path().join("target/hidden.txt"), "needle").unwrap();
+    let approvals = Arc::new(AtomicUsize::new(0));
+    let approvals_seen = Arc::clone(&approvals);
+    let ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(move |_| {
+            approvals_seen.fetch_add(1, Ordering::SeqCst);
+            true
+        }),
+    )
+    .with_guard(Box::new(|access| match access {
+        Access::Read("asked.txt") => Guard::Ask,
+        Access::Read("blocked.txt") => Guard::Block("protected".into()),
+        _ => Guard::Allow,
+    }));
+
+    let result = GrepFiles
+        .execute(json!({"pattern": "needle"}), &ctx)
+        .unwrap();
+
+    assert!(result.starts_with("allowed.txt:1:needle\n— 1 matches in 1 files;"));
+    assert!(result.contains("2 files excluded by law"));
+    assert!(result.contains(
+        "1 build/vendor directories pruned by default (target, node_modules, .venv, dist, build)"
+    ));
+    assert!(!result.contains("asked.txt"));
+    assert!(!result.contains("blocked.txt"));
+    assert!(!result.contains("hidden.txt"));
+    assert_eq!(approvals.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn grep_files_skips_binary_and_oversized_files_and_truncates_honestly() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("binary.bin"), b"needle\0hidden").unwrap();
+    std::fs::write(
+        dir.path().join("large.txt"),
+        vec![b'x'; MAX_TOOL_READ_BYTES + 1],
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("long.txt"),
+        format!("needle {}", "x".repeat(400)),
+    )
+    .unwrap();
+
+    let result = GrepFiles
+        .execute(json!({"pattern": "needle"}), &ctx_with(dir.path(), true))
+        .unwrap();
+    let lines: Vec<&str> = result.lines().collect();
+
+    assert!(lines[0].starts_with("long.txt:1:needle "));
+    assert!(lines[0].contains("…(+"), "got: {}", lines[0]);
+    assert!(lines[0].ends_with(" more chars)"), "got: {}", lines[0]);
+    assert!(lines[1].starts_with("— 1 matches in 1 files; 3 files visited;"));
+    assert!(lines[1].contains("1 binary files skipped"));
+    assert!(lines[1].contains("1 oversized files skipped"));
+}
+
+#[test]
+fn grep_files_stops_at_the_match_cap_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    const MATCH_CAP: usize = 500;
+    std::fs::write(
+        dir.path().join("many.txt"),
+        "needle\n".repeat(MATCH_CAP + 1),
+    )
+    .unwrap();
+
+    let result = GrepFiles
+        .execute(json!({"pattern": "needle"}), &ctx_with(dir.path(), true))
+        .unwrap();
+    let lines: Vec<&str> = result.lines().collect();
+
+    assert_eq!(lines.len(), MATCH_CAP + 1);
+    assert_eq!(lines[0], "many.txt:1:needle");
+    assert_eq!(lines[MATCH_CAP - 1], "many.txt:500:needle");
+    assert!(lines[MATCH_CAP].contains("stopped after the 500-match cap"));
+}
+
+#[test]
+fn grep_files_file_visit_cap_is_honest() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        std::fs::write(dir.path().join(name), "absent").unwrap();
+    }
+
+    let result = super::search::grep_files_with_limits(
+        &json!({"pattern": "needle"}),
+        &ctx_with(dir.path(), true),
+        super::search::SearchLimits {
+            files: 2,
+            matches: 10,
+        },
+    )
+    .unwrap();
+
+    assert!(result.starts_with("— 0 matches in 0 files; 2 files visited;"));
+    assert!(result.contains("stopped after the 2-file visit cap"));
+}
+
+#[test]
+fn grep_files_scrubs_literal_secrets_before_returning_match_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    const SECRET: &str = "fixture-literal-search-secret";
+    std::fs::write(
+        dir.path().join("secret.txt"),
+        format!("needle {SECRET} suffix"),
+    )
+    .unwrap();
+    let ctx =
+        ctx_with(dir.path(), true).with_scrubber(nh_vault::Scrubber::new(vec![SECRET.to_owned()]));
+
+    let result = GrepFiles
+        .execute(json!({"pattern": "needle"}), &ctx)
+        .unwrap();
+
+    assert!(result.contains("needle [REDACTED] suffix"));
+    assert!(!result.contains(SECRET));
 }
 
 #[test]

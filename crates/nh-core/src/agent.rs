@@ -510,7 +510,7 @@ fn finish_tool_run(output: String, repair_notes: Vec<String>, audit: Vec<ToolAud
 fn progress_line(turn: u32, call: &ToolCallReq) -> String {
     let mut line = format!("turn {turn}: {}", call.name);
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
-        for key in ["path", "command"] {
+        for key in ["path", "command", "pattern"] {
             if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
                 let short: String = s.chars().take(60).collect();
                 line.push(' ');

@@ -1343,6 +1343,7 @@ name = "nh-tools"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "nh-law",
  "nh-vault",
  "reqwest",
  "serde",

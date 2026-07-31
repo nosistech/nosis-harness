@@ -9,12 +9,13 @@ mod model;
 
 pub use load::{assemble_constitution, load, user_home_dir};
 
+/// Segment-wise iterative glob matching: no recursion, so adversarial patterns
+/// cannot exhaust the stack, and `**` spans directory segments.
+pub use matcher::glob_matches;
 pub use model::{Autonomy, ConstitutionSources, Law, LoadOptions, Policy, PolicyView, Verdict};
 
 #[cfg(test)]
 use load::{compile_policy, load_with_home, parse_law};
-#[cfg(test)]
-use matcher::glob_matches;
 
 const SECTION_JOINER: &str = "\n\n";
 const OPERATING_LAW_LABEL: &str = "## Operating law";
