@@ -2,6 +2,234 @@
 
 Use this for fast decisions. Large technical decisions live in `../02-architecture/ARCHITECTURE_DECISIONS.md`.
 
+## 2026-07-31: Price freshness becomes provenance, not a deadline
+
+Decision:
+
+Replace `valid_until` with `verified_on` in every `catalog.toml` price block. Delete the recheck
+deadline and the `stale` boolean that hangs off it. Receipts disclose **when a human last verified
+the price**, and let the reader judge. Keep the separate **fx-rate staleness refusal** exactly as it
+is. Scheduled as wave M3 "NO DEADLINES".
+
+Why:
+
+The owner was tired of it, and he was right. `catalog.toml:3` describes `valid_until` in the
+project's own words as "Nosis's short recheck deadline, not a provider guarantee" — prices verified
+2026-07-26 expiring 2026-08-02, **a seven-day window** for providers that change published prices
+perhaps two to four times a year. The cadence modelled volatility that does not exist, and the cost
+landed entirely on one person.
+
+`valid_until` is a promise about the future: it expires, and it demands action. `verified_on` is a
+fact about the past: it never expires and never asks for anything. The receipt goes from
+"prices stale" to "price verified 2026-07-26", which carries strictly more information than a
+boolean — so this **strengthens** the honest-cost claim while removing the recurring obligation.
+
+Rejected alternatives:
+
+- Widen the window to 90 or 180 days — reduces the toil without removing it. The owner asked for
+  removal, not for a longer leash.
+- Delete `valid_until` and change nothing else. **This is a trap:** `resolver.rs:116` reads
+  `price.valid_until.is_none_or(|d| at.date_naive() > d)`, so an absent date makes every quote
+  permanently stale. Deleting the field pins the flag on rather than removing it, and "stale" would
+  lose all meaning by appearing everywhere forever.
+- A scheduled CI price-watcher that diffs provider pricing pages and opens an issue on change. Good
+  design, and it was offered — but it exists to buy down the risk of a long window. With no window,
+  there is nothing to backstop, so it became optional and was dropped. Recorded here because it is
+  the right answer if freshness ever needs a guarantee again. It must never write prices into the
+  catalog: `price_confidence = "confirmed"` means a person checked, and a scraper that could set it
+  would make the word a lie.
+- Remove price disclosure entirely — rejected. Honest metering is the product.
+
+Consequences:
+
+- Immediate: no calendar, no expiry, no recurring task. One catalog edit and the flag is gone.
+- Long-term: freshness is disclosed and ages visibly instead of flipping on a date nobody chose
+  deliberately. The residual risk is stated plainly: a silent provider price change could go
+  unnoticed indefinitely, with a receding `verified_on` date as the only signal. Accepted knowingly.
+- **Unchanged:** fx staleness still refuses. A stale exchange rate silently mis-converts CNY to USD
+  and yields a confidently wrong number. Price provenance is disclosure; fx staleness is arithmetic.
+
+Review later:
+
+If anyone ever runs a business on nosis receipts, revisit the watcher.
+
+## 2026-07-31: An intra-workspace path edge is not a new dependency
+
+Decision:
+
+`crates/nh-tools` may depend on `crates/nh-law` by path. The standing "do not add dependencies" rule
+governs **third-party** crates and is otherwise absolute.
+
+Why:
+
+Wave M2's `glob_files` needed glob matching. The audited, iterative, stack-safe matcher already
+existed at `nh-law/src/matcher.rs`, but `nh-tools` could not see it, and the wave brief forbade
+manifest edits — an unsatisfiable pair that made the executor stop clean, correctly. The rule exists
+to protect the supply chain and the `cargo deny` surface. An intra-workspace edge touches neither:
+`nh-law` is already a path dependency of nh-cli, nh-fleet, nh-mcp and nh-tui, depends only on
+anyhow, serde and toml — all of which nh-tools already had — and no external version changed in
+`Cargo.lock`. No cycle exists; nh-law depends on no workspace crate.
+
+Rejected alternatives:
+
+- Copy the matcher into nh-tools — creates a **second security-relevant glob surface** to audit and
+  keep in sync, which is exactly the failure mode the reuse item was written to prevent.
+- Drop `glob_files` — removes a third of the wave to preserve a rule that was never aimed at it.
+
+Consequences:
+
+- Immediate: one line in one manifest; one `pub(super)` widened to `pub` with a doc comment
+  recording that the matcher is iterative and `**` spans segments. Matching behaviour unchanged.
+- Long-term: future waves may reuse in-tree crates freely. Every third-party addition still needs an
+  explicit owner decision.
+
+Review later:
+
+Never. The distinction is the rule now.
+
+## 2026-07-30: Image generation declined — the two-wire rule holds
+
+Decision:
+
+Do not add image generation. `nh` accepts images as input (wave M1, `05c53cc`) and does not produce
+them. If it is ever revisited, the least-damaging shape is an `nh-mcp` tool, which leaves the
+router's wire rule intact.
+
+Why:
+
+Of the four providers, only Z.ai can generate images (`glm-image` $0.015/image, `cogview-4`
+$0.01/image) and only through `POST /api/paas/v4/images/generations`. That is **a third wire**,
+which violates the ratified two-wire rule (OpenAI-compatible and Anthropic Messages). Worse, the
+endpoint returns **no `usage` object at all**, so every generated image would have to be metered
+from an assumed per-image price rather than a reported one — cost we would be **fabricating**, which
+is the exact behaviour this product exists to refuse. Z.ai Terms of Use §III.5(d) additionally place
+an **affirmative AI-labelling duty on the operator**, a compliance obligation the harness has no
+mechanism to discharge.
+
+Rejected alternatives:
+
+- Add the generations endpoint as a third wire — breaks the two-wire rule for one provider and one
+  feature, and the wire has no usage block to meter.
+- Hard-code a per-image price and present it as measured — dishonest metering; refused outright.
+- Hard-code the price and label it an estimate — still puts a number we did not receive into a
+  receipt, next to numbers we did. Receipts stay one kind of thing.
+
+Consequences:
+
+- Immediate: no code, no catalog rows, no new dependency. Wave M1 shipped input-only.
+- Long-term: the two-wire rule remains the load-bearing constraint that keeps the meter honest. Any
+  future capability that needs a third wire must clear the same test — a real `usage` block, or it
+  does not ship inside the router.
+
+Review later:
+
+Only if Z.ai adds a `usage` block to the generations response **and** the feature is worth a wire.
+
+## 2026-07-30: MiMo off-peak 0.8× refuted — it is not available to us
+
+Decision:
+
+Do not implement a MiMo off-peak multiplier. `catalog.toml` has no `off_peak` key, so **it is
+already correct by omission — change nothing.** Remove it from the backlog as refuted, not deferred.
+
+Why:
+
+The July research listed it as ready to build. Verification against first-party documentation killed
+it. The 0.8× exists **only on the prepaid Token Plan**, as a Credits consumption coefficient — not a
+pay-as-you-go discount. Both pay-as-you-go pages (English and zh-CN, dated 2026-07-15) contain zero
+off-peak language. Worse, Token Plan quota is contractually **coding-tools-only** and expressly
+forbids API use by automation scripts and application backends, which is precisely what `nh` is.
+Implementing it would have written a **discount into the meter that we never receive**, understating
+real spend — the single worst failure mode this product has.
+
+Rejected alternatives:
+
+- Implement it behind a flag for Token Plan holders — the plan's terms forbid our access pattern, so
+  the flag would only ever be set by someone violating them.
+- Implement it and label it an estimate — an estimate that systematically understates cost is worse
+  than no feature.
+
+Consequences:
+
+- Immediate: no catalog schema change, no time-of-day logic in the pricer, no clock dependency.
+- Long-term: reinforces the standing rule that a discount enters the meter only with first-party
+  documentation **for our own billing relationship**, not for an adjacent product tier.
+
+Review later:
+
+Only if MiMo publishes off-peak pricing on a pay-as-you-go page.
+
+## 2026-07-30: Kimi Batch API 0.6× refuted — not adoptable now
+
+Decision:
+
+Do not adopt the Kimi Batch API. Plausible **only** for fleet mode, and only after a live probe.
+
+Why:
+
+Two independent blockers. First, `completion_window` has a **12-hour minimum**, so every call is a
+≥12h asynchronous job (upload → submit → poll → download → rejoin by `custom_id`). That rules out
+`nh run` and `nh chat` categorically; they are interactive. Second, the documented batch `usage`
+block has **no `cached_tokens` field**, while batch bills cache-hit ($0.10/1M) and cache-miss
+($0.57/1M) **5.7× apart**. Cost could therefore only be guessed, which is a **REFUSE** condition for
+this product — the harness declines to report a number it cannot derive.
+
+Two traps recorded for anyone who revisits this:
+
+- The 0.6× multiplier does **not** reconcile for `kimi-k2.6` cached input: published batch price is
+  $0.10, not 0.6 × $0.16 = $0.096. Do not derive batch prices by multiplication.
+- The pricing page lists `kimi-k2.7-code` as batch-eligible, while the API guide's normative warning
+  says the model must be k2.6 or k2.5. The two first-party sources disagree; a live probe is the
+  only tiebreak.
+
+Rejected alternatives:
+
+- Adopt for `nh run` with a progress spinner — a 12-hour floor is not a spinner, it is a different
+  product.
+- Adopt and meter cache-hit optimistically or pessimistically — a 5.7× spread makes either choice a
+  fabrication.
+
+Consequences:
+
+- Immediate: no batch client, no job store, no polling loop, no `custom_id` rejoin logic. Nothing
+  built.
+- Long-term: the fleet path keeps batch as a genuine future option, but the entry condition is now
+  written down — a live probe that shows a `cached_tokens` field, or it stays out.
+
+Review later:
+
+If Moonshot adds `cached_tokens` to the batch usage block, or shortens `completion_window`.
+
+## 2026-07-30: Verified leads, not research specifications
+
+Decision:
+
+Treat `00-start-here/RESEARCH_2026-07_harness.md` (~90 items, 10 tiers) and the 14 raw files in
+`04-research/_harness-research-2026-07/` as **July-2026 leads**. Verify every item against
+first-party documentation **and** a live probe before briefing it to an executor.
+
+Why:
+
+Three items were taken to verification on 2026-07-30. **Two were refuted outright** (MiMo off-peak,
+Kimi batch, both above) and the third — multimodal — needed five corrections before it was safe to
+build, including one catalog claim (`mimo-v2.5-pro` modality) that was false and **protected by a
+green test**. A 2-in-3 refutation rate on items marked ready-to-build is the evidence.
+
+Rejected alternatives:
+
+- Brief research items to Sol directly — two of three would have produced shipped code implementing
+  something that does not exist.
+
+Consequences:
+
+- Immediate: Tier 2 is marked stale (it assumes auto-routing, which the harness does not do). Tier 4,
+  5 and 8 remain unbuilt but unverified.
+- Long-term: verification cost is now part of every wave's budget, not an optional preflight.
+
+Review later:
+
+Never. This is a standing rule.
+
 ## 2026-07-29: Provider scope frozen at four open-weight providers plus local
 
 Decision:

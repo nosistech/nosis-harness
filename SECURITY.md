@@ -14,9 +14,18 @@ nosis is in development and is before version 1.0. We apply security fixes to th
 
 ## How to Report a Vulnerability
 
-Do not open a public issue for a security problem. Do not put security data in a public discussion or a pull request. Send a private email to `info@nosistech.com`.
+Do not open a public issue for a security problem. Do not put security data in a public discussion or a pull request.
 
-We send a first reply in 5 business days or less. If you do not get a reply, send the email again after 5 business days.
+**Use GitHub private vulnerability reporting. It is the primary channel.** The feature is enabled on this repository. Do one of these:
+
+- Go to <https://github.com/nosistech/nosis-harness/security/advisories/new>.
+- Or open the **Security** tab of the repository, then select **Report a vulnerability**.
+
+A GitHub account is necessary. Your report stays private. Only the maintainers can read it until we publish an advisory.
+
+If you cannot use GitHub, send an email to `info@nosistech.com`. **This mailbox is best-effort.** We do not monitor it continuously, and a reply can be slow or can fail to arrive. Use GitHub private reporting for all urgent problems.
+
+We try to send a first reply in 5 business days. A GitHub report gets a reply more quickly than an email.
 
 Include this data in your report:
 

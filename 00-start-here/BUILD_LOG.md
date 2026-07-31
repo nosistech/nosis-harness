@@ -2,6 +2,138 @@
 
 Record every meaningful session here.
 
+## 2026-07-31: Wave M2 "TOOL FLOOR" — write_file, grep_files, glob_files
+
+What changed (`2e0fea0`, 9 files, +1317/−14, all 9 items, no deferrals):
+
+- `write_file`, **create-only**: refuses an existing path (naming `edit_file` as the alternative)
+  and refuses a missing parent directory rather than creating one. Publication reuses `edit_file`'s
+  temp-file + fsync + atomic-rename path with cleanup on every error branch.
+- `grep_files`: **literal substring, not regex** — stated in the tool description so the model does
+  not send `\d+` and silently get nothing. NUL-sniff binary skip, oversized skip, 300-char line
+  truncation with an honest `(+N more chars)`.
+- `glob_files`: segment-wise with `**` spanning directories, results sorted lexicographically.
+  Determinism is deliberate — `read_dir` order is filesystem-dependent and a non-deterministic tool
+  result poisons the prefix cache.
+- `builtin_tools()` now returns read_file, write_file, edit_file, grep_files, glob_files,
+  exec_shell — cheapest and safest first, shell last.
+- `nh-core`: `progress_line` reads the `"pattern"` argument key. One line, nothing else.
+
+The case-folding bypass is closed:
+
+- The WARNING left at `nh-tools/src/lib.rs:277` for exactly this wave is **discharged**, and the
+  comment updated rather than left to mislead the next reader.
+- `creation_guard_verdict` consults the typed path, its ASCII-folded form, and — where an existing
+  parent resolves through an in-workdir alias — the actual path and its folded form too.
+  `merge_guard_verdict` takes the strictest answer: **Block beats Ask beats Allow**.
+- `read_file`, `edit_file` and `load_image` are unchanged; they touch only existing files, so
+  `canonicalize` already hands the guard the true on-disk case.
+- Two hardenings beyond the brief: `symlink_metadata` makes a symlink at the destination count as
+  existing, so create-only refuses it; and the parent directory is canonicalized before creation,
+  closing a symlinked-parent escape.
+
+Honest search, no approval storm:
+
+- The walk consults the law per file. `Allow` includes; `Ask` and `Block` **exclude silently and
+  increment a counter**. `approve` is never called in the walk — hundreds of per-file prompts would
+  train blind approval, a worse security outcome than an excluded file.
+- Footer counts, all eight: matches, files visited, files excluded by law, binary skipped,
+  oversized skipped, symlinks skipped, and **law-pruned versus default-pruned directories tracked
+  separately** — separately because counting files inside a law-blocked directory would mean
+  entering it.
+- Bounded and iterative: explicit stack, no recursion, no symlink following, 20,000 files and 500
+  matches maximum, cap named in the footer when it stops the walk. Nothing silently truncated.
+- `target`, `node_modules`, `.venv`, `dist`, `build` pruned by default, disclosed in both the tool
+  description and the footer.
+
+Verification:
+
+- `GATE: PASS` — **620 passed / 0 failed / 1 ignored, `--release`** (599 → 620, +21 tests).
+- All five steps green: `fmt --check`, `clippy -D warnings`, `rustdoc -D warnings`,
+  `cargo deny --locked`, `test --release`. Orchestrator ran the scoped `cargo fmt -p` normalize on
+  the four touched crates, per protocol.
+
+Process note — **three clean stops, and every one of them was right:**
+
+- Stop 1: the brief required `nh_law::glob_matches` while forbidding manifest edits. `nh-tools` had
+  no `nh-law` dependency, so the brief was unsatisfiable.
+- Stop 2: the brief claimed nh-cli asserts tool names but never counts.
+  `nh-cli/src/cmd_chat/tests.rs:815` asserted exactly three lines.
+- Both errors came from the orchestrator reading the tree and reading it wrong. Sol changed nothing
+  and fabricated nothing on either stop. The scope-by-crate rule from wave M1 held: no stop occurred
+  for a file inside a fully-in-scope crate.
+- **Two more obsolete assertions were found passing** (`nh-tools` three-name list, nh-cli `/tools`
+  three-line count), which is the M1 lesson repeating: a passing test proves consistency, not truth.
+
+CI on the pushed commits: Windows, macOS and Supply-chain all green; **ubuntu-latest cancelled at
+the 35-minute ceiling for the fifth time.** The hang remains the one hard blocker for `v0.1.0`.
+
+## 2026-07-30: Wave M1 "IMAGES IN" — image input on OpenAI-wire vision routes
+
+What changed (`05c53cc`, 26 files, +948/−41, all 11 items, no deferrals):
+
+- `nh run --image <path>` (repeatable, maximum 4) and `/image <path>` in `nh chat` attach PNG or
+  JPEG images to the next user message. The text-only path is unchanged.
+- `ChatMessage` gained an optional `parts: Vec<ContentPart>` with `ContentPart { Text, ImageB64 }`.
+  When `parts` is absent the serialized request is **byte-identical** to before, asserted literally
+  by `parts_free_request_bytes_remain_identical`, so the prefix cache and the PrefixSeal invariant
+  are unaffected.
+- The OpenAI wire emits the content array only when parts exist, and always as a full
+  `data:<mime>;base64,<data>` URI.
+- `load_image` in `nh-tools` reuses `read_file`'s workdir boundary and law guard, allowlists PNG and
+  JPEG by extension, **verifies magic bytes** so a mislabelled file is refused rather than guessed
+  at, and caps raw size at 3.5 MiB. Base64 is a dependency-free RFC 4648 encoder tested against the
+  specification vectors.
+- Image capability is read from the live catalog and **fails closed before any HTTP call**, at three
+  independent layers, naming the image-capable routes in the refusal.
+- Compaction's pre-send estimate counts 32 tokens per image part, which brackets the measured 18–29
+  token deltas. It is documented as an estimate used only to trigger compaction — never for billing,
+  and never shown as measured.
+- `nh-fleet`, `nh-tui` and the Anthropic wire received only a one-line `parts: None` initializer. No
+  image logic entered any of them.
+
+Catalog correction:
+
+- `mimo-v2.5-pro` declared `modality = ["text","image","video","audio"]`. Xiaomi documents it as
+  text-only and a live probe returned `404 No endpoints found that support image input`. Corrected
+  to `["text"]` with a dated citation. The `nh-routes` test
+  `mimo_routes_preserve_reasoning_and_are_omni_modal` had been **passing** while asserting the false
+  claim; it was updated and renamed. **A passing test proves consistency, not truth.**
+
+Wire facts established by live probe on 2026-07-30, not from documentation:
+
+| route | text-only prompt tokens | with image | delta |
+|---|---|---|---|
+| `kimi-k2.6` | 14 | 43 | +29 |
+| `mimo-v2.5` | 254 | 272 | +18 |
+| `glm-4.6v-flash` | 13 | 40 | +27 |
+
+- All three fold image tokens into `usage.prompt_tokens`; none exposes a separate image-token field.
+  `Usage` already parses that, so **receipts are honest for images with zero costing change.**
+- `kimi-k2.6` rejects a bare base64 string — the `data:` prefix is mandatory. `glm-4.6v-flash`
+  accepts both forms, so one code path serves all three.
+- Images coexist with a `tools` array on `kimi-k2.6` (verified, prompt=72).
+- Free `glm-4.6v-flash` is heavily rate-limited; the probe needed four retries at 6/12/24/48s.
+- Total probe spend was well under $0.01.
+
+Verification:
+
+- `GATE: PASS` — **599 passed / 0 failed / 1 ignored, `--release`** (579 → 599, +20 tests).
+- All five gate steps green: `fmt --check`, `clippy -D warnings`, tests, `rustdoc -D warnings`,
+  `cargo deny --locked`.
+
+Known limitations, both non-blocking:
+
+- Part ordering is emitted text-first but was only measured image-first. One sub-cent call settles
+  whether ordering changes the token count.
+- MiMo documents an 8192-pixel minimum per image and the harness does not decode image dimensions,
+  so a very small but otherwise valid image may be refused by the provider rather than by `nh`.
+
+Next step:
+
+- `05c53cc` and the checkpoint commit `3e40c36` are **committed and not pushed**. `origin/main` is
+  still at `52314a3`. The push needs owner action.
+
 ## 2026-07-29: Wave 4 strict release Clippy gate cleared
 
 What changed:
