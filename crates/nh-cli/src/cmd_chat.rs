@@ -393,12 +393,6 @@ fn print_price(s: &ChatSession, out: &mut dyn Write) {
         session_money(s, now)
     );
     let _ = writeln!(out, "{}", scrub_line(&s.scrubber, &line));
-    if quote.stale {
-        // Honest-cost rule: stale data is flagged, never silently trusted.
-        let warning =
-            "warning: price freshness missing or expired — verify before trusting these numbers";
-        let _ = writeln!(out, "{}", scrub_line(&s.scrubber, warning));
-    }
 }
 
 /// `/tools` — builtin tools first, then MCP tools, one line each; MCP warnings
@@ -482,7 +476,7 @@ fn add_session_cost(s: &mut ChatSession, usage: &nh_core::wire::Usage, at: DateT
         s.unpriced_turns = s.unpriced_turns.saturating_add(1);
         return;
     };
-    let uncertain = quote.stale || quote.confidence == PriceConfidence::VerifyLive;
+    let uncertain = quote.confidence == PriceConfidence::VerifyLive;
     if let Some(total) = s
         .session_cost
         .iter_mut()
@@ -508,7 +502,7 @@ fn session_money(s: &ChatSession, at: DateTime<Utc>) -> String {
                 || "—".into(),
                 |quote| {
                     let mut display = money_with_gloss(0.0, quote.currency, s.resolver.fx(), at);
-                    if quote.stale || quote.confidence == PriceConfidence::VerifyLive {
+                    if quote.confidence == PriceConfidence::VerifyLive {
                         display.push('*');
                     }
                     display

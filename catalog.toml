@@ -1,7 +1,5 @@
 # Nosis Harness route catalog — DATA, not code (AGENTS.md hard rule).
 # Prices and capabilities verified against first-party provider docs on 2026-07-26.
-# `valid_until = "2026-08-02"` is Nosis's short recheck deadline, not a provider
-# guarantee. Quotes become stale after it instead of silently trusting old prices.
 #
 # Schema, per route:
 #   class               "api" (direct, token-metered) | "local" (explicit loopback route) |
@@ -16,9 +14,7 @@
 #   quirks              wire quirks the adapters match by exact string
 #   [routes.<id>.price] currency "CNY"|"USD" · unit "per_million_tokens" ·
 #                       cache_hit / cache_miss / output (per M tokens) ·
-#                       price_confidence "confirmed"|"reported"|"verify_live" ·
-#                       valid_until "YYYY-MM-DD" (quotes flag stale past this date —
-#                       honest-cost rule: stale data is flagged, never guessed)
+#                       price_confidence "confirmed"|"reported"|"verify_live"
 #   [routes.<id>.price.peak]  multiplier · timezone (fixed offset, no DST) ·
 #                       windows ["HH:MM-HH:MM", ...] local to that timezone,
 #                       start inclusive, end exclusive.
@@ -50,7 +46,6 @@ cache_hit = 0.003625
 cache_miss = 0.435
 output = 0.87
 price_confidence = "confirmed"
-valid_until = "2026-08-02"
 
 [routes.deepseek-v4-flash]
 provider = "deepseek"
@@ -74,7 +69,6 @@ cache_hit = 0.0028
 cache_miss = 0.14
 output = 0.28
 price_confidence = "confirmed"
-valid_until = "2026-08-02"
 
 # ------------------------------------------------------------------ Kimi / Moonshot (plan B.2)
 # K2.7 protocol nuances are adapter-enforced: always-thinking (never send a mode
@@ -101,7 +95,6 @@ cache_hit = 0.19
 cache_miss = 0.95
 output = 4.00
 price_confidence = "confirmed" # 2026-07-26 platform.kimi.ai/docs/pricing/chat-k27-code
-valid_until = "2026-08-02"
 
 # Highspeed serving of the same model (~180 tok/s): human-waiting turns only.
 [routes."kimi-k2.7-code-highspeed"]
@@ -124,7 +117,6 @@ cache_hit = 0.38  # was 0.19 (reported) — first-party page lists 2x standard i
 cache_miss = 1.90 # was 0.95 (reported)
 output = 8.00
 price_confidence = "confirmed" # 2026-07-26 platform.kimi.ai/docs/pricing/chat-k27-code
-valid_until = "2026-08-02"
 
 # K3 model, limits, effort tiers, and prices re-verified first-party 2026-07-28
 # against platform.kimi.ai/docs/guide/kimi-k3-quickstart, /docs/api/chat,
@@ -151,7 +143,6 @@ cache_hit = 0.30
 cache_miss = 3.00
 output = 15.00
 price_confidence = "confirmed" # 2026-07-28 platform.kimi.ai
-valid_until = "2026-08-02"
 
 # K2.6 supports an explicit thinking toggle and requires reasoning replay while enabled.
 [routes."kimi-k2.6"]
@@ -175,7 +166,6 @@ cache_hit = 0.16    # was 0.60 worst-case; cache-hit rate now published first-pa
 cache_miss = 0.95   # was 0.60 (reported range) — first-party page supersedes
 output = 4.00       # was 2.65 (reported range) — first-party page supersedes
 price_confidence = "confirmed" # 2026-07-26 platform.kimi.ai/docs/pricing/chat-k26
-valid_until = "2026-08-02"
 
 # ------------------------------------------------------------------ MiMo / Xiaomi (plan B.3)
 # Plan B.3 pricing conflict RESOLVED and rechecked 2026-07-26: Xiaomi's own pricing page
@@ -205,7 +195,6 @@ cache_hit = 0.0036 # was 0.20 (reported) — first-party page supersedes
 cache_miss = 0.435 # conflict resolved: platform page lists $0.435, not the May 27 $1.00
 output = 0.87      # conflict resolved: platform page lists $0.87, not $3.00
 price_confidence = "confirmed" # 2026-07-26 mimo.mi.com/docs/en-US/price/pay-as-you-go
-valid_until = "2026-08-02"
 
 [routes."mimo-v2.5"]
 provider = "mimo"
@@ -228,7 +217,6 @@ cache_hit = 0.0028 # was 0.14 worst-case; cache-hit rate now published first-par
 cache_miss = 0.14
 output = 0.28
 price_confidence = "confirmed" # 2026-07-26 mimo.mi.com/docs/en-US/price/pay-as-you-go
-valid_until = "2026-08-02"
 
 # ------------------------------------------------------------------ GLM / Z.ai (plan B.4)
 # Free routes are the $0 CI/smoke-test lane. Zeros confirmed on Z.ai's own pricing
@@ -255,7 +243,6 @@ cache_hit = 0.26
 cache_miss = 1.40
 output = 4.40
 price_confidence = "confirmed" # 2026-07-26 docs.z.ai/guides/overview/pricing
-valid_until = "2026-08-02"
 
 [routes."glm-4.7-flash"]
 provider = "glm"
@@ -278,7 +265,6 @@ cache_hit = 0.0
 cache_miss = 0.0
 output = 0.0
 price_confidence = "confirmed" # 2026-07-26 docs.z.ai/guides/overview/pricing lists this model as Free
-valid_until = "2026-08-02"
 
 [routes."glm-4.6v-flash"]
 provider = "glm"
@@ -301,7 +287,6 @@ cache_hit = 0.0
 cache_miss = 0.0
 output = 0.0
 price_confidence = "confirmed" # 2026-07-26 docs.z.ai/guides/overview/pricing lists this model as Free
-valid_until = "2026-08-02"
 
 [routes."glm-4.5-flash"]
 provider = "glm"
@@ -324,7 +309,6 @@ cache_hit = 0.0
 cache_miss = 0.0
 output = 0.0
 price_confidence = "confirmed" # 2026-07-26 docs.z.ai/guides/overview/pricing lists this model as Free
-valid_until = "2026-08-02"
 
 # ------------------------------------------------------------------ Local routes (user-filled)
 # Local routes are explicit-selection-only: `nh why`, resolve_capable, provider

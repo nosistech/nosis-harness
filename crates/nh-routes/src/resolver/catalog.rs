@@ -65,8 +65,6 @@ struct RawPrice {
     output: f64,
     price_confidence: String,
     #[serde(default)]
-    valid_until: Option<String>,
-    #[serde(default)]
     peak: Option<RawPeak>,
 }
 
@@ -215,13 +213,6 @@ fn parse_price(id: &str, raw: RawPrice) -> anyhow::Result<RoutePrice> {
     check_rate(id, "cache_miss", raw.cache_miss)?;
     check_rate(id, "output", raw.output)?;
     let confidence = parse_confidence(&format!("route '{id}'"), &raw.price_confidence)?;
-    let valid_until = raw
-        .valid_until
-        .map(|s| {
-            NaiveDate::parse_from_str(&s, "%Y-%m-%d")
-                .map_err(|_| anyhow!("route '{id}': bad valid_until '{s}' — use YYYY-MM-DD"))
-        })
-        .transpose()?;
     let peak = raw.peak.map(|p| parse_peak(id, p)).transpose()?;
     Ok(RoutePrice {
         currency,
@@ -229,7 +220,6 @@ fn parse_price(id: &str, raw: RawPrice) -> anyhow::Result<RoutePrice> {
         cache_miss: raw.cache_miss,
         output: raw.output,
         confidence,
-        valid_until,
         peak,
     })
 }

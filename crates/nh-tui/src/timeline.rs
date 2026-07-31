@@ -201,7 +201,7 @@ pub(super) fn record_turn_cost(app: &mut App, usage: &Usage, at: DateTime<Utc>) 
         let _ = apply_event(app, AgentEvent::MeterIncomplete);
         return;
     };
-    let uncertain = quote.stale || quote.confidence == PriceConfidence::VerifyLive;
+    let uncertain = quote.confidence == PriceConfidence::VerifyLive;
     app.add_session_cost(quote.currency, actual, uncertain);
     for line in savings_lines(&app.resolver, &app.route, usage, at) {
         app.push_line(&line, TranscriptKind::Progress);
@@ -225,7 +225,7 @@ pub(super) fn savings_lines(
         return vec!["cost unpriced — invalid usage; meter incomplete".into()];
     };
     let mut paid = money_with_gloss(actual, quote.currency, resolver.fx(), at);
-    let uncertain = quote.stale || quote.confidence == PriceConfidence::VerifyLive;
+    let uncertain = quote.confidence == PriceConfidence::VerifyLive;
     if uncertain {
         paid.push('*');
     }
@@ -253,11 +253,7 @@ pub(super) fn savings_lines(
         ));
     }
     if uncertain {
-        lines.push(if quote.stale {
-            "*price stale".into()
-        } else {
-            "*price verify_live".into()
-        });
+        lines.push("*price verify_live".into());
     }
     lines
 }

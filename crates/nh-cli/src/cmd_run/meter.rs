@@ -78,7 +78,7 @@ pub(crate) fn turn_cost_line(
         return Some("cost unpriced — invalid usage; meter incomplete".into());
     };
     let mut paid = money_with_gloss(actual, quote.currency, resolver.fx(), at);
-    if quote.stale || quote.confidence == PriceConfidence::VerifyLive {
+    if quote.confidence == PriceConfidence::VerifyLive {
         paid.push('*');
     }
     let mut line = format!("cost {paid}");
@@ -103,9 +103,7 @@ pub(crate) fn turn_cost_line(
             money(costs.top_tier, costs.currency)
         ));
     }
-    if quote.stale {
-        line.push_str(" · *price stale");
-    } else if quote.confidence == PriceConfidence::VerifyLive {
+    if quote.confidence == PriceConfidence::VerifyLive {
         line.push_str(" · *price verify_live");
     }
     Some(line)

@@ -25,7 +25,6 @@ const METER_CATALOG: &str = r#"
     cache_hit = 0.1
     cache_miss = 1.0
     output = 2.0
-    valid_until = "2099-01-01"
     price_confidence = "confirmed"
 
     [routes.expensive]
@@ -43,7 +42,6 @@ const METER_CATALOG: &str = r#"
     cache_hit = 0.2
     cache_miss = 4.0
     output = 8.0
-    valid_until = "2099-01-01"
     price_confidence = "reported"
 
     [routes.too-small]
@@ -60,7 +58,6 @@ const METER_CATALOG: &str = r#"
     cache_hit = 0.01
     cache_miss = 0.01
     output = 0.01
-    valid_until = "2099-01-01"
     price_confidence = "confirmed"
 "#;
 
@@ -280,6 +277,7 @@ fn route_cost_matches_quote_and_omits_usd_when_fx_absent_or_stale() {
         result["structuredContent"]["quote"]["confidence"],
         quote.confidence.as_str()
     );
+    assert!(result["structuredContent"]["quote"].get("stale").is_none());
     assert!(result["structuredContent"]["cost"]
         .get("usd_approx")
         .is_none());

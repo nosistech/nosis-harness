@@ -5,7 +5,9 @@ use crate::session::{effort_for, effort_name, parse_effort};
 use crate::state::{AgentEvent, App, Overlay, PaletteEntry, PickerKind, PickerRow, TranscriptKind};
 use crate::timeline::apply_event;
 use chrono::Utc;
-use nh_routes::{cost_of, money_with_gloss, PriceConfidence, ResolvedRoute, RouteClass};
+use nh_routes::{
+    cost_of, money_with_gloss, to_usd_approx, Currency, PriceConfidence, ResolvedRoute, RouteClass,
+};
 
 pub(crate) fn execute_command_menu(app: &mut App) -> UiAction {
     let command_text = app.input.strip_prefix('/').unwrap_or("");
@@ -179,6 +181,18 @@ fn model_picker_rows(app: &App) -> Vec<PickerRow> {
     let required = prompt_est.saturating_add(output_est);
     let ids = app.resolver.available();
     let at = Utc::now();
+    let currencies = ids
+        .iter()
+        .filter_map(|id| {
+            let route = app.resolver.resolve(id).ok()?;
+            (route.class() == RouteClass::Api)
+                .then(|| route.price_at(at).map(|quote| quote.currency))
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    let mixed_currency = currencies
+        .first()
+        .is_some_and(|first| currencies.iter().any(|currency| currency != first));
 
     ids.into_iter()
         .filter_map(|id| {
@@ -218,8 +232,14 @@ fn model_picker_rows(app: &App) -> Vec<PickerRow> {
                 },
             );
             let price_state = quote.as_ref().map_or("", |quote| {
-                if quote.stale {
-                    " · price stale · comparison refused"
+                let fx_refuses_comparison = mixed_currency
+                    && quote.currency == Currency::Cny
+                    && app
+                        .resolver
+                        .fx()
+                        .is_none_or(|fx| to_usd_approx(0.0, quote.currency, fx, at).is_none());
+                if fx_refuses_comparison {
+                    " · fx stale · comparison refused"
                 } else if quote.confidence == PriceConfidence::VerifyLive {
                     " · price verify_live"
                 } else {
@@ -346,9 +366,7 @@ pub(crate) fn explain_why(app: &mut App) -> UiAction {
                 "  unpriced this turn (est) — meter incomplete".into()
             }
         };
-        if quote.stale {
-            line.push_str(" · *price stale");
-        } else if quote.confidence == PriceConfidence::VerifyLive {
+        if quote.confidence == PriceConfidence::VerifyLive {
             line.push_str(" · *price verify_live");
         }
         app.push_line(&line, TranscriptKind::Progress);

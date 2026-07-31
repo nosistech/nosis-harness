@@ -32,7 +32,6 @@ fn peak_route() -> ResolvedRoute {
         cache_miss = 3.00
         output = 6.00
         price_confidence = "confirmed"
-        valid_until = "2099-12-31"
         [routes.peak-route.price.peak]
         multiplier = 2.0
         timezone = "Asia/Shanghai"
@@ -182,7 +181,6 @@ fn mixed_currency_catalog(fx_valid_until: Option<&str>) -> String {
         cache_hit = 3.0
         cache_miss = 3.0
         output = 3.0
-        valid_until = "2099-12-31"
         price_confidence = "reported"
 
         [routes.usd-route]
@@ -198,7 +196,6 @@ fn mixed_currency_catalog(fx_valid_until: Option<&str>) -> String {
         cache_hit = 2.0
         cache_miss = 2.0
         output = 2.0
-        valid_until = "2099-12-31"
         price_confidence = "reported"
         "#
     )
@@ -287,7 +284,7 @@ fn deepseek_routes_carry_dialect_quirk_and_limits() {
 }
 
 #[test]
-fn repo_catalog_prices_are_fresh_and_comparable_on_verification_date() {
+fn repo_catalog_prices_are_usd_and_comparable() {
     let resolver = resolver();
     let verified_at = utc(2026, 7, 26, 12, 0, 0);
     for id in resolver.available() {
@@ -296,7 +293,6 @@ fn repo_catalog_prices_are_fresh_and_comparable_on_verification_date() {
             .price_at(verified_at)
             .expect("every v1 route is priced");
         assert_eq!(quote.currency, Currency::Usd, "{id}");
-        assert!(!quote.stale, "{id}");
     }
 
     let pro = resolver
@@ -549,7 +545,6 @@ fn peak_quote_doubles_all_rates() {
     assert!(close(quote.output, 12.00), "got {}", quote.output);
     assert_eq!(quote.currency, Currency::Cny);
     assert_eq!(quote.confidence, PriceConfidence::Confirmed);
-    assert!(!quote.stale);
 }
 
 #[test]
@@ -593,22 +588,9 @@ fn routes_without_peak_windows_are_never_peak() {
 }
 
 #[test]
-fn stale_flag_flips_after_valid_until() {
-    // Provider prices carry valid_until = 2026-08-02 (valid through that UTC day).
-    let route = resolver().resolve("deepseek-v4-flash").unwrap();
-    let fresh = route.price_at(utc(2026, 8, 2, 23, 59, 59)).unwrap();
-    assert!(!fresh.stale, "still valid on the valid_until day");
-    let stale = route.price_at(utc(2026, 8, 3, 0, 0, 0)).unwrap();
-    assert!(
-        stale.stale,
-        "past valid_until must flag stale — honest-cost rule"
-    );
-}
-
-#[test]
-fn free_glm_route_quotes_zero_and_obeys_recheck_deadline() {
+fn free_glm_route_quotes_zero_without_expiry() {
     let route = resolver().resolve("glm-4.7-flash").unwrap();
-    let quote = route.price_at(utc(2026, 8, 2, 12, 0, 0)).unwrap();
+    let quote = route.price_at(utc(2099, 1, 1, 12, 0, 0)).unwrap();
     assert!(close(quote.cache_hit, 0.0));
     assert!(close(quote.cache_miss, 0.0));
     assert!(close(quote.output, 0.0));
@@ -616,13 +598,6 @@ fn free_glm_route_quotes_zero_and_obeys_recheck_deadline() {
     // Free tier confirmed 2026-07-26 (docs.z.ai/guides/overview/pricing).
     assert_eq!(quote.confidence, PriceConfidence::Confirmed);
     assert!(!quote.peak);
-    assert!(!quote.stale);
-    assert!(
-        route
-            .price_at(utc(2026, 8, 3, 0, 0, 0))
-            .is_some_and(|quote| quote.stale),
-        "the free tier still needs a price recheck"
-    );
 }
 
 #[test]
@@ -652,7 +627,6 @@ fn cost_of_splits_cached_miss_and_output_tokens() {
         currency: Currency::Cny,
         peak: false,
         confidence: PriceConfidence::Confirmed,
-        stale: false,
     };
     assert!(close(cost_of(&quote, 1_000, 400, 100).unwrap(), 0.0084));
     assert_eq!(cost_of(&quote, 100, 200, 0), None);
@@ -668,7 +642,7 @@ fn cost_of_splits_cached_miss_and_output_tokens() {
 }
 
 #[test]
-fn undated_price_remains_available_for_native_cost_and_counterfactuals() {
+fn price_block_without_freshness_key_loads_and_produces_normal_quote() {
     let catalog = r#"
         [routes.native]
         provider = "p"
@@ -688,7 +662,12 @@ fn undated_price_remains_available_for_native_cost_and_counterfactuals() {
     let route = resolver.resolve("native").unwrap();
     let at = utc(2026, 7, 20, 0, 0, 0);
     let quote = route.price_at(at).unwrap();
-    assert!(quote.stale);
+    assert!(close(quote.cache_hit, 1.0));
+    assert!(close(quote.cache_miss, 3.0));
+    assert!(close(quote.output, 2.0));
+    assert_eq!(quote.currency, Currency::Cny);
+    assert_eq!(quote.confidence, PriceConfidence::Confirmed);
+    assert!(!quote.peak);
     let actual = cost_of(&quote, 1_000_000, 500_000, 100_000).unwrap();
     let costs = resolver
         .naive_cost(&route, 1_000_000, 500_000, 100_000, at)
@@ -829,6 +808,25 @@ fn usd_approx_requires_fresh_cny_and_formats_consistently() {
         money_with_gloss(0.02, Currency::Usd, Some(&fx), fresh),
         "$0.02"
     );
+}
+
+#[test]
+fn fx_staleness_still_refuses_conversion_after_catalog_parsing() {
+    let catalog = format!(
+        r#"
+        [fx]
+        usd_per_cny = 0.139
+        valid_until = "2026-07-24"
+        price_confidence = "reported"
+        {}
+        "#,
+        route_toml("")
+    );
+    let resolver = RouteResolver::from_toml(&catalog).unwrap();
+    let fx = resolver.fx().expect("parsed fx metadata");
+
+    assert!(to_usd_approx(1.0, Currency::Cny, fx, utc(2026, 7, 24, 23, 59, 59)).is_some());
+    assert!(to_usd_approx(1.0, Currency::Cny, fx, utc(2026, 7, 25, 0, 0, 0)).is_none());
 }
 
 #[test]
@@ -1361,12 +1359,6 @@ fn bad_price_fields_are_rejected() {
         .expect("must fail")
         .to_string();
     assert!(msg.contains("output"), "got: {msg}");
-    // Bad valid_until.
-    let msg = RouteResolver::from_toml(&price(r#"valid_until = "July 24""#))
-        .err()
-        .expect("must fail")
-        .to_string();
-    assert!(msg.contains("YYYY-MM-DD"), "got: {msg}");
 }
 
 #[test]

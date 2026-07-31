@@ -10,8 +10,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Self-contained catalog: a peak-priced deepseek route, kimi, two free glm
 /// routes (alphabetical tie-break), a delegate route, and an unpriced route.
-/// Its 2026-07-24 dates are deliberate: injected clocks exercise both sides
-/// of the freshness boundary.
 const TEST_CATALOG: &str = r#"
     [fx]
     usd_per_cny = 0.139
@@ -35,7 +33,6 @@ const TEST_CATALOG: &str = r#"
     cache_miss = 1.00
     output = 2.00
     price_confidence = "confirmed"
-    valid_until = "2026-07-24"
 
     [routes.deepseek-v4-flash.price.peak]
     multiplier = 2.0
@@ -149,7 +146,7 @@ impl ChatClient for MockClient {
     }
 }
 
-/// Fixed instant: 2026-07-15 Beijing 08:00 (00:00 UTC) — off-peak, not stale.
+/// Fixed instant: 2026-07-15 Beijing 08:00 (00:00 UTC) — off-peak.
 fn off_peak_now() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap()
 }
@@ -451,21 +448,6 @@ fn peak_boundary_is_shown_in_the_users_local_time() {
     s.local_offset = FixedOffset::west_opt(6 * 3600).unwrap();
     let (out, _err) = drive(&mut s, &["/price"]);
     assert!(out.contains("peak 2x until 22:00"), "got: {out}");
-}
-
-#[test]
-fn price_after_valid_until_adds_stale_warning() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (mut s, _calls) = test_session("deepseek-v4-flash", tmp.path());
-    s.now = Box::new(|| Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap());
-    let (out, _err) = drive(&mut s, &["/price"]);
-    assert!(out.contains("off-peak"), "got: {out}");
-    assert!(
-        out.contains(
-            "warning: price freshness missing or expired — verify before trusting these numbers"
-        ),
-        "honest-cost rule: {out}"
-    );
 }
 
 #[test]

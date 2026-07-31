@@ -109,11 +109,9 @@ impl ResolvedRoute {
     /// Price per million tokens at `at` (UTC). None when the route carries no
     /// price table. Peak windows are evaluated in the route's fixed-offset
     /// timezone; when `at` is inside a window, all three rates scale by the
-    /// multiplier. `stale` = `valid_until` is absent or `at` falls after it
-    /// (dated prices are valid through that whole UTC day).
+    /// multiplier.
     pub fn price_at(&self, at: DateTime<Utc>) -> Option<PriceQuote> {
         let price = self.price.as_ref()?;
-        let stale = price.valid_until.is_none_or(|d| at.date_naive() > d);
         let (peak, factor) = match &price.peak {
             Some(p) if p.is_peak(at) => (true, p.multiplier),
             _ => (false, 1.0),
@@ -125,7 +123,6 @@ impl ResolvedRoute {
             currency: price.currency,
             peak,
             confidence: price.confidence,
-            stale,
         })
     }
 
@@ -221,7 +218,6 @@ impl RouteResolver {
                     currency: price.currency,
                     peak: true,
                     confidence: price.confidence,
-                    stale: quote.stale,
                 })
             })
             .map_or(Some(actual), |peak_quote| {
@@ -366,13 +362,7 @@ impl RouteResolver {
                 route,
                 native_cost: expected_cost,
                 currency: price.currency,
-                usd_cost: usd_compare_key(
-                    expected_cost,
-                    price.currency,
-                    self.fx.as_ref(),
-                    at,
-                    price.stale,
-                ),
+                usd_cost: usd_compare_key(expected_cost, price.currency, self.fx.as_ref(), at),
             });
         }
 

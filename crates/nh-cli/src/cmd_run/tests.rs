@@ -16,7 +16,6 @@ const PEAK_CATALOG: &str = r#"
     cache_miss = 1.0
     output = 2.0
     price_confidence = "confirmed"
-    valid_until = "2099-12-31"
 
     [routes.peak-route.price.peak]
     multiplier = 2.0

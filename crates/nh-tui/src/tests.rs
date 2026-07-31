@@ -39,9 +39,7 @@ const TEST_CATALOG: &str = r#"
     context = 2000
 "#;
 
-// Far-future `valid_until` = "fresh" for fixture purposes, matching the
-// 2099-01-01 sentinel in nh-mcp. Tests here that need a stale price inject
-// their own clock; a dated fixture would age out and break the live-clock test.
+// Far-future FX metadata keeps CNY-to-USD fixture glosses deterministic.
 const METER_CATALOG: &str = r#"
     [fx]
     usd_per_cny = 0.139
@@ -63,7 +61,6 @@ const METER_CATALOG: &str = r#"
     cache_miss = 1.0
     output = 2.0
     price_confidence = "confirmed"
-    valid_until = "2099-01-01"
     [routes.meter-route.price.peak]
     multiplier = 2.0
     timezone = "Asia/Shanghai"
@@ -103,6 +100,11 @@ const METER_CATALOG: &str = r#"
 "#;
 
 const PICKER_CATALOG: &str = r#"
+    [fx]
+    usd_per_cny = 0.139
+    valid_until = "2020-01-01"
+    price_confidence = "reported"
+
     [routes.a-cheap]
     provider = "alpha"
     model_id = "a-cheap"
@@ -117,7 +119,6 @@ const PICKER_CATALOG: &str = r#"
     cache_miss = 0.1
     output = 0.1
     price_confidence = "confirmed"
-    valid_until = "2099-01-01"
 
     [routes.b-expensive]
     provider = "beta"
@@ -133,7 +134,6 @@ const PICKER_CATALOG: &str = r#"
     cache_miss = 0.2
     output = 0.2
     price_confidence = "confirmed"
-    valid_until = "2099-01-01"
 
     [routes.c-unknown-context]
     provider = "gamma"
@@ -148,7 +148,6 @@ const PICKER_CATALOG: &str = r#"
     cache_miss = 0.0
     output = 0.0
     price_confidence = "confirmed"
-    valid_until = "2099-01-01"
 
     [routes.d-unknown-price]
     provider = "delta"
@@ -158,21 +157,20 @@ const PICKER_CATALOG: &str = r#"
     vault_entry = "delta"
     context = 100000
 
-    [routes.e-stale]
+    [routes.e-cny]
     provider = "epsilon"
-    model_id = "e-stale"
+    model_id = "e-cny"
     base_url = "https://example.invalid"
     wire = "openai"
     vault_entry = "epsilon"
     context = 100000
-    [routes.e-stale.price]
-    currency = "USD"
+    [routes.e-cny.price]
+    currency = "CNY"
     unit = "per_million_tokens"
     cache_hit = 0.3
     cache_miss = 0.3
     output = 0.3
     price_confidence = "confirmed"
-    valid_until = "2020-01-01"
 
     [routes.f-local]
     provider = "ollama"
@@ -1014,7 +1012,7 @@ fn bare_model_opens_an_honest_catalog_picker_and_uses_the_typed_switch_action() 
         labels[3]
     );
     assert!(
-        labels[4].contains("est $0.0003 · price stale · comparison refused"),
+        labels[4].contains("est ¥0.0003 · fx stale · comparison refused"),
         "got: {}",
         labels[4]
     );
