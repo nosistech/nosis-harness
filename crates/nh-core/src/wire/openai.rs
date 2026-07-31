@@ -6,7 +6,8 @@ use zeroize::Zeroizing;
 use super::http::{client, provider_error, read_body_capped, send_error, MAX_PROVIDER_BODY_BYTES};
 use super::usage_debug::UsageDebug;
 use super::{
-    ChatClient, ChatMessage, ChatRequest, ChatResponse, ThinkingEffort, ToolCallReq, Usage,
+    ChatClient, ChatMessage, ChatRequest, ChatResponse, ContentPart, ThinkingEffort, ToolCallReq,
+    Usage,
 };
 
 pub(super) const DEFAULT_MAX_TOKENS: u64 = 65_536;
@@ -95,7 +96,26 @@ pub(super) fn build_body(request: &ChatRequest, policy: OpenAiPolicy) -> serde_j
         .iter()
         .map(|message| {
             let mut encoded = serde_json::json!({ "role": message.role });
-            if let Some(content) = &message.content {
+            if let Some(parts) = &message.parts {
+                encoded["content"] = serde_json::Value::Array(
+                    parts
+                        .iter()
+                        .map(|part| match part {
+                            ContentPart::Text { text } => {
+                                serde_json::json!({"type": "text", "text": text})
+                            }
+                            ContentPart::ImageB64 { media_type, data } => {
+                                serde_json::json!({
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": format!("data:{media_type};base64,{data}")
+                                    }
+                                })
+                            }
+                        })
+                        .collect(),
+                );
+            } else if let Some(content) = &message.content {
                 encoded["content"] = serde_json::Value::String(content.clone());
             }
             if let Some(calls) = &message.tool_calls {
@@ -317,6 +337,7 @@ pub(super) fn parse_response(body: &str) -> anyhow::Result<ChatResponse> {
         message: ChatMessage {
             role: choice.message.role.unwrap_or_else(|| "assistant".into()),
             content: choice.message.content,
+            parts: None,
             tool_calls,
             tool_call_id: None,
             reasoning_content: choice.message.reasoning_content,

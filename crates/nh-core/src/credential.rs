@@ -15,6 +15,36 @@ pub fn connect<V: Vault>(
     approved_origins: &[String],
     output_cap: Option<u64>,
 ) -> anyhow::Result<CredentialedConnection> {
+    connect_with_image_routes(vault, route, approved_origins, output_cap, &[])
+}
+
+/// Catalog-aware connection used by image-capable frontends. The route client
+/// keeps the live catalog suggestions for its final pre-HTTP capability gate.
+pub fn connect_with_catalog<V: Vault>(
+    vault: &V,
+    route: &ResolvedRoute,
+    approved_origins: &[String],
+    output_cap: Option<u64>,
+    resolver: &nh_routes::RouteResolver,
+) -> anyhow::Result<CredentialedConnection> {
+    connect_with_image_routes(
+        vault,
+        route,
+        approved_origins,
+        output_cap,
+        &resolver.routes_with_modality("image"),
+    )
+}
+
+/// Connect with an already catalog-derived, sorted image-route list. This
+/// keeps long-lived frontend connector closures independent of the resolver.
+pub fn connect_with_image_routes<V: Vault>(
+    vault: &V,
+    route: &ResolvedRoute,
+    approved_origins: &[String],
+    output_cap: Option<u64>,
+    image_capable_routes: &[String],
+) -> anyhow::Result<CredentialedConnection> {
     match route.class() {
         RouteClass::Api | RouteClass::Local => {}
         RouteClass::Delegate => {
@@ -29,7 +59,10 @@ pub fn connect<V: Vault>(
     )?;
     let literal = secret.clone();
     let output_cap = min_cap(route.max_out(), output_cap);
-    Ok((make_client(route, secret, output_cap)?, literal))
+    Ok((
+        make_client(route, secret, output_cap, image_capable_routes.to_vec())?,
+        literal,
+    ))
 }
 
 fn min_cap(route_cap: Option<u64>, requested_cap: Option<u64>) -> Option<u64> {

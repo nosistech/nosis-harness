@@ -44,6 +44,7 @@ fn parses_run_with_defaults() {
             think,
             autonomy,
             profile,
+            image,
         } => {
             assert_eq!(task, "fix the failing test");
             assert_eq!(model, "deepseek-v4-flash");
@@ -51,6 +52,7 @@ fn parses_run_with_defaults() {
             assert_eq!(think, None, "no --think = per-dialect default");
             assert_eq!(autonomy, None, "no --autonomy = law-file default");
             assert_eq!(profile, "balanced");
+            assert!(image.is_empty());
         }
         _ => panic!("expected run"),
     }
@@ -76,6 +78,7 @@ fn parses_run_with_overrides() {
             think,
             autonomy,
             profile,
+            image,
         } => {
             assert_eq!(task, "review the diff");
             assert_eq!(model, "deepseek-v4-pro");
@@ -83,6 +86,7 @@ fn parses_run_with_overrides() {
             assert_eq!(think, None);
             assert_eq!(autonomy, None);
             assert_eq!(profile, "balanced");
+            assert!(image.is_empty());
         }
         _ => panic!("expected run"),
     }
@@ -91,6 +95,41 @@ fn parses_run_with_overrides() {
 #[test]
 fn run_requires_a_task() {
     assert!(Cli::try_parse_from(["nh", "run"]).is_err());
+}
+
+#[test]
+fn parses_repeatable_run_images() {
+    let cli = Cli::try_parse_from([
+        "nh",
+        "run",
+        "--image",
+        "first.png",
+        "--image",
+        "second.jpg",
+        "explain the screenshots",
+    ])
+    .unwrap();
+
+    match cli.cmd {
+        Cmd::Run { task, image, .. } => {
+            assert_eq!(task, "explain the screenshots");
+            assert_eq!(image, ["first.png", "second.jpg"]);
+        }
+        _ => panic!("expected run"),
+    }
+}
+
+#[test]
+fn run_help_discovers_supported_image_formats_and_limit() {
+    use clap::CommandFactory as _;
+
+    let mut command = Cli::command();
+    let run = command.find_subcommand_mut("run").expect("run subcommand");
+    let help = run.render_long_help().to_string();
+
+    assert!(help.contains("--image <PATH>"), "got: {help}");
+    assert!(help.contains("PNG or JPEG"), "got: {help}");
+    assert!(help.contains("maximum 4"), "got: {help}");
 }
 
 #[test]

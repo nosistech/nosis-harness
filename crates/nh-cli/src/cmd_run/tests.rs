@@ -37,6 +37,15 @@ fn mcp_config(name: &str, url: &str, trust: McpTrust) -> McpServerConfig {
 }
 
 #[test]
+fn run_refuses_more_than_four_images_before_loading() {
+    assert!(validate_image_count(4).is_ok());
+    assert_eq!(
+        validate_image_count(5).unwrap_err().to_string(),
+        "a message can attach at most 4 images - remove the extra image paths"
+    );
+}
+
+#[test]
 fn finds_catalog_walking_up_from_nested_dir() {
     let tmp = tempfile::tempdir().unwrap();
     fs::write(tmp.path().join("catalog.toml"), BUNDLED_CATALOG).unwrap();

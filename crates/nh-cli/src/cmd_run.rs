@@ -27,10 +27,10 @@ use nh_core::credential;
 use nh_core::receipt::{Outcome, ReceiptWriter};
 #[cfg(test)]
 use nh_core::wire::Usage;
-use nh_core::wire::{resolve_effort, ThinkingEffort};
+use nh_core::wire::{ensure_image_capable, resolve_effort, ContentPart, ThinkingEffort};
 use nh_law::{Autonomy, LoadOptions};
 use nh_routes::{RouteClass, RouteResolver, ThinkingDialect, ThinkingPosture, Wire};
-use nh_tools::{builtin_tools, Access, ToolCtx};
+use nh_tools::{builtin_tools, load_image, Access, ToolCtx, MAX_IMAGES_PER_MESSAGE};
 #[cfg(test)]
 use nh_tools::{McpAuth, McpServerConfig, McpTrust};
 use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, SecretRegistry};
@@ -104,8 +104,10 @@ pub fn run(
     think: Option<ThinkArg>,
     autonomy: Option<AutonomyArg>,
     profile: &str,
+    images: &[String],
 ) -> anyhow::Result<()> {
     validate_task(task)?;
+    validate_image_count(images.len())?;
     let cwd = std::env::current_dir()?;
     let (root, catalog) = find_catalog(&cwd)?;
     let law = nh_law::load(
@@ -131,13 +133,21 @@ pub fn run(
     if route.class() == RouteClass::Delegate {
         anyhow::bail!("{DELEGATE_MSG}");
     }
+    if !images.is_empty() {
+        ensure_image_capable(&route, &resolver)?;
+    }
 
     let vault = EnvFallbackVault {
         inner: KeyringVault,
     };
     let approved = law.policy.approved_audiences(route.vault_entry());
-    let (client, literal) =
-        credential::connect(&vault, &route, &approved, execution_policy.output_cap)?;
+    let (client, literal) = credential::connect_with_catalog(
+        &vault,
+        &route,
+        &approved,
+        execution_policy.output_cap,
+        &resolver,
+    )?;
     let mut active_secrets = SecretRegistry::new();
     active_secrets.insert(literal);
     let session_scrubber = active_secrets.scrubber();
@@ -159,6 +169,10 @@ pub fn run(
         Access::Exec(command) => guard_from(policy.exec_verdict(command)),
         Access::Send(target) => guard_from(policy.send_verdict(target)),
     }));
+    let image_parts = images
+        .iter()
+        .map(|path| image_part(path, &ctx))
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let receipts = ReceiptWriter::project(root.clone(), session_scrubber.clone());
     let mut agent = AgentLoop {
         client,
@@ -188,7 +202,12 @@ pub fn run(
     );
     let scrubber = session_scrubber;
     let started = Utc::now();
-    let result = agent.run(task);
+    let result = if image_parts.is_empty() {
+        agent.run(task)
+    } else {
+        let mut history = Vec::new();
+        agent.run_with_history_and_parts(&mut history, task, image_parts)
+    };
     let ended = Utc::now();
     let (answer, receipt) =
         result.map_err(|e| anyhow::anyhow!("{}", safe_line(&scrubber, &e.to_string())))?;
@@ -211,6 +230,23 @@ pub fn run(
         anyhow::bail!("{}", max_turns_timeout_message(max_turns));
     }
     Ok(())
+}
+
+pub(crate) fn validate_image_count(count: usize) -> anyhow::Result<()> {
+    if count > MAX_IMAGES_PER_MESSAGE {
+        anyhow::bail!(
+            "a message can attach at most {MAX_IMAGES_PER_MESSAGE} images - remove the extra image paths"
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn image_part(path: &str, ctx: &ToolCtx) -> anyhow::Result<ContentPart> {
+    let image = load_image(path, ctx)?;
+    Ok(ContentPart::ImageB64 {
+        media_type: image.media_type,
+        data: image.data,
+    })
 }
 
 fn write_run_output<W: Write, E: Write>(

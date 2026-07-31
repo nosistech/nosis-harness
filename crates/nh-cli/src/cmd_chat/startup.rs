@@ -76,7 +76,7 @@ pub(super) fn open(model: &str, profile: &str) -> anyhow::Result<ChatSession> {
         profiles,
         execution_policy,
     } = Startup::load(model, profile)?;
-    let connect = connector(&law.policy);
+    let connect = connector(&law.policy, resolver.routes_with_modality("image"));
     let initial = initial_connection(&connect, &route, execution_policy.output_cap)?;
     let registry_scrubber = initial.key_literals.scrubber();
     let scrubber: SharedScrubber = Arc::new(RwLock::new(registry_scrubber.clone()));
@@ -139,6 +139,7 @@ pub(super) fn open(model: &str, profile: &str) -> anyhow::Result<ChatSession> {
         now: Box::new(Utc::now),
         local_offset: *chrono::Local::now().offset(),
         mcp_warnings,
+        pending_images: Vec::new(),
     })
 }
 
@@ -148,17 +149,18 @@ fn print_warnings(warnings: &[String], scrubber: &Scrubber) {
     }
 }
 
-fn connector(policy: &Policy) -> ConnectFn {
+fn connector(policy: &Policy, image_capable_routes: Vec<String>) -> ConnectFn {
     let policy = policy.clone();
     Box::new(move |route, output_cap| {
         let vault = EnvFallbackVault {
             inner: KeyringVault,
         };
-        credential::connect(
+        credential::connect_with_image_routes(
             &vault,
             route,
             &policy.approved_audiences(route.vault_entry()),
             output_cap,
+            &image_capable_routes,
         )
     })
 }

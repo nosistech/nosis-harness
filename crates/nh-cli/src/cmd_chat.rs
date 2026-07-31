@@ -12,7 +12,7 @@ use std::sync::{Arc, RwLock};
 
 use chrono::{DateTime, FixedOffset, Utc};
 use nh_core::agent::{AgentLoop, MAX_TASK_BYTES};
-use nh_core::wire::{cache_hit_pct, ChatClient, ChatMessage};
+use nh_core::wire::{cache_hit_pct, ensure_image_capable, ChatClient, ChatMessage, ContentPart};
 use nh_routes::{
     cost_of, money, money_with_gloss, Currency, PriceConfidence, Profiles, ResolvedRoute,
     RouteClass, RouteResolver, LOCAL_METER_COPY,
@@ -111,12 +111,16 @@ struct ChatSession {
     now: Box<dyn Fn() -> DateTime<Utc>>,
     local_offset: FixedOffset,
     mcp_warnings: Vec<String>,
+    pending_images: Vec<ContentPart>,
 }
+
+const CHAT_HELP: &str = "commands: /image <path> (PNG or JPEG; max 4 for the next message), \
+                         /model <id>, /provider <name>, /price, /tools, /quit";
 
 pub fn run(model: &str, profile: &str) -> anyhow::Result<()> {
     let mut session = startup::open(model, profile)?;
     eprintln!(
-        "chat started on {} - /model <id>, /provider <name>, /price, /tools, /quit",
+        "chat started on {} - use /image <path> for PNG or JPEG; /help lists commands",
         scrub_line(&session.scrubber, session.route.id())
     );
     let mut next_line = || {
@@ -204,6 +208,9 @@ fn handle_command(
     let arg = parts.next();
     match (name, arg) {
         ("quit", _) => return Flow::Quit,
+        ("help", _) => {
+            let _ = writeln!(out, "{CHAT_HELP}");
+        }
         ("model", Some(id)) => match s.resolver.resolve(id) {
             Ok(route) => switch_to(s, route, out, err),
             Err(e) => print_err(s, err, &e.to_string()),
@@ -214,13 +221,19 @@ fn handle_command(
             Err(e) => print_err(s, err, &e.to_string()),
         },
         ("provider", None) => print_err(s, err, "usage: /provider <name>"),
+        ("image", _) => {
+            let path = cmd
+                .strip_prefix(name)
+                .map(str::trim)
+                .filter(|path| !path.is_empty());
+            match path {
+                Some(path) => attach_image(s, path, out, err),
+                None => print_err(s, err, "usage: /image <path> (PNG or JPEG; max 4)"),
+            }
+        }
         ("price", _) => print_price(s, out),
         ("tools", _) => print_tools(s, out, err),
-        _ => print_err(
-            s,
-            err,
-            "unknown command - try /model <id>, /provider <name>, /price, /tools, /quit",
-        ),
+        _ => print_err(s, err, "unknown command - type /help"),
     }
     Flow::Continue
 }
@@ -240,7 +253,14 @@ fn run_task(s: &mut ChatSession, task: &str, out: &mut dyn Write, err: &mut dyn 
             }
         }
     }
-    match s.agent.run_with_history(&mut s.history, task) {
+    let image_parts = std::mem::take(&mut s.pending_images);
+    let result = if image_parts.is_empty() {
+        s.agent.run_with_history(&mut s.history, task)
+    } else {
+        s.agent
+            .run_with_history_and_parts(&mut s.history, task, image_parts)
+    };
+    match result {
         Ok((answer, receipt)) => {
             let _ = writeln!(out, "{}", scrub_text(&s.scrubber, &answer));
             let is_local = s.route.class() == RouteClass::Local;
@@ -261,6 +281,33 @@ fn run_task(s: &mut ChatSession, task: &str, out: &mut dyn Write, err: &mut dyn 
             let _ = writeln!(err, "{}", scrub_line(&s.scrubber, &footer(s)));
         }
         Err(e) => print_err(s, err, &e.to_string()),
+    }
+}
+
+fn attach_image(s: &mut ChatSession, path: &str, out: &mut dyn Write, err: &mut dyn Write) {
+    if s.pending_images.len() >= nh_tools::MAX_IMAGES_PER_MESSAGE {
+        print_err(
+            s,
+            err,
+            "a message can attach at most 4 images - send the pending message first",
+        );
+        return;
+    }
+    if let Err(error) = ensure_image_capable(&s.route, &s.resolver) {
+        print_err(s, err, &error.to_string());
+        return;
+    }
+    match cmd_run::image_part(path, &s.agent.ctx) {
+        Ok(part) => {
+            s.pending_images.push(part);
+            let line = format!(
+                "attached {path} for next message ({}/{})",
+                s.pending_images.len(),
+                nh_tools::MAX_IMAGES_PER_MESSAGE
+            );
+            let _ = writeln!(out, "{}", scrub_line(&s.scrubber, &line));
+        }
+        Err(error) => print_err(s, err, &error.to_string()),
     }
 }
 

@@ -302,6 +302,7 @@ fn tracked_client_emits_start_and_finish_on_success_and_failure() {
                 message: ChatMessage {
                     role: "assistant".into(),
                     content: Some("done".into()),
+                    parts: None,
                     tool_calls: None,
                     tool_call_id: None,
                     reasoning_content: None,

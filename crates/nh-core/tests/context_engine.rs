@@ -79,6 +79,7 @@ fn message(role: &str, content: &str) -> ChatMessage {
     ChatMessage {
         role: role.into(),
         content: Some(content.into()),
+        parts: None,
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,
@@ -89,6 +90,7 @@ fn assistant_tool_call(id: &str, reasoning: &str) -> ChatMessage {
     ChatMessage {
         role: "assistant".into(),
         content: None,
+        parts: None,
         tool_calls: Some(vec![ToolCallReq {
             id: id.into(),
             name: "read_file".into(),
@@ -103,6 +105,7 @@ fn tool_result(id: &str, content: &str) -> ChatMessage {
     ChatMessage {
         role: "tool".into(),
         content: Some(content.into()),
+        parts: None,
         tool_calls: None,
         tool_call_id: Some(id.into()),
         reasoning_content: None,

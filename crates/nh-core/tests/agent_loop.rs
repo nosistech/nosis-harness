@@ -84,6 +84,7 @@ fn tool_call_resp(name: &str, arguments: &str, id: &str, usage: Option<Usage>) -
         message: ChatMessage {
             role: "assistant".into(),
             content: None,
+            parts: None,
             tool_calls: Some(vec![ToolCallReq {
                 id: id.into(),
                 name: name.into(),
@@ -102,6 +103,7 @@ fn text_resp(text: &str, usage: Option<Usage>) -> ChatResponse {
         message: ChatMessage {
             role: "assistant".into(),
             content: Some(text.into()),
+            parts: None,
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
@@ -322,6 +324,7 @@ fn oversized_task_is_rejected_before_provider_history_or_receipt() {
     let mut history = vec![ChatMessage {
         role: "system".into(),
         content: Some("existing session".into()),
+        parts: None,
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,

@@ -63,6 +63,9 @@ enum Cmd {
         /// Execution profile: frugal, balanced, or max-quality
         #[arg(long, default_value = "balanced")]
         profile: String,
+        /// Attach a PNG or JPEG image (repeatable; maximum 4)
+        #[arg(long, value_name = "PATH")]
+        image: Vec<String>,
     },
     /// Chat with a model - /model and /provider switch routes mid-session
     Chat {
@@ -182,7 +185,8 @@ fn main() -> anyhow::Result<()> {
             think,
             autonomy,
             profile,
-        } => cmd_run::run(&task, &model, max_turns, think, autonomy, &profile),
+            image,
+        } => cmd_run::run(&task, &model, max_turns, think, autonomy, &profile, &image),
         Cmd::Chat { model, profile } => cmd_chat::run(&model, &profile),
         Cmd::Why { task, model } => cmd_why::run(task.as_deref(), model.as_deref()),
         Cmd::Profile { model } => cmd_profile::run(&model),

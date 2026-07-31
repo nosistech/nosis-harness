@@ -8,7 +8,9 @@ use std::net::TcpListener;
 use std::sync::mpsc;
 
 use nh_core::credential;
-use nh_core::wire::{ChatClient, ChatMessage, ChatRequest, ThinkingEffort, ToolCallReq};
+use nh_core::wire::{
+    ChatClient, ChatMessage, ChatRequest, ContentPart, ThinkingEffort, ToolCallReq,
+};
 use nh_routes::{Profiles, ResolvedRoute, RouteResolver, ThinkingDialect, Wire};
 use nh_vault::Vault;
 use zeroize::Zeroizing;
@@ -178,6 +180,7 @@ fn msg(role: &str, content: Option<&str>) -> ChatMessage {
     ChatMessage {
         role: role.into(),
         content: content.map(str::to_string),
+        parts: None,
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,
@@ -241,6 +244,77 @@ fn factory_openai_wire_posts_chat_completions_with_route_policy() {
     assert!(captured.body.get("reasoning_effort").is_none());
     assert_eq!(captured.body["messages"][1]["reasoning_content"], "");
     assert_eq!(captured.body["max_tokens"], 384_000);
+}
+
+#[test]
+fn text_only_route_refuses_image_before_any_http_call_and_lists_live_catalog_routes() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let resolver = RouteResolver::from_toml(&format!(
+        r#"
+        [routes.text-route]
+        provider = "mock"
+        model_id = "text-model"
+        base_url = "{base_url}"
+        wire = "openai"
+        vault_entry = "mock"
+        modality = ["text"]
+
+        [routes.image-route]
+        provider = "mock"
+        model_id = "image-model"
+        base_url = "{base_url}"
+        wire = "openai"
+        vault_entry = "mock"
+        modality = ["text", "image"]
+        "#
+    ))
+    .unwrap();
+    let route = resolver.resolve("text-route").unwrap();
+    let client = credential::connect_with_catalog(
+        &TestVault,
+        &route,
+        &[route.base_url().to_owned()],
+        None,
+        &resolver,
+    )
+    .unwrap()
+    .0;
+    let request = req(
+        vec![ChatMessage {
+            role: "user".into(),
+            content: None,
+            parts: Some(vec![
+                ContentPart::Text {
+                    text: "describe it".into(),
+                },
+                ContentPart::ImageB64 {
+                    media_type: "image/png".into(),
+                    data: "Zm9v".into(),
+                },
+            ]),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }],
+        ThinkingEffort::None,
+    );
+
+    let error = client.complete(&request).unwrap_err().to_string();
+
+    assert_eq!(
+        error,
+        "route text-route accepts text only - it cannot read images. \
+         Image-capable routes: image-route. Switch with /model <id> or --model <id>."
+    );
+    assert!(
+        matches!(
+            listener.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ),
+        "capability refusal must happen before opening a socket"
+    );
 }
 
 #[test]

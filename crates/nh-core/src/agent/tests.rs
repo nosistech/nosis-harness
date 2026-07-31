@@ -1,4 +1,4 @@
-use super::context::{estimate_tokens, message_bytes};
+use super::context::{estimate_tokens, message_bytes, IMAGE_ESTIMATE_TOKENS};
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -96,6 +96,7 @@ fn compaction_input_count_sees_a_new_large_tool_result() {
     history.push(ChatMessage {
         role: "tool".into(),
         content: Some("x".repeat(4_000)),
+        parts: None,
         tool_calls: None,
         tool_call_id: Some("c1".into()),
         reasoning_content: None,
@@ -182,6 +183,7 @@ impl ChatClient for OverflowUsageClient {
                 message: ChatMessage {
                     role: "assistant".into(),
                     content: Some("working".into()),
+                    parts: None,
                     tool_calls: Some(vec![ToolCallReq {
                         id: "overflow-probe".into(),
                         name: "missing_tool".into(),
@@ -506,6 +508,32 @@ fn request_estimate_counts_preserved_reasoning_and_tool_specs() {
 }
 
 #[test]
+fn request_estimate_adds_only_the_documented_per_image_allowance() {
+    let plain = vec![message("user", "look")];
+    let image = vec![ChatMessage {
+        role: "user".into(),
+        content: None,
+        parts: Some(vec![
+            ContentPart::Text {
+                text: "look".into(),
+            },
+            ContentPart::ImageB64 {
+                media_type: "image/png".into(),
+                data: "base64 bytes are not token-counted locally".repeat(100),
+            },
+        ]),
+        tool_calls: None,
+        tool_call_id: None,
+        reasoning_content: None,
+    }];
+
+    assert_eq!(
+        estimate_tokens(&image),
+        estimate_tokens(&plain) + IMAGE_ESTIMATE_TOKENS
+    );
+}
+
+#[test]
 fn effective_context_clamps_large_windows_before_compaction_threshold() {
     let raw = 1_000_000;
     let working = effective_context(raw);
@@ -555,6 +583,7 @@ impl ChatClient for RepairingToolCallClient {
                 message: ChatMessage {
                     role: "assistant".into(),
                     content: None,
+                    parts: None,
                     tool_calls: Some(vec![ToolCallReq {
                         id: "repair-1".into(),
                         name: "view_file".into(),
@@ -632,6 +661,7 @@ impl ChatClient for AuditedEditClient {
                 message: ChatMessage {
                     role: "assistant".into(),
                     content: None,
+                    parts: None,
                     tool_calls: Some(vec![ToolCallReq {
                         id: "audit-edit".into(),
                         name: "edit_file".into(),

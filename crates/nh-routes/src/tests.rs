@@ -387,9 +387,12 @@ fn kimi_k3_has_verified_capacity_price_and_effort_control() {
 }
 
 #[test]
-fn mimo_routes_preserve_reasoning_and_are_omni_modal() {
+fn mimo_routes_preserve_reasoning_with_route_specific_modalities() {
     let r = resolver();
-    for id in ["mimo-v2.5", "mimo-v2.5-pro"] {
+    for (id, expected_modality) in [
+        ("mimo-v2.5", vec!["text", "image", "video", "audio"]),
+        ("mimo-v2.5-pro", vec!["text"]),
+    ] {
         let route = r.resolve(id).unwrap();
         assert!(route.preserve_reasoning(), "{id}");
         assert_eq!(
@@ -397,11 +400,7 @@ fn mimo_routes_preserve_reasoning_and_are_omni_modal() {
             ThinkingDialect::KimiToggle,
             "{id}"
         );
-        assert_eq!(
-            route.modality(),
-            vec!["text", "image", "video", "audio"],
-            "{id}"
-        );
+        assert_eq!(route.modality(), expected_modality, "{id}");
         assert_eq!(route.context(), Some(1_000_000), "{id}");
     }
 }

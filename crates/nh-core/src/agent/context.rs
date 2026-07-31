@@ -1,12 +1,16 @@
 //! Cache-safe context accounting and compaction.
 
-use crate::wire::ChatMessage;
+use crate::wire::{ChatMessage, ContentPart};
 
 pub(super) const COMPACT_AT: f64 = 0.70;
 const COMPACT_TARGET: f64 = 0.50;
 const KEEP_RECENT: usize = 2;
 const MESSAGE_OVERHEAD_TOKENS: u64 = 4;
 const EFFECTIVE_CONTEXT_CAP: u64 = 256_000;
+/// Coarse per-image allowance used only to trigger context compaction. It is
+/// never billed or displayed as measured usage; providers report measured
+/// image cost inside `usage.prompt_tokens`.
+pub(super) const IMAGE_ESTIMATE_TOKENS: u64 = 32;
 
 /// Context-rot guard: very large advertised windows use a smaller working
 /// window so compaction starts while the retained context is still useful.
@@ -53,6 +57,7 @@ pub(super) fn plain_msg(role: &str, content: String) -> ChatMessage {
     ChatMessage {
         role: role.into(),
         content: Some(content),
+        parts: None,
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,
@@ -69,7 +74,19 @@ fn estimate_message_tokens(messages: &[ChatMessage], preserve_reasoning: bool) -
     messages
         .iter()
         .map(|message| {
-            let content_bytes = message.content.as_ref().map_or(0, String::len);
+            let (content_bytes, image_count) = message.parts.as_ref().map_or_else(
+                || (message.content.as_ref().map_or(0, String::len), 0_u64),
+                |parts| {
+                    parts
+                        .iter()
+                        .fold((0_usize, 0_u64), |totals, part| match part {
+                            ContentPart::Text { text } => {
+                                (totals.0.saturating_add(text.len()), totals.1)
+                            }
+                            ContentPart::ImageB64 { .. } => (totals.0, totals.1.saturating_add(1)),
+                        })
+                },
+            );
             let tool_call_bytes = message.tool_calls.as_ref().map_or(0, |calls| {
                 serde_json::to_vec(calls).map_or(0, |serialized| serialized.len())
             });
@@ -81,7 +98,10 @@ fn estimate_message_tokens(messages: &[ChatMessage], preserve_reasoning: bool) -
             let bytes = (content_bytes as u64)
                 .saturating_add(tool_call_bytes as u64)
                 .saturating_add(reasoning_bytes as u64);
-            bytes.div_ceil(4).saturating_add(MESSAGE_OVERHEAD_TOKENS)
+            bytes
+                .div_ceil(4)
+                .saturating_add(MESSAGE_OVERHEAD_TOKENS)
+                .saturating_add(image_count.saturating_mul(IMAGE_ESTIMATE_TOKENS))
         })
         .sum()
 }
