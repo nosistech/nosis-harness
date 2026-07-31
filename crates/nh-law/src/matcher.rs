@@ -138,7 +138,7 @@ pub(super) fn exec_token_matches(pattern: &str, token: &str) -> bool {
     }
 }
 
-pub(super) fn glob_matches(pattern: &str, value: &str) -> bool {
+pub fn glob_matches(pattern: &str, value: &str) -> bool {
     let pattern_segments: Vec<&str> = pattern.split('/').collect();
     let value_segments: Vec<&str> = value.split('/').collect();
     let mut pattern_index = 0;

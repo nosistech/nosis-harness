@@ -1,4 +1,4 @@
-//! nh-tools - read_file / edit_file / exec_shell behind an approval gate.
+//! nh-tools - bounded file tools and approval-gated shell execution.
 //! SECURITY INVARIANT: tool outputs are DATA, never instructions. exec is refused on Block and
 //! otherwise always requires explicit approval, regardless of the guard verdict.
 
@@ -12,6 +12,7 @@ use std::time::Duration;
 mod edit;
 mod exec;
 pub mod mcp;
+mod search;
 
 #[cfg(test)]
 use exec::{render_bounded_output, spawn_drain, BoundedOutput, DrainCompletion, DrainOutcome};
@@ -20,6 +21,7 @@ pub use mcp::{
     load_mcp_config, mcp_tools, McpAuth, McpClient, McpServerConfig, McpToolInfo, McpToolset,
     McpTrust,
 };
+pub use search::{GlobFiles, GrepFiles};
 
 /// What a tool is about to do. Write paths are normalized and workdir-relative.
 pub enum Access<'a> {
@@ -136,6 +138,10 @@ pub trait Tool: Send + Sync {
 
 /// args: {"path": string} - read file relative to workdir, refuse escapes above workdir.
 pub struct ReadFile;
+
+/// args: {"path", "content"} - create one new file without replacing an existing path
+/// or creating parent directories.
+pub struct WriteFile;
 
 /// args: {"path", "old_string", "new_string"} - exact, unique match or a clear error
 /// telling the model what to fix (not found / not unique).
@@ -274,9 +280,9 @@ fn normalize_lexically(path: &Path) -> PathBuf {
 /// becomes `.git/config`). Missing paths retain typed case only in the lexical
 /// branch, then fail with "file not found" before any write.
 ///
-/// WARNING: any future file-creation tool must canonicalize or case-fold its guard
-/// path (or the guard must case-fold there), or variants such as `.GIT/x` and `.ENV`
-/// could bypass `.git/**` and `**/.env*`.
+/// `WriteFile` closes the missing-path case-folding bypass in
+/// `creation_guard_verdict`: it checks both the typed relative path and its
+/// ASCII-lowercased form, so `.GIT/x` and `.ENV` cannot evade the write law.
 fn resolve_in_workdir(workdir: &Path, rel: &str) -> anyhow::Result<(PathBuf, String)> {
     let root = workdir
         .canonicalize()
@@ -298,6 +304,71 @@ fn resolve_in_workdir(workdir: &Path, rel: &str) -> anyhow::Result<(PathBuf, Str
         .collect::<Vec<_>>()
         .join("/");
     Ok((resolved, relative))
+}
+
+fn merge_guard_verdict(first: Guard, second: Guard) -> Guard {
+    match (first, second) {
+        (Guard::Block(reason), _) => Guard::Block(reason),
+        (_, Guard::Block(reason)) => Guard::Block(reason),
+        (Guard::Ask, _) | (_, Guard::Ask) => Guard::Ask,
+        (Guard::Allow, Guard::Allow) => Guard::Allow,
+    }
+}
+
+/// Check the typed creation path and its ASCII-folded form. If an existing
+/// parent resolves through an in-workdir alias, check that actual path too.
+fn creation_guard_verdict(ctx: &ToolCtx, relative: &str, actual_relative: Option<&str>) -> Guard {
+    let folded = relative.to_ascii_lowercase();
+    let typed = (ctx.guard)(&Access::Write(relative));
+    let lowercase = (ctx.guard)(&Access::Write(&folded));
+    let mut verdict = merge_guard_verdict(typed, lowercase);
+
+    if let Some(actual) = actual_relative.filter(|actual| *actual != relative) {
+        let actual_folded = actual.to_ascii_lowercase();
+        let actual_verdict = (ctx.guard)(&Access::Write(actual));
+        let actual_lowercase = (ctx.guard)(&Access::Write(&actual_folded));
+        verdict = merge_guard_verdict(
+            verdict,
+            merge_guard_verdict(actual_verdict, actual_lowercase),
+        );
+    }
+    verdict
+}
+
+fn path_exists_without_following(path: &Path, display_path: &str) -> anyhow::Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => {
+            Err(error).with_context(|| format!("could not inspect destination {display_path}"))
+        }
+    }
+}
+
+fn relative_path(root: &Path, path: &Path) -> anyhow::Result<String> {
+    Ok(path
+        .strip_prefix(root)
+        .map_err(|_| anyhow::anyhow!("resolved path escaped the working directory"))?
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/"))
+}
+
+fn parent_label(relative: &str) -> String {
+    let parent = Path::new(relative)
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
+    let label = parent
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    if label.is_empty() {
+        ".".to_owned()
+    } else {
+        label
+    }
 }
 
 /// A validated image ready for a model-facing content part.
@@ -446,6 +517,187 @@ impl Tool for ReadFile {
             ));
         }
         Ok(ToolResultEnvelope::new(content, &ctx.scrubber).render())
+    }
+}
+
+impl Tool for WriteFile {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "write_file".into(),
+            description: "Create a new UTF-8 text file inside the working directory. Refuses existing files and missing parent directories.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "New file path, relative to the working directory."
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Complete UTF-8 content for the new file."
+                    }
+                },
+                "required": ["path", "content"]
+            }),
+        }
+    }
+
+    fn execute(&self, args: serde_json::Value, ctx: &ToolCtx) -> anyhow::Result<String> {
+        let path = str_arg(&args, "path")?;
+        let content = str_arg(&args, "content")?;
+        let (resolved, relative) = resolve_in_workdir(&ctx.workdir, path)?;
+        let parent = resolved.parent().ok_or_else(|| {
+            anyhow::anyhow!("could not write {path}: file has no parent directory")
+        })?;
+        let parent_is_dir = parent.is_dir();
+        let initially_exists = path_exists_without_following(&resolved, path)?;
+
+        let (destination, actual_relative) = if !initially_exists && parent_is_dir {
+            let root = ctx.workdir.canonicalize().with_context(|| {
+                format!("working directory not found: {}", ctx.workdir.display())
+            })?;
+            let canonical_parent = parent
+                .canonicalize()
+                .with_context(|| format!("could not resolve parent directory for {path}"))?;
+            if !canonical_parent.starts_with(&root) {
+                bail!("refused: {path} escapes the working directory");
+            }
+            let file_name = resolved
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("could not write {path}: invalid file name"))?;
+            let destination = canonical_parent.join(file_name);
+            let actual_relative = relative_path(&root, &destination)?;
+            (destination, Some(actual_relative))
+        } else {
+            (resolved.clone(), None)
+        };
+
+        let verdict = creation_guard_verdict(ctx, &relative, actual_relative.as_deref());
+        if let Guard::Block(reason) = &verdict {
+            return Ok(
+                ToolResultEnvelope::new(format!("blocked by law: {reason}"), &ctx.scrubber)
+                    .render(),
+            );
+        }
+
+        if initially_exists || path_exists_without_following(&destination, path)? {
+            return Ok(ToolResultEnvelope::new(
+                format!("refused: {path} already exists - use edit_file to change it"),
+                &ctx.scrubber,
+            )
+            .render());
+        }
+        if content.len() > MAX_TOOL_READ_BYTES {
+            bail!("content too large to write safely (> {MAX_TOOL_READ_BYTES} bytes)");
+        }
+        if !parent_is_dir {
+            return Ok(ToolResultEnvelope::new(
+                format!(
+                    "refused: parent directory does not exist: {} - create it first",
+                    parent_label(&relative)
+                ),
+                &ctx.scrubber,
+            )
+            .render());
+        }
+        if matches!(verdict, Guard::Ask) {
+            let action = format!("create {relative}");
+            if !(ctx.approve)(&action) {
+                return Ok(ToolResultEnvelope::new(
+                    format!("user denied: {action}"),
+                    &ctx.scrubber,
+                )
+                .render());
+            }
+        }
+
+        let destination_parent = destination.parent().ok_or_else(|| {
+            anyhow::anyhow!("could not write {path}: file has no parent directory")
+        })?;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let mut attempt = 0_u16;
+        let (temp_path, mut temp_file) = loop {
+            if attempt == 1000 {
+                bail!("could not create temporary file for {path}");
+            }
+            let candidate = destination_parent.join(format!(
+                ".nh-write-{}-{nonce}-{attempt}.tmp",
+                std::process::id()
+            ));
+            match std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&candidate)
+            {
+                Ok(file) => break (candidate, file),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    attempt += 1;
+                }
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("could not create temporary file for {path}"))
+                }
+            }
+        };
+
+        let write_result = (|| -> anyhow::Result<()> {
+            use std::io::Write as _;
+
+            temp_file
+                .write_all(content.as_bytes())
+                .with_context(|| format!("could not write {path}"))?;
+            // A new file deliberately keeps the platform-default mode assigned
+            // when the temporary file is created; there is no prior mode to copy.
+            temp_file
+                .flush()
+                .with_context(|| format!("could not flush temporary file for {path}"))?;
+            temp_file
+                .sync_all()
+                .with_context(|| format!("could not fsync temporary file for {path}"))?;
+            Ok(())
+        })();
+        drop(temp_file);
+        if let Err(error) = write_result {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(error);
+        }
+
+        match path_exists_without_following(&destination, path) {
+            Ok(false) => {}
+            Ok(true) => {
+                let _ = std::fs::remove_file(&temp_path);
+                return Ok(ToolResultEnvelope::new(
+                    format!("refused: {path} already exists - use edit_file to change it"),
+                    &ctx.scrubber,
+                )
+                .render());
+            }
+            Err(error) => {
+                let _ = std::fs::remove_file(&temp_path);
+                return Err(error);
+            }
+        }
+        if let Err(error) = std::fs::rename(&temp_path, &destination) {
+            let _ = std::fs::remove_file(&temp_path);
+            if error.kind() == std::io::ErrorKind::AlreadyExists
+                || path_exists_without_following(&destination, path).unwrap_or(false)
+            {
+                return Ok(ToolResultEnvelope::new(
+                    format!("refused: {path} already exists - use edit_file to change it"),
+                    &ctx.scrubber,
+                )
+                .render());
+            }
+            return Err(error).with_context(|| format!("could not create {path}"));
+        }
+        Ok(ToolResultEnvelope::new(
+            format!("created {path} ({} bytes)", content.len()),
+            &ctx.scrubber,
+        )
+        .render())
     }
 }
 
@@ -629,7 +881,14 @@ impl Tool for EditFile {
 }
 
 pub fn builtin_tools() -> Vec<Box<dyn Tool>> {
-    vec![Box::new(ReadFile), Box::new(EditFile), Box::new(ExecShell)]
+    vec![
+        Box::new(ReadFile),
+        Box::new(WriteFile),
+        Box::new(EditFile),
+        Box::new(GrepFiles),
+        Box::new(GlobFiles),
+        Box::new(ExecShell),
+    ]
 }
 
 #[cfg(test)]

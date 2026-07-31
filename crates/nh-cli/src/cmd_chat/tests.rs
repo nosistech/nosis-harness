@@ -809,10 +809,17 @@ fn tools_lists_builtins_one_per_line() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut s, _calls) = test_session("deepseek-v4-flash", tmp.path());
     let (out, _err) = drive(&mut s, &["/tools"]);
-    for name in ["read_file - ", "edit_file - ", "exec_shell - "] {
+    for name in [
+        "read_file - ",
+        "write_file - ",
+        "edit_file - ",
+        "grep_files - ",
+        "glob_files - ",
+        "exec_shell - ",
+    ] {
         assert!(out.contains(name), "missing {name}: {out}");
     }
-    assert_eq!(out.lines().count(), 3, "one line per tool: {out}");
+    assert_eq!(out.lines().count(), 6, "one line per tool: {out}");
 }
 
 /// Puts a session into the keyless-start state: stand-in client installed,
