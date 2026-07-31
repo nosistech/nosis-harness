@@ -16,11 +16,19 @@ use nh_routes::{ThinkingDialect, ThinkingPosture, Wire};
 use openai::{OpenAiPolicy, DEFAULT_MAX_TOKENS};
 use zeroize::Zeroizing;
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ContentPart {
+    Text { text: String },
+    ImageB64 { media_type: String, data: String },
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parts: Option<Vec<ContentPart>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallReq>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -163,14 +171,101 @@ pub trait ChatClient: Send + Sync {
     fn complete(&self, request: &ChatRequest) -> anyhow::Result<ChatResponse>;
 }
 
+#[derive(Debug, Clone)]
+struct RouteCapabilities {
+    route_id: String,
+    modalities: Vec<String>,
+    image_capable_routes: Vec<String>,
+    wire: Wire,
+}
+
+struct RouteCheckedClient {
+    inner: Box<dyn ChatClient>,
+    capabilities: RouteCapabilities,
+}
+
+impl ChatClient for RouteCheckedClient {
+    fn complete(&self, request: &ChatRequest) -> anyhow::Result<ChatResponse> {
+        let mut has_image = false;
+        for message in &request.messages {
+            let image_count = message.parts.as_ref().map_or(0, |parts| {
+                parts
+                    .iter()
+                    .filter(|part| matches!(part, ContentPart::ImageB64 { .. }))
+                    .count()
+            });
+            if image_count > nh_tools::MAX_IMAGES_PER_MESSAGE {
+                anyhow::bail!(
+                    "a message can attach at most {} images — split them across messages",
+                    nh_tools::MAX_IMAGES_PER_MESSAGE
+                );
+            }
+            has_image |= image_count > 0;
+        }
+        if has_image {
+            ensure_image_capability(
+                &self.capabilities.route_id,
+                &self.capabilities.modalities,
+                &self.capabilities.image_capable_routes,
+            )?;
+            if self.capabilities.wire != Wire::OpenAi {
+                anyhow::bail!(
+                    "route {} cannot carry images on its configured wire — switch to an image-capable OpenAI route",
+                    self.capabilities.route_id
+                );
+            }
+        }
+        self.inner.complete(request)
+    }
+}
+
+/// Refuse an image before loading or sending it when the current resolved
+/// route lacks image input. Suggestions come from the loaded catalog.
+pub fn ensure_image_capable(
+    route: &nh_routes::ResolvedRoute,
+    resolver: &nh_routes::RouteResolver,
+) -> anyhow::Result<()> {
+    ensure_image_capability(
+        route.id(),
+        route.modality(),
+        &resolver.routes_with_modality("image"),
+    )
+}
+
+fn ensure_image_capability(
+    route_id: &str,
+    modalities: &[String],
+    image_capable_routes: &[String],
+) -> anyhow::Result<()> {
+    if modalities.iter().any(|modality| modality == "image") {
+        return Ok(());
+    }
+    let accepted = match modalities {
+        [] => "no declared input modality".to_owned(),
+        [only] => format!("{only} only"),
+        several => format!("{} only", several.join(", ")),
+    };
+    let alternatives = if image_capable_routes.is_empty() {
+        "none in the loaded catalog".to_owned()
+    } else {
+        image_capable_routes.join(", ")
+    };
+    anyhow::bail!(
+        "route {route_id} accepts {accepted} — it cannot read images. \
+         Image-capable routes: {alternatives}. Switch with /model <id> or --model <id>."
+    )
+}
+
 /// Build the correct wire client after the credential module has authorized
 /// and materialized the route-scoped secret.
 pub(crate) fn make_client(
     route: &nh_routes::ResolvedRoute,
     api_key: Zeroizing<String>,
     max_out: Option<u64>,
+    image_capable_routes: Vec<String>,
 ) -> anyhow::Result<Box<dyn ChatClient>> {
-    let client: Box<dyn ChatClient> = match route.wire() {
+    let wire = route.wire();
+    let client: Box<dyn ChatClient> = match wire.clone() {
         Wire::OpenAi => {
             let mut client =
                 OpenAiCompatClient::new(route.base_url().to_owned(), api_key, route.id())?;
@@ -192,7 +287,15 @@ pub(crate) fn make_client(
             route.id(),
         )?),
     };
-    Ok(client)
+    Ok(Box::new(RouteCheckedClient {
+        inner: client,
+        capabilities: RouteCapabilities {
+            route_id: route.id().to_owned(),
+            modalities: route.modality().to_vec(),
+            image_capable_routes,
+            wire,
+        },
+    }))
 }
 
 #[cfg(test)]

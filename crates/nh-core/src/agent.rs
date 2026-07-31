@@ -7,7 +7,9 @@ mod tool_repair;
 pub use context::{effective_context, PrefixSeal};
 
 use crate::receipt::{FailureClass, Outcome, Receipt, ReceiptWriter, RepairStats};
-use crate::wire::{ChatClient, ChatMessage, ChatRequest, ThinkingEffort, ToolCallReq, Usage};
+use crate::wire::{
+    ChatClient, ChatMessage, ChatRequest, ContentPart, ThinkingEffort, ToolCallReq, Usage,
+};
 use context::{
     compact_history, compaction_input_tokens, context_percentage, estimate_request_tokens,
     plain_msg, COMPACT_AT,
@@ -151,7 +153,39 @@ impl AgentLoop {
         history: &mut Vec<ChatMessage>,
         task: &str,
     ) -> anyhow::Result<(String, Receipt)> {
+        self.run_with_history_inner(history, task, None)
+    }
+
+    /// Add image or future content parts to the next user task. The existing
+    /// history entry point remains the unchanged text-only path.
+    pub fn run_with_history_and_parts(
+        &mut self,
+        history: &mut Vec<ChatMessage>,
+        task: &str,
+        parts: Vec<ContentPart>,
+    ) -> anyhow::Result<(String, Receipt)> {
+        self.run_with_history_inner(history, task, Some(parts))
+    }
+
+    fn run_with_history_inner(
+        &mut self,
+        history: &mut Vec<ChatMessage>,
+        task: &str,
+        parts: Option<Vec<ContentPart>>,
+    ) -> anyhow::Result<(String, Receipt)> {
         validate_task(task)?;
+        let image_count = parts.as_ref().map_or(0, |parts| {
+            parts
+                .iter()
+                .filter(|part| matches!(part, ContentPart::ImageB64 { .. }))
+                .count()
+        });
+        if image_count > nh_tools::MAX_IMAGES_PER_MESSAGE {
+            anyhow::bail!(
+                "a message can attach at most {} images — split them across messages",
+                nh_tools::MAX_IMAGES_PER_MESSAGE
+            );
+        }
         let specs: Vec<nh_tools::ToolSpec> = self.tools.iter().map(|t| t.spec()).collect();
         if history.is_empty() {
             let system = self.constitution.clone().unwrap_or_else(|| {
@@ -164,7 +198,23 @@ impl AgentLoop {
             });
             history.push(plain_msg("system", system));
         }
-        history.push(plain_msg("user", task.to_string()));
+        if let Some(parts) = parts {
+            let mut message_parts = Vec::with_capacity(parts.len().saturating_add(1));
+            message_parts.push(ContentPart::Text {
+                text: task.to_owned(),
+            });
+            message_parts.extend(parts);
+            history.push(ChatMessage {
+                role: "user".into(),
+                content: None,
+                parts: Some(message_parts),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            });
+        } else {
+            history.push(plain_msg("user", task.to_string()));
+        }
 
         let prefix_seal = PrefixSeal::new(&history[..1]);
         let mut prefix_drift_reported = false;
@@ -301,6 +351,7 @@ impl AgentLoop {
                 history.push(ChatMessage {
                     role: "tool".into(),
                     content: Some(result.output),
+                    parts: None,
                     tool_calls: None,
                     tool_call_id: Some(call.id.clone()),
                     reasoning_content: None,

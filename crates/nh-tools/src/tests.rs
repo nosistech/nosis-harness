@@ -8,6 +8,158 @@ fn ctx_with(workdir: &Path, approve: bool) -> ToolCtx {
     ToolCtx::new(workdir.to_path_buf(), Box::new(move |_| approve))
 }
 
+fn png_bytes() -> Vec<u8> {
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    bytes.extend_from_slice(b"fixture");
+    bytes
+}
+
+#[test]
+fn base64_matches_rfc_4648_vectors() {
+    for (plain, encoded) in [
+        ("", ""),
+        ("f", "Zg=="),
+        ("fo", "Zm8="),
+        ("foo", "Zm9v"),
+        ("foob", "Zm9vYg=="),
+        ("fooba", "Zm9vYmE="),
+        ("foobar", "Zm9vYmFy"),
+    ] {
+        assert_eq!(encode_base64(plain.as_bytes()), encoded, "{plain:?}");
+    }
+}
+
+#[test]
+fn base64_full_byte_range_has_standard_length_and_alphabet() {
+    let bytes: Vec<u8> = (0..=u8::MAX).collect();
+    let encoded = encode_base64(&bytes);
+
+    assert_eq!(encoded.len(), bytes.len().div_ceil(3) * 4);
+    assert!(
+        encoded
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=')),
+        "non-RFC-4648 byte in {encoded}"
+    );
+    let padding = encoded
+        .bytes()
+        .rev()
+        .take_while(|byte| *byte == b'=')
+        .count();
+    assert_eq!(padding, 2);
+    assert!(!encoded[..encoded.len() - padding].contains('='));
+}
+
+#[test]
+fn load_image_validates_and_encodes_png_and_jpeg() {
+    let dir = tempfile::tempdir().unwrap();
+    let png = png_bytes();
+    let jpeg = b"\xff\xd8\xfffixture".to_vec();
+    std::fs::write(dir.path().join("screen.png"), &png).unwrap();
+    std::fs::write(dir.path().join("photo.jpeg"), &jpeg).unwrap();
+    let ctx = ctx_with(dir.path(), true);
+
+    assert_eq!(
+        load_image("screen.png", &ctx).unwrap(),
+        LoadedImage {
+            media_type: "image/png".into(),
+            data: encode_base64(&png),
+        }
+    );
+    assert_eq!(
+        load_image("photo.jpeg", &ctx).unwrap(),
+        LoadedImage {
+            media_type: "image/jpeg".into(),
+            data: encode_base64(&jpeg),
+        }
+    );
+}
+
+#[test]
+fn load_image_refuses_workdir_escape() {
+    let dir = tempfile::tempdir().unwrap();
+    let workdir = dir.path().join("inner");
+    std::fs::create_dir(&workdir).unwrap();
+    std::fs::write(dir.path().join("outside.png"), png_bytes()).unwrap();
+
+    let error = load_image("../outside.png", &ctx_with(&workdir, true))
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        error.contains("escapes the working directory"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn load_image_refuses_law_block_before_reading() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("blocked.png"), png_bytes()).unwrap();
+    let approvals = Arc::new(AtomicUsize::new(0));
+    let approvals_seen = Arc::clone(&approvals);
+    let ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(move |_| {
+            approvals_seen.fetch_add(1, Ordering::SeqCst);
+            true
+        }),
+    )
+    .with_guard(Box::new(|access| match access {
+        Access::Read("blocked.png") => Guard::Block("protected image".into()),
+        _ => Guard::Allow,
+    }));
+
+    let error = load_image("blocked.png", &ctx).unwrap_err().to_string();
+
+    assert_eq!(error, "blocked by law: protected image");
+    assert_eq!(approvals.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn load_image_refuses_unsupported_extension() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("screen.gif"), png_bytes()).unwrap();
+
+    let error = load_image("screen.gif", &ctx_with(dir.path(), true))
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!(
+        error,
+        "unsupported image format — use PNG or JPEG (.png, .jpg, .jpeg)"
+    );
+}
+
+#[test]
+fn load_image_refuses_magic_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("disguised.png"), b"\xff\xd8\xfffixture").unwrap();
+
+    let error = load_image("disguised.png", &ctx_with(dir.path(), true))
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!(error, "image bytes do not match the .png extension");
+}
+
+#[test]
+fn load_image_refuses_oversize_raw_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut bytes = png_bytes();
+    bytes.resize(MAX_IMAGE_BYTES + 1, 0);
+    std::fs::write(dir.path().join("large.png"), bytes).unwrap();
+
+    let error = load_image("large.png", &ctx_with(dir.path(), true))
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!(
+        error,
+        format!("image is too large — maximum raw size is 3.5 MiB ({MAX_IMAGE_BYTES} bytes)")
+    );
+}
+
 struct BlockingReader {
     first: Option<Vec<u8>>,
     blocked: Option<mpsc::Sender<()>>,

@@ -235,6 +235,7 @@ pub(super) fn parse_response(body: &str) -> anyhow::Result<ChatResponse> {
         message: ChatMessage {
             role: "assistant".into(),
             content: saw_text.then_some(text),
+            parts: None,
             tool_calls: (!calls.is_empty()).then_some(calls),
             tool_call_id: None,
             reasoning_content: None,

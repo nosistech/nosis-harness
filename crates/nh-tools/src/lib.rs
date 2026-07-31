@@ -147,6 +147,11 @@ pub struct EditFile;
 /// captures stdout+stderr+exit code.
 pub struct ExecShell;
 
+/// Product limit for one user message. This is deliberately smaller than any
+/// provider-specific allowance so the harness has one predictable boundary.
+pub const MAX_IMAGES_PER_MESSAGE: usize = 4;
+/// 3.5 MiB raw stays below a 5 MiB provider cap even after base64 expansion.
+const MAX_IMAGE_BYTES: usize = 3_670_016;
 /// Maximum returned tool-result excerpt before head/tail elision.
 const MAX_TOOL_RESULT_CHARS: usize = 32_000;
 /// Maximum bytes retained from any one file or child-process stream before elision.
@@ -293,6 +298,103 @@ fn resolve_in_workdir(workdir: &Path, rel: &str) -> anyhow::Result<(PathBuf, Str
         .collect::<Vec<_>>()
         .join("/");
     Ok((resolved, relative))
+}
+
+/// A validated image ready for a model-facing content part.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedImage {
+    pub media_type: String,
+    pub data: String,
+}
+
+/// Load one user-selected image through the same read-law and workdir boundary
+/// as `read_file`, then validate and base64-encode it for the wire layer.
+pub fn load_image(path: &str, ctx: &ToolCtx) -> anyhow::Result<LoadedImage> {
+    let (resolved, relative) = resolve_in_workdir(&ctx.workdir, path)?;
+    match (ctx.guard)(&Access::Read(&relative)) {
+        Guard::Block(reason) => bail!("blocked by law: {reason}"),
+        Guard::Ask => {
+            let action = format!("read {relative}");
+            if !(ctx.approve)(&action) {
+                bail!("user denied: {action}");
+            }
+        }
+        Guard::Allow => {}
+    }
+    if !resolved.is_file() {
+        bail!("image not found: {path} — check the path against the working directory");
+    }
+
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+    let (media_type, expected_magic): (&str, &[u8]) = match extension.as_deref() {
+        Some("png") => ("image/png", b"\x89PNG\r\n\x1a\n"),
+        Some("jpg" | "jpeg") => ("image/jpeg", b"\xff\xd8\xff"),
+        _ => bail!("unsupported image format — use PNG or JPEG (.png, .jpg, .jpeg)"),
+    };
+
+    let file =
+        std::fs::File::open(&resolved).with_context(|| format!("could not read image {path}"))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("could not read image {path}"))?;
+    if metadata.len() > MAX_IMAGE_BYTES as u64 {
+        bail!("image is too large — maximum raw size is 3.5 MiB ({MAX_IMAGE_BYTES} bytes)");
+    }
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len())
+            .unwrap_or(MAX_IMAGE_BYTES)
+            .min(MAX_IMAGE_BYTES),
+    );
+    file.take((MAX_IMAGE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("could not read image {path}"))?;
+    if bytes.len() > MAX_IMAGE_BYTES {
+        bail!("image is too large — maximum raw size is 3.5 MiB ({MAX_IMAGE_BYTES} bytes)");
+    }
+    if !bytes.starts_with(expected_magic) {
+        let extension = extension.as_deref().unwrap_or_default();
+        bail!("image bytes do not match the .{extension} extension");
+    }
+
+    Ok(LoadedImage {
+        media_type: media_type.to_owned(),
+        data: encode_base64(&bytes),
+    })
+}
+
+fn encode_base64(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(input.len().div_ceil(3) * 4);
+    let mut chunks = input.chunks_exact(3);
+    for chunk in &mut chunks {
+        let bits = (u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[2]);
+        encoded.push(ALPHABET[((bits >> 18) & 0x3f) as usize] as char);
+        encoded.push(ALPHABET[((bits >> 12) & 0x3f) as usize] as char);
+        encoded.push(ALPHABET[((bits >> 6) & 0x3f) as usize] as char);
+        encoded.push(ALPHABET[(bits & 0x3f) as usize] as char);
+    }
+    match chunks.remainder() {
+        [first] => {
+            let bits = u32::from(*first) << 16;
+            encoded.push(ALPHABET[((bits >> 18) & 0x3f) as usize] as char);
+            encoded.push(ALPHABET[((bits >> 12) & 0x3f) as usize] as char);
+            encoded.push('=');
+            encoded.push('=');
+        }
+        [first, second] => {
+            let bits = (u32::from(*first) << 16) | (u32::from(*second) << 8);
+            encoded.push(ALPHABET[((bits >> 18) & 0x3f) as usize] as char);
+            encoded.push(ALPHABET[((bits >> 12) & 0x3f) as usize] as char);
+            encoded.push(ALPHABET[((bits >> 6) & 0x3f) as usize] as char);
+            encoded.push('=');
+        }
+        [] => {}
+        _ => unreachable!("chunks_exact(3) leaves at most two bytes"),
+    }
+    encoded
 }
 
 impl Tool for ReadFile {

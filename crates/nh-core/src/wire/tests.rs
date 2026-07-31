@@ -24,6 +24,7 @@ fn msg(role: &str, content: Option<&str>) -> ChatMessage {
     ChatMessage {
         role: role.into(),
         content: content.map(str::to_string),
+        parts: None,
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,
@@ -216,6 +217,60 @@ fn body_nests_tools_and_tool_calls() {
     );
     assert_eq!(body["messages"][1]["tool_call_id"], "c1");
     assert!(body["messages"][1].get("tool_calls").is_none());
+}
+
+#[test]
+fn parts_free_request_bytes_remain_identical() {
+    let request = req(vec![msg("user", Some("hello"))]);
+    let bytes = serde_json::to_string(&build_body(&request, OpenAiPolicy::default())).unwrap();
+
+    assert_eq!(
+        bytes,
+        r#"{"max_tokens":65536,"messages":[{"content":"hello","role":"user"}],"model":"mock-model"}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&request.messages[0]).unwrap(),
+        r#"{"role":"user","content":"hello"}"#
+    );
+}
+
+#[test]
+fn image_parts_emit_exact_openai_data_uri_shape_and_keep_tools() {
+    let mut request = req(vec![ChatMessage {
+        role: "user".into(),
+        content: None,
+        parts: Some(vec![
+            ContentPart::Text {
+                text: "what is shown?".into(),
+            },
+            ContentPart::ImageB64 {
+                media_type: "image/png".into(),
+                data: "Zm9v".into(),
+            },
+        ]),
+        tool_calls: None,
+        tool_call_id: None,
+        reasoning_content: None,
+    }]);
+    request.tools = vec![nh_tools::ToolSpec {
+        name: "read_file".into(),
+        description: "read a file".into(),
+        parameters: serde_json::json!({"type": "object"}),
+    }];
+
+    let body = build_body(&request, OpenAiPolicy::default());
+
+    assert_eq!(
+        body["messages"][0]["content"],
+        serde_json::json!([
+            {"type": "text", "text": "what is shown?"},
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,Zm9v"}
+            }
+        ])
+    );
+    assert_eq!(body["tools"][0]["function"]["name"], "read_file");
 }
 
 #[test]

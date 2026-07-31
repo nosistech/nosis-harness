@@ -208,6 +208,7 @@ impl ChatClient for EchoClient {
             message: ChatMessage {
                 role: "assistant".into(),
                 content: Some(format!("echo completed {}", self.task_id)),
+                parts: None,
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,

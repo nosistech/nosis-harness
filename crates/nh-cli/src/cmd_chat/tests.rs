@@ -48,6 +48,7 @@ const TEST_CATALOG: &str = r#"
     base_url = "https://example.invalid"
     wire = "openai"
     vault_entry = "kimi"
+    modality = ["text", "image"]
     context = 2000
     max_out = 64000
 
@@ -217,6 +218,7 @@ fn test_session(model: &str, tmp: &Path) -> (ChatSession, Arc<AtomicUsize>) {
         now: Box::new(off_peak_now),
         local_offset: beijing_offset(),
         mcp_warnings: Vec::new(),
+        pending_images: Vec::new(),
     };
     (session, calls)
 }
@@ -680,10 +682,7 @@ fn unknown_command_prints_one_line_help() {
     let (mut s, _calls) = test_session("deepseek-v4-flash", tmp.path());
     let (out, err) = drive(&mut s, &["/frobnicate"]);
     assert!(out.is_empty(), "help goes to stderr: {out}");
-    assert!(
-        err.contains("unknown command — try /model <id>, /provider <name>, /price, /tools, /quit"),
-        "got: {err}"
-    );
+    assert!(err.contains("unknown command — type /help"), "got: {err}");
 }
 
 #[test]
@@ -693,6 +692,116 @@ fn model_without_arg_prints_usage() {
     let (_out, err) = drive(&mut s, &["/model", "/provider"]);
     assert!(err.contains("usage: /model <id>"), "got: {err}");
     assert!(err.contains("usage: /provider <name>"), "got: {err}");
+}
+
+#[test]
+fn chat_help_discovers_image_formats_and_limit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut s, _calls) = test_session("deepseek-v4-flash", tmp.path());
+    let (out, _err) = drive(&mut s, &["/help"]);
+
+    assert!(out.contains("/image <path>"), "got: {out}");
+    assert!(out.contains("PNG or JPEG"), "got: {out}");
+    assert!(out.contains("max 4"), "got: {out}");
+}
+
+#[test]
+fn image_without_path_prints_usage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut s, _calls) = test_session("kimi-k2.6", tmp.path());
+    let (_out, err) = drive(&mut s, &["/image"]);
+
+    assert!(
+        err.contains("usage: /image <path> (PNG or JPEG; max 4)"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn image_attaches_to_next_message_and_accepts_spaces_in_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("screen shot.png"),
+        b"\x89PNG\r\n\x1a\nfixture",
+    )
+    .unwrap();
+    let (mut s, calls) = test_session("kimi-k2.6", tmp.path());
+
+    let (out, err) = drive(
+        &mut s,
+        &["/image screen shot.png", "why is this misaligned?"],
+    );
+
+    assert!(
+        out.contains("attached screen shot.png for next message (1/4)"),
+        "got: {out}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "one provider call");
+    assert!(s.pending_images.is_empty());
+    assert!(!err.contains("cannot read images"), "got: {err}");
+    let parts = s.history[1]
+        .parts
+        .as_ref()
+        .expect("multimodal user message");
+    assert!(matches!(
+        &parts[0],
+        ContentPart::Text { text } if text == "why is this misaligned?"
+    ));
+    assert!(matches!(
+        &parts[1],
+        ContentPart::ImageB64 { media_type, data }
+            if media_type == "image/png" && !data.is_empty()
+    ));
+}
+
+#[test]
+fn image_on_text_only_route_fails_before_read_or_model_call_and_teaches_switch() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("screen.png"), b"\x89PNG\r\n\x1a\nfixture").unwrap();
+    let (mut s, calls) = test_session("deepseek-v4-flash", tmp.path());
+
+    let (out, err) = drive(&mut s, &["/image screen.png"]);
+
+    assert!(out.is_empty(), "no attachment confirmation: {out}");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(s.pending_images.is_empty());
+    assert!(
+        err.contains("route deepseek-v4-flash accepts text only — it cannot read images."),
+        "got: {err}"
+    );
+    assert!(
+        err.contains("Image-capable routes: kimi-k2.6."),
+        "got: {err}"
+    );
+    assert!(
+        err.contains("Switch with /model <id> or --model <id>."),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn fifth_pending_image_is_refused_clearly() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("screen.png"), b"\x89PNG\r\n\x1a\nfixture").unwrap();
+    let (mut s, calls) = test_session("kimi-k2.6", tmp.path());
+
+    let (_out, err) = drive(
+        &mut s,
+        &[
+            "/image screen.png",
+            "/image screen.png",
+            "/image screen.png",
+            "/image screen.png",
+            "/image screen.png",
+        ],
+    );
+
+    assert_eq!(s.pending_images.len(), 4);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(
+        err.contains("a message can attach at most 4 images"),
+        "got: {err}"
+    );
 }
 
 #[test]

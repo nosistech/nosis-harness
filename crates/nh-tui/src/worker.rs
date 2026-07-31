@@ -455,6 +455,7 @@ impl WorkerSession {
                         content: Some(format!(
                             "Route changed: {previous_route} → {next_route_id}."
                         )),
+                        parts: None,
                         tool_calls: None,
                         tool_call_id: None,
                         reasoning_content: None,

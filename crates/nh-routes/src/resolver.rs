@@ -457,6 +457,17 @@ impl RouteResolver {
         self.routes.keys().cloned().collect()
     }
 
+    /// Sorted route ids whose validated catalog modality includes `modality`.
+    /// Capability guidance must always come from the loaded catalog, never a
+    /// hard-coded model list.
+    pub fn routes_with_modality(&self, modality: &str) -> Vec<String> {
+        self.routes
+            .iter()
+            .filter(|(_, route)| route.modality.iter().any(|candidate| candidate == modality))
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
     fn available_list(&self) -> String {
         if self.routes.is_empty() {
             "none (catalog.toml has no routes)".to_string()
