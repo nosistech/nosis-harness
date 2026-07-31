@@ -2,6 +2,147 @@
 
 Use this for fast decisions. Large technical decisions live in `../02-architecture/ARCHITECTURE_DECISIONS.md`.
 
+## 2026-07-31: A request timeout is never retried, because it may hide a billed response
+
+Shipped as `76cbb54`, wave M4 "RESILIENCE". This is the decision that shaped the whole wave.
+
+Decision:
+
+Retry only on (a) transport failures that are **not** timeouts, and (b) HTTP 429, 500, 502, 503,
+504. Never retry a request timeout. Never retry 400/401/403/404 or any other 4xx. Never retry a 2xx
+whose body fails to read or parse.
+
+Why:
+
+A status code is **evidence about billing**. When a provider answers 429 or 503, it answered and
+produced no completion, so that attempt cost nothing and retrying is free of double-charge risk. A
+timeout is evidence of nothing at all: the 600-second request ceiling can expire while the provider
+has already generated — and billed — a full response that never reached us. Retrying then charges
+the user twice while the receipt reports one completion.
+
+That asymmetry is the entire argument. This project's claim is an honest meter, and a silent
+double-charge is precisely the failure the meter exists to prevent. A retry that *might* have been
+paid for twice is worse than a failure the user can see, because the user cannot audit it. The same
+reasoning excludes a 2xx that fails to parse: a 200 means we were billed, so the honest move is to
+surface the parse failure, not to buy a second copy.
+
+Rejected alternatives:
+
+- Retry timeouts like any other transport failure. Recovers more real-world flakiness — the common
+  choice in HTTP client libraries, which are not metering anything. Rejected: it trades an invisible
+  monetary error for a visible one, in the wrong direction.
+- Retry a timeout only when no usage block was seen. Unworkable: a timeout means no response body
+  arrived at all, so there is nothing to inspect. The absence of evidence is the problem.
+
+Consequences:
+
+- Immediate: a genuinely hung connection still costs the user the full 600-second ceiling and one
+  manual retry. Accepted knowingly.
+- The reasoning is preserved as a comment beside `is_retryable` in `nh-core/src/wire/retry.rs`, not
+  only here, because the next person to read that match arm will otherwise "fix" the omission.
+- Long-term: this is the template for any future retry surface (fleet, MCP egress). The question is
+  never "did it fail?" but "does the failure prove we were not billed?"
+
+## 2026-07-31: Retry budget is four attempts and 45 seconds, with no configuration knob
+
+Decision:
+
+Four attempts maximum (one initial plus three retries), 2-second exponential backoff doubling to a
+20-second per-delay cap, full jitter in `[0.5, 1.0]`, a hard 45-second total retry budget, and
+`Retry-After` honored in its **delta-seconds form only**, clamped to the per-delay cap. No CLI flag,
+no profile setting, no environment override.
+
+Why:
+
+The one piece of live evidence is the 2026-07-30 image probe, where free `glm-4.6v-flash` needed
+four manual retries at 6/12/24/48s. A ladder sized to fully cover that case would freeze an
+interactive turn for ninety seconds with no in-flight notice, which is a worse first-run experience
+than an honest failure. 45 seconds bounds the silent wait while still covering the common transient
+429. Where a provider sends `Retry-After`, its number beats our guess.
+
+The HTTP-date form of `Retry-After` is ignored rather than parsed, because parsing it means either a
+new dependency or a hand-rolled date parser, and the delta-seconds form is what these providers
+actually send.
+
+Rejected alternatives:
+
+- Match the observed GLM ladder (5 attempts, ~90s). Recovers the free-tier on-ramp more often; costs
+  a minute and a half of silent interactive freeze. Reconsider once the live working heartbeat
+  exists — the tradeoff flips when the wait is visible.
+- Add a config knob now. More surface across profiles, CLI and docs in a wave otherwise contained to
+  one crate, to tune numbers nobody has field data for yet. Deferred, not refused.
+
+Consequences:
+
+- **Accepted tradeoff:** under a 45-second budget the observed GLM ladder only fully recovers if GLM
+  sends `Retry-After`, which is unverified.
+- The budget counts measured attempt time as well as sleeps, so a provider that answers 503 slowly
+  consumes its own budget and effectively gets fewer retries. Defensible — it bounds total
+  wall-clock — but it is not what "45 seconds of retry budget" sounds like, so it is written down.
+- No in-flight "retrying in 6s" notice exists: the wire clients have no progress sink, and threading
+  one through `credential.rs` would touch every frontend. The hard budget is what bounds the silence.
+
+## 2026-07-31: Wave M4 is retry only — failover, re-resolve and cooldown stay unbuilt
+
+Decision:
+
+Ship bounded retry and nothing else from research Tier 4. No availability re-resolve to the cheapest
+capable route, no provider cooldown or circuit breaker.
+
+Why:
+
+Retry is contained to `nh-core`'s wire layer and reviewable in one sitting. Availability re-resolve
+pulls in `nh-routes` and the resolver and changes **which provider gets the user's data and money**
+on failure — a different question, with a privacy dimension, that deserves its own ratification. One
+wave, one concern, is also the shape that has produced every clean executor run on this repo.
+
+Rejected alternative: implement all three together, as the research groups them. Rejected for review
+surface, not for merit; all three remain High-value leads.
+
+Consequences: a dead provider still ends the turn after the retry budget. The research's Tier-4
+"availability re-resolve" and "provider cooldown" rows are unchanged and remain the next candidates.
+Note the related standing decision that **the harness does not auto-route**, which constrains what
+re-resolve is allowed to do without asking.
+
+## 2026-07-31: A defect found in review is fixed before the commit, not after it
+
+Decision:
+
+Wave M4b — the jitter-domain fix and the error-wording fix — was squashed into the M4 commit rather
+than landing as a follow-up `fix:` commit. History records one correct wave.
+
+Why:
+
+The M4b work corrected code that had never been published. Committing the defect first and the fix
+second would have put a backoff that silently ran at half its ratified length into permanent
+history, for the sole benefit of preserving a review narrative that the `BUILD_LOG` already records
+in full. Nobody was ever exposed to the bug.
+
+The bug is worth recording even though it never shipped, because of *how* it survived: `next_delay`
+divided its jitter sample by `u32::MAX`, while both production callers supplied
+`SystemTime`-derived `subsec_nanos`, bounded at 999,999,999 — about 23% of that divisor. The
+specified `[0.5, 1.0]` jitter span was really `[0.5, 0.616]` in production. **The unit tests were
+green because they passed `u32::MAX`, a value the real caller can never produce.** The pure function
+and its only caller disagreed about the domain, and nothing asserted the caller's side.
+
+Rejected alternative: two commits preserving the exact review sequence. Rejected — the `BUILD_LOG`
+keeps both wave entries, so nothing about the review is lost.
+
+Consequences:
+
+- The general lesson, now the third instance of the repo's own rule that a passing test proves
+  consistency rather than truth: **a pure function tested only at values its real caller cannot
+  supply is not tested.** The fix therefore names the domain (`JITTER_SCALE`), collapses the
+  duplicated inline closure into one `system_jitter()` source, and adds the assertion that the
+  *source* stays inside the domain — the check whose absence let this through.
+- An out-of-domain jitter value now trips a `debug_assert` rather than being clamped, so a future
+  contract mismatch is exposed instead of silently distorted. Note this compiles out in release; the
+  domain test covers the only production caller.
+- `RetryExhausted` remains the terminal error for non-retryable failures, because uniform receipt
+  recovery is worth it, but its `Display` renders the bare provider failure when `attempts == 1`. A
+  rejected API key reads exactly as it did before wave M4 instead of gaining an "after 1 attempt
+  over 0.4s" preamble in front of the one actionable sentence.
+
 ## 2026-07-31: Route prices do not expire — the freshness apparatus is deleted
 
 **This entry supersedes the `verified_on` design drafted earlier the same day. `verified_on` was

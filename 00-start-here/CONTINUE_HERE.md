@@ -5,12 +5,14 @@
 **Works for:** Codex or Claude in `C:\Users\capv2\Desktop\nosis-Harness`
 
 This file supersedes every older checkpoint and "next task" in `CURRENT_TASK.md`. Historical records
-remain useful for provenance, but do not execute their stale instructions.
+remain useful for provenance, but do not execute their stale instructions. **An executor read
+`CURRENT_TASK.md` during wave M4 and found its tail still announcing "NEXT = Slice C VISIBLE",
+ancient history. Read this file, not that one.**
 
-## THE HEADLINE: three waves shipped. The price treadmill is gone for good. Product work is next.
+## THE HEADLINE: retry shipped. The harness no longer tells the user to retry. Next is `nh resume`.
 
-Waves **M1 (images in)**, **M2 (tool floor)** and **M3 (prices don't expire)** are committed and
-gated. The owner's standing instruction as of this session: **all product work from here.**
+Wave **M4 "RESILIENCE"** is committed as `76cbb54`. Waves **M1 (images in)**, **M2 (tool floor)**
+and **M3 (prices don't expire)** shipped earlier. All product work from here.
 
 ## First action on `continue`
 
@@ -18,15 +20,16 @@ Read this file in full. Then verify with read-only commands:
 
 ```powershell
 git status --short                  # expect CLEAN
-git log -3 --oneline                # expect the M3, docs, and M2 commits
-git log origin/main..HEAD --oneline # expect nothing pending (or push if there is)
+git log -3 --oneline                # expect the M4 docs and feat commits on top of cb2670b
+git log origin/main..HEAD --oneline # expect nothing pending
 git config --local user.email       # expect 98294098+arparvar@users.noreply.github.com
 Get-Process -Name nh,codex -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,StartTime
 ```
 
 Any `codex.exe` you find is probably the OWNER'S on another project — on 2026-07-30/31 two of his
-ran the whole session on `super-triplets` and `Ashveil-horror-story`. Check
-`~/.codex/sessions` rollout files for `"cwd"` before assuming a codex is yours.
+ran for days on `super-triplets` and `Ashveil-horror-story`. Check `~/.codex/sessions` rollout files
+for `"cwd"` before assuming a codex is yours. Verified procedure: read the first line of the newest
+rollout `.jsonl` files and match `StartTime` to the rollout timestamp.
 
 ## ⚠ EVERY COMMIT SHA CHANGED ON 2026-07-30
 
@@ -55,6 +58,7 @@ explicit owner decision. `git config --local user.email` is now the noreply addr
   `Start-Process` and PowerShell background mode are BLOCKED in this harness (EPERM on uv_spawn);
   launch through the **Bash tool with `run_in_background: true`**:
   `codex exec -m gpt-5.6-sol -c 'model_reasoning_effort=max' -s workspace-write --color never -C <repo> -o <out>.md < <brief>.txt > <run>.log 2>&1`
+  Verified working on 2026-07-31 for both M4 and M4b.
 - **Write commit messages to a file and use `git commit -F`.** Verify no BOM (first bytes must not
   be `EF BB BF`). Use the Write tool or `[System.IO.File]::WriteAllText` with `UTF8Encoding($false)`.
 - Follow root `AGENTS.md`, `05-ai-collaboration/AGENTS.md`, and THE LAW.
@@ -69,6 +73,12 @@ The shape that works: name **FULLY-IN-SCOPE crates**, **MECHANICAL-ONLY crates**
 **FORBIDDEN list**, then say explicitly *"the crate list IS the boundary; any file list is a map
 built by reading, and reading can be wrong — trust the compiler over the map, and do not stop for a
 file inside a fully-in-scope crate."*
+
+**Wave M4 confirmed this works at scale.** Its brief made `nh-core` fully in scope and *every other
+crate* mechanical-only, explicitly pre-authorizing one-line default-field additions even inside
+frozen `nh-fleet`. Sol touched 19 files across four crates in one run with **no clean stop**. Before
+briefing, size the blast radius yourself: `git grep -n 'StructName {'` counts the struct literals a
+new field will break.
 
 The five stops, so nobody repeats them:
 
@@ -89,68 +99,52 @@ both the route-price and `[fx]` structs, and `cmd_why.rs` uses the fx one.
 
 ## What shipped this session (2026-07-31)
 
-- **`2e0fea0` — wave M2 "TOOL FLOOR"**, 9 files, +1317/−14. `write_file` (create-only, refuses an
-  existing path and a missing parent), `grep_files` (literal substring, NOT regex — no regex crate
-  and the description says so), `glob_files` (sorted output, because `read_dir` order is
-  filesystem-dependent and non-determinism poisons the prefix cache).
-  **The `.GIT/x` / `.ENV` case-fold bypass is CLOSED** — the WARNING left at `lib.rs:277` for
-  exactly this wave is discharged. `creation_guard_verdict` checks the typed path, its folded form,
-  and the resolved actual path plus its folded form; `merge_guard_verdict` takes Block > Ask > Allow.
-  Two hardenings beyond the brief: `symlink_metadata` makes a destination symlink count as existing,
-  and the parent is canonicalized before creation.
-  Search consults the law per file and **excludes non-Allow files silently while counting them** —
-  no approval storm. Eight honesty counters in the footer. Iterative stack, no symlink following,
-  20k-file / 500-match caps, `target`/`node_modules`/`.venv`/`dist`/`build` pruned and **disclosed**.
-- **`9939db3` — docs**: M1 + M2 close, six decision entries, `SECURITY.md` rewritten to lead with
-  GitHub private vulnerability reporting (verified `enabled` before advertising it) and demote the
-  unmonitored email to explicitly best-effort.
-- **`223217a` — wave M3 "PRICES DON'T EXPIRE"**, 17 files, +82/−158, a net deletion. See below.
+**`76cbb54` — wave M4 "RESILIENCE"**, 19 files, +1135/−63, new file
+`crates/nh-core/src/wire/retry.rs`. Gate **PASS 636/0/1 `--release`** (fmt, clippy `-D`, rustdoc
+`-D`, cargo-deny, tests). 619 → 636 = seventeen new tests, none removed.
 
-## THE PRICE TOPIC IS CLOSED. DO NOT REOPEN IT.
+There was no HTTP retry anywhere; `http.rs` answered a 429 with "rate limited; retry later" — it
+told the HUMAN to retry, while free `glm-4.6v-flash` needed four manual retries at 6/12/24/48s in
+the 2026-07-30 image probes. GLM-free is the no-credit-card on-ramp.
 
-The owner said three times, with rising frustration, that maintaining prices would keep dragging him
-back to the product. **Do not propose a price-freshness feature, a recheck cadence, a CI price
-watcher, or a `verified_on`-style date. Do not add `valid_until` back to any catalog block.**
+- Retry lives in the **wire layer**, not a `ChatClient` decorator: above `complete()` the status and
+  `Retry-After` have collapsed into an `anyhow` string, and deciding to spend money again by
+  string-matching an error message is what this project exists not to do.
+- Policy is pure and injected — sleep, jitter and attempt execution are all parameters, so **no test
+  opens a socket or sleeps**.
+- `RetryStats { retries, rate_limited }` counts RETRIES not attempts, so a no-retry run serializes
+  to zeros, the field is skipped, and `receipts.jsonl` stays byte-identical — **pinned by an exact
+  JSON string test**.
+- Typed `RetryExhausted` (same downcast pattern as `nh_vault::AudienceRefused`) carries stats and
+  salvaged usage into the FAIL receipt, so money spent on failed attempts is not dropped.
+- Usage across attempts is SUMMED from blocks actually observed; an absent block contributes ZERO
+  and nothing is estimated. Overflow fails closed to `None`.
 
-What was deleted: all 12 route-price `valid_until` lines, `PriceQuote.stale`, the staleness
-computation, the catalog parsing, `usd_compare_key`'s `stale` parameter, six `*price stale` display
-markers, and the `stale` member of the MCP `route_cost` payload. A test **pins the absence** of both,
-so an expiry cannot return by accident.
+**Four decisions were ratified and are logged in `DECISION_LOG.md`**: never retry a timeout; the
+4-attempt/45s budget with no knob; retry-only scope; and squashing the M4b fix.
 
-What was NOT deleted: **prices themselves.** Metering, receipts, `nh why` and cheapest-capable
-selection are unchanged. `price_confidence` and the per-route first-party citation comments stay.
+### The M4 review lesson — the most reusable thing in this wave
 
-Also swept — the obligation lived in DOCUMENTS as much as in code, and removing the field alone
-would have removed the enforcement while keeping the chore: `RELEASE_CHECKLIST.md` (was a release
-blocker, now says in bold it can never block again) and `PROMPT_LIBRARY.md` (told future research
-agents to record a `valid_until` — would have rebuilt the machinery), plus `PRODUCT_BRIEF`, `COSTS`,
-`ENVIRONMENT`, `VENDOR_MAP`. Historical records left untouched.
+Review caught a real defect in green code. `next_delay` divided its jitter sample by `u32::MAX`
+while both production callers supplied `SystemTime` `subsec_nanos`, bounded at 999,999,999 — 23% of
+that divisor. The ratified `[0.5, 1.0]` jitter span was really `[0.5, 0.616]`, so backoff ran at
+**roughly half its ratified length**, worst for the exact rate-limit case the wave existed to fix.
 
-**fx staleness is DIFFERENT and stays.** An old price is a number a reader can judge; an old
-exchange rate silently mis-converts CNY to USD into a confidently wrong number they cannot judge.
-It costs nothing: there is no `[fx]` block in `catalog.toml`, so the path is dormant.
-
-Accepted tradeoff, recorded honestly: receipts carry no freshness signal, so a silent provider price
-change is metered wrong until a human notices.
+**The tests were green because they passed `u32::MAX` — a value production can never produce.** A
+pure function tested only at values its real caller cannot supply is not tested. The fix named the
+domain (`JITTER_SCALE`), collapsed the duplicated closure into one `system_jitter()`, and added the
+assertion that the *source* stays in the domain. Squashed into `76cbb54`; `BUILD_LOG` keeps both
+wave entries.
 
 ## Remaining work, newest priority first — ALL PRODUCT WORK
 
-1. **NEXT WAVE — "RESILIENCE": retry with exponential backoff.** There is **no HTTP-level retry
-   anywhere** on the interactive path. `nh-core/src/wire/http.rs:71` answers a 429 with
-   `"rate limited; retry later"` — it tells the HUMAN to retry. The only `Retry` in the tree is
-   nh-fleet's task ladder (`model.rs:147`) and a file-lock wait. Live evidence: free
-   `glm-4.6v-flash` needed **four manual retries at 6/12/24/48s** during the 2026-07-30 image
-   probes. GLM-free is the on-ramp for anyone trying nosis without a credit card, and it currently
-   fails and blames the user.
-   **Honesty requirement:** a retried call's cost is the SUM of attempts that returned usage;
-   attempts with no usage block cost nothing and must be reported as zero, never estimated. The
-   receipt should say something like "3 attempts, 2 rate-limited". Research Tier 4 is unbuilt.
-2. **`nh resume` + session ledger.** A crashed session loses everything today. Table stakes, and the
-   substrate the compaction-receipt work needs. Research Tier 3 is partial: `effective_context`
-   exists; five-stage compaction, compaction receipts and the session ledger do not.
-3. **Compaction receipts** — show what was dropped and what it saved. The honesty thesis applied to
+1. **NEXT WAVE — `nh resume` + session ledger.** A crashed session loses everything today. Table
+   stakes, and the substrate the compaction-receipt work needs. Research Tier 3 is partial:
+   `effective_context` exists; five-stage compaction, compaction receipts and the session ledger do
+   not.
+2. **Compaction receipts** — show what was dropped and what it saved. The honesty thesis applied to
    context instead of money. Differentiator, not a chore.
-4. **Ubuntu test-suite hang — THE blocker for `v0.1.0`.** Linux compiles and lints clean; `cargo
+3. **Ubuntu test-suite hang — THE blocker for `v0.1.0`.** Linux compiles and lints clean; `cargo
    test` never finishes and hits the 30-minute CI ceiling. Confirmed again 2026-07-31: Windows,
    macOS and Supply-chain all green, **ubuntu-latest cancelled at ~35m for the fifth time**. The
    hanging test is unnamed (GitHub archives no logs for a timed-out job). **Ruled out, do not
@@ -158,14 +152,20 @@ change is metered wrong until a human notices.
    causes (macOS passes). Prime suspects: `nh-fleet`'s `File::try_lock`/flock semantics, or Linux
    process-group timing. **The owner runs the Ubuntu VM himself** (VirtualBox Ubuntu 26.04 Desktop,
    `libdbus-1-dev` required).
+4. **Live-verify the retry path.** Every M4 test is a scripted fake by construction, so the real
+   shape of a GLM `Retry-After` header is unverified — the same class of gap VERIFY-LIVE §7 closed
+   for thinking dialects. Forcing a 429 on demand is awkward; treat it as opportunistic.
 5. **Two M1 nits, non-blocking:** image part ordering is emitted text-first but was only measured
    image-first (one sub-cent call settles it); and MiMo's documented 8192-pixel minimum is
    unenforced because the wave does not decode image dimensions.
 6. **Cruft, non-blocking:** three `nh-fleet` test fixtures still carry route-price `valid_until`
    lines. Dead keys — serde ignores them. `nh-fleet` is frozen; left for a future sweep.
-7. Then: FEEL pass on the current binary, required status checks, final gate, **tag `v0.1.0`**.
+7. **Deferred from M4, non-blocking:** `wire/anthropic.rs` duplicates ~118 lines of attempt
+   scaffolding from `openai.rs`. Cosmetic today — all 12 catalog routes are `wire = "openai"`.
+   Also: there is no in-flight "retrying in 6s" notice, which the live working heartbeat would fix.
+8. Then: FEEL pass on the current binary, required status checks, final gate, **tag `v0.1.0`**.
 
-## OWNER ACTIONS STILL OWED (neither is blocking)
+## OWNER ACTIONS STILL OWED (none blocking)
 
 1. **Branch protection.** Ratified 2026-07-30, still NOT applied — `main` is unprotected. The
    harness classifier blocks the orchestrator from writing GitHub settings, so the owner runs it:
@@ -178,13 +178,19 @@ change is metered wrong until a human notices.
 
 ## Settled — do not reopen
 
-- **The price topic** (see above). This is the strongest one on the list.
+- **The price topic.** Route prices deliberately never expire. Do not propose a freshness feature, a
+  recheck cadence, a CI price watcher, or a `verified_on` date. **fx staleness is DIFFERENT and
+  stays** — an old price is a number a reader can judge; an old exchange rate silently mis-converts
+  CNY to USD into a confidently wrong number they cannot judge.
+- **Never retry a request timeout** (2026-07-31). A status proves the provider was not billed; a
+  timeout may hide a billed response, so retrying double-charges invisibly.
 - Provider scope is **DeepSeek + Kimi + GLM + MiMo + local**. No Anthropic/OpenAI/Gemini API routes.
 - **All 12 catalog routes are `wire = "openai"`.**
 - Never add a frontier price row as a `top_tier` anchor.
 - Zero-price routes are a selectable tier, not a routing winner.
 - **The harness does not auto-route.** The "router inside the harness" moat claim is retired, which
-  makes the research's Tier-2 "learning router" **stale as written**.
+  makes the research's Tier-2 "learning router" **stale as written**, and constrains what a future
+  availability re-resolve may do without asking.
 - Do not add a quality axis to routing.
 - Do not change the edit format, restructure the prompt, lower temperature, or use
   grammar-constrained decoding.
@@ -203,17 +209,20 @@ verification: **two were refuted outright** and the third needed five correction
 to build, including one catalog claim protected by a green test. Verify every item against
 first-party docs AND a live probe before briefing it.
 
-Tier status: Tier 0/1/9 largely shipped; **Tier 2 stale** (assumes auto-routing); Tier 3 partial;
-**Tier 4 unbuilt** (this is item 1 above); **Tier 5 and 8 unbuilt**.
+Tier status: Tier 0/1/9 largely shipped; **Tier 2 stale** (assumes auto-routing); Tier 3 partial
+(this is item 1 above); **Tier 4 retry row now SHIPPED**, its re-resolve and cooldown rows unbuilt;
+**Tier 5 and 8 unbuilt**.
 
 ## Do not redo
 
 - The five-lane audit, the responsibility refactor, the GitHub bootstrap, Slice G, the history
-  rewrite, waves 1/2/3/3b/A/4, or waves M1, M2, M3.
+  rewrite, waves 1/2/3/3b/A/4, or waves M1, M2, M3, M4.
 - The image-input probes, the image-generation research, the MiMo off-peak verification, or the
   Kimi batch verification.
 - **A passing test proves consistency, not truth.** Wave M1 found a green test protecting a false
-  catalog claim; wave M2 found two more obsolete assertions passing. Only a live call breaks the tie.
+  catalog claim; wave M2 found two more obsolete assertions passing; **wave M4 found a green test
+  suite hiding a halved backoff, because it fed the function a value its real caller could never
+  produce.** Only a live call, or an assertion on the real caller, breaks the tie.
 - Do not claim Linux support. macOS **is** verified green; no support claim ships without owner
   sign-off.
 
