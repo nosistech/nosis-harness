@@ -456,6 +456,7 @@ impl SwarmClient for MockSwarm {
             }),
             cache_hit_pct: None,
             repairs: Default::default(),
+            retries: Default::default(),
             effective_profile: None,
         })
     }
@@ -544,6 +545,7 @@ fn failed_receipt(route_id: &str) -> Receipt {
         }),
         cache_hit_pct: None,
         repairs: Default::default(),
+        retries: Default::default(),
         effective_profile: None,
     }
 }

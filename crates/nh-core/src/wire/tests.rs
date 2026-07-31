@@ -1,9 +1,12 @@
 use super::anthropic::{
     build_body as build_anthropic_body, endpoint as anthropic_endpoint,
-    parse_response as parse_anthropic_response,
+    extract_usage as extract_anthropic_usage, parse_response as parse_anthropic_response,
 };
 use super::http::{scrub_snippet, send_error_line, CONNECT_TIMEOUT, REQUEST_TIMEOUT};
-use super::openai::{build_body, endpoint, parse_response, OpenAiPolicy};
+use super::openai::{
+    build_body, endpoint, extract_usage as extract_openai_usage, parse_response, OpenAiPolicy,
+};
+use super::retry::combine_usage;
 use super::usage_debug::{UsageDebug, DEBUG_USAGE_ENV};
 use super::*;
 use std::ffi::OsStr;
@@ -751,6 +754,60 @@ fn parses_plain_content_without_usage() {
     assert_eq!(resp.message.content.as_deref(), Some("done"));
     assert_eq!(resp.finish_reason, "");
     assert!(resp.usage.is_none());
+}
+
+#[test]
+fn wire_specific_error_usage_is_salvaged_without_estimation() {
+    let openai = extract_openai_usage(
+        r#"{"error":{"message":"busy"},"usage":{"prompt_tokens":11,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":3}}}"#,
+    )
+    .unwrap();
+    assert_eq!(openai.prompt_tokens, 11);
+    assert_eq!(openai.completion_tokens, 2);
+    assert_eq!(openai.cached_tokens, Some(3));
+
+    let anthropic = extract_anthropic_usage(
+        r#"{"type":"error","error":{"message":"busy"},"usage":{"input_tokens":7,"output_tokens":4,"cache_read_input_tokens":2}}"#,
+    )
+    .unwrap();
+    assert_eq!(anthropic.prompt_tokens, 7);
+    assert_eq!(anthropic.completion_tokens, 4);
+    assert_eq!(anthropic.cached_tokens, Some(2));
+
+    assert!(extract_openai_usage(r#"{"error":{"message":"busy"}}"#).is_none());
+    assert!(extract_anthropic_usage("not json").is_none());
+}
+
+#[test]
+fn salvaged_and_success_usage_sum_while_absence_contributes_zero() {
+    let salvaged = Usage {
+        prompt_tokens: 11,
+        completion_tokens: 2,
+        cached_tokens: Some(3),
+    };
+    let success = Usage {
+        prompt_tokens: 7,
+        completion_tokens: 4,
+        cached_tokens: Some(2),
+    };
+    let combined = combine_usage(Some(salvaged), Some(success)).unwrap();
+    assert_eq!(combined.prompt_tokens, 18);
+    assert_eq!(combined.completion_tokens, 6);
+    assert_eq!(combined.cached_tokens, Some(5));
+
+    let observed = combine_usage(
+        None,
+        Some(Usage {
+            prompt_tokens: 7,
+            completion_tokens: 4,
+            cached_tokens: None,
+        }),
+    )
+    .unwrap();
+    assert_eq!(observed.prompt_tokens, 7);
+    assert_eq!(observed.completion_tokens, 4);
+    assert_eq!(observed.cached_tokens, None);
+    assert!(combine_usage(None, None).is_none());
 }
 
 #[test]

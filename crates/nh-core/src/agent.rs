@@ -8,7 +8,8 @@ pub use context::{effective_context, PrefixSeal};
 
 use crate::receipt::{FailureClass, Outcome, Receipt, ReceiptWriter, RepairStats};
 use crate::wire::{
-    ChatClient, ChatMessage, ChatRequest, ContentPart, ThinkingEffort, ToolCallReq, Usage,
+    ChatClient, ChatMessage, ChatRequest, ContentPart, RetryExhausted, RetryStats, ThinkingEffort,
+    ToolCallReq, Usage,
 };
 use context::{
     compact_history, compaction_input_tokens, context_percentage, estimate_request_tokens,
@@ -54,6 +55,7 @@ struct ReceiptFields {
     failure_class: Option<FailureClass>,
     usage: Option<Usage>,
     repairs: RepairStats,
+    retries: RetryStats,
 }
 
 fn classify_finish_reason(raw: &str) -> FinishKind {
@@ -89,6 +91,11 @@ fn add_usage_checked(total: &mut Usage, usage: &Usage) -> bool {
     total.completion_tokens = completion_tokens;
     total.cached_tokens = cached_tokens;
     true
+}
+
+fn add_retry_stats(total: &mut RetryStats, retries: RetryStats) {
+    total.retries = total.retries.saturating_add(retries.retries);
+    total.rate_limited = total.rate_limited.saturating_add(retries.rate_limited);
 }
 
 /// Build the byte-stable identity prefix required at every model-facing
@@ -229,6 +236,7 @@ impl AgentLoop {
         let mut saw_usage = false;
         let mut usage_overflowed = false;
         let mut latest_prompt_tokens = None;
+        let mut retry_total = RetryStats::default();
 
         while turns < self.max_turns {
             self.report_prefix_drift(&prefix_seal, history, &mut prefix_drift_reported);
@@ -263,6 +271,15 @@ impl AgentLoop {
             let resp = match self.client.complete(&req) {
                 Ok(r) => r,
                 Err(e) => {
+                    if let Some(exhausted) = e.downcast_ref::<RetryExhausted>() {
+                        add_retry_stats(&mut retry_total, exhausted.stats);
+                        if let Some(usage) = &exhausted.usage {
+                            saw_usage = true;
+                            if !usage_overflowed && !add_usage_checked(&mut usage_total, usage) {
+                                usage_overflowed = true;
+                            }
+                        }
+                    }
                     self.report_prefix_drift(&prefix_seal, history, &mut prefix_drift_reported);
                     let mut receipt = self.make_receipt(
                         task,
@@ -273,12 +290,21 @@ impl AgentLoop {
                             failure_class: Some(FailureClass::Verification),
                             usage: (!usage_overflowed && saw_usage).then(|| usage_total.clone()),
                             repairs,
+                            retries: retry_total,
                         },
                     );
                     self.append_receipt(&mut receipt);
                     return Err(e);
                 }
             };
+            add_retry_stats(&mut retry_total, resp.retries);
+            if resp.retries.retries > 0 {
+                self.emit(&format!(
+                    "turn {turns}: {} attempts, {} rate-limited",
+                    resp.retries.retries.saturating_add(1),
+                    resp.retries.rate_limited
+                ));
+            }
             latest_prompt_tokens = resp.usage.as_ref().map(|u| u.prompt_tokens);
             if let Some(u) = &resp.usage {
                 saw_usage = true;
@@ -314,6 +340,7 @@ impl AgentLoop {
                         failure_class,
                         usage: (!usage_overflowed && saw_usage).then(|| usage_total.clone()),
                         repairs,
+                        retries: retry_total,
                     },
                 );
                 self.append_receipt(&mut receipt);
@@ -372,6 +399,7 @@ impl AgentLoop {
                 failure_class: Some(FailureClass::Constraint),
                 usage: (!usage_overflowed && saw_usage).then(|| usage_total.clone()),
                 repairs,
+                retries: retry_total,
             },
         );
         self.append_receipt(&mut receipt);
@@ -471,6 +499,7 @@ impl AgentLoop {
             failure_class,
             usage,
             repairs,
+            retries,
         } = fields;
         let cache_hit_pct = usage
             .as_ref()
@@ -486,6 +515,7 @@ impl AgentLoop {
             usage,
             cache_hit_pct,
             repairs,
+            retries,
             effective_profile: self.profile.clone(),
         }
     }

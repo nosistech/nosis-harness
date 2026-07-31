@@ -987,6 +987,7 @@ fn receipt(usage: Option<Usage>) -> Receipt {
         usage,
         cache_hit_pct: None,
         repairs: Default::default(),
+        retries: Default::default(),
         effective_profile: None,
     }
 }

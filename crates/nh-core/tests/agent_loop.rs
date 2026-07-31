@@ -95,6 +95,7 @@ fn tool_call_resp(name: &str, arguments: &str, id: &str, usage: Option<Usage>) -
         },
         finish_reason: "tool_calls".into(),
         usage,
+        retries: Default::default(),
     }
 }
 
@@ -110,6 +111,7 @@ fn text_resp(text: &str, usage: Option<Usage>) -> ChatResponse {
         },
         finish_reason: "stop".into(),
         usage,
+        retries: Default::default(),
     }
 }
 
@@ -185,6 +187,7 @@ fn pre_profile_receipt_json_still_parses() {
     )
     .unwrap();
     assert_eq!(receipt.effective_profile, None);
+    assert_eq!(receipt.retries, Default::default());
 }
 
 #[test]

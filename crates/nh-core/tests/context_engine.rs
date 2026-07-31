@@ -72,6 +72,7 @@ fn final_answer(usage: Option<Usage>) -> ChatResponse {
         message: message("assistant", "ok"),
         finish_reason: "stop".into(),
         usage,
+        retries: Default::default(),
     }
 }
 

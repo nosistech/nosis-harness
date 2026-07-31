@@ -679,6 +679,7 @@ fn failed_timeline_summary(model_id: &str, task: &str, reason: &str) -> Timeline
             usage: None,
             cache_hit_pct: None,
             repairs: RepairStats::default(),
+            retries: Default::default(),
             effective_profile: None,
         },
         answer: format!("error: {reason}"),

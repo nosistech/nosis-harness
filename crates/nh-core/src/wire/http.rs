@@ -45,12 +45,12 @@ pub(super) fn read_body_capped(
 pub(super) fn send_error(url: &str, error: &reqwest::Error) -> anyhow::Error {
     anyhow::anyhow!(
         "{}",
-        send_error_line(
-            url,
-            error.is_timeout() && !error.is_connect(),
-            &error.to_string(),
-        )
+        send_error_line(url, is_request_timeout(error), &error.to_string(),)
     )
+}
+
+pub(super) fn is_request_timeout(error: &reqwest::Error) -> bool {
+    error.is_timeout() && !error.is_connect()
 }
 
 pub(super) fn send_error_line(url: &str, timed_out: bool, detail: &str) -> String {
@@ -68,7 +68,7 @@ pub(super) fn send_error_line(url: &str, timed_out: bool, detail: &str) -> Strin
 pub(super) fn provider_error(status: reqwest::StatusCode, body: &str, key: &str) -> anyhow::Error {
     let hint = match status.as_u16() {
         401 | 403 => " - key rejected; run `nh key add <provider>`",
-        429 => " - rate limited; retry later",
+        429 => " - rate limited",
         _ => "",
     };
     anyhow::anyhow!(
