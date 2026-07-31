@@ -482,7 +482,7 @@ impl App {
                     |quote| {
                         let mut display =
                             money_with_gloss(0.0, quote.currency, self.resolver.fx(), now);
-                        if quote.stale || quote.confidence == PriceConfidence::VerifyLive {
+                        if quote.confidence == PriceConfidence::VerifyLive {
                             display.push('*');
                         }
                         display
@@ -552,9 +552,7 @@ impl App {
             ));
         }
         if let Some(quote) = self.route.price_at(now) {
-            if quote.stale {
-                line.push_str(" · *price stale");
-            } else if quote.confidence == PriceConfidence::VerifyLive {
+            if quote.confidence == PriceConfidence::VerifyLive {
                 line.push_str(" · *price verify_live");
             }
         }

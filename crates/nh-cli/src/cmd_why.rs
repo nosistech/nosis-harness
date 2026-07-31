@@ -63,9 +63,7 @@ pub(crate) fn render(
             ),
             None => "  unpriced this turn (est) - cost unavailable".into(),
         };
-        if quote.stale {
-            cost.push_str(" · *price stale");
-        } else if quote.confidence == PriceConfidence::VerifyLive {
+        if quote.confidence == PriceConfidence::VerifyLive {
             cost.push_str(" · *price verify_live");
         }
         lines.push(cost);

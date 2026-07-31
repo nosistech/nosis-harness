@@ -24,8 +24,7 @@ impl fmt::Display for Currency {
     }
 }
 
-/// Honest-cost rule (plan §7, B.8): price data carries its own confidence,
-/// and stale/uncertain data is flagged - never guessed.
+/// Price data carries its catalog confidence; rates are never guessed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PriceConfidence {
     Confirmed,
@@ -89,8 +88,6 @@ pub struct RoutePrice {
     pub cache_miss: f64,
     pub output: f64,
     pub confidence: PriceConfidence,
-    /// Prices are valid through this whole UTC day; quotes after it are `stale`.
-    pub valid_until: Option<NaiveDate>,
     pub peak: Option<PeakWindows>,
 }
 
@@ -103,8 +100,6 @@ pub struct PriceQuote {
     pub currency: Currency,
     pub peak: bool,
     pub confidence: PriceConfidence,
-    /// True when `valid_until` is absent or the quote instant is past it.
-    pub stale: bool,
 }
 
 /// Counterfactual costs for the same turn and token counts.
@@ -166,9 +161,8 @@ pub(super) fn usd_compare_key(
     currency: Currency,
     fx: Option<&Fx>,
     at: DateTime<Utc>,
-    stale: bool,
 ) -> Option<f64> {
-    if stale || !cost.is_finite() {
+    if !cost.is_finite() {
         return None;
     }
     match currency {

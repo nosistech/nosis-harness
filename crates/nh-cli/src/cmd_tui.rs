@@ -126,7 +126,6 @@ mod tests {
         cache_miss = 0.1
         output = 0.1
         price_confidence = "confirmed"
-        valid_until = "2099-01-01"
 
         [routes.glm-route]
         provider = "glm"
@@ -142,7 +141,6 @@ mod tests {
         cache_miss = 0.1
         output = 0.1
         price_confidence = "confirmed"
-        valid_until = "2099-01-01"
 
         [routes.kimi-route]
         provider = "kimi"
@@ -158,7 +156,6 @@ mod tests {
         cache_miss = 0.1
         output = 0.1
         price_confidence = "confirmed"
-        valid_until = "2099-01-01"
 
         [routes.rogue-route]
         provider = "rogue"
@@ -174,7 +171,6 @@ mod tests {
         cache_miss = 0.1
         output = 0.1
         price_confidence = "confirmed"
-        valid_until = "2099-01-01"
     "#;
 
     struct StubVault {

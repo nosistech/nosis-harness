@@ -251,8 +251,7 @@ pub(super) fn route_cost_at(
             "output": quote.output,
             "currency": quote.currency.as_str(),
             "peak": quote.peak,
-            "confidence": quote.confidence.as_str(),
-            "stale": quote.stale
+            "confidence": quote.confidence.as_str()
         },
         "cost": cost
     });
