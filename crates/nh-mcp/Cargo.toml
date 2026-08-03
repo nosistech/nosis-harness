@@ -14,7 +14,7 @@ serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 tiny_http.workspace = true
-getrandom = "0.2"
+getrandom = "0.4"
 subtle = "2.6"
 nh-core = { path = "../nh-core", version = "0.1.0" }
 nh-fleet = { path = "../nh-fleet", version = "0.1.0" }
