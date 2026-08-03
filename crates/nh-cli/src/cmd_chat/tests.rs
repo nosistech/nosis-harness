@@ -123,8 +123,12 @@ const TEST_CATALOG: &str = r#"
 
 /// ChatMessage literals live only in nh-core (CONTRACTS_M1.md §5.2) - build via serde.
 fn assistant_msg(text: &str) -> ChatMessage {
-    serde_json::from_value(serde_json::json!({ "role": "assistant", "content": text }))
-        .expect("valid assistant message")
+    text_msg("assistant", text)
+}
+
+fn text_msg(role: &str, text: &str) -> ChatMessage {
+    serde_json::from_value(serde_json::json!({ "role": role, "content": text }))
+        .expect("valid text message")
 }
 
 fn session_path(root: &Path, id: &str) -> std::path::PathBuf {
@@ -191,7 +195,7 @@ fn test_session(model: &str, tmp: &Path) -> (ChatSession, Arc<AtomicUsize>) {
             nh_vault::secret(format!("fake-key-{}", route.vault_entry())),
         ))
     });
-    let resolver = RouteResolver::from_toml(TEST_CATALOG).expect("test catalog parses");
+    let resolver = Arc::new(RouteResolver::from_toml(TEST_CATALOG).expect("test catalog parses"));
     let route = resolver.resolve(model).expect("known test route");
     let profiles = Profiles::bundled();
     let execution_policy = profiles.effective("balanced", &route);
@@ -241,6 +245,7 @@ fn test_session(model: &str, tmp: &Path) -> (ChatSession, Arc<AtomicUsize>) {
         session_in: 0,
         session_out: 0,
         session_cached: Some(0),
+        last_cached_tokens: None,
         session_cost: Vec::new(),
         unpriced_turns: 0,
         scrubber: Arc::new(RwLock::new(test_scrubber)),
@@ -404,6 +409,18 @@ fn provider_switch_resolves_the_provider_default() {
     // Cheapest api route by output price; free glm routes tie -> alphabetical.
     assert!(out.contains("switched to glm-4.5-flash"), "got: {out}");
     assert_eq!(s.route.id(), "glm-4.5-flash");
+}
+
+#[test]
+fn route_switch_clears_preceding_call_cache_evidence() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut s, _calls) = test_session("deepseek-v4-flash", tmp.path());
+    s.last_cached_tokens = Some(400);
+
+    let (out, _err) = drive(&mut s, &["/model kimi-k2.6"]);
+
+    assert!(out.contains("switched to kimi-k2.6"), "got: {out}");
+    assert_eq!(s.last_cached_tokens, None);
 }
 
 #[test]
@@ -577,6 +594,10 @@ fn footer_after_each_answer_has_route_peak_and_session_tokens() {
         err.contains("cost <¥0.0001 (≈<$0.0001) - saved 15% vs no-cache"),
         "turn cost on stderr: {err}"
     );
+    assert_eq!(
+        footer(&s),
+        "deepseek-v4-flash | off-peak | session <¥0.0001 (≈<$0.0001) | tokens 12 in / 7 out / 4 cached | cache 33%"
+    );
 }
 
 #[test]
@@ -640,12 +661,14 @@ fn failed_agent_turn_still_persists_its_history_delta() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut session, _) = test_session("deepseek-v4-flash", tmp.path());
     session.agent.client = Box::new(FailingClient);
+    session.last_cached_tokens = Some(400);
     let mut out = Vec::new();
     let mut err = Vec::new();
 
     run_task(&mut session, "keep this failed turn", &mut out, &mut err);
 
     assert!(out.is_empty());
+    assert_eq!(session.last_cached_tokens, None);
     assert!(String::from_utf8(err)
         .unwrap()
         .contains("provider failed after accepting the turn"));
@@ -698,6 +721,7 @@ fn chat_resume_round_trip_preserves_history_and_appends_same_ledger() {
     assert!(reopened.resumed);
     assert_eq!(reopened.restored_turns, 1);
     assert_eq!(reopened.ledger.session_id(), "test-session");
+    assert_eq!(reopened.last_cached_tokens, None);
     assert_eq!(serde_json::to_vec(&reopened.history).unwrap(), live_history);
     assert!(std::fs::read(&path).unwrap().len() > bytes_before_reopen.len());
 
@@ -805,9 +829,89 @@ fn footer_omits_cache_chip_before_any_usage() {
     let tmp = tempfile::tempdir().unwrap();
     let (s, _calls) = test_session("deepseek-v4-flash", tmp.path());
     let line = footer(&s);
-    assert!(line.contains("session ¥0.00 (≈$0.00) | tokens 0 in / 0 out"));
-    assert!(!line.contains("cached"), "got: {line}");
-    assert!(!line.contains("| cache"), "got: {line}");
+    assert_eq!(
+        line,
+        "deepseek-v4-flash | off-peak | session ¥0.00 (≈$0.00) | tokens 0 in / 0 out"
+    );
+}
+
+#[test]
+fn compaction_projection_never_changes_session_usage_or_cost_totals() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut s, _calls) = test_session("deepseek-v4-flash", tmp.path());
+    let usage = Usage {
+        prompt_tokens: 12,
+        completion_tokens: 7,
+        cached_tokens: Some(4),
+    };
+    assert!(add_session_usage(&mut s, &usage));
+    add_session_cost(&mut s, &usage, off_peak_now());
+    let before = (
+        s.session_in,
+        s.session_out,
+        s.session_cached,
+        session_cost_snapshot(&s),
+        footer(&s),
+    );
+    let mut compaction = nh_core::receipt::CompactionStats::default();
+    compaction.record(8, 100, Some(300));
+
+    let line = cmd_run::compaction_meter_line(&s.resolver, &s.route, &compaction).unwrap();
+
+    assert!(line.contains("~100 tokens elided"), "got: {line}");
+    assert!(
+        line.contains("exact compaction time unavailable"),
+        "got: {line}"
+    );
+    assert_eq!(
+        (
+            s.session_in,
+            s.session_out,
+            s.session_cached,
+            session_cost_snapshot(&s),
+            footer(&s),
+        ),
+        before
+    );
+}
+
+#[test]
+fn real_chat_compaction_keeps_estimates_out_of_measured_session_totals() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut s, _calls) = test_session("deepseek-v4-flash", tmp.path());
+    s.history = vec![
+        text_msg("system", "sealed prefix"),
+        text_msg("user", &"x".repeat(4_000)),
+        text_msg("assistant", "older answer"),
+        text_msg("user", "recent question"),
+    ];
+    s.agent.context_limit = Some(1_000);
+    s.last_cached_tokens = None;
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+
+    run_task(&mut s, "next question", &mut out, &mut err);
+
+    let err = String::from_utf8(err).unwrap();
+    let compaction = err
+        .lines()
+        .find(|line| line.starts_with("compaction "))
+        .expect("real AgentLoop receipt reaches the chat surface");
+    assert!(compaction.contains("tokens elided"), "got: {compaction}");
+    assert!(
+        compaction.contains("exact preceding-call cached tokens unavailable"),
+        "got: {compaction}"
+    );
+    assert_eq!(
+        (s.session_in, s.session_out, s.session_cached),
+        (12, 7, Some(4))
+    );
+    assert_eq!(s.last_cached_tokens, None);
+    assert!(
+        footer(&s).contains("tokens 12 in / 7 out / 4 cached | cache 33%"),
+        "got: {}",
+        footer(&s)
+    );
 }
 
 #[test]

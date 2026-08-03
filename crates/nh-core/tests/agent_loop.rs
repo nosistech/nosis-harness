@@ -2,9 +2,11 @@
 
 use std::sync::{Arc, Mutex};
 
-use nh_core::agent::{AgentLoop, MAX_TASK_BYTES};
-use nh_core::receipt::{FailureClass, Outcome, Receipt, ReceiptWriter};
-use nh_core::wire::{ChatClient, ChatMessage, ChatRequest, ChatResponse, ToolCallReq, Usage};
+use nh_core::agent::{AgentLoop, CompactionEvent, MAX_TASK_BYTES};
+use nh_core::receipt::{CompactionStats, FailureClass, Outcome, Receipt, ReceiptWriter};
+use nh_core::wire::{
+    ChatClient, ChatMessage, ChatRequest, ChatResponse, RetryStats, ToolCallReq, Usage,
+};
 use nh_tools::{Tool, ToolCtx, ToolSpec};
 
 /// Obviously fake test secret (never a real key shape in use).
@@ -76,6 +78,33 @@ impl Tool for TestEditFile {
         );
         std::fs::write(&path, new)?;
         Ok("edited".into())
+    }
+}
+
+struct LargeOutputTool;
+
+impl Tool for LargeOutputTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "large_output".into(),
+            description: "return a large deterministic test result".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    fn execute(&self, _args: serde_json::Value, _ctx: &ToolCtx) -> anyhow::Result<String> {
+        Ok("large tool evidence ".repeat(80))
+    }
+}
+
+fn message(role: &str, content: impl Into<String>) -> ChatMessage {
+    ChatMessage {
+        role: role.into(),
+        content: Some(content.into()),
+        parts: None,
+        tool_calls: None,
+        tool_call_id: None,
+        reasoning_content: None,
     }
 }
 
@@ -188,6 +217,7 @@ fn pre_profile_receipt_json_still_parses() {
     .unwrap();
     assert_eq!(receipt.effective_profile, None);
     assert_eq!(receipt.retries, Default::default());
+    assert_eq!(*receipt.compaction, CompactionStats::default());
 }
 
 #[test]
@@ -363,15 +393,236 @@ fn run_with_history_keeps_tool_turns_even_on_timeout() {
 }
 
 #[test]
+fn real_loop_accumulates_multiple_compactions_without_mixing_estimates_into_usage() {
+    let dir = tempfile::tempdir().unwrap();
+    let responses = vec![
+        tool_call_resp(
+            "large_output",
+            "{}",
+            "large-1",
+            Some(Usage {
+                prompt_tokens: 620,
+                completion_tokens: 11,
+                cached_tokens: Some(480),
+            }),
+        ),
+        text_resp(
+            "done",
+            Some(Usage {
+                prompt_tokens: 730,
+                completion_tokens: 7,
+                cached_tokens: Some(420),
+            }),
+        ),
+        text_resp(
+            "done again",
+            Some(Usage {
+                prompt_tokens: 810,
+                completion_tokens: 3,
+                cached_tokens: Some(500),
+            }),
+        ),
+    ];
+    let mut agent = agent_in(
+        dir.path(),
+        Box::new(ScriptedClient {
+            responses: Mutex::new(responses),
+        }),
+        vec![Box::new(LargeOutputTool)],
+        2,
+    );
+    agent.context_limit = Some(1_000);
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&lines);
+    agent.on_event = Some(Box::new(move |line| {
+        sink.lock().unwrap().push(line.to_owned())
+    }));
+
+    let mut history = vec![message("system", "sealed constitution")];
+    for turn in 0..8 {
+        history.push(message(
+            "user",
+            format!("old user {turn}: context context ").repeat(10),
+        ));
+        history.push(message(
+            "assistant",
+            format!("old answer {turn}: context context ").repeat(10),
+        ));
+    }
+    let original_len = history.len();
+    let mut latest_cached_tokens = Some(600);
+
+    let (answer, receipt) = agent
+        .run_with_persistent_history_and_cache(
+            &mut history,
+            "finish with current evidence",
+            &mut latest_cached_tokens,
+        )
+        .unwrap();
+
+    assert_eq!(answer, "done");
+    assert_eq!(
+        latest_cached_tokens, None,
+        "the append-only transcript is not the compacted provider prefix"
+    );
+    assert_eq!(
+        history.len(),
+        original_len + 4,
+        "ledger history stays append-only"
+    );
+    let events = lines
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|line| CompactionEvent::parse(line))
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 2, "the real turn loop must compact twice");
+    assert_eq!(events[0].preceding_cached_tokens, Some(600));
+    assert_eq!(events[1].preceding_cached_tokens, Some(480));
+    assert!(
+        events
+            .iter()
+            .all(|event| event.occurred_at_unix_seconds.is_some()),
+        "each real compaction records its own measured time"
+    );
+    assert_eq!(receipt.compaction.events, events.len() as u32);
+    assert_eq!(
+        receipt.compaction.messages_elided,
+        events.iter().fold(0_u64, |total, event| {
+            total.saturating_add(event.messages_elided)
+        })
+    );
+    assert_eq!(
+        receipt.compaction.estimated_tokens_elided,
+        events.iter().fold(0_u64, |total, event| {
+            total.saturating_add(event.estimated_tokens_elided)
+        })
+    );
+    assert_eq!(
+        receipt.compaction.preceding_cached_tokens, None,
+        "an aggregate of different next calls must refuse a money claim"
+    );
+    assert_eq!(
+        receipt.compaction.occurred_at_unix_seconds, None,
+        "an aggregate of different next calls has no single event time"
+    );
+    assert!(receipt.compaction.estimated_tokens_elided > 0);
+
+    let usage = receipt.usage.expect("provider usage remains measured");
+    assert_eq!(usage.prompt_tokens, 1_350);
+    assert_eq!(usage.completion_tokens, 18);
+    assert_eq!(usage.cached_tokens, Some(900));
+
+    let (_, next_receipt) = agent
+        .run_with_persistent_history_and_cache(
+            &mut history,
+            "continue from the append-only transcript",
+            &mut latest_cached_tokens,
+        )
+        .unwrap();
+    let all_events = lines
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|line| CompactionEvent::parse(line))
+        .collect::<Vec<_>>();
+    assert_eq!(all_events.len(), 3);
+    assert_eq!(
+        all_events[2].preceding_cached_tokens, None,
+        "the next persistent task must not claim cache evidence for a different prefix"
+    );
+    assert_eq!(next_receipt.compaction.events, 1);
+    assert_eq!(next_receipt.compaction.preceding_cached_tokens, None);
+    assert_eq!(latest_cached_tokens, None);
+}
+
+#[test]
+fn retried_response_usage_is_not_relabelled_as_final_call_cache_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut response = text_resp(
+        "done",
+        Some(Usage {
+            prompt_tokens: 30,
+            completion_tokens: 4,
+            cached_tokens: Some(12),
+        }),
+    );
+    response.retries = RetryStats {
+        retries: 1,
+        rate_limited: 1,
+    };
+    let mut agent = agent_in(
+        dir.path(),
+        Box::new(ScriptedClient {
+            responses: Mutex::new(vec![response]),
+        }),
+        vec![],
+        1,
+    );
+    let mut history = Vec::new();
+    let mut latest_cached_tokens = Some(99);
+
+    let (_, receipt) = agent
+        .run_with_persistent_history_and_cache(
+            &mut history,
+            "finish after a provider retry",
+            &mut latest_cached_tokens,
+        )
+        .unwrap();
+
+    assert_eq!(receipt.usage.unwrap().cached_tokens, Some(12));
+    assert_eq!(receipt.retries.retries, 1);
+    assert_eq!(latest_cached_tokens, None);
+}
+
+#[test]
 fn provider_error_writes_fail_receipt_and_returns_err() {
     let dir = tempfile::tempdir().unwrap();
     let mut agent = agent_in(dir.path(), Box::new(FailingClient), vec![], 5);
+    let mut history = Vec::new();
+    let mut latest_cached_tokens = Some(12);
 
-    let err = agent.run("anything").unwrap_err();
+    let err = agent
+        .run_with_persistent_history_and_cache(&mut history, "anything", &mut latest_cached_tokens)
+        .unwrap_err();
     assert!(err.to_string().contains("HTTP 500"));
+    assert_eq!(latest_cached_tokens, None);
 
     let lines = receipt_lines(dir.path());
     assert_eq!(lines.len(), 1, "exactly one receipt per run");
     assert!(lines[0].contains(r#""outcome":"fail""#));
     assert!(lines[0].contains(r#""failure_class":"verification""#));
+}
+
+#[test]
+fn persistent_task_without_compaction_returns_exact_final_cache_measurement() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut agent = agent_in(
+        dir.path(),
+        Box::new(ScriptedClient {
+            responses: Mutex::new(vec![text_resp(
+                "done",
+                Some(Usage {
+                    prompt_tokens: 20,
+                    completion_tokens: 2,
+                    cached_tokens: Some(9),
+                }),
+            )]),
+        }),
+        vec![],
+        1,
+    );
+    let mut history = Vec::new();
+    let mut latest_cached_tokens = Some(4);
+
+    let (_, receipt) = agent
+        .run_with_persistent_history_and_cache(
+            &mut history,
+            "a small task",
+            &mut latest_cached_tokens,
+        )
+        .unwrap();
+
+    assert!(receipt.compaction.is_empty());
+    assert_eq!(latest_cached_tokens, Some(9));
 }

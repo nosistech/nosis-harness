@@ -1,20 +1,28 @@
 //! Receipt-to-terminal cost and usage projection for `run` and `chat`.
 
 use chrono::{DateTime, Utc};
+use nh_core::agent::CompactionEvent;
+use nh_core::receipt::CompactionStats;
 use nh_core::wire::{cache_hit_pct, Usage};
 use nh_routes::{
     cost_of, money, money_with_gloss, saved_pct, PriceConfidence, ResolvedRoute, RouteClass,
     RouteResolver, LOCAL_METER_COPY,
 };
 
+#[derive(Clone, Copy)]
+pub(super) struct RunTiming {
+    pub started: DateTime<Utc>,
+    pub ended: DateTime<Utc>,
+}
+
 pub(super) fn run_meter_lines(
     resolver: &RouteResolver,
     route: &ResolvedRoute,
     usage: Option<&Usage>,
+    compaction: &CompactionStats,
     turns: u32,
     tool_calls: u32,
-    started: DateTime<Utc>,
-    ended: DateTime<Utc>,
+    timing: RunTiming,
 ) -> Vec<String> {
     let Some(usage) = usage else {
         let mut lines = vec![format!(
@@ -22,6 +30,9 @@ pub(super) fn run_meter_lines(
         )];
         if route.class() == RouteClass::Local {
             lines.push(LOCAL_METER_COPY.to_owned());
+        }
+        if let Some(line) = compaction_meter_line(resolver, route, compaction) {
+            lines.push(line);
         }
         return lines;
     };
@@ -36,10 +47,154 @@ pub(super) fn run_meter_lines(
         token_line.push_str(&format!(" / {cached} cached | cache {pct:.0}%"));
     }
     let mut lines = vec![token_line];
-    if let Some(line) = turn_cost_line_for_run(resolver, route, usage, started, ended) {
+    if let Some(line) = turn_cost_line_for_run(resolver, route, usage, timing.started, timing.ended)
+    {
+        lines.push(line);
+    }
+    if let Some(line) = compaction_meter_line(resolver, route, compaction) {
         lines.push(line);
     }
     lines
+}
+
+/// Render one progress callback. Ordinary core progress remains byte-for-byte
+/// unchanged; compaction facts are recognized and priced by this surface.
+pub(crate) fn progress_meter_line(
+    resolver: &RouteResolver,
+    route: &ResolvedRoute,
+    core_line: &str,
+) -> String {
+    let Some(event) = CompactionEvent::parse(core_line) else {
+        return core_line.to_owned();
+    };
+    let mut line = format!(
+        "context ~{}% - compacted {} earlier messages · ~{} tokens elided",
+        event.context_percent, event.messages_elided, event.estimated_tokens_elided
+    );
+    append_compaction_effect(
+        &mut line,
+        resolver,
+        route,
+        1,
+        event.estimated_tokens_elided,
+        event.preceding_cached_tokens,
+        compaction_time(event.occurred_at_unix_seconds),
+    );
+    line
+}
+
+pub(crate) fn compaction_meter_line(
+    resolver: &RouteResolver,
+    route: &ResolvedRoute,
+    stats: &CompactionStats,
+) -> Option<String> {
+    if stats.is_empty() {
+        return None;
+    }
+    let event_noun = if stats.events == 1 { "event" } else { "events" };
+    let message_noun = if stats.messages_elided == 1 {
+        "message"
+    } else {
+        "messages"
+    };
+    let mut line = format!(
+        "compaction {} {event_noun} · {} {message_noun} elided · ~{} tokens elided",
+        stats.events, stats.messages_elided, stats.estimated_tokens_elided
+    );
+    append_compaction_effect(
+        &mut line,
+        resolver,
+        route,
+        stats.events,
+        stats.estimated_tokens_elided,
+        stats.preceding_cached_tokens,
+        compaction_time(stats.occurred_at_unix_seconds),
+    );
+    Some(line)
+}
+
+fn append_compaction_effect(
+    line: &mut String,
+    resolver: &RouteResolver,
+    route: &ResolvedRoute,
+    events: u32,
+    estimated_tokens_elided: u64,
+    preceding_cached_tokens: Option<u64>,
+    occurred_at: Option<DateTime<Utc>>,
+) {
+    if events != 1 {
+        line.push_str(" · aggregate money not stated - compactions affect separate next calls");
+        return;
+    }
+    if route.class() == RouteClass::Local {
+        line.push_str(" · next-call money not stated - ");
+        line.push_str(LOCAL_METER_COPY);
+        return;
+    }
+    let Some(cached) = preceding_cached_tokens else {
+        line.push_str(
+            " · next-call money not stated - exact preceding-call cached tokens unavailable",
+        );
+        return;
+    };
+    let Some(retained) = cached.checked_sub(estimated_tokens_elided) else {
+        line.push_str(
+            " · next-call money not stated - measured cache does not cover the elided token estimate",
+        );
+        return;
+    };
+    let Some(at) = occurred_at else {
+        line.push_str(" · next-call money not stated - exact compaction time unavailable");
+        return;
+    };
+    let Some(quote) = route.price_at(at) else {
+        line.push_str(" · next-call money not stated - no price data");
+        return;
+    };
+    let Some(saving) = cost_of(&quote, estimated_tokens_elided, estimated_tokens_elided, 0) else {
+        line.push_str(" · next-call money not stated - invalid compaction facts");
+        return;
+    };
+    let (Some(retained_miss), Some(retained_hit)) = (
+        cost_of(&quote, retained, 0, 0),
+        cost_of(&quote, retained, retained, 0),
+    ) else {
+        line.push_str(" · next-call money not stated - invalid compaction facts");
+        return;
+    };
+    if retained_miss < retained_hit {
+        line.push_str(" · next-call money not stated - cache-miss price is below cache-hit price");
+        return;
+    }
+    let surcharge = retained_miss - retained_hit;
+    let net = saving - surcharge;
+    let net_is_zero = net.abs() <= f64::EPSILON * saving.abs().max(surcharge.abs()).max(1.0);
+    let saving = format!("~{}", money(saving, quote.currency));
+    let surcharge = format!("~{}", money(surcharge, quote.currency));
+    let (net_label, net_amount) = if net_is_zero {
+        ("net break-even", 0.0)
+    } else if net < 0.0 {
+        ("net loss", -net)
+    } else {
+        ("net saving", net)
+    };
+    let mut net = format!(
+        "~{}",
+        money_with_gloss(net_amount, quote.currency, resolver.fx(), at)
+    );
+    if quote.confidence == PriceConfidence::VerifyLive {
+        net.push('*');
+    }
+    line.push_str(&format!(
+        " · next-call estimate: cache-hit saving {saving} · cache-reset surcharge {surcharge} · {net_label} {net}"
+    ));
+    if quote.confidence == PriceConfidence::VerifyLive {
+        line.push_str(" · *price verify_live");
+    }
+}
+
+fn compaction_time(unix_seconds: Option<i64>) -> Option<DateTime<Utc>> {
+    unix_seconds.and_then(|seconds| DateTime::<Utc>::from_timestamp(seconds, 0))
 }
 
 pub(super) fn turn_cost_line_for_run(

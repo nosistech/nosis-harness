@@ -6,7 +6,8 @@ use crate::session::{effort_for, effort_name, safe_line, scrub_full_line};
 use crate::worker::ApprovalRequest;
 use crate::{SharedScrubber, BUDGET_REASON};
 use chrono::{DateTime, FixedOffset, Utc};
-use nh_core::receipt::{FailureClass, Outcome, Receipt};
+use nh_core::agent::CompactionEvent;
+use nh_core::receipt::{CompactionStats, FailureClass, Outcome, Receipt};
 use nh_core::session_ledger::RestoredSession;
 use nh_core::wire::{cache_hit_pct, ThinkingEffort, Usage};
 use nh_law::{Law, PolicyView};
@@ -40,11 +41,24 @@ pub struct TimelineEntry {
     pub usage: Option<Usage>,
     pub answer: String,
     pub compacted: bool,
+    pub compaction: CompactionStats,
+    pub(super) compaction_detail: Option<String>,
+    pub(super) compaction_hud: Option<String>,
 }
 
 impl TimelineEntry {
     /// Build a timeline row without mutating the source receipt.
-    pub fn from_receipt(turn: usize, receipt: Receipt, answer: String, compacted: bool) -> Self {
+    pub fn from_receipt(
+        turn: usize,
+        receipt: Receipt,
+        answer: String,
+        live_compaction: CompactionStats,
+    ) -> Self {
+        let compaction = if receipt.compaction.is_empty() {
+            live_compaction
+        } else {
+            *receipt.compaction
+        };
         Self {
             turn,
             ts_utc: receipt.ts_utc,
@@ -56,7 +70,10 @@ impl TimelineEntry {
             failure_class: receipt.failure_class,
             usage: receipt.usage,
             answer,
-            compacted,
+            compacted: !compaction.is_empty(),
+            compaction,
+            compaction_detail: None,
+            compaction_hud: None,
         }
     }
 
@@ -73,6 +90,7 @@ impl TimelineEntry {
 
 /// Additive worker payload carrying the receipt alongside its existing answer event.
 pub struct TimelineSummary {
+    pub route_id: String,
     pub receipt: Receipt,
     pub answer: String,
 }
@@ -176,6 +194,7 @@ pub(super) enum Overlay {
 /// Everything the render loop learns from the worker.
 pub enum AgentEvent {
     Progress(String),
+    Compaction(CompactionEvent),
     ModelStarted {
         route: String,
         started_at: DateTime<Utc>,
@@ -276,7 +295,8 @@ pub struct App {
     pub(super) credentialed_providers: Vec<String>,
     pub(super) overlay: Overlay,
     pub(super) timeline: Vec<TimelineEntry>,
-    pub(super) current_task_compacted: bool,
+    pub(super) current_task_compaction: CompactionStats,
+    pub(super) last_compaction_hud: Option<String>,
     pub(super) session_cost: Vec<SessionCost>,
     pub(super) has_failed_turn: bool,
     pub(super) session_allow: Vec<String>,
@@ -336,7 +356,8 @@ impl App {
             credentialed_providers,
             overlay: Overlay::None,
             timeline: Vec::new(),
-            current_task_compacted: false,
+            current_task_compaction: CompactionStats::default(),
+            last_compaction_hud: None,
             session_cost: Vec::new(),
             has_failed_turn: false,
             session_allow: Vec::new(),
@@ -401,7 +422,8 @@ impl App {
             return None;
         }
         self.input.clear();
-        self.current_task_compacted = false;
+        self.current_task_compaction = CompactionStats::default();
+        self.last_compaction_hud = None;
         self.active_model = None;
         self.active_tool = None;
         self.push_line(&task, TranscriptKind::Task);
@@ -410,6 +432,7 @@ impl App {
     }
 
     pub(super) fn switch_route(&mut self, route: ResolvedRoute) {
+        self.last_compaction_hud = None;
         let policy = self.profiles.effective(&self.active_profile, &route);
         self.effort = effort_for(policy.posture, route.thinking_dialect(), route.wire());
         self.active_profile = policy.profile;
@@ -536,6 +559,10 @@ impl App {
         );
         if let Some(pct) = cache_hit_pct(self.usage.prompt_tokens, self.usage.cached_tokens) {
             line.push_str(&format!(" · cache {pct:.0}%"));
+        }
+        if let Some(compaction) = &self.last_compaction_hud {
+            line.push_str(" · ");
+            line.push_str(compaction);
         }
         line.push_str(&format!(
             " · {}",

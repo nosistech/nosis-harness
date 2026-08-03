@@ -6,20 +6,21 @@ mod config;
 mod meter;
 
 pub(crate) use config::{find_catalog, load_and_vet_mcp_configs};
-pub(crate) use meter::turn_cost_line;
+pub(crate) use meter::{compaction_meter_line, progress_meter_line, turn_cost_line};
 
 #[cfg(test)]
 use config::{
     filter_mcp_audiences_with, find_catalog_with_home, merge_and_vet, unapproved_mcp_target,
     BUNDLED_CATALOG,
 };
-use meter::run_meter_lines;
 #[cfg(test)]
 use meter::turn_cost_line_for_run;
+use meter::{run_meter_lines, RunTiming};
 
 #[cfg(test)]
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::sync::Arc;
 
 use chrono::Utc;
 use nh_core::agent::{validate_task, AgentLoop};
@@ -120,7 +121,7 @@ pub fn run(
     for warning in &law.warnings {
         eprintln!("warning: {}", safe_line(&warning_scrubber, warning));
     }
-    let resolver = RouteResolver::from_toml(&catalog)?;
+    let resolver = Arc::new(RouteResolver::from_toml(&catalog)?);
     let route = resolver.resolve(model)?;
     let (profiles, profile_warnings) = nh_routes::Profiles::load(&root);
     for warning in &profile_warnings {
@@ -155,6 +156,8 @@ pub fn run(
     // progress, tools, and approvals all derive from its zeroizing registry.
     let approve_scrubber = session_scrubber.clone();
     let event_scrubber = session_scrubber.clone();
+    let event_resolver = Arc::clone(&resolver);
+    let event_route = route.clone();
     let policy = law.policy.clone();
     let ctx = ToolCtx::new(
         cwd,
@@ -192,7 +195,8 @@ pub fn run(
         constitution: Some(agent_constitution(&law.constitution, &route)),
         context_limit: route.context(),
         on_event: Some(Box::new(move |line| {
-            eprintln!("  {}", safe_line(&event_scrubber, line))
+            let line = progress_meter_line(&event_resolver, &event_route, line);
+            eprintln!("  {}", safe_line(&event_scrubber, &line))
         })),
     };
 
@@ -216,10 +220,10 @@ pub fn run(
         &resolver,
         &route,
         receipt.usage.as_ref(),
+        &receipt.compaction,
         receipt.turns,
         receipt.tool_calls,
-        started,
-        ended,
+        RunTiming { started, ended },
     );
     let stdout = io::stdout();
     let mut stdout = stdout.lock();

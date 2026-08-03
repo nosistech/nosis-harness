@@ -988,6 +988,7 @@ fn receipt(usage: Option<Usage>) -> Receipt {
         cache_hit_pct: None,
         repairs: Default::default(),
         retries: Default::default(),
+        compaction: Default::default(),
         effective_profile: None,
     }
 }

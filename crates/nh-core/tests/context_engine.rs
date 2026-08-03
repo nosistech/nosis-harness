@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use nh_core::agent::{AgentLoop, PrefixSeal};
+use nh_core::agent::{AgentLoop, CompactionEvent, PrefixSeal};
 use nh_core::receipt::ReceiptWriter;
 use nh_core::wire::{
     cache_hit_pct, ChatClient, ChatMessage, ChatRequest, ChatResponse, ThinkingEffort, ToolCallReq,
@@ -199,7 +199,7 @@ fn compaction_preserves_prefix_user_boundary_tool_pairs_and_recent_turns() {
         sink.lock().unwrap().push(line.to_string())
     }));
 
-    loop_
+    let (_, receipt) = loop_
         .run_with_history(&mut history, "current task")
         .unwrap();
 
@@ -244,8 +244,16 @@ fn compaction_preserves_prefix_user_boundary_tool_pairs_and_recent_turns() {
 
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 1);
-    assert!(events[0].starts_with("context "));
-    assert!(events[0].contains("% - compacted "));
+    let event = CompactionEvent::parse(&events[0]).expect("real compaction event parses");
+    assert!(event.context_percent >= 70);
+    assert!(event.messages_elided > 0);
+    assert!(event.estimated_tokens_elided > 0);
+    assert_eq!(event.preceding_cached_tokens, None);
+    assert!(event.occurred_at_unix_seconds.is_some());
+    assert_eq!(
+        receipt.compaction.occurred_at_unix_seconds, event.occurred_at_unix_seconds,
+        "the event and receipt use the same clock reading"
+    );
 }
 
 #[test]

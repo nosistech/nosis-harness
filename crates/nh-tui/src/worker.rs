@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use chrono::Utc;
-use nh_core::agent::AgentLoop;
+use nh_core::agent::{AgentLoop, CompactionEvent};
 use nh_core::receipt::{FailureClass, Outcome, Receipt, ReceiptWriter, RepairStats};
 use nh_core::session_ledger::{
     new_session_id, RestoredSession, SessionEvent, SessionLedger, Surface,
@@ -293,6 +293,7 @@ struct WorkerSession {
     law_constitution: String,
     agent: AgentLoop,
     history: Vec<ChatMessage>,
+    preceding_cached_tokens: Option<u64>,
     session_usage: Usage,
     scrubber: SharedScrubber,
     connect: ConnectFn,
@@ -393,8 +394,11 @@ impl WorkerSession {
             constitution: Some(current_constitution.clone()),
             context_limit: route.context(),
             on_event: Some(Box::new(move |line| {
-                let _ =
-                    progress_events.send(AgentEvent::Progress(safe_line(&event_scrubber, line)));
+                let event = CompactionEvent::parse(line).map_or_else(
+                    || AgentEvent::Progress(safe_line(&event_scrubber, line)),
+                    AgentEvent::Compaction,
+                );
+                let _ = progress_events.send(event);
             })),
         };
 
@@ -450,6 +454,7 @@ impl WorkerSession {
             law_constitution,
             agent,
             history,
+            preceding_cached_tokens: None,
             session_usage,
             scrubber,
             connect,
@@ -496,6 +501,7 @@ impl WorkerSession {
         match command {
             WorkerCommand::Task(task) => CommandAction::Run(task),
             WorkerCommand::SwitchRoute(next_route) => {
+                self.preceding_cached_tokens = None;
                 let previous_route = self.route.id().to_owned();
                 let next_route_id = next_route.id().to_owned();
                 let execution_policy = self.profiles.effective(&self.active_profile, &next_route);
@@ -602,6 +608,7 @@ impl WorkerSession {
     /// Returns false only when shutdown should stop the command loop.
     fn run_task(&mut self, task: String) -> bool {
         if let Err(error) = self.ensure_connected() {
+            self.preceding_cached_tokens = None;
             if self.stopped() {
                 return false;
             }
@@ -613,9 +620,14 @@ impl WorkerSession {
         if let Some(message) = self.pending_route_context.take() {
             self.history.push(message);
         }
-        let result = self
-            .agent
-            .run_with_persistent_history(&mut self.history, &task);
+        let result = self.agent.run_with_persistent_history_and_cache(
+            &mut self.history,
+            &task,
+            &mut self.preceding_cached_tokens,
+        );
+        if result.is_err() {
+            self.preceding_cached_tokens = None;
+        }
         let usage = result
             .as_ref()
             .ok()
@@ -647,9 +659,11 @@ impl WorkerSession {
                     }
                 }
                 let _ = self.events.send(AgentEvent::Answer(answer.clone()));
-                let _ = self
-                    .events
-                    .send(AgentEvent::TaskReceipt(TimelineSummary { receipt, answer }));
+                let _ = self.events.send(AgentEvent::TaskReceipt(TimelineSummary {
+                    route_id: self.route.id().to_owned(),
+                    receipt,
+                    answer,
+                }));
             }
             Err(error) => {
                 if self.stopped() {
@@ -686,6 +700,7 @@ impl WorkerSession {
         let _ = self
             .events
             .send(AgentEvent::TaskReceipt(failed_timeline_summary(
+                self.route.id(),
                 self.route.model_id(),
                 task,
                 &reason,
@@ -776,8 +791,14 @@ fn session_timestamp(at: chrono::DateTime<Utc>) -> String {
     at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-fn failed_timeline_summary(model_id: &str, task: &str, reason: &str) -> TimelineSummary {
+fn failed_timeline_summary(
+    route_id: &str,
+    model_id: &str,
+    task: &str,
+    reason: &str,
+) -> TimelineSummary {
     TimelineSummary {
+        route_id: route_id.to_owned(),
         receipt: Receipt {
             ts_utc: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             model_id: model_id.to_owned(),
@@ -790,6 +811,7 @@ fn failed_timeline_summary(model_id: &str, task: &str, reason: &str) -> Timeline
             cache_hit_pct: None,
             repairs: RepairStats::default(),
             retries: Default::default(),
+            compaction: Default::default(),
             effective_profile: None,
         },
         answer: format!("error: {reason}"),

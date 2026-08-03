@@ -127,6 +127,7 @@ where
         profiles,
         execution_policy,
     } = startup;
+    let resolver = Arc::new(resolver);
     if let Some(saved) = &restored {
         if saved.model_id != route.model_id() {
             anyhow::bail!(
@@ -208,6 +209,9 @@ where
         session_in: 0,
         session_out: 0,
         session_cached: Some(0),
+        // Turn-ledger usage is task-cumulative, so it cannot prove the final
+        // provider call's cache measurement after a resume.
+        last_cached_tokens: None,
         session_cost: Vec::new(),
         unpriced_turns: 0,
         key_literals: initial.key_literals,

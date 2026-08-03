@@ -6,7 +6,7 @@ mod tool_repair;
 
 pub use context::{effective_context, PrefixSeal};
 
-use crate::receipt::{FailureClass, Outcome, Receipt, ReceiptWriter, RepairStats};
+use crate::receipt::{CompactionStats, FailureClass, Outcome, Receipt, ReceiptWriter, RepairStats};
 use crate::wire::{
     ChatClient, ChatMessage, ChatRequest, ContentPart, RetryExhausted, RetryStats, ThinkingEffort,
     ToolCallReq, Usage,
@@ -67,6 +67,7 @@ struct ReceiptFields {
     usage: Option<Usage>,
     repairs: RepairStats,
     retries: RetryStats,
+    compaction: CompactionStats,
 }
 
 fn classify_finish_reason(raw: &str) -> FinishKind {
@@ -127,6 +128,100 @@ pub fn identity_constitution(law_constitution: &str, route_id: &str, provider: &
 /// Optional progress sink used by terminal frontends.
 pub type ProgressCallback = Box<dyn Fn(&str) + Send>;
 
+/// Lossless, route-agnostic compaction facts carried over the existing text
+/// progress callback. Frontends parse this record and own user-facing wording
+/// and pricing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactionEvent {
+    pub context_percent: u64,
+    pub messages_elided: u64,
+    pub estimated_tokens_elided: u64,
+    pub preceding_cached_tokens: Option<u64>,
+    pub occurred_at_unix_seconds: Option<i64>,
+}
+
+impl CompactionEvent {
+    pub const fn new(
+        context_percent: u64,
+        messages_elided: u64,
+        estimated_tokens_elided: u64,
+        preceding_cached_tokens: Option<u64>,
+    ) -> Self {
+        Self {
+            context_percent,
+            messages_elided,
+            estimated_tokens_elided,
+            preceding_cached_tokens,
+            occurred_at_unix_seconds: None,
+        }
+    }
+
+    pub const fn new_at(
+        context_percent: u64,
+        messages_elided: u64,
+        estimated_tokens_elided: u64,
+        preceding_cached_tokens: Option<u64>,
+        unix_seconds: i64,
+    ) -> Self {
+        Self {
+            context_percent,
+            messages_elided,
+            estimated_tokens_elided,
+            preceding_cached_tokens,
+            occurred_at_unix_seconds: Some(unix_seconds),
+        }
+    }
+
+    /// Parse the exact natural-language fact record emitted by the turn loop.
+    pub fn parse(line: &str) -> Option<Self> {
+        let line = line.strip_prefix("context ~")?;
+        let (context_percent, line) = line.split_once("% - compacted ")?;
+        let (messages_elided, line) = line.split_once(" earlier messages · ~")?;
+        let (estimated_tokens_elided, line) =
+            line.split_once(" tokens elided · preceding cache ")?;
+        let (cache, unix_time) = line.split_once(" · Unix time ")?;
+        let preceding_cached_tokens = if cache == "unavailable" {
+            None
+        } else {
+            Some(cache.strip_suffix(" tokens measured")?.parse().ok()?)
+        };
+        let occurred_at_unix_seconds = if unix_time == "unavailable" {
+            None
+        } else {
+            Some(unix_time.strip_suffix(" measured")?.parse().ok()?)
+        };
+
+        Some(Self {
+            context_percent: context_percent.parse().ok()?,
+            messages_elided: messages_elided.parse().ok()?,
+            estimated_tokens_elided: estimated_tokens_elided.parse().ok()?,
+            preceding_cached_tokens,
+            occurred_at_unix_seconds,
+        })
+    }
+}
+
+impl std::fmt::Display for CompactionEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "context ~{}% - compacted {} earlier messages · ~{} tokens elided · preceding cache ",
+            self.context_percent, self.messages_elided, self.estimated_tokens_elided
+        )?;
+        if let Some(cached_tokens) = self.preceding_cached_tokens {
+            write!(f, "{cached_tokens} tokens measured")
+        } else {
+            f.write_str("unavailable")
+        }?;
+        f.write_str(" · Unix time ")?;
+        if let Some(unix_seconds) = self.occurred_at_unix_seconds {
+            write!(f, "{unix_seconds} measured")
+        } else {
+            f.write_str("unavailable")
+        }
+    }
+}
+
 pub struct AgentLoop {
     pub client: Box<dyn ChatClient>,
     pub tools: Vec<Box<dyn Tool>>,
@@ -171,7 +266,8 @@ impl AgentLoop {
         history: &mut Vec<ChatMessage>,
         task: &str,
     ) -> anyhow::Result<(String, Receipt)> {
-        self.run_with_history_inner(history, task, None, None)
+        let mut latest_cached_tokens = None;
+        self.run_with_history_inner(history, task, None, None, &mut latest_cached_tokens)
     }
 
     /// Run against a compactable working copy while keeping the caller's
@@ -182,7 +278,24 @@ impl AgentLoop {
         history: &mut Vec<ChatMessage>,
         task: &str,
     ) -> anyhow::Result<(String, Receipt)> {
-        self.run_with_persistent_history_inner(history, task, None)
+        let mut latest_cached_tokens = None;
+        self.run_with_persistent_history_inner(history, task, None, &mut latest_cached_tokens)
+    }
+
+    /// Persistent-history form with cache evidence from the immediately
+    /// preceding provider response. `preceding_cached_tokens` is in/out:
+    /// callers supply the prior response's exact field, and receive the final
+    /// response's exact field only while it still describes the caller's
+    /// prefix. Output is `None` after an unreported value, provider error or
+    /// retry, or working-copy compaction because caller history stays
+    /// append-only and will rebuild a different prefix.
+    pub fn run_with_persistent_history_and_cache(
+        &mut self,
+        history: &mut Vec<ChatMessage>,
+        task: &str,
+        preceding_cached_tokens: &mut Option<u64>,
+    ) -> anyhow::Result<(String, Receipt)> {
+        self.run_with_persistent_history_inner(history, task, None, preceding_cached_tokens)
     }
 
     /// Add image or future content parts to the next user task. The existing
@@ -193,7 +306,8 @@ impl AgentLoop {
         task: &str,
         parts: Vec<ContentPart>,
     ) -> anyhow::Result<(String, Receipt)> {
-        self.run_with_history_inner(history, task, Some(parts), None)
+        let mut latest_cached_tokens = None;
+        self.run_with_history_inner(history, task, Some(parts), None, &mut latest_cached_tokens)
     }
 
     /// Multimodal form of [`Self::run_with_persistent_history`].
@@ -203,7 +317,25 @@ impl AgentLoop {
         task: &str,
         parts: Vec<ContentPart>,
     ) -> anyhow::Result<(String, Receipt)> {
-        self.run_with_persistent_history_inner(history, task, Some(parts))
+        let mut latest_cached_tokens = None;
+        self.run_with_persistent_history_inner(
+            history,
+            task,
+            Some(parts),
+            &mut latest_cached_tokens,
+        )
+    }
+
+    /// Multimodal persistent-history form with the same in/out cache evidence
+    /// semantics as [`Self::run_with_persistent_history_and_cache`].
+    pub fn run_with_persistent_history_and_parts_and_cache(
+        &mut self,
+        history: &mut Vec<ChatMessage>,
+        task: &str,
+        parts: Vec<ContentPart>,
+        preceding_cached_tokens: &mut Option<u64>,
+    ) -> anyhow::Result<(String, Receipt)> {
+        self.run_with_persistent_history_inner(history, task, Some(parts), preceding_cached_tokens)
     }
 
     fn run_with_persistent_history_inner(
@@ -211,11 +343,24 @@ impl AgentLoop {
         history: &mut Vec<ChatMessage>,
         task: &str,
         parts: Option<Vec<ContentPart>>,
+        latest_cached_tokens: &mut Option<u64>,
     ) -> anyhow::Result<(String, Receipt)> {
         let mut working = history.clone();
         let mut appended = Vec::new();
-        let result = self.run_with_history_inner(&mut working, task, parts, Some(&mut appended));
+        let result = self.run_with_history_inner(
+            &mut working,
+            task,
+            parts,
+            Some(&mut appended),
+            latest_cached_tokens,
+        );
+        let compacted = result
+            .as_ref()
+            .is_ok_and(|(_, receipt)| !receipt.compaction.is_empty());
         history.extend(appended);
+        if compacted {
+            *latest_cached_tokens = None;
+        }
         result
     }
 
@@ -225,6 +370,7 @@ impl AgentLoop {
         task: &str,
         parts: Option<Vec<ContentPart>>,
         mut appended: Option<&mut Vec<ChatMessage>>,
+        latest_cached_tokens: &mut Option<u64>,
     ) -> anyhow::Result<(String, Receipt)> {
         validate_task(task)?;
         let image_count = parts.as_ref().map_or(0, |parts| {
@@ -287,6 +433,7 @@ impl AgentLoop {
         let mut usage_overflowed = false;
         let mut latest_prompt_tokens = None;
         let mut retry_total = RetryStats::default();
+        let mut compaction_total = CompactionStats::default();
 
         while turns < self.max_turns {
             self.report_prefix_drift(&prefix_seal, history, &mut prefix_drift_reported);
@@ -301,10 +448,22 @@ impl AgentLoop {
                             self.emit("cache break detected: retained prefix drift");
                         }
                         let pct = context_percentage(input_tokens, working_limit);
-                        self.emit(&format!(
-                            "context {pct}% - compacted {} earlier messages",
-                            compaction.messages
-                        ));
+                        let messages_elided = compaction.messages as u64;
+                        let occurred_at_unix_seconds = chrono::Utc::now().timestamp();
+                        let event = CompactionEvent::new_at(
+                            pct,
+                            messages_elided,
+                            compaction.estimated_tokens_elided,
+                            *latest_cached_tokens,
+                            occurred_at_unix_seconds,
+                        );
+                        compaction_total.record_at(
+                            messages_elided,
+                            compaction.estimated_tokens_elided,
+                            *latest_cached_tokens,
+                            occurred_at_unix_seconds,
+                        );
+                        self.emit(&event.to_string());
                     }
                 }
             }
@@ -321,6 +480,7 @@ impl AgentLoop {
             let resp = match self.client.complete(&req) {
                 Ok(r) => r,
                 Err(e) => {
+                    *latest_cached_tokens = None;
                     if let Some(exhausted) = e.downcast_ref::<RetryExhausted>() {
                         add_retry_stats(&mut retry_total, exhausted.stats);
                         if let Some(usage) = &exhausted.usage {
@@ -341,6 +501,7 @@ impl AgentLoop {
                             usage: (!usage_overflowed && saw_usage).then(|| usage_total.clone()),
                             repairs,
                             retries: retry_total,
+                            compaction: compaction_total,
                         },
                     );
                     self.append_receipt(&mut receipt);
@@ -356,6 +517,14 @@ impl AgentLoop {
                 ));
             }
             latest_prompt_tokens = resp.usage.as_ref().map(|u| u.prompt_tokens);
+            // Wire clients fold any usage salvaged from failed retry attempts
+            // into the successful response. That aggregate remains correct for
+            // metered totals, but it is not an exact final-call cache measure.
+            *latest_cached_tokens = if resp.retries.retries == 0 {
+                resp.usage.as_ref().and_then(|u| u.cached_tokens)
+            } else {
+                None
+            };
             if let Some(u) = &resp.usage {
                 saw_usage = true;
                 if !usage_overflowed && !add_usage_checked(&mut usage_total, u) {
@@ -391,6 +560,7 @@ impl AgentLoop {
                         usage: (!usage_overflowed && saw_usage).then(|| usage_total.clone()),
                         repairs,
                         retries: retry_total,
+                        compaction: compaction_total,
                     },
                 );
                 self.append_receipt(&mut receipt);
@@ -454,6 +624,7 @@ impl AgentLoop {
                 usage: (!usage_overflowed && saw_usage).then(|| usage_total.clone()),
                 repairs,
                 retries: retry_total,
+                compaction: compaction_total,
             },
         );
         self.append_receipt(&mut receipt);
@@ -554,6 +725,7 @@ impl AgentLoop {
             usage,
             repairs,
             retries,
+            compaction,
         } = fields;
         let cache_hit_pct = usage
             .as_ref()
@@ -570,6 +742,7 @@ impl AgentLoop {
             cache_hit_pct,
             repairs,
             retries,
+            compaction: Box::new(compaction),
             effective_profile: self.profile.clone(),
         }
     }

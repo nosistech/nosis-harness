@@ -41,6 +41,81 @@ impl RepairStats {
     }
 }
 
+/// Route-agnostic facts about context compaction during one accepted task.
+/// Cache evidence is retained only for a single event; aggregating distinct
+/// next-call effects would violate the per-next-call honesty boundary.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CompactionStats {
+    #[serde(default)]
+    pub events: u32,
+    #[serde(default)]
+    pub messages_elided: u64,
+    #[serde(default)]
+    pub estimated_tokens_elided: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preceding_cached_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurred_at_unix_seconds: Option<i64>,
+}
+
+impl CompactionStats {
+    /// Record one real compaction event with saturating task totals.
+    pub fn record(
+        &mut self,
+        messages_elided: u64,
+        estimated_tokens_elided: u64,
+        preceding_cached_tokens: Option<u64>,
+    ) {
+        self.record_inner(
+            messages_elided,
+            estimated_tokens_elided,
+            preceding_cached_tokens,
+            None,
+        );
+    }
+
+    /// Record one real compaction event and its measured wall-clock time.
+    pub fn record_at(
+        &mut self,
+        messages_elided: u64,
+        estimated_tokens_elided: u64,
+        preceding_cached_tokens: Option<u64>,
+        unix_seconds: i64,
+    ) {
+        self.record_inner(
+            messages_elided,
+            estimated_tokens_elided,
+            preceding_cached_tokens,
+            Some(unix_seconds),
+        );
+    }
+
+    fn record_inner(
+        &mut self,
+        messages_elided: u64,
+        estimated_tokens_elided: u64,
+        preceding_cached_tokens: Option<u64>,
+        occurred_at_unix_seconds: Option<i64>,
+    ) {
+        let first = self.events == 0;
+        self.events = self.events.saturating_add(1);
+        self.messages_elided = self.messages_elided.saturating_add(messages_elided);
+        self.estimated_tokens_elided = self
+            .estimated_tokens_elided
+            .saturating_add(estimated_tokens_elided);
+        self.preceding_cached_tokens = if first { preceding_cached_tokens } else { None };
+        self.occurred_at_unix_seconds = if first {
+            occurred_at_unix_seconds
+        } else {
+            None
+        };
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Receipt {
     pub ts_utc: String,
@@ -59,6 +134,8 @@ pub struct Receipt {
     pub repairs: RepairStats,
     #[serde(default, skip_serializing_if = "RetryStats::is_empty")]
     pub retries: RetryStats,
+    #[serde(default, skip_serializing_if = "CompactionStats::is_empty")]
+    pub compaction: Box<CompactionStats>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_profile: Option<String>,
 }
@@ -145,6 +222,7 @@ mod tests {
             cache_hit_pct: None,
             repairs: RepairStats::default(),
             retries: RetryStats::default(),
+            compaction: Default::default(),
             effective_profile: None,
         }
     }
@@ -267,5 +345,27 @@ mod tests {
         let retried = serde_json::to_value(retried).unwrap();
         assert_eq!(retried["retries"]["retries"], 2);
         assert_eq!(retried["retries"]["rate_limited"], 2);
+    }
+
+    #[test]
+    fn compaction_preserves_old_json_and_persists_nonempty_facts() {
+        let old = r#"{"ts_utc":"2026-07-22T00:00:00Z","model_id":"test-model","task":"old","turns":1,"tool_calls":0,"outcome":"pass"}"#;
+        let parsed: Receipt = serde_json::from_str(old).unwrap();
+        assert_eq!(*parsed.compaction, CompactionStats::default());
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), old);
+
+        let mut compacted = receipt("compacted");
+        compacted
+            .compaction
+            .record_at(8, 512, Some(640), 1_785_432_100);
+        let compacted = serde_json::to_value(compacted).unwrap();
+        assert_eq!(compacted["compaction"]["events"], 1);
+        assert_eq!(compacted["compaction"]["messages_elided"], 8);
+        assert_eq!(compacted["compaction"]["estimated_tokens_elided"], 512);
+        assert_eq!(compacted["compaction"]["preceding_cached_tokens"], 640);
+        assert_eq!(
+            compacted["compaction"]["occurred_at_unix_seconds"],
+            1_785_432_100_i64
+        );
     }
 }

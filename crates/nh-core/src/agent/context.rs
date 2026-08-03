@@ -50,6 +50,7 @@ impl PrefixSeal {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Compaction {
     pub(super) messages: usize,
+    pub(super) estimated_tokens_elided: u64,
     pub(super) prefix_held: bool,
 }
 
@@ -165,6 +166,7 @@ pub(super) fn compact_history(history: &mut Vec<ChatMessage>, limit: u64) -> Opt
 
     Some(Compaction {
         messages,
+        estimated_tokens_elided: tokens,
         prefix_held,
     })
 }

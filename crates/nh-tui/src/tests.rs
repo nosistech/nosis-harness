@@ -5,7 +5,8 @@ use crate::timeline::{timeline_detail_lines, timeline_row};
 use crate::worker::WorkerCommand;
 use chrono::{DateTime, Utc};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use nh_core::agent::MAX_TASK_BYTES;
+use nh_core::agent::{CompactionEvent, MAX_TASK_BYTES};
+use nh_core::receipt::CompactionStats;
 use nh_core::session_ledger::{list_sessions, read_session};
 use nh_core::wire::{ChatRequest, ChatResponse};
 use ratatui::{
@@ -352,12 +353,18 @@ fn receipt(task: &str, outcome: Outcome, usage: Option<Usage>) -> Receipt {
         cache_hit_pct: None,
         repairs: Default::default(),
         retries: Default::default(),
+        compaction: Default::default(),
         effective_profile: None,
     }
 }
 
 fn timeline_event(task: &str, answer: &str) -> AgentEvent {
+    timeline_event_on("test-route", task, answer)
+}
+
+fn timeline_event_on(route_id: &str, task: &str, answer: &str) -> AgentEvent {
     AgentEvent::TaskReceipt(TimelineSummary {
+        route_id: route_id.into(),
         receipt: receipt(
             task,
             Outcome::Pass,
@@ -796,7 +803,7 @@ fn timeline_entry_projects_receipt_outcome_and_tokens() {
             }),
         ),
         "partial answer".into(),
-        false,
+        Default::default(),
     );
 
     assert_eq!(entry.turn, 7);
@@ -809,21 +816,42 @@ fn timeline_entry_projects_receipt_outcome_and_tokens() {
 }
 
 #[test]
-fn compaction_progress_marks_only_the_current_timeline_turn() {
-    let mut app = test_app(None);
+fn typed_compaction_event_marks_only_the_current_timeline_turn() {
+    let mut app = meter_app();
     app.status = Status::Working;
+    apply_event(
+        &mut app,
+        AgentEvent::Compaction(CompactionEvent::new_at(
+            73,
+            8,
+            40_000,
+            None,
+            fixed_at().timestamp(),
+        )),
+    );
+    assert_eq!(app.current_task_compaction.events, 1);
+    assert_eq!(app.current_task_compaction.messages_elided, 8);
+    assert_eq!(app.current_task_compaction.estimated_tokens_elided, 40_000);
+    assert!(app
+        .transcript
+        .last()
+        .is_some_and(|line| line.text.contains("~40000 tokens elided")));
+    apply_event(&mut app, AgentEvent::Answer("one".into()));
+    apply_event(&mut app, timeline_event_on("meter-route", "first", "one"));
+    assert!(app.timeline[0].compacted);
+    assert_eq!(app.timeline[0].compaction.events, 1);
+    assert!(app.last_compaction_hud.is_some());
+
+    app.input = "second".into();
+    assert_eq!(app.dispatch().as_deref(), Some("second"));
+    assert!(app.last_compaction_hud.is_none());
     apply_event(
         &mut app,
         AgentEvent::Progress("context 73% - compacted 8 earlier messages".into()),
     );
-    apply_event(&mut app, timeline_event("first", "one"));
-    assert!(app.timeline[0].compacted);
-
-    apply_event(&mut app, AgentEvent::Answer("one".into()));
-    app.input = "second".into();
-    assert_eq!(app.dispatch().as_deref(), Some("second"));
     apply_event(&mut app, timeline_event("second", "two"));
     assert!(!app.timeline[1].compacted);
+    assert!(app.last_compaction_hud.is_none());
 }
 
 #[test]
@@ -1525,7 +1553,7 @@ fn cost_hud_and_timeline_distinguish_absent_cache_from_measured_zero() {
         1,
         receipt("absent", Outcome::Pass, Some(app.usage.clone())),
         "done".into(),
-        false,
+        Default::default(),
     );
     assert_eq!(timeline_row(&absent_entry), "#1  pass  20/2");
     assert_eq!(
@@ -1540,7 +1568,7 @@ fn cost_hud_and_timeline_distinguish_absent_cache_from_measured_zero() {
         1,
         receipt("zero", Outcome::Pass, Some(app.usage.clone())),
         "done".into(),
-        false,
+        Default::default(),
     );
     assert_eq!(timeline_row(&measured_entry), "#1  pass  20/2/0 cache 0%");
     assert_eq!(
@@ -1619,6 +1647,333 @@ fn local_hud_and_turn_meter_do_not_present_hardware_cost_as_zero() {
         Some(nh_routes::LOCAL_METER_COPY)
     );
     assert!(app.session_cost.is_empty());
+}
+
+#[test]
+fn compaction_without_exact_preceding_cache_refuses_money() {
+    let mut app = meter_app();
+    let usage = Usage {
+        prompt_tokens: 100_000,
+        completion_tokens: 10_000,
+        cached_tokens: Some(90_000),
+    };
+    let mut stats = CompactionStats::default();
+    stats.record_at(8, 40_000, None, fixed_at().timestamp());
+    let mut compacted = receipt("compact", Outcome::Pass, Some(usage));
+    compacted.compaction = Box::new(stats);
+
+    apply_event(
+        &mut app,
+        AgentEvent::TaskReceipt(TimelineSummary {
+            route_id: "meter-route".into(),
+            receipt: compacted,
+            answer: "done".into(),
+        }),
+    );
+
+    let detail = app.timeline[0].compaction_detail.as_deref().unwrap();
+    assert_eq!(
+        detail,
+        "compaction 1 event · 8 messages elided · ~40000 tokens elided · next-call money not stated - exact preceding-call cached tokens unavailable"
+    );
+    assert!(!detail.contains('¥'), "got: {detail}");
+    assert!(!detail.contains('$'), "got: {detail}");
+    assert_eq!(
+        app.last_compaction_hud.as_deref(),
+        Some("compact ~40000t · net not stated")
+    );
+}
+
+#[test]
+fn compaction_without_exact_event_time_refuses_money() {
+    let mut app = meter_app();
+    let mut stats = CompactionStats::default();
+    stats.record(8, 40_000, Some(160_000));
+    let mut compacted = receipt("compact", Outcome::Pass, None);
+    compacted.compaction = Box::new(stats);
+
+    apply_event(
+        &mut app,
+        AgentEvent::TaskReceipt(TimelineSummary {
+            route_id: "meter-route".into(),
+            receipt: compacted,
+            answer: "done".into(),
+        }),
+    );
+
+    let detail = app.timeline[0].compaction_detail.as_deref().unwrap();
+    assert!(
+        detail.contains("exact compaction time unavailable"),
+        "got: {detail}"
+    );
+    assert!(!detail.contains('¥'), "got: {detail}");
+    assert!(!detail.contains('$'), "got: {detail}");
+}
+
+#[test]
+fn local_compaction_never_presents_zero_billed_saving() {
+    let mut app = picker_app();
+    app.route = app.resolver.resolve("f-local").unwrap();
+    let mut stats = CompactionStats::default();
+    stats.record_at(8, 40_000, None, fixed_at().timestamp());
+    let mut compacted = receipt("compact", Outcome::Pass, None);
+    compacted.compaction = Box::new(stats);
+
+    apply_event(
+        &mut app,
+        AgentEvent::TaskReceipt(TimelineSummary {
+            route_id: "f-local".into(),
+            receipt: compacted,
+            answer: "done".into(),
+        }),
+    );
+
+    let detail = app.timeline[0].compaction_detail.as_deref().unwrap();
+    assert!(
+        detail.contains(nh_routes::LOCAL_METER_COPY),
+        "got: {detail}"
+    );
+    assert!(
+        detail.contains("next-call money not stated"),
+        "got: {detail}"
+    );
+    assert!(!detail.contains("$0.00"), "got: {detail}");
+}
+
+#[test]
+fn compaction_prices_cache_hit_saving_and_reports_negative_net() {
+    let mut app = meter_app();
+    let mut stats = CompactionStats::default();
+    stats.record_at(8, 40_000, Some(160_000), fixed_at().timestamp());
+    let mut compacted = receipt(
+        "compact",
+        Outcome::Pass,
+        Some(Usage {
+            prompt_tokens: 100_000,
+            completion_tokens: 0,
+            cached_tokens: Some(0),
+        }),
+    );
+    compacted.ts_utc = "2026-07-14T02:00:00Z".into();
+    compacted.compaction = Box::new(stats);
+
+    apply_event(
+        &mut app,
+        AgentEvent::TaskReceipt(TimelineSummary {
+            route_id: "meter-route".into(),
+            receipt: compacted,
+            answer: "done".into(),
+        }),
+    );
+
+    let detail_before_switch = app.timeline[0].compaction_detail.clone().unwrap();
+    assert_eq!(
+        detail_before_switch,
+        "compaction 1 event · 8 messages elided · ~40000 tokens elided · next-call estimate: cache-hit saving ~¥0.0008 · cache-reset surcharge ~¥0.12 · net loss ~¥0.12 (≈$0.02)"
+    );
+    assert_eq!(
+        app.last_compaction_hud.as_deref(),
+        Some("compact ~40000t · next-call net loss ~¥0.12 (≈$0.02)")
+    );
+
+    let next_route = app.resolver.resolve("cny-top").unwrap();
+    app.switch_route(next_route);
+    assert_eq!(
+        app.timeline[0].compaction_detail.as_deref(),
+        Some(detail_before_switch.as_str()),
+        "stored receipt display must not be repriced after /model"
+    );
+    assert!(app.last_compaction_hud.is_none());
+    assert_eq!(app.session_cost.len(), 1);
+    assert!((app.session_cost[0].amount - 0.2).abs() < f64::EPSILON);
+}
+
+#[test]
+fn delayed_receipt_uses_its_origin_route_without_restoring_a_stale_hud() {
+    let mut app = meter_app();
+    let mut stats = CompactionStats::default();
+    stats.record_at(8, 40_000, Some(160_000), fixed_at().timestamp());
+    let mut compacted = receipt(
+        "compact",
+        Outcome::Pass,
+        Some(Usage {
+            prompt_tokens: 100_000,
+            completion_tokens: 0,
+            cached_tokens: Some(0),
+        }),
+    );
+    compacted.compaction = Box::new(stats);
+    let next_route = app.resolver.resolve("cny-top").unwrap();
+    app.switch_route(next_route);
+
+    apply_event(
+        &mut app,
+        AgentEvent::TaskReceipt(TimelineSummary {
+            route_id: "meter-route".into(),
+            receipt: compacted,
+            answer: "done".into(),
+        }),
+    );
+
+    assert_eq!(app.route.id(), "cny-top");
+    assert_eq!(
+        app.timeline[0].compaction_detail.as_deref(),
+        Some(
+            "compaction 1 event · 8 messages elided · ~40000 tokens elided · next-call estimate: cache-hit saving ~¥0.0008 · cache-reset surcharge ~¥0.12 · net loss ~¥0.12 (≈$0.02)"
+        )
+    );
+    assert!(app.last_compaction_hud.is_none());
+    assert_eq!(app.session_cost.len(), 1);
+    assert!((app.session_cost[0].amount - 0.1).abs() < f64::EPSILON);
+}
+
+#[test]
+fn compaction_zero_net_says_break_even() {
+    let mut app = meter_app();
+    let mut stats = CompactionStats::default();
+    stats.record_at(2, 49, Some(50), fixed_at().timestamp());
+    let mut compacted = receipt("compact", Outcome::Pass, None);
+    compacted.compaction = Box::new(stats);
+
+    apply_event(
+        &mut app,
+        AgentEvent::TaskReceipt(TimelineSummary {
+            route_id: "meter-route".into(),
+            receipt: compacted,
+            answer: "done".into(),
+        }),
+    );
+
+    let detail = app.timeline[0].compaction_detail.as_deref().unwrap();
+    assert!(
+        detail.contains("net break-even ~¥0.00 (≈$0.00)"),
+        "got: {detail}"
+    );
+}
+
+#[test]
+fn compaction_estimates_do_not_change_usage_or_session_cost() {
+    let usage = Usage {
+        prompt_tokens: 100_000,
+        completion_tokens: 50_000,
+        cached_tokens: Some(90_000),
+    };
+    let mut plain = meter_app();
+    let mut compacted = meter_app();
+    apply_event(&mut plain, AgentEvent::Usage(usage.clone()));
+    apply_event(&mut compacted, AgentEvent::Usage(usage.clone()));
+
+    let plain_receipt = receipt("plain", Outcome::Pass, Some(usage.clone()));
+    apply_event(
+        &mut plain,
+        AgentEvent::TaskReceipt(TimelineSummary {
+            route_id: "meter-route".into(),
+            receipt: plain_receipt,
+            answer: "done".into(),
+        }),
+    );
+
+    let mut stats = CompactionStats::default();
+    stats.record_at(8, 40_000, Some(160_000), fixed_at().timestamp());
+    let mut compacted_receipt = receipt("compact", Outcome::Pass, Some(usage.clone()));
+    compacted_receipt.compaction = Box::new(stats);
+    apply_event(
+        &mut compacted,
+        AgentEvent::TaskReceipt(TimelineSummary {
+            route_id: "meter-route".into(),
+            receipt: compacted_receipt,
+            answer: "done".into(),
+        }),
+    );
+
+    assert_eq!(compacted.usage.prompt_tokens, usage.prompt_tokens);
+    assert_eq!(compacted.usage.completion_tokens, usage.completion_tokens);
+    assert_eq!(compacted.usage.cached_tokens, usage.cached_tokens);
+    assert_eq!(
+        compacted.session_money(fixed_at()),
+        plain.session_money(fixed_at())
+    );
+    assert_eq!(compacted.session_cost.len(), plain.session_cost.len());
+    assert_eq!(
+        compacted.session_cost[0].amount,
+        plain.session_cost[0].amount
+    );
+}
+
+#[test]
+fn default_compaction_keeps_timeline_and_hud_copy_exact() {
+    let mut app = meter_app();
+    let usage = Usage {
+        prompt_tokens: 100_000,
+        completion_tokens: 50_000,
+        cached_tokens: Some(90_000),
+    };
+    apply_event(&mut app, AgentEvent::Usage(usage.clone()));
+    apply_event(
+        &mut app,
+        AgentEvent::TaskReceipt(TimelineSummary {
+            route_id: "meter-route".into(),
+            receipt: receipt("plain", Outcome::Pass, Some(usage)),
+            answer: "done".into(),
+        }),
+    );
+
+    assert_eq!(
+        timeline_row(&app.timeline[0]),
+        "#1  pass  100000/50000/90000 cache 90%"
+    );
+    assert_eq!(
+        timeline_detail_lines(&app.timeline[0]),
+        vec![
+            "TURN #1",
+            "timestamp: 2026-07-14T12:00:00Z",
+            "model: test-route",
+            "task: plain",
+            "outcome: pass",
+            "agent turns: 3",
+            "tool calls: 2",
+            "failure class: none",
+            "tokens: 100000 in / 50000 out / 90000 cached | cache 90%",
+            "compacted: no",
+            "",
+            "answer: done",
+        ]
+    );
+    assert_eq!(
+        app.hud_line(fixed_at()),
+        "session ¥0.11 (≈$0.02) · in 100000 · out 50000 · cache 90% · off-peak · profile balanced"
+    );
+}
+
+#[test]
+fn multiple_compactions_refuse_one_aggregate_money_claim() {
+    let mut app = meter_app();
+    let mut stats = CompactionStats::default();
+    stats.record_at(4, 20_000, Some(150_000), fixed_at().timestamp());
+    stats.record_at(
+        3,
+        10_000,
+        Some(120_000),
+        fixed_at().timestamp().saturating_add(1),
+    );
+    let mut compacted = receipt("twice", Outcome::Pass, None);
+    compacted.compaction = Box::new(stats);
+
+    apply_event(
+        &mut app,
+        AgentEvent::TaskReceipt(TimelineSummary {
+            route_id: "meter-route".into(),
+            receipt: compacted,
+            answer: "done".into(),
+        }),
+    );
+
+    let detail = app.timeline[0].compaction_detail.as_deref().unwrap();
+    assert_eq!(
+        detail,
+        "compaction 2 events · 7 messages elided · ~30000 tokens elided · aggregate money not stated - compactions affect separate next calls"
+    );
+    assert!(!detail.contains('¥'), "got: {detail}");
 }
 
 #[test]
@@ -1847,6 +2202,7 @@ fn rendered_timeline_scrubs_every_receipt_and_answer_line() {
     apply_event(
         &mut app,
         AgentEvent::TaskReceipt(TimelineSummary {
+            route_id: "test-route".into(),
             receipt: receipt(
                 &format!("task value={secret}\r\x1b[2K"),
                 Outcome::Pass,
@@ -1912,6 +2268,8 @@ struct RecordingClient {
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
 }
 
+struct MeasuredCacheClient;
+
 struct FailingClient;
 
 impl ChatClient for FailingClient {
@@ -1951,6 +2309,27 @@ impl ChatClient for RecordingClient {
                 prompt_tokens: 10,
                 completion_tokens: 2,
                 cached_tokens: Some(4),
+            }),
+            retries: Default::default(),
+        })
+    }
+}
+
+impl ChatClient for MeasuredCacheClient {
+    fn complete(&self, request: &ChatRequest) -> anyhow::Result<ChatResponse> {
+        let mut message = request.messages.last().cloned().expect("user message");
+        message.role = "assistant".into();
+        message.content = Some("ok".into());
+        message.tool_calls = None;
+        message.tool_call_id = None;
+        message.reasoning_content = None;
+        Ok(ChatResponse {
+            message,
+            finish_reason: "stop".into(),
+            usage: Some(Usage {
+                prompt_tokens: 900,
+                completion_tokens: 2,
+                cached_tokens: Some(600),
             }),
             retries: Default::default(),
         })
@@ -2274,6 +2653,7 @@ fn worker_uses_injected_client_and_keeps_one_history_across_tasks() {
                 }
                 AgentEvent::Usage(_)
                 | AgentEvent::Progress(_)
+                | AgentEvent::Compaction(_)
                 | AgentEvent::ModelStarted { .. }
                 | AgentEvent::ModelFinished { .. }
                 | AgentEvent::ToolStarted { .. }
@@ -2286,6 +2666,75 @@ fn worker_uses_injected_client_and_keeps_one_history_across_tasks() {
     }
     assert_eq!(worker.shutdown(), WorkerShutdown::Clean);
     assert_eq!(*request_lengths.lock().unwrap(), vec![2, 4]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn worker_emits_typed_compaction_with_exact_preceding_call_cache() {
+    let root = temp_dir();
+    let connect: ConnectFn = Box::new(|_, _| {
+        Ok((
+            Box::new(MeasuredCacheClient),
+            nh_vault::secret("fake-worker-secret"),
+        ))
+    });
+    let law = nh_law::load(&root, &nh_law::LoadOptions { cli_autonomy: None });
+    let mut worker = spawn_worker(WorkerConfig {
+        route: test_route(),
+        profiles: Profiles::bundled(),
+        active_profile: "balanced".into(),
+        law,
+        repo_root: root.clone(),
+        workdir: root.clone(),
+        scrubber: Arc::new(RwLock::new(Scrubber::new(Vec::new()))),
+        connect,
+        initial: None,
+        resume: None,
+    })
+    .unwrap();
+    let mut app = test_app(None);
+
+    for fill in ['a', 'b'] {
+        worker
+            .commands
+            .send(WorkerCommand::Task(fill.to_string().repeat(1_200)))
+            .unwrap();
+        receive_completed_task(&worker, &mut app);
+    }
+    worker
+        .commands
+        .send(WorkerCommand::Task("c".repeat(1_200)))
+        .unwrap();
+
+    let mut live = None;
+    let receipt = loop {
+        let event = worker
+            .events
+            .recv_timeout(Duration::from_secs(2))
+            .expect("third task compacts and completes");
+        if let AgentEvent::Compaction(compaction) = &event {
+            live = Some(*compaction);
+        }
+        let receipt = match &event {
+            AgentEvent::TaskReceipt(summary) => Some(summary.receipt.clone()),
+            _ => None,
+        };
+        apply_event(&mut app, event);
+        if let Some(receipt) = receipt {
+            break receipt;
+        }
+    };
+
+    let live = live.expect("compaction is a typed worker event");
+    assert_eq!(live.preceding_cached_tokens, Some(600));
+    assert_eq!(receipt.compaction.events, 1);
+    assert_eq!(receipt.compaction.messages_elided, live.messages_elided);
+    assert_eq!(
+        receipt.compaction.estimated_tokens_elided,
+        live.estimated_tokens_elided
+    );
+    assert_eq!(receipt.compaction.preceding_cached_tokens, Some(600));
+    assert_eq!(worker.shutdown(), WorkerShutdown::Clean);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -2422,6 +2871,7 @@ fn worker_profile_change_reconnects_with_clamp_and_records_next_turn() {
             AgentEvent::Usage(_)
             | AgentEvent::Answer(_)
             | AgentEvent::Progress(_)
+            | AgentEvent::Compaction(_)
             | AgentEvent::ModelStarted { .. }
             | AgentEvent::ModelFinished { .. }
             | AgentEvent::ToolStarted { .. }

@@ -91,7 +91,7 @@ struct SessionCost {
 
 /// Everything one chat session owns. History and usage survive route switches.
 struct ChatSession {
-    resolver: RouteResolver,
+    resolver: Arc<RouteResolver>,
     route: ResolvedRoute,
     profiles: Profiles,
     active_profile: String,
@@ -101,6 +101,10 @@ struct ChatSession {
     session_in: u64,
     session_out: u64,
     session_cached: Option<u64>,
+    /// Cache evidence from the provider call immediately before the next task.
+    /// Unlike `session_cached`, this is not a total: compaction pricing may use
+    /// only the preceding call's measured value.
+    last_cached_tokens: Option<u64>,
     session_cost: Vec<SessionCost>,
     unpriced_turns: usize,
     /// Every key literal this session has seen - switched-away keys stay scrubbed.
@@ -296,13 +300,25 @@ fn run_task(s: &mut ChatSession, task: &str, out: &mut dyn Write, err: &mut dyn 
     if let Some(message) = s.pending_route_context.take() {
         s.history.push(message);
     }
+    refresh_progress_meter(s);
     let image_parts = std::mem::take(&mut s.pending_images);
     let result = if image_parts.is_empty() {
-        s.agent.run_with_persistent_history(&mut s.history, task)
+        s.agent.run_with_persistent_history_and_cache(
+            &mut s.history,
+            task,
+            &mut s.last_cached_tokens,
+        )
     } else {
-        s.agent
-            .run_with_persistent_history_and_parts(&mut s.history, task, image_parts)
+        s.agent.run_with_persistent_history_and_parts_and_cache(
+            &mut s.history,
+            task,
+            image_parts,
+            &mut s.last_cached_tokens,
+        )
     };
+    if result.is_err() {
+        s.last_cached_tokens = None;
+    }
     let at = (s.now)();
     let usage = result
         .as_ref()
@@ -339,10 +355,28 @@ fn run_task(s: &mut ChatSession, task: &str, out: &mut dyn Write, err: &mut dyn 
             if is_local {
                 let _ = writeln!(err, "{LOCAL_METER_COPY}");
             }
+            if let Some(line) =
+                cmd_run::compaction_meter_line(&s.resolver, &s.route, &receipt.compaction)
+            {
+                let _ = writeln!(err, "{}", scrub_line(&s.scrubber, &line));
+            }
             let _ = writeln!(err, "{}", scrub_line(&s.scrubber, &footer(s)));
         }
         Err(e) => print_err(s, err, &e.to_string()),
     }
+}
+
+fn refresh_progress_meter(s: &mut ChatSession) {
+    if s.agent.on_event.is_none() {
+        return;
+    }
+    let resolver = Arc::clone(&s.resolver);
+    let route = s.route.clone();
+    let scrubber = Arc::clone(&s.scrubber);
+    s.agent.on_event = Some(Box::new(move |core_line| {
+        let line = cmd_run::progress_meter_line(&resolver, &route, core_line);
+        eprintln!("  {}", scrub_line(&scrubber, &line));
+    }));
 }
 
 fn attach_image(s: &mut ChatSession, path: &str, out: &mut dyn Write, err: &mut dyn Write) {
@@ -417,6 +451,7 @@ fn switch_to(s: &mut ChatSession, route: ResolvedRoute, out: &mut dyn Write, err
             s.agent.constitution = Some(constitution);
             s.agent.context_limit = route.context();
             s.route = route;
+            s.last_cached_tokens = None;
             let event = SessionEvent::RouteSwitched {
                 ts_utc: session_timestamp((s.now)()),
                 route_id: s.route.id().to_owned(),

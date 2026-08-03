@@ -427,7 +427,18 @@ fn missing_usage_is_reported_without_a_zero_cost() {
     let resolver = RouteResolver::from_toml(PEAK_CATALOG).unwrap();
     let route = resolver.resolve("peak-route").unwrap();
     let at = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
-    let lines = run_meter_lines(&resolver, &route, None, 2, 1, at, at);
+    let lines = run_meter_lines(
+        &resolver,
+        &route,
+        None,
+        &Default::default(),
+        2,
+        1,
+        RunTiming {
+            started: at,
+            ended: at,
+        },
+    );
 
     assert_eq!(lines.len(), 1);
     assert!(lines[0].contains("tokens: not reported by provider - cost unknown"));
@@ -465,19 +476,59 @@ fn local_run_meter_uses_the_ratified_qualifier_with_or_without_usage() {
         cached_tokens: None,
     };
 
-    let reported = run_meter_lines(&resolver, &route, Some(&usage), 1, 0, at, at);
-    assert!(
-        reported[0].contains("tokens 100 in / 20 out"),
-        "got: {:?}",
-        reported
+    let reported = run_meter_lines(
+        &resolver,
+        &route,
+        Some(&usage),
+        &Default::default(),
+        1,
+        0,
+        RunTiming {
+            started: at,
+            ended: at,
+        },
     );
-    assert!(!reported[0].contains("cached"), "got: {:?}", reported);
-    assert!(!reported[0].contains("cache 0%"), "got: {:?}", reported);
-    assert_eq!(reported[1], nh_routes::LOCAL_METER_COPY);
+    assert_eq!(
+        reported,
+        vec![
+            "turns 1 | tool calls 0 | tokens 100 in / 20 out".to_owned(),
+            nh_routes::LOCAL_METER_COPY.to_owned(),
+        ]
+    );
     assert!(!reported.iter().any(|line| line.contains("$0.00")));
 
-    let missing = run_meter_lines(&resolver, &route, None, 1, 0, at, at);
-    assert_eq!(missing[1], nh_routes::LOCAL_METER_COPY);
+    let missing = run_meter_lines(
+        &resolver,
+        &route,
+        None,
+        &Default::default(),
+        1,
+        0,
+        RunTiming {
+            started: at,
+            ended: at,
+        },
+    );
+    assert_eq!(
+        missing,
+        vec![
+            "turns 1 | tool calls 0 | tokens: not reported by provider - cost unknown".to_owned(),
+            nh_routes::LOCAL_METER_COPY.to_owned(),
+        ]
+    );
+
+    let mut compaction = nh_core::receipt::CompactionStats::default();
+    compaction.record(2, 50, Some(100));
+    let compaction = compaction_meter_line(&resolver, &route, &compaction).unwrap();
+    assert!(
+        compaction.contains("~50 tokens elided"),
+        "got: {compaction}"
+    );
+    assert!(
+        compaction.contains(nh_routes::LOCAL_METER_COPY),
+        "got: {compaction}"
+    );
+    assert!(!compaction.contains("$0.00"), "got: {compaction}");
 }
 
 #[test]
@@ -495,14 +546,232 @@ fn run_meter_distinguishes_absent_cache_measurement_from_measured_zero() {
         ..absent.clone()
     };
 
-    let absent = run_meter_lines(&resolver, &route, Some(&absent), 1, 0, at, at);
+    let absent = run_meter_lines(
+        &resolver,
+        &route,
+        Some(&absent),
+        &Default::default(),
+        1,
+        0,
+        RunTiming {
+            started: at,
+            ended: at,
+        },
+    );
     assert_eq!(absent[0], "turns 1 | tool calls 0 | tokens 100 in / 20 out");
 
-    let measured_zero = run_meter_lines(&resolver, &route, Some(&measured_zero), 1, 0, at, at);
+    let measured_zero = run_meter_lines(
+        &resolver,
+        &route,
+        Some(&measured_zero),
+        &Default::default(),
+        1,
+        0,
+        RunTiming {
+            started: at,
+            ended: at,
+        },
+    );
     assert_eq!(
         measured_zero[0],
         "turns 1 | tool calls 0 | tokens 100 in / 20 out / 0 cached | cache 0%"
     );
+}
+
+#[test]
+fn ordinary_progress_and_empty_compaction_keep_the_old_surface_bytes() {
+    let resolver = RouteResolver::from_toml(PEAK_CATALOG).unwrap();
+    let route = resolver.resolve("peak-route").unwrap();
+
+    assert_eq!(
+        progress_meter_line(&resolver, &route, "calling read_file"),
+        "calling read_file"
+    );
+    assert_eq!(
+        compaction_meter_line(&resolver, &route, &Default::default()),
+        None
+    );
+}
+
+#[test]
+fn compaction_without_preceding_cache_refuses_money_even_when_current_usage_has_cache() {
+    let resolver = RouteResolver::from_toml(PEAK_CATALOG).unwrap();
+    let route = resolver.resolve("peak-route").unwrap();
+    let at = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+    let usage = Usage {
+        prompt_tokens: 500,
+        completion_tokens: 20,
+        cached_tokens: Some(400),
+    };
+    let mut compaction = nh_core::receipt::CompactionStats::default();
+    compaction.record(8, 100, None);
+
+    let lines = run_meter_lines(
+        &resolver,
+        &route,
+        Some(&usage),
+        &compaction,
+        1,
+        0,
+        RunTiming {
+            started: at,
+            ended: at,
+        },
+    );
+    let line = lines.last().expect("compaction line");
+    assert_eq!(
+        line,
+        "compaction 1 event · 8 messages elided · ~100 tokens elided · next-call money not stated - exact preceding-call cached tokens unavailable"
+    );
+    assert!(!line.contains('$'));
+    assert!(!line.contains("saving"));
+    assert_eq!(usage.cached_tokens, Some(400));
+}
+
+#[test]
+fn compaction_prices_cache_hit_and_calls_a_negative_net_a_loss() {
+    let resolver = RouteResolver::from_toml(PEAK_CATALOG).unwrap();
+    let route = resolver.resolve("peak-route").unwrap();
+    let at = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+    let mut compaction = nh_core::receipt::CompactionStats::default();
+    compaction.record_at(8, 1_000, Some(3_000), at.timestamp());
+
+    let line = compaction_meter_line(&resolver, &route, &compaction).unwrap();
+
+    assert!(
+        line.contains("next-call estimate: cache-hit saving ~$0.0001"),
+        "got: {line}"
+    );
+    assert!(
+        line.contains("cache-reset surcharge ~$0.0018"),
+        "got: {line}"
+    );
+    assert!(line.contains("net loss ~$0.0017"), "got: {line}");
+    assert!(!line.contains("cache-hit saving ~$0.0010"), "got: {line}");
+}
+
+#[test]
+fn receipt_compaction_uses_stored_event_time_instead_of_run_end_time() {
+    let resolver = RouteResolver::from_toml(PEAK_CATALOG).unwrap();
+    let route = resolver.resolve("peak-route").unwrap();
+    let event_at = Utc.with_ymd_and_hms(2026, 7, 15, 0, 30, 0).unwrap();
+    let ended_in_peak = Utc.with_ymd_and_hms(2026, 7, 15, 1, 30, 0).unwrap();
+    let usage = Usage {
+        prompt_tokens: 500,
+        completion_tokens: 20,
+        cached_tokens: Some(400),
+    };
+    let mut compaction = nh_core::receipt::CompactionStats::default();
+    compaction.record_at(8, 1_000, Some(3_000), event_at.timestamp());
+
+    let lines = run_meter_lines(
+        &resolver,
+        &route,
+        Some(&usage),
+        &compaction,
+        1,
+        0,
+        RunTiming {
+            started: event_at,
+            ended: ended_in_peak,
+        },
+    );
+    let line = lines.last().expect("compaction line");
+
+    assert!(line.contains("net loss ~$0.0017"), "got: {line}");
+    assert!(!line.contains("net loss ~$0.0034"), "got: {line}");
+}
+
+#[test]
+fn out_of_range_compaction_time_refuses_money_instead_of_guessing() {
+    let resolver = RouteResolver::from_toml(PEAK_CATALOG).unwrap();
+    let route = resolver.resolve("peak-route").unwrap();
+    let mut compaction = nh_core::receipt::CompactionStats::default();
+    compaction.record_at(8, 1_000, Some(3_000), i64::MAX);
+
+    let line = compaction_meter_line(&resolver, &route, &compaction).unwrap();
+
+    assert!(
+        line.ends_with("next-call money not stated - exact compaction time unavailable"),
+        "got: {line}"
+    );
+}
+
+#[test]
+fn compaction_money_uses_the_existing_verify_live_asterisk_convention() {
+    let catalog = PEAK_CATALOG.replace(
+        "price_confidence = \"confirmed\"",
+        "price_confidence = \"verify_live\"",
+    );
+    let resolver = RouteResolver::from_toml(&catalog).unwrap();
+    let route = resolver.resolve("peak-route").unwrap();
+    let at = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+    let mut compaction = nh_core::receipt::CompactionStats::default();
+    compaction.record_at(8, 1_000, Some(3_000), at.timestamp());
+
+    let line = compaction_meter_line(&resolver, &route, &compaction).unwrap();
+
+    assert!(line.contains("net loss ~$0.0017*"), "got: {line}");
+    assert!(line.ends_with(" · *price verify_live"), "got: {line}");
+}
+
+#[test]
+fn multiple_compactions_report_facts_but_refuse_one_aggregate_next_call_price() {
+    let resolver = RouteResolver::from_toml(PEAK_CATALOG).unwrap();
+    let route = resolver.resolve("peak-route").unwrap();
+    let mut compaction = nh_core::receipt::CompactionStats::default();
+    compaction.record(3, 100, Some(300));
+    compaction.record(4, 200, Some(600));
+
+    let line = compaction_meter_line(&resolver, &route, &compaction).unwrap();
+
+    assert_eq!(
+        line,
+        "compaction 2 events · 7 messages elided · ~300 tokens elided · aggregate money not stated - compactions affect separate next calls"
+    );
+    assert!(!line.contains('$'));
+}
+
+#[test]
+fn unpriced_compaction_keeps_facts_and_states_that_money_is_unavailable() {
+    let resolver = RouteResolver::from_toml(
+        r#"
+        [routes.unpriced]
+        provider = "test"
+        model_id = "unpriced"
+        base_url = "https://example.invalid"
+        wire = "openai"
+        vault_entry = "test"
+        "#,
+    )
+    .unwrap();
+    let route = resolver.resolve("unpriced").unwrap();
+    let at = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+    let mut compaction = nh_core::receipt::CompactionStats::default();
+    compaction.record_at(2, 100, Some(300), at.timestamp());
+
+    let line = compaction_meter_line(&resolver, &route, &compaction).unwrap();
+
+    assert_eq!(
+        line,
+        "compaction 1 event · 2 messages elided · ~100 tokens elided · next-call money not stated - no price data"
+    );
+}
+
+#[test]
+fn live_compaction_parses_the_real_core_event_shape() {
+    let resolver = RouteResolver::from_toml(PEAK_CATALOG).unwrap();
+    let route = resolver.resolve("peak-route").unwrap();
+    let at = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+    let event = nh_core::agent::CompactionEvent::new_at(72, 8, 1_000, Some(3_000), at.timestamp());
+
+    let line = progress_meter_line(&resolver, &route, &event.to_string());
+
+    assert!(
+        line.starts_with("context ~72% - compacted 8 earlier messages · ~1000 tokens elided"),
+        "got: {line}"
+    );
+    assert!(line.contains("net loss"), "got: {line}");
 }
 
 #[test]

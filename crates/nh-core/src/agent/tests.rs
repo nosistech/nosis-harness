@@ -22,10 +22,12 @@ fn compaction_keeps_retained_messages_byte_identical_and_prefix_sealed() {
         message("assistant", "recent answer b"),
     ];
     let retained_before: Vec<Vec<u8>> = history[5..].iter().map(message_bytes).collect();
+    let expected_elided_tokens = estimate_tokens(&history[1..5]);
     let seal = PrefixSeal::new(&history[..1]);
 
     let compaction = compact_history(&mut history, 100).expect("compaction fires");
     assert!(compaction.prefix_held);
+    assert_eq!(compaction.estimated_tokens_elided, expected_elided_tokens);
     assert!(
         seal.check(&history),
         "PrefixSeal is enforced in release too"
@@ -703,6 +705,16 @@ fn progress_line_survives_bad_json() {
         arguments: "{oops".into(),
     };
     assert_eq!(progress_line(1, &call), "turn 1: read_file");
+}
+
+#[test]
+fn compaction_event_round_trips_explicitly_unavailable_time() {
+    let event = CompactionEvent::new(72, 8, 512, None);
+    let line = event.to_string();
+
+    assert!(line.starts_with("context ~72%"));
+    assert!(line.ends_with("Unix time unavailable"));
+    assert_eq!(CompactionEvent::parse(&line), Some(event));
 }
 
 struct RepairingToolCallClient {
