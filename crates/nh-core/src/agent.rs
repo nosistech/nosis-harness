@@ -48,6 +48,17 @@ struct ToolRun {
     audit: Vec<ToolAudit>,
 }
 
+fn push_message(
+    history: &mut Vec<ChatMessage>,
+    appended: &mut Option<&mut Vec<ChatMessage>>,
+    message: ChatMessage,
+) {
+    if let Some(journal) = appended.as_deref_mut() {
+        journal.push(message.clone());
+    }
+    history.push(message);
+}
+
 struct ReceiptFields {
     turns: u32,
     tool_calls: u32,
@@ -160,7 +171,18 @@ impl AgentLoop {
         history: &mut Vec<ChatMessage>,
         task: &str,
     ) -> anyhow::Result<(String, Receipt)> {
-        self.run_with_history_inner(history, task, None)
+        self.run_with_history_inner(history, task, None, None)
+    }
+
+    /// Run against a compactable working copy while keeping the caller's
+    /// transcript append-only. Session ledgers use this entry point so every
+    /// newly produced message can be persisted as an exact suffix delta.
+    pub fn run_with_persistent_history(
+        &mut self,
+        history: &mut Vec<ChatMessage>,
+        task: &str,
+    ) -> anyhow::Result<(String, Receipt)> {
+        self.run_with_persistent_history_inner(history, task, None)
     }
 
     /// Add image or future content parts to the next user task. The existing
@@ -171,7 +193,30 @@ impl AgentLoop {
         task: &str,
         parts: Vec<ContentPart>,
     ) -> anyhow::Result<(String, Receipt)> {
-        self.run_with_history_inner(history, task, Some(parts))
+        self.run_with_history_inner(history, task, Some(parts), None)
+    }
+
+    /// Multimodal form of [`Self::run_with_persistent_history`].
+    pub fn run_with_persistent_history_and_parts(
+        &mut self,
+        history: &mut Vec<ChatMessage>,
+        task: &str,
+        parts: Vec<ContentPart>,
+    ) -> anyhow::Result<(String, Receipt)> {
+        self.run_with_persistent_history_inner(history, task, Some(parts))
+    }
+
+    fn run_with_persistent_history_inner(
+        &mut self,
+        history: &mut Vec<ChatMessage>,
+        task: &str,
+        parts: Option<Vec<ContentPart>>,
+    ) -> anyhow::Result<(String, Receipt)> {
+        let mut working = history.clone();
+        let mut appended = Vec::new();
+        let result = self.run_with_history_inner(&mut working, task, parts, Some(&mut appended));
+        history.extend(appended);
+        result
     }
 
     fn run_with_history_inner(
@@ -179,6 +224,7 @@ impl AgentLoop {
         history: &mut Vec<ChatMessage>,
         task: &str,
         parts: Option<Vec<ContentPart>>,
+        mut appended: Option<&mut Vec<ChatMessage>>,
     ) -> anyhow::Result<(String, Receipt)> {
         validate_task(task)?;
         let image_count = parts.as_ref().map_or(0, |parts| {
@@ -203,7 +249,7 @@ impl AgentLoop {
                     tool_names.join(", ")
                 )
             });
-            history.push(plain_msg("system", system));
+            push_message(history, &mut appended, plain_msg("system", system));
         }
         if let Some(parts) = parts {
             let mut message_parts = Vec::with_capacity(parts.len().saturating_add(1));
@@ -211,16 +257,20 @@ impl AgentLoop {
                 text: task.to_owned(),
             });
             message_parts.extend(parts);
-            history.push(ChatMessage {
-                role: "user".into(),
-                content: None,
-                parts: Some(message_parts),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
+            push_message(
+                history,
+                &mut appended,
+                ChatMessage {
+                    role: "user".into(),
+                    content: None,
+                    parts: Some(message_parts),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                },
+            );
         } else {
-            history.push(plain_msg("user", task.to_string()));
+            push_message(history, &mut appended, plain_msg("user", task.to_string()));
         }
 
         let prefix_seal = PrefixSeal::new(&history[..1]);
@@ -312,7 +362,7 @@ impl AgentLoop {
                     usage_overflowed = true;
                 }
             }
-            history.push(resp.message.clone());
+            push_message(history, &mut appended, resp.message.clone());
             let calls = resp.message.tool_calls.clone().unwrap_or_default();
             if calls.is_empty() {
                 self.report_prefix_drift(&prefix_seal, history, &mut prefix_drift_reported);
@@ -375,14 +425,18 @@ impl AgentLoop {
                         }
                     }
                 }
-                history.push(ChatMessage {
-                    role: "tool".into(),
-                    content: Some(result.output),
-                    parts: None,
-                    tool_calls: None,
-                    tool_call_id: Some(call.id.clone()),
-                    reasoning_content: None,
-                });
+                push_message(
+                    history,
+                    &mut appended,
+                    ChatMessage {
+                        role: "tool".into(),
+                        content: Some(result.output),
+                        parts: None,
+                        tool_calls: None,
+                        tool_call_id: Some(call.id.clone()),
+                        reasoning_content: None,
+                    },
+                );
             }
 
             self.report_prefix_drift(&prefix_seal, history, &mut prefix_drift_reported);

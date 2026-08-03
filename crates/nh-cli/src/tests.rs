@@ -204,6 +204,18 @@ fn parses_chat_with_default_model() {
 }
 
 #[test]
+fn parses_top_level_resume_with_optional_session_id() {
+    let listing = Cli::try_parse_from(["nh", "resume"]).unwrap();
+    assert!(matches!(listing.cmd, Cmd::Resume { session_id: None }));
+
+    let named = Cli::try_parse_from(["nh", "resume", "session-123"]).unwrap();
+    assert!(matches!(
+        named.cmd,
+        Cmd::Resume { session_id: Some(id) } if id == "session-123"
+    ));
+}
+
+#[test]
 fn run_rejects_zero_max_turns() {
     let error = match Cli::try_parse_from(["nh", "run", "task", "--max-turns", "0"]) {
         Ok(_) => panic!("zero turns must be rejected"),

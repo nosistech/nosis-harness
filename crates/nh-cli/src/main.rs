@@ -11,6 +11,7 @@ mod cmd_init;
 mod cmd_key;
 mod cmd_mcp;
 mod cmd_profile;
+mod cmd_resume;
 mod cmd_run;
 mod cmd_tui;
 mod cmd_why;
@@ -75,6 +76,11 @@ enum Cmd {
         /// Execution profile: frugal, balanced, or max-quality
         #[arg(long, default_value = "balanced")]
         profile: String,
+    },
+    /// Resume an interrupted chat or TUI session
+    Resume {
+        /// Session id; omit it to list interrupted sessions
+        session_id: Option<String>,
     },
     /// Explain the cheapest capable route for a task estimate
     Why {
@@ -188,6 +194,7 @@ fn main() -> anyhow::Result<()> {
             image,
         } => cmd_run::run(&task, &model, max_turns, think, autonomy, &profile, &image),
         Cmd::Chat { model, profile } => cmd_chat::run(&model, &profile),
+        Cmd::Resume { session_id } => cmd_resume::run(session_id.as_deref()),
         Cmd::Why { task, model } => cmd_why::run(task.as_deref(), model.as_deref()),
         Cmd::Profile { model } => cmd_profile::run(&model),
         Cmd::Tui {

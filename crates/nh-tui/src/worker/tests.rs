@@ -40,6 +40,11 @@ fn apply_new_credential_refreshes_every_scrubber() {
         context_limit: None,
         on_event: None,
     };
+    let mut ledger = SessionLedger::create(
+        PathBuf::from("."),
+        "unused-session",
+        Scrubber::new(Vec::new()),
+    );
     let literal = "fake-route-credential";
 
     apply_new_credential(
@@ -47,6 +52,7 @@ fn apply_new_credential_refreshes_every_scrubber() {
         &mut key_literals,
         nh_vault::secret(literal),
         &mut agent,
+        &mut ledger,
     );
 
     assert_eq!(key_literals.len(), 1);

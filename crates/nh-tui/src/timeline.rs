@@ -189,11 +189,33 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
 }
 
 pub(super) fn record_turn_cost(app: &mut App, usage: &Usage, at: DateTime<Utc>) {
-    if app.route.class() == RouteClass::Local {
-        app.push_line(LOCAL_METER_COPY, TranscriptKind::Progress);
+    let route = app.route.clone();
+    record_route_turn_cost(app, &route, usage, at, true);
+}
+
+pub(super) fn record_restored_turn_cost(
+    app: &mut App,
+    route: &ResolvedRoute,
+    usage: &Usage,
+    at: DateTime<Utc>,
+) {
+    record_route_turn_cost(app, route, usage, at, false);
+}
+
+fn record_route_turn_cost(
+    app: &mut App,
+    route: &ResolvedRoute,
+    usage: &Usage,
+    at: DateTime<Utc>,
+    show_details: bool,
+) {
+    if route.class() == RouteClass::Local {
+        if show_details {
+            app.push_line(LOCAL_METER_COPY, TranscriptKind::Progress);
+        }
         return;
     }
-    let Some(quote) = app.route.price_at(at) else {
+    let Some(quote) = route.price_at(at) else {
         return;
     };
     let cached = usage.cached_tokens.unwrap_or(0);
@@ -203,8 +225,10 @@ pub(super) fn record_turn_cost(app: &mut App, usage: &Usage, at: DateTime<Utc>) 
     };
     let uncertain = quote.confidence == PriceConfidence::VerifyLive;
     app.add_session_cost(quote.currency, actual, uncertain);
-    for line in savings_lines(&app.resolver, &app.route, usage, at) {
-        app.push_line(&line, TranscriptKind::Progress);
+    if show_details {
+        for line in savings_lines(&app.resolver, route, usage, at) {
+            app.push_line(&line, TranscriptKind::Progress);
+        }
     }
 }
 

@@ -1,12 +1,14 @@
 //! `nh init` - set up .nosis/ and the secret-guard pre-commit hook. Idempotent.
 
 use std::fs;
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 /// .nosis/.gitignore: runtime artifacts and auth material never reach git.
 const GITIGNORE: &str =
-    "# nosis-harness runtime artifacts - never commit\nreceipts.jsonl\nfleet/\n*.log\nauth*\n";
+    "# nosis-harness runtime artifacts - never commit\nreceipts.jsonl\nfleet/\nsessions/\n*.log\nauth*\n";
+const REQUIRED_GITIGNORE_LINES: &[&str] =
+    &["receipts.jsonl", "fleet/", "sessions/", "*.log", "auth*"];
 
 /// Starter route catalog for repos that have none, so `nh run` works right after
 /// `nh init`. Catalog stays DATA: this embeds the repo-root catalog.toml at build
@@ -63,10 +65,7 @@ pub fn init_at(root: &Path) -> anyhow::Result<Vec<String>> {
     }
 
     let gitignore = nosis.join(".gitignore");
-    if !gitignore.is_file() {
-        fs::write(&gitignore, GITIGNORE)?;
-        lines.push("created .nosis/.gitignore".to_string());
-    }
+    update_gitignore(&gitignore, &mut lines)?;
 
     let catalog = root.join("catalog.toml");
     if !catalog.is_file() {
@@ -94,6 +93,49 @@ pub fn init_at(root: &Path) -> anyhow::Result<Vec<String>> {
         lines.push("already set up".to_string());
     }
     Ok(lines)
+}
+
+fn update_gitignore(path: &Path, lines: &mut Vec<String>) -> anyhow::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            anyhow::bail!(
+                "refused: .nosis/.gitignore is not a regular file - replace it, then rerun `nh init`"
+            )
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::write(path, GITIGNORE)?;
+            lines.push("created .nosis/.gitignore".to_string());
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    }
+
+    let existing = fs::read(path)?;
+    let missing = REQUIRED_GITIGNORE_LINES
+        .iter()
+        .copied()
+        .filter(|required| {
+            !existing
+                .split(|byte| *byte == b'\n')
+                .any(|line| line.strip_suffix(b"\r").unwrap_or(line) == required.as_bytes())
+        })
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let mut file = fs::OpenOptions::new().append(true).open(path)?;
+    if !existing.is_empty() && existing.last() != Some(&b'\n') {
+        file.write_all(b"\n")?;
+    }
+    for entry in missing {
+        writeln!(file, "{entry}")?;
+        lines.push(format!("added {entry} to .nosis/.gitignore"));
+    }
+    file.flush()?;
+    file.sync_all()?;
+    Ok(())
 }
 
 enum HooksResolution {

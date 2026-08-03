@@ -2,14 +2,16 @@
 
 use crate::input::handle_input_event;
 use crate::render::render;
-use crate::state::{AgentEvent, App, Status, TuiConfig, UiDiscovery};
+use crate::state::{AgentEvent, App, Status, TranscriptKind, TuiConfig, UiDiscovery};
 use crate::terminal::{with_terminal_panic_hook, PanicAbort, TerminalGuard, TerminalStateHandle};
-use crate::timeline::apply_event;
+use crate::timeline::{apply_event, record_restored_turn_cost};
 use crate::worker::{spawn_worker, Worker, WorkerConfig, WorkerShutdown, SHUTDOWN_TIMEOUT};
 use crate::{ConnectFn, SharedScrubber, EVENT_POLL, TASKBAR_CLEAR, TASKBAR_WAITING};
 use anyhow::Context as _;
+use chrono::{DateTime, Utc};
 use crossterm::event;
 use nh_core::credential;
+use nh_core::session_ledger::{RestoredSession, Surface};
 use nh_core::wire::{resolve_effort, ThinkingEffort};
 use nh_routes::{ResolvedRoute, RouteClass, ThinkingDialect, ThinkingPosture, Wire};
 use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, SecretRegistry, SecretValue};
@@ -17,9 +19,107 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io::{self, Write};
 use std::sync::{mpsc::TryRecvError, Arc, RwLock};
 
+fn validate_resume(
+    resolver: &nh_routes::RouteResolver,
+    route: &ResolvedRoute,
+    restored: &RestoredSession,
+) -> anyhow::Result<()> {
+    if restored.surface != Surface::Tui {
+        anyhow::bail!(
+            "session belongs to chat - run `nh resume {}`",
+            restored.session_id
+        );
+    }
+    if route.model_id() != restored.model_id {
+        anyhow::bail!(
+            "session route {} now points to a different model - restore the recorded catalog entry, then retry",
+            restored.route_id
+        );
+    }
+    for turn in &restored.turns {
+        if turn.usage.is_none() {
+            continue;
+        }
+        resolver.resolve(&turn.route_id).map_err(|_| {
+            anyhow::anyhow!(
+                "session route {} is no longer available - restore it in catalog.toml, then retry",
+                turn.route_id
+            )
+        })?;
+        DateTime::parse_from_rfc3339(&turn.ts_utc).map_err(|_| {
+            anyhow::anyhow!("session has an invalid turn timestamp - inspect its ledger")
+        })?;
+    }
+    Ok(())
+}
+
+fn restore_app(
+    app: &mut App,
+    restored: &RestoredSession,
+    law_constitution: &str,
+) -> anyhow::Result<()> {
+    app.resumed = true;
+    for turn in &restored.turns {
+        let Some(usage) = &turn.usage else {
+            continue;
+        };
+        if crate::worker::add_usage(&mut app.usage, usage) {
+            app.has_failed_turn = true;
+            continue;
+        }
+        let route = app.resolver.resolve(&turn.route_id)?;
+        let at = DateTime::parse_from_rfc3339(&turn.ts_utc)?.with_timezone(&Utc);
+        record_restored_turn_cost(app, &route, usage, at);
+    }
+    app.push_line(
+        &format!(
+            "resumed {} - {} turns restored on {}",
+            restored.session_id,
+            restored.turns.len(),
+            restored.route_id
+        ),
+        TranscriptKind::Progress,
+    );
+    if restored.dropped_torn_tail {
+        app.push_line(
+            "last session record was incomplete and was dropped - continuing safely",
+            TranscriptKind::Progress,
+        );
+    }
+    let constitution_changed = restored
+        .history
+        .first()
+        .filter(|message| message.role == "system")
+        .and_then(|message| message.content.as_deref())
+        .is_some_and(|recorded| !recorded.ends_with(law_constitution));
+    if constitution_changed {
+        app.push_line(
+            "session kept its original constitution - start a new session to use the current one",
+            TranscriptKind::Progress,
+        );
+    }
+    if app.budget_reached() {
+        app.set_status(Status::Blocked(crate::BUDGET_REASON.into()), Utc::now());
+    }
+    Ok(())
+}
+
 /// Run the full-screen TUI until the user quits.
 pub fn run(config: TuiConfig) -> anyhow::Result<()> {
-    let route = config.resolver.resolve(&config.model_id)?;
+    let model_id = config
+        .resume
+        .as_ref()
+        .map_or(config.model_id.as_str(), |resume| resume.route_id.as_str());
+    let route = match config.resolver.resolve(model_id) {
+        Ok(route) => route,
+        Err(_) if config.resume.is_some() => anyhow::bail!(
+            "session route {model_id} is no longer available - restore it in catalog.toml, then retry"
+        ),
+        Err(error) => return Err(error),
+    };
+    if let Some(resume) = &config.resume {
+        validate_resume(&config.resolver, &route, resume)?;
+    }
     if route.class() == RouteClass::Delegate {
         anyhow::bail!("delegate routes arrive in M4 - pick an api route");
     }
@@ -66,6 +166,7 @@ pub(super) fn run_tui_session(
         workdir,
         palette_entries,
         credentialed_providers,
+        resume,
     } = config;
     let scrubber = Arc::new(RwLock::new(Scrubber::new(Vec::new())));
     let execution_policy = profiles.effective(&profile, &route);
@@ -74,6 +175,8 @@ pub(super) fn run_tui_session(
         install_literal(&scrubber, &mut SecretRegistry::new(), literal.clone());
     }
     let policy_view = law.policy.view();
+    let law_constitution = law.constitution.clone();
+    let resume_for_app = resume.clone();
     let mut worker = spawn_worker(WorkerConfig {
         route: route.clone(),
         law,
@@ -84,6 +187,7 @@ pub(super) fn run_tui_session(
         initial: Some(initial),
         profiles: profiles.clone(),
         active_profile: execution_policy.profile.clone(),
+        resume,
     })?;
     // Keep App after Worker: unwinding drops its approval sender before Worker::drop.
     let mut app = App::new(
@@ -98,6 +202,9 @@ pub(super) fn run_tui_session(
         },
         (profiles, execution_policy.profile),
     );
+    if let Some(restored) = &resume_for_app {
+        restore_app(&mut app, restored, &law_constitution)?;
+    }
 
     let terminal_guard = TerminalGuard::enter(terminal_state)?;
     let backend = CrosstermBackend::new(io::stdout());

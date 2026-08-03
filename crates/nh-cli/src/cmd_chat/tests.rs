@@ -1,6 +1,7 @@
 use super::*;
 use chrono::TimeZone;
 use nh_core::receipt::ReceiptWriter;
+use nh_core::session_ledger::{read_session, RestoredSession};
 use nh_core::wire::{ChatRequest, ChatResponse, ThinkingEffort, Usage};
 use nh_law::LoadOptions;
 use nh_routes::{ThinkingDialect, ThinkingPosture, Wire};
@@ -126,6 +127,20 @@ fn assistant_msg(text: &str) -> ChatMessage {
         .expect("valid assistant message")
 }
 
+fn session_path(root: &Path, id: &str) -> std::path::PathBuf {
+    root.join(".nosis")
+        .join("sessions")
+        .join(format!("{id}.jsonl"))
+}
+
+fn session_events(root: &Path, id: &str) -> Vec<SessionEvent> {
+    std::fs::read_to_string(session_path(root, id))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
 struct MockClient {
     reply: String,
     calls: Arc<AtomicUsize>,
@@ -144,6 +159,14 @@ impl ChatClient for MockClient {
             }),
             retries: Default::default(),
         })
+    }
+}
+
+struct FailingClient;
+
+impl ChatClient for FailingClient {
+    fn complete(&self, _request: &ChatRequest) -> anyhow::Result<ChatResponse> {
+        anyhow::bail!("provider failed after accepting the turn")
     }
 }
 
@@ -178,6 +201,17 @@ fn test_session(model: &str, tmp: &Path) -> (ChatSession, Arc<AtomicUsize>) {
     let mut key_literals = SecretRegistry::new();
     key_literals.insert(literal);
     let test_scrubber = key_literals.scrubber();
+    let ledger = SessionLedger::create(tmp, "test-session", test_scrubber.clone());
+    ledger
+        .append(&SessionEvent::Started {
+            session_id: "test-session".into(),
+            surface: nh_core::session_ledger::Surface::Chat,
+            route_id: route.id().to_owned(),
+            model_id: route.model_id().to_owned(),
+            profile: execution_policy.profile.clone(),
+            created_utc: session_timestamp(off_peak_now()),
+        })
+        .unwrap();
     let agent = AgentLoop {
         client,
         tools: builtin_tools(),
@@ -217,8 +251,42 @@ fn test_session(model: &str, tmp: &Path) -> (ChatSession, Arc<AtomicUsize>) {
         local_offset: beijing_offset(),
         mcp_warnings: Vec::new(),
         pending_images: Vec::new(),
+        ledger,
+        ledger_failed: false,
+        ledger_notice_shown: false,
+        resumed: false,
+        restored_turns: 0,
+        dropped_torn_tail: false,
+        constitution_changed: false,
+        pending_route_context: None,
     };
     (session, calls)
+}
+
+fn reopen_test_session(restored: RestoredSession, tmp: &Path) -> (ChatSession, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let connect_calls = Arc::clone(&calls);
+    let connect: ConnectFn = Box::new(move |route, _| {
+        Ok((
+            Box::new(MockClient {
+                reply: "ok".into(),
+                calls: Arc::clone(&connect_calls),
+            }) as Box<dyn ChatClient>,
+            nh_vault::secret(format!("fake-key-{}", route.vault_entry())),
+        ))
+    });
+    let resolver = RouteResolver::from_toml(TEST_CATALOG).expect("test catalog parses");
+    let session = super::startup::reopen_with_test_dependencies(tmp, resolver, restored, connect)
+        .expect("offline resume opens");
+    (session, calls)
+}
+
+fn session_cost_snapshot(session: &ChatSession) -> Vec<(Currency, u64, bool)> {
+    session
+        .session_cost
+        .iter()
+        .map(|cost| (cost.currency, cost.amount.to_bits(), cost.uncertain))
+        .collect()
 }
 
 #[test]
@@ -298,17 +366,18 @@ fn model_switch_preserves_history_and_changes_route() {
 
     assert!(out.contains("switched to kimi-k2.6"), "got: {out}");
     assert_eq!(calls.load(Ordering::SeqCst), 2, "one wire call per task");
-    // History survived the switch: system + (user, assistant) x 2.
-    assert_eq!(s.history.len(), 5, "history: {:#?}", s.history);
+    // History survived the switch without rewriting its sealed prefix. The
+    // new route identity is an append-only system message in the next turn.
+    assert_eq!(s.history.len(), 6, "history: {:#?}", s.history);
     assert_eq!(s.history[0].role, "system");
     assert_eq!(s.history[1].content.as_deref(), Some("write a haiku"));
-    assert_eq!(s.history[3].content.as_deref(), Some("another one"));
+    assert_eq!(s.history[4].content.as_deref(), Some("another one"));
     // Active route changed.
     assert_eq!(s.route.id(), "kimi-k2.6");
     assert_eq!(s.agent.model_id, "kimi-k2.6");
     assert_eq!(s.agent.context_limit, Some(2000));
-    // Identity prompt refreshes to the new route, still appends the law text, and
-    // the live system message in history is rewritten to match.
+    // Identity prompt refreshes to the new route while the original prefix
+    // remains byte-identical for ledger replay and provider caching.
     let constitution = s.agent.constitution.clone().unwrap();
     assert!(
         constitution.contains("nosis on kimi-k2.6")
@@ -320,7 +389,11 @@ fn model_switch_preserves_history_and_changes_route() {
         constitution.ends_with("test constitution\n"),
         "law text preserved: {constitution}"
     );
-    assert_eq!(s.history[0].content.as_ref(), Some(&constitution));
+    assert!(s.history[0]
+        .content
+        .as_deref()
+        .is_some_and(|content| content.contains("nosis on deepseek-v4-flash")));
+    assert_eq!(s.history[3].content.as_ref(), Some(&constitution));
 }
 
 #[test]
@@ -521,6 +594,162 @@ fn session_usage_accumulates_across_turns_and_switches() {
 }
 
 #[test]
+fn restored_totals_match_live_totals_across_route_switch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut live, calls) = test_session("deepseek-v4-flash", tmp.path());
+
+    let (_out, _err) = drive(
+        &mut live,
+        &["first metered turn", "/model kimi-k2.6", "second", "third"],
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    let restored = read_session(tmp.path(), "test-session").unwrap();
+    assert_eq!(
+        restored
+            .turns
+            .iter()
+            .map(|turn| turn.route_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["deepseek-v4-flash", "kimi-k2.6", "kimi-k2.6"]
+    );
+    assert_eq!(restored.route_id, "kimi-k2.6");
+
+    let live_totals = (
+        live.session_in,
+        live.session_out,
+        live.session_cached,
+        session_cost_snapshot(&live),
+        live.unpriced_turns,
+    );
+    let (reopened, _) = reopen_test_session(restored, tmp.path());
+    let restored_totals = (
+        reopened.session_in,
+        reopened.session_out,
+        reopened.session_cached,
+        session_cost_snapshot(&reopened),
+        reopened.unpriced_turns,
+    );
+
+    assert_eq!(restored_totals, live_totals);
+    assert_eq!(reopened.session_cost.len(), 2);
+    assert_eq!(reopened.route.id(), "kimi-k2.6");
+}
+
+#[test]
+fn failed_agent_turn_still_persists_its_history_delta() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut session, _) = test_session("deepseek-v4-flash", tmp.path());
+    session.agent.client = Box::new(FailingClient);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+
+    run_task(&mut session, "keep this failed turn", &mut out, &mut err);
+
+    assert!(out.is_empty());
+    assert!(String::from_utf8(err)
+        .unwrap()
+        .contains("provider failed after accepting the turn"));
+    let events = session_events(tmp.path(), "test-session");
+    let turn = events
+        .iter()
+        .find(|event| matches!(event, SessionEvent::Turn { .. }))
+        .expect("failed task writes a turn event");
+    let SessionEvent::Turn {
+        route_id,
+        messages,
+        usage,
+        ..
+    } = turn
+    else {
+        unreachable!()
+    };
+    assert_eq!(route_id, "deepseek-v4-flash");
+    assert!(usage.is_none());
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].role, "system");
+    assert_eq!(messages[1].role, "user");
+    assert_eq!(
+        messages[1].content.as_deref(),
+        Some("keep this failed turn")
+    );
+    assert_eq!(
+        serde_json::to_vec(messages).unwrap(),
+        serde_json::to_vec(&session.history).unwrap()
+    );
+}
+
+#[test]
+fn chat_resume_round_trip_preserves_history_and_appends_same_ledger() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = session_path(tmp.path(), "test-session");
+    let (mut live, live_calls) = test_session("deepseek-v4-flash", tmp.path());
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    run_task(&mut live, "before interruption", &mut out, &mut err);
+    assert_eq!(live_calls.load(Ordering::SeqCst), 1);
+
+    let live_history = serde_json::to_vec(&live.history).unwrap();
+    let bytes_before_reopen = std::fs::read(&path).unwrap();
+    let restored = read_session(tmp.path(), "test-session").unwrap();
+    assert_eq!(restored.turns.len(), 1);
+    assert_eq!(serde_json::to_vec(&restored.history).unwrap(), live_history);
+
+    let (mut reopened, resumed_calls) = reopen_test_session(restored, tmp.path());
+    assert!(reopened.resumed);
+    assert_eq!(reopened.restored_turns, 1);
+    assert_eq!(reopened.ledger.session_id(), "test-session");
+    assert_eq!(serde_json::to_vec(&reopened.history).unwrap(), live_history);
+    assert!(std::fs::read(&path).unwrap().len() > bytes_before_reopen.len());
+
+    let mut resumed_out = Vec::new();
+    let mut resumed_err = Vec::new();
+    run_task(
+        &mut reopened,
+        "after interruption",
+        &mut resumed_out,
+        &mut resumed_err,
+    );
+    assert_eq!(resumed_calls.load(Ordering::SeqCst), 1);
+
+    let resumed = read_session(tmp.path(), "test-session").unwrap();
+    assert_eq!(resumed.turns.len(), 2);
+    assert_eq!(
+        serde_json::to_vec(&resumed.history[..live.history.len()]).unwrap(),
+        live_history
+    );
+    assert_eq!(
+        resumed.history[live.history.len()].content.as_deref(),
+        Some("after interruption")
+    );
+    let events = session_events(tmp.path(), "test-session");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::Started { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::Resumed { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        std::fs::read_dir(tmp.path().join(".nosis").join("sessions"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(
+                |entry| entry.path().extension().and_then(|value| value.to_str()) == Some("jsonl")
+            )
+            .count(),
+        1,
+        "resume must not mint a second ledger"
+    );
+}
+
+#[test]
 fn footer_without_price_table_says_no_price_data() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut s, _calls) = test_session("unpriced", tmp.path());
@@ -647,6 +876,34 @@ fn blank_lines_reprompt_without_calling_the_model() {
     let (_out, err) = drive(&mut s, &["", "   ", "/quit"]);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(err.matches("nh> ").count(), 3, "got: {err}");
+}
+
+#[test]
+fn failed_ledger_append_keeps_repl_alive_and_warns_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut session, calls) = test_session("deepseek-v4-flash", tmp.path());
+    let path = session_path(tmp.path(), "test-session");
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+
+    let (out, err) = drive(&mut session, &["one", "/price", "two", "/help", "three"]);
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "every task reached the client"
+    );
+    assert_eq!(out.lines().filter(|line| *line == "ok").count(), 3);
+    assert!(out.contains("deepseek-v4-flash | off-peak"), "got: {out}");
+    assert!(out.contains(CHAT_HELP), "got: {out}");
+    assert_eq!(
+        err.matches("session persistence is off - copy anything you need before quitting")
+            .count(),
+        1,
+        "got: {err}"
+    );
+    assert!(session.ledger_failed);
+    assert!(session.ledger_notice_shown);
 }
 
 #[test]
@@ -881,6 +1138,41 @@ fn both_session_keys_are_scrubbed_after_a_switch() {
     assert!(!out.contains("fake-key-deepseek"), "old key leaked: {out}");
     assert!(!out.contains("fake-key-glm"), "new key leaked: {out}");
     assert_eq!(out.matches("[REDACTED]").count(), 2, "got: {out}");
+}
+
+#[test]
+fn credential_installed_mid_session_never_reaches_session_file() {
+    const LITERAL: &str = "test-credential-installed-mid-session";
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut session, calls) = test_session("deepseek-v4-flash", tmp.path());
+    session.connect = Box::new(move |_, _| {
+        Ok((
+            Box::new(MockClient {
+                reply: format!("provider echoed {LITERAL}"),
+                calls: Arc::clone(&calls),
+            }),
+            nh_vault::secret(LITERAL),
+        ))
+    });
+
+    let (out, _err) = drive(&mut session, &["/model kimi-k2.6", "persist this turn"]);
+    assert!(out.contains("provider echoed [REDACTED]"), "got: {out}");
+    assert!(session.key_literals.contains(LITERAL));
+
+    let bytes = std::fs::read(session_path(tmp.path(), "test-session")).unwrap();
+    assert!(
+        !bytes
+            .windows(LITERAL.len())
+            .any(|window| window == LITERAL.as_bytes()),
+        "the installed credential reached the session ledger"
+    );
+    assert!(
+        bytes
+            .windows(b"[REDACTED]".len())
+            .any(|window| window == b"[REDACTED]"),
+        "the on-disk turn did not exercise redaction"
+    );
 }
 
 #[test]

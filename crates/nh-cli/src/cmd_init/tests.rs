@@ -58,6 +58,7 @@ fn creates_nosis_gitignore_and_catalog_then_is_idempotent() {
     let gi = fs::read_to_string(tmp.path().join(".nosis").join(".gitignore")).unwrap();
     assert!(gi.contains("receipts.jsonl"));
     assert!(gi.contains("fleet/"));
+    assert!(gi.contains("sessions/"));
     assert!(gi.contains("*.log"));
     assert!(gi.contains("auth*"));
     let law = fs::read_to_string(tmp.path().join(".nosis").join("law.toml")).unwrap();
@@ -67,6 +68,42 @@ fn creates_nosis_gitignore_and_catalog_then_is_idempotent() {
 
     let again = init_at(tmp.path()).unwrap();
     assert_eq!(again, vec!["already set up".to_string()]);
+}
+
+#[test]
+fn existing_gitignore_is_extended_without_reordering_and_second_init_is_idempotent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let nosis = tmp.path().join(".nosis");
+    fs::create_dir(&nosis).unwrap();
+    fs::write(
+        nosis.join(".gitignore"),
+        "# user rule\ncustom-cache/\nfleet/\n",
+    )
+    .unwrap();
+    fs::write(tmp.path().join("catalog.toml"), CATALOG_STARTER).unwrap();
+    fs::write(nosis.join("law.toml"), nh_law::STARTER_LAW_TOML).unwrap();
+
+    let lines = init_at(tmp.path()).unwrap();
+    let updated = fs::read_to_string(nosis.join(".gitignore")).unwrap();
+
+    assert!(updated.starts_with("# user rule\ncustom-cache/\nfleet/\n"));
+    assert_eq!(updated.matches("fleet/\n").count(), 1);
+    for required in ["receipts.jsonl", "sessions/", "*.log", "auth*"] {
+        assert_eq!(
+            updated.lines().filter(|line| *line == required).count(),
+            1,
+            "missing or duplicated {required}: {updated}"
+        );
+        assert!(lines
+            .iter()
+            .any(|line| line == &format!("added {required} to .nosis/.gitignore")));
+    }
+
+    assert_eq!(init_at(tmp.path()).unwrap(), ["already set up"]);
+    assert_eq!(
+        fs::read_to_string(nosis.join(".gitignore")).unwrap(),
+        updated
+    );
 }
 
 #[test]

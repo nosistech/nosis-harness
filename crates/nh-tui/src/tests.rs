@@ -6,6 +6,7 @@ use crate::worker::WorkerCommand;
 use chrono::{DateTime, Utc};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use nh_core::agent::MAX_TASK_BYTES;
+use nh_core::session_ledger::{list_sessions, read_session};
 use nh_core::wire::{ChatRequest, ChatResponse};
 use ratatui::{
     backend::TestBackend,
@@ -2044,6 +2045,7 @@ fn worker_error_marks_the_rendered_session_meter_incomplete() {
         scrubber: Arc::new(RwLock::new(Scrubber::new(Vec::new()))),
         connect,
         initial: None,
+        resume: None,
     })
     .unwrap();
     worker
@@ -2095,6 +2097,7 @@ fn model_switch_keeps_worker_history_transcript_and_updates_route_identity() {
         scrubber: Arc::new(RwLock::new(Scrubber::new(Vec::new()))),
         connect,
         initial: None,
+        resume: None,
     })
     .unwrap();
     let mut app = test_app(None);
@@ -2143,17 +2146,12 @@ fn model_switch_keeps_worker_history_transcript_and_updates_route_identity() {
     assert_eq!(requests[0].effort, ThinkingEffort::None);
     assert_eq!(requests[1].model, "other-route");
     assert_eq!(requests[1].message_count, 5, "history was not kept");
-    assert!(requests[1].system.contains("nosis on other-route"));
+    assert!(requests[1].system.contains("nosis on test-route"));
     assert!(requests[1].system.contains("never claim to be Claude"));
     assert_eq!(requests[1].history[0].0, "system");
-    assert!(requests[1].history[0].1.contains("nosis on other-route"));
-    assert_eq!(
-        requests[1].history[3],
-        (
-            "system".into(),
-            "Route changed: test-route → other-route.".into()
-        )
-    );
+    assert!(requests[1].history[0].1.contains("nosis on test-route"));
+    assert_eq!(requests[1].history[3].0, "system");
+    assert!(requests[1].history[3].1.contains("nosis on other-route"));
     assert_eq!(
         requests[1]
             .history
@@ -2194,6 +2192,7 @@ fn keyless_switch_accepts_route_then_next_task_surfaces_add_key_line() {
         scrubber: Arc::new(RwLock::new(Scrubber::new(Vec::new()))),
         connect,
         initial: None,
+        resume: None,
     })
     .unwrap();
     worker
@@ -2250,6 +2249,7 @@ fn worker_uses_injected_client_and_keeps_one_history_across_tasks() {
         scrubber,
         connect,
         initial: None,
+        resume: None,
     })
     .unwrap();
 
@@ -2290,6 +2290,93 @@ fn worker_uses_injected_client_and_keeps_one_history_across_tasks() {
 }
 
 #[test]
+fn restored_worker_sends_restored_history_on_first_request() {
+    let root = temp_dir();
+    let live_requests = Arc::new(Mutex::new(Vec::new()));
+    let requests_for_connect = Arc::clone(&live_requests);
+    let live_connect: ConnectFn = Box::new(move |_, _| {
+        Ok((
+            Box::new(RecordingClient {
+                requests: Arc::clone(&requests_for_connect),
+            }),
+            nh_vault::secret("fake-worker-secret"),
+        ))
+    });
+    let law = nh_law::load(&root, &nh_law::LoadOptions { cli_autonomy: None });
+    let mut live_worker = spawn_worker(WorkerConfig {
+        route: test_route(),
+        profiles: Profiles::bundled(),
+        active_profile: "balanced".into(),
+        law,
+        repo_root: root.clone(),
+        workdir: root.clone(),
+        scrubber: Arc::new(RwLock::new(Scrubber::new(Vec::new()))),
+        connect: live_connect,
+        initial: None,
+        resume: None,
+    })
+    .unwrap();
+    live_worker
+        .commands
+        .send(WorkerCommand::Task("before interruption".into()))
+        .unwrap();
+    receive_completed_task(&live_worker, &mut test_app(None));
+    assert_eq!(live_worker.shutdown(), WorkerShutdown::Clean);
+    assert_eq!(live_requests.lock().unwrap().len(), 1);
+
+    let index = list_sessions(&root).unwrap();
+    assert_eq!(index.sessions.len(), 1);
+    let session_id = index.sessions[0].session_id.clone();
+    let restored = read_session(&root, &session_id).unwrap();
+    assert_eq!(restored.turns.len(), 1);
+    let restored_message_count = restored.history.len();
+    let restored_system = restored.history[0].content.clone().unwrap();
+
+    let resumed_requests = Arc::new(Mutex::new(Vec::new()));
+    let requests_for_connect = Arc::clone(&resumed_requests);
+    let resumed_connect: ConnectFn = Box::new(move |_, _| {
+        Ok((
+            Box::new(RecordingClient {
+                requests: Arc::clone(&requests_for_connect),
+            }),
+            nh_vault::secret("fake-worker-secret"),
+        ))
+    });
+    let law = nh_law::load(&root, &nh_law::LoadOptions { cli_autonomy: None });
+    let mut resumed_worker = spawn_worker(WorkerConfig {
+        route: test_route(),
+        profiles: Profiles::bundled(),
+        active_profile: "balanced".into(),
+        law,
+        repo_root: root.clone(),
+        workdir: root.clone(),
+        scrubber: Arc::new(RwLock::new(Scrubber::new(Vec::new()))),
+        connect: resumed_connect,
+        initial: None,
+        resume: Some(restored),
+    })
+    .unwrap();
+    resumed_worker
+        .commands
+        .send(WorkerCommand::Task("after interruption".into()))
+        .unwrap();
+    receive_completed_task(&resumed_worker, &mut test_app(None));
+
+    assert_eq!(resumed_worker.shutdown(), WorkerShutdown::Clean);
+    let requests = resumed_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "requests: {requests:#?}");
+    assert_eq!(requests[0].message_count, restored_message_count + 1);
+    assert_eq!(requests[0].system, restored_system);
+    assert_eq!(requests[0].history[0].0, "system");
+    assert_eq!(requests[0].history[0].1, restored_system);
+    assert_eq!(requests[0].history[1].1, "before interruption");
+    assert_eq!(requests[0].history[2].1, "ok");
+    drop(requests);
+    assert_eq!(read_session(&root, &session_id).unwrap().turns.len(), 2);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn worker_profile_change_reconnects_with_clamp_and_records_next_turn() {
     let root = temp_dir();
     let seen_caps = Arc::new(Mutex::new(Vec::new()));
@@ -2316,6 +2403,7 @@ fn worker_profile_change_reconnects_with_clamp_and_records_next_turn() {
         scrubber: Arc::new(RwLock::new(Scrubber::new(Vec::new()))),
         connect,
         initial: None,
+        resume: None,
     })
     .unwrap();
 
@@ -2370,6 +2458,7 @@ fn keyless_worker_starts_and_task_surfaces_the_add_key_line() {
         scrubber: Arc::new(RwLock::new(Scrubber::new(Vec::new()))),
         connect,
         initial: Some(Err(anyhow::anyhow!("{message}"))),
+        resume: None,
     })
     .unwrap();
     worker

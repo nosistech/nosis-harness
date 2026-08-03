@@ -11,6 +11,9 @@ use anyhow::Context as _;
 use chrono::Utc;
 use nh_core::agent::AgentLoop;
 use nh_core::receipt::{FailureClass, Outcome, Receipt, ReceiptWriter, RepairStats};
+use nh_core::session_ledger::{
+    new_session_id, RestoredSession, SessionEvent, SessionLedger, Surface,
+};
 use nh_core::wire::{ChatClient, ChatMessage, ChatRequest, ChatResponse, ThinkingEffort, Usage};
 use nh_law::{Law, Verdict};
 use nh_routes::{Profiles, ResolvedRoute};
@@ -27,6 +30,7 @@ use crate::{AgentEvent, ConnectFn, SharedScrubber, TimelineSummary};
 const APPROVAL_WAIT_POLL: Duration = Duration::from_millis(10);
 const JOIN_POLL: Duration = Duration::from_millis(2);
 pub(super) const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
+const PERSISTENCE_OFF: &str = "session persistence is off - copy anything you need before quitting";
 
 struct TrackedTool {
     inner: Box<dyn Tool>,
@@ -140,12 +144,14 @@ fn apply_new_credential(
     key_literals: &mut SecretRegistry,
     literal: SecretValue,
     agent: &mut AgentLoop,
+    ledger: &mut SessionLedger,
 ) {
     // One place updates every scrubber snapshot so they can never diverge:
     // shared/UI egress, the tool boundary, and receipts all see the new credential.
     install_literal(shared, key_literals, literal);
     agent.ctx.scrubber = key_literals.scrubber();
     agent.receipts.replace_scrubber(key_literals.scrubber());
+    ledger.replace_scrubber(key_literals.scrubber());
 }
 
 /// One approval decision waiting for the main-thread UI.
@@ -245,6 +251,7 @@ pub(super) struct WorkerConfig {
     pub(super) scrubber: SharedScrubber,
     pub(super) connect: ConnectFn,
     pub(super) initial: Option<anyhow::Result<(Box<dyn ChatClient>, SecretValue)>>,
+    pub(super) resume: Option<RestoredSession>,
 }
 
 pub(super) fn spawn_worker(config: WorkerConfig) -> anyhow::Result<Worker> {
@@ -293,6 +300,10 @@ struct WorkerSession {
     connected: bool,
     events: Sender<AgentEvent>,
     shutdown: Arc<AtomicBool>,
+    ledger: SessionLedger,
+    ledger_failed: bool,
+    ledger_notice_sent: bool,
+    pending_route_context: Option<ChatMessage>,
 }
 
 impl WorkerSession {
@@ -307,6 +318,7 @@ impl WorkerSession {
             scrubber,
             connect,
             initial,
+            resume,
         } = config;
 
         let initial_policy = profiles.effective(&active_profile, &route);
@@ -364,11 +376,12 @@ impl WorkerSession {
                 Access::Send(target) => verdict_to_guard(policy.send_verdict(target)),
             }));
         let law_constitution = law.constitution;
+        let current_constitution = identity_constitution(&law_constitution, &route);
         let agent = AgentLoop {
             client,
             tools: tracked_tools(builtin_tools(), &events),
             ctx,
-            receipts: ReceiptWriter::project(repo_root, key_literals.scrubber()),
+            receipts: ReceiptWriter::project(repo_root.clone(), key_literals.scrubber()),
             model_id: route.model_id().to_owned(),
             max_turns: 20,
             thinking: effort_for(
@@ -377,7 +390,7 @@ impl WorkerSession {
                 route.wire(),
             ),
             profile: Some(active_profile.clone()),
-            constitution: Some(identity_constitution(&law_constitution, &route)),
+            constitution: Some(current_constitution.clone()),
             context_limit: route.context(),
             on_event: Some(Box::new(move |line| {
                 let _ =
@@ -385,23 +398,69 @@ impl WorkerSession {
             })),
         };
 
+        let session_id = resume
+            .as_ref()
+            .map_or_else(new_session_id, |saved| saved.session_id.clone());
+        let ledger = SessionLedger::create(repo_root, session_id.clone(), key_literals.scrubber());
+        let history = resume
+            .as_ref()
+            .map_or_else(Vec::new, |saved| saved.history.clone());
+        let pending_route_context = resume.as_ref().and_then(|saved| {
+            saved
+                .turns
+                .last()
+                .is_some_and(|turn| turn.route_id != saved.route_id)
+                .then(|| route_context_message(current_constitution.clone()))
+        });
+        let mut session_usage = Usage {
+            cached_tokens: Some(0),
+            ..Usage::default()
+        };
+        let mut usage_incomplete = false;
+        if let Some(saved) = &resume {
+            for usage in saved.turns.iter().filter_map(|turn| turn.usage.as_ref()) {
+                usage_incomplete |= add_usage(&mut session_usage, usage);
+            }
+        }
+        let lifecycle = resume.as_ref().map_or_else(
+            || SessionEvent::Started {
+                session_id,
+                surface: Surface::Tui,
+                route_id: route.id().to_owned(),
+                model_id: route.model_id().to_owned(),
+                profile: active_profile.clone(),
+                created_utc: session_timestamp(Utc::now()),
+            },
+            |_| SessionEvent::Resumed {
+                ts_utc: session_timestamp(Utc::now()),
+            },
+        );
+        let ledger_failed = ledger.append(&lifecycle).is_err();
+        if usage_incomplete {
+            let _ = events.send(AgentEvent::MeterIncomplete);
+        }
+        if ledger_failed {
+            let _ = events.send(AgentEvent::Progress(safe_line(&scrubber, PERSISTENCE_OFF)));
+        }
+
         Self {
             route,
             profiles,
             active_profile,
             law_constitution,
             agent,
-            history: Vec::new(),
-            session_usage: Usage {
-                cached_tokens: Some(0),
-                ..Usage::default()
-            },
+            history,
+            session_usage,
             scrubber,
             connect,
             key_literals,
             connected,
             events,
             shutdown,
+            ledger,
+            ledger_failed,
+            ledger_notice_sent: ledger_failed,
+            pending_route_context,
         }
     }
 
@@ -423,6 +482,10 @@ impl WorkerSession {
                 CommandAction::Stop => break,
             }
         }
+        let ended = SessionEvent::Ended {
+            ts_utc: session_timestamp(Utc::now()),
+        };
+        self.append_session_event(&ended);
     }
 
     fn stopped(&self) -> bool {
@@ -448,21 +511,18 @@ impl WorkerSession {
                 self.active_profile = execution_policy.profile;
                 let constitution = identity_constitution(&self.law_constitution, &next_route);
                 self.agent.constitution = Some(constitution.clone());
-                replace_system_message(&mut self.history, constitution);
-                if !self.history.is_empty() && previous_route != next_route_id {
-                    self.history.push(ChatMessage {
-                        role: "system".into(),
-                        content: Some(format!(
-                            "Route changed: {previous_route} → {next_route_id}."
-                        )),
-                        parts: None,
-                        tool_calls: None,
-                        tool_call_id: None,
-                        reasoning_content: None,
-                    });
-                }
+                self.pending_route_context = (!self.history.is_empty()
+                    && previous_route != next_route_id)
+                    .then(|| route_context_message(constitution));
                 self.agent.context_limit = next_route.context();
                 self.route = *next_route;
+                let event = SessionEvent::RouteSwitched {
+                    ts_utc: session_timestamp(Utc::now()),
+                    route_id: self.route.id().to_owned(),
+                    model_id: self.route.model_id().to_owned(),
+                    profile: self.active_profile.clone(),
+                };
+                self.append_session_event(&event);
                 CommandAction::Continue
             }
             WorkerCommand::SetEffort(effort) => {
@@ -481,6 +541,13 @@ impl WorkerSession {
                 );
                 self.agent.profile = Some(execution_policy.profile.clone());
                 self.active_profile = execution_policy.profile;
+                let event = SessionEvent::RouteSwitched {
+                    ts_utc: session_timestamp(Utc::now()),
+                    route_id: self.route.id().to_owned(),
+                    model_id: self.route.model_id().to_owned(),
+                    profile: self.active_profile.clone(),
+                };
+                self.append_session_event(&event);
                 CommandAction::Continue
             }
             WorkerCommand::Stop => CommandAction::Stop,
@@ -514,6 +581,7 @@ impl WorkerSession {
             &mut self.key_literals,
             literal,
             &mut self.agent,
+            &mut self.ledger,
         );
         self.agent.client =
             tracked_client(shutdown_aware(client, &self.shutdown), route, &self.events);
@@ -541,7 +609,30 @@ impl WorkerSession {
             return true;
         }
 
-        match self.agent.run_with_history(&mut self.history, &task) {
+        let history_before = self.history.len();
+        if let Some(message) = self.pending_route_context.take() {
+            self.history.push(message);
+        }
+        let result = self
+            .agent
+            .run_with_persistent_history(&mut self.history, &task);
+        let usage = result
+            .as_ref()
+            .ok()
+            .and_then(|(_, receipt)| receipt.usage.clone());
+        let messages = self
+            .history
+            .get(history_before..)
+            .map_or_else(Vec::new, <[ChatMessage]>::to_vec);
+        let turn = SessionEvent::Turn {
+            ts_utc: session_timestamp(Utc::now()),
+            route_id: self.route.id().to_owned(),
+            messages,
+            usage,
+        };
+        self.append_session_event(&turn);
+
+        match result {
             Ok((answer, receipt)) => {
                 if self.stopped() {
                     return false;
@@ -568,6 +659,22 @@ impl WorkerSession {
             }
         }
         true
+    }
+
+    fn append_session_event(&mut self, event: &SessionEvent) {
+        if self.ledger_failed {
+            return;
+        }
+        if self.ledger.append(event).is_err() {
+            self.ledger_failed = true;
+            if !self.ledger_notice_sent {
+                let _ = self.events.send(AgentEvent::Progress(safe_line(
+                    &self.scrubber,
+                    PERSISTENCE_OFF,
+                )));
+                self.ledger_notice_sent = true;
+            }
+        }
     }
 
     fn send_failure(&self, task: &str, error: &str, meter_incomplete: bool) {
@@ -620,18 +727,6 @@ fn shutdown_aware(client: Box<dyn ChatClient>, shutdown: &Arc<AtomicBool>) -> Bo
     })
 }
 
-fn replace_system_message(history: &mut [ChatMessage], constitution: String) {
-    if let Some(system) = history
-        .first_mut()
-        .filter(|message| message.role == "system")
-    {
-        system.content = Some(constitution);
-        system.tool_calls = None;
-        system.tool_call_id = None;
-        system.reasoning_content = None;
-    }
-}
-
 struct NotConnected {
     message: String,
 }
@@ -642,7 +737,7 @@ impl ChatClient for NotConnected {
     }
 }
 
-fn add_usage(total: &mut Usage, usage: &Usage) -> bool {
+pub(super) fn add_usage(total: &mut Usage, usage: &Usage) -> bool {
     let Some(prompt_tokens) = total.prompt_tokens.checked_add(usage.prompt_tokens) else {
         return true;
     };
@@ -664,6 +759,21 @@ fn add_usage(total: &mut Usage, usage: &Usage) -> bool {
     total.completion_tokens = completion_tokens;
     total.cached_tokens = cached_tokens;
     false
+}
+
+fn route_context_message(content: String) -> ChatMessage {
+    ChatMessage {
+        role: "system".to_owned(),
+        content: Some(content),
+        parts: None,
+        tool_calls: None,
+        tool_call_id: None,
+        reasoning_content: None,
+    }
+}
+
+fn session_timestamp(at: chrono::DateTime<Utc>) -> String {
+    at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 fn failed_timeline_summary(model_id: &str, task: &str, reason: &str) -> TimelineSummary {

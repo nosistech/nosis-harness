@@ -6,4 +6,5 @@ pub mod runtime_path;
 
 pub mod agent;
 pub mod receipt;
+pub mod session_ledger;
 pub mod wire;

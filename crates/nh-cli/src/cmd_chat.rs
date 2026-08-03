@@ -12,7 +12,10 @@ use std::sync::{Arc, RwLock};
 
 use chrono::{DateTime, FixedOffset, Utc};
 use nh_core::agent::{AgentLoop, MAX_TASK_BYTES};
-use nh_core::wire::{cache_hit_pct, ensure_image_capable, ChatClient, ChatMessage, ContentPart};
+use nh_core::session_ledger::{RestoredSession, RestoredTurn, SessionEvent, SessionLedger};
+use nh_core::wire::{
+    cache_hit_pct, ensure_image_capable, ChatClient, ChatMessage, ContentPart, Usage,
+};
 use nh_routes::{
     cost_of, money, money_with_gloss, Currency, PriceConfidence, Profiles, ResolvedRoute,
     RouteClass, RouteResolver, LOCAL_METER_COPY,
@@ -112,17 +115,50 @@ struct ChatSession {
     local_offset: FixedOffset,
     mcp_warnings: Vec<String>,
     pending_images: Vec<ContentPart>,
+    ledger: SessionLedger,
+    ledger_failed: bool,
+    ledger_notice_shown: bool,
+    resumed: bool,
+    restored_turns: usize,
+    dropped_torn_tail: bool,
+    constitution_changed: bool,
+    pending_route_context: Option<ChatMessage>,
 }
 
 const CHAT_HELP: &str = "commands: /image <path> (PNG or JPEG; max 4 for the next message), \
                          /model <id>, /provider <name>, /price, /tools, /quit";
 
 pub fn run(model: &str, profile: &str) -> anyhow::Result<()> {
-    let mut session = startup::open(model, profile)?;
-    eprintln!(
-        "chat started on {} - use /image <path> for PNG or JPEG; /help lists commands",
-        scrub_line(&session.scrubber, session.route.id())
-    );
+    run_session(startup::open(model, profile)?)
+}
+
+pub(crate) fn resume(restored: RestoredSession) -> anyhow::Result<()> {
+    run_session(startup::reopen(restored)?)
+}
+
+fn run_session(mut session: ChatSession) -> anyhow::Result<()> {
+    if session.resumed {
+        eprintln!(
+            "resumed {} - {} turns restored on {}",
+            scrub_line(&session.scrubber, session.ledger.session_id()),
+            session.restored_turns,
+            scrub_line(&session.scrubber, session.route.id())
+        );
+        if session.dropped_torn_tail {
+            eprintln!("last session record was incomplete and was dropped - continuing safely");
+        }
+        if session.constitution_changed {
+            eprintln!(
+                "session kept its original constitution - start a new session to use the current one"
+            );
+        }
+    } else {
+        eprintln!(
+            "chat started: {} on {} - /help lists commands",
+            scrub_line(&session.scrubber, session.ledger.session_id()),
+            scrub_line(&session.scrubber, session.route.id())
+        );
+    }
     let mut next_line = || {
         let stdin = std::io::stdin();
         read_chat_input(&mut stdin.lock())
@@ -164,10 +200,12 @@ fn chat_loop(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> anyhow::Result<()> {
+    report_persistence_failure(s, err);
     loop {
         let _ = write!(err, "nh> ");
         let _ = err.flush();
         let Some(input) = next_line()? else {
+            end_session(s, err);
             return Ok(());
         };
         let raw = match input {
@@ -189,6 +227,7 @@ fn chat_loop(
         match line.strip_prefix('/') {
             Some(cmd) => {
                 if handle_command(s, cmd, out, err) == Flow::Quit {
+                    end_session(s, err);
                     return Ok(());
                 }
             }
@@ -253,20 +292,42 @@ fn run_task(s: &mut ChatSession, task: &str, out: &mut dyn Write, err: &mut dyn 
             }
         }
     }
+    let history_before = s.history.len();
+    if let Some(message) = s.pending_route_context.take() {
+        s.history.push(message);
+    }
     let image_parts = std::mem::take(&mut s.pending_images);
     let result = if image_parts.is_empty() {
-        s.agent.run_with_history(&mut s.history, task)
+        s.agent.run_with_persistent_history(&mut s.history, task)
     } else {
         s.agent
-            .run_with_history_and_parts(&mut s.history, task, image_parts)
+            .run_with_persistent_history_and_parts(&mut s.history, task, image_parts)
     };
+    let at = (s.now)();
+    let usage = result
+        .as_ref()
+        .ok()
+        .and_then(|(_, receipt)| receipt.usage.clone());
+    let messages = s
+        .history
+        .get(history_before..)
+        .map_or_else(Vec::new, <[ChatMessage]>::to_vec);
+    append_session_event(
+        s,
+        &SessionEvent::Turn {
+            ts_utc: session_timestamp(at),
+            route_id: s.route.id().to_owned(),
+            messages,
+            usage,
+        },
+        err,
+    );
     match result {
         Ok((answer, receipt)) => {
             let _ = writeln!(out, "{}", scrub_text(&s.scrubber, &answer));
             let is_local = s.route.class() == RouteClass::Local;
             if let Some(u) = &receipt.usage {
                 if add_session_usage(s, u) {
-                    let at = (s.now)();
                     add_session_cost(s, u, at);
                     if !is_local {
                         if let Some(line) = cmd_run::turn_cost_line(&s.resolver, &s.route, u, at) {
@@ -323,7 +384,8 @@ fn install_client(s: &mut ChatSession, client: Box<dyn ChatClient>, literal: Sec
     // Refresh the tool-boundary scrubber too, so a route switch cannot leave the
     // newly-active credential unredacted at tool egress, same as the TUI.
     s.agent.ctx.scrubber = registry.clone();
-    s.agent.receipts.replace_scrubber(registry);
+    s.agent.receipts.replace_scrubber(registry.clone());
+    s.ledger.replace_scrubber(registry);
     s.agent.client = client;
     s.connected = true;
 }
@@ -347,18 +409,21 @@ fn switch_to(s: &mut ChatSession, route: ResolvedRoute, out: &mut dyn Write, err
             );
             s.agent.profile = Some(execution_policy.profile.clone());
             s.active_profile = execution_policy.profile;
-            // Refresh the identity prompt for the NEW route - both the agent's stored
-            // constitution and the live system message already in history (which
-            // run_with_history seeds only once, on the first turn).
+            // Preserve the sealed prefix. The next task records the new route
+            // context as part of that turn's append-only history delta.
             let constitution = cmd_run::agent_constitution(&s.law_constitution, &route);
-            if let Some(system) = s.history.first_mut() {
-                if system.role == "system" {
-                    system.content = Some(constitution.clone());
-                }
-            }
+            s.pending_route_context =
+                (!s.history.is_empty()).then(|| route_context_message(constitution.clone()));
             s.agent.constitution = Some(constitution);
             s.agent.context_limit = route.context();
             s.route = route;
+            let event = SessionEvent::RouteSwitched {
+                ts_utc: session_timestamp((s.now)()),
+                route_id: s.route.id().to_owned(),
+                model_id: s.route.model_id().to_owned(),
+                profile: s.active_profile.clone(),
+            };
+            append_session_event(s, &event, err);
             let _ = writeln!(out, "switched to {}", scrub_line(&s.scrubber, s.route.id()));
         }
         // Unknown key, delegate, whatever - keep the current route, say why.
@@ -430,6 +495,9 @@ fn footer(s: &ChatSession) -> String {
     ) {
         line.push_str(&format!(" / {cached} cached | cache {pct:.0}%"));
     }
+    if s.resumed {
+        line.push_str(" | resumed");
+    }
     line
 }
 
@@ -460,10 +528,15 @@ fn add_session_usage(s: &mut ChatSession, usage: &nh_core::wire::Usage) -> bool 
 }
 
 fn add_session_cost(s: &mut ChatSession, usage: &nh_core::wire::Usage, at: DateTime<Utc>) {
-    if s.route.class() == RouteClass::Local {
+    let route = s.route.clone();
+    add_route_cost(s, &route, usage, at);
+}
+
+fn add_route_cost(s: &mut ChatSession, route: &ResolvedRoute, usage: &Usage, at: DateTime<Utc>) {
+    if route.class() == RouteClass::Local {
         return;
     }
-    let Some(quote) = s.route.price_at(at) else {
+    let Some(quote) = route.price_at(at) else {
         s.unpriced_turns = s.unpriced_turns.saturating_add(1);
         return;
     };
@@ -491,6 +564,74 @@ fn add_session_cost(s: &mut ChatSession, usage: &nh_core::wire::Usage, at: DateT
             uncertain,
         });
     }
+}
+
+fn restore_session_totals(s: &mut ChatSession, turns: &[RestoredTurn]) -> anyhow::Result<()> {
+    let mut replay = Vec::new();
+    for turn in turns {
+        let Some(usage) = &turn.usage else {
+            continue;
+        };
+        let route = s.resolver.resolve(&turn.route_id).map_err(|_| {
+            anyhow::anyhow!(
+                "session route {} is no longer available - restore it in catalog.toml, then retry",
+                turn.route_id
+            )
+        })?;
+        let at = DateTime::parse_from_rfc3339(&turn.ts_utc)
+            .map_err(|_| {
+                anyhow::anyhow!("session has an invalid turn timestamp - inspect its ledger")
+            })?
+            .with_timezone(&Utc);
+        replay.push((route, usage.clone(), at));
+    }
+    for (route, usage, at) in replay {
+        if add_session_usage(s, &usage) {
+            add_route_cost(s, &route, &usage, at);
+        }
+    }
+    Ok(())
+}
+
+fn route_context_message(content: String) -> ChatMessage {
+    ChatMessage {
+        role: "system".to_owned(),
+        content: Some(content),
+        parts: None,
+        tool_calls: None,
+        tool_call_id: None,
+        reasoning_content: None,
+    }
+}
+
+fn session_timestamp(at: DateTime<Utc>) -> String {
+    at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+fn append_session_event(s: &mut ChatSession, event: &SessionEvent, err: &mut dyn Write) {
+    if s.ledger_failed {
+        report_persistence_failure(s, err);
+        return;
+    }
+    if s.ledger.append(event).is_err() {
+        s.ledger_failed = true;
+        report_persistence_failure(s, err);
+    }
+}
+
+fn report_persistence_failure(s: &mut ChatSession, err: &mut dyn Write) {
+    if s.ledger_failed && !s.ledger_notice_shown {
+        let line = "session persistence is off - copy anything you need before quitting";
+        let _ = writeln!(err, "{}", scrub_line(&s.scrubber, line));
+        s.ledger_notice_shown = true;
+    }
+}
+
+fn end_session(s: &mut ChatSession, err: &mut dyn Write) {
+    let event = SessionEvent::Ended {
+        ts_utc: session_timestamp((s.now)()),
+    };
+    append_session_event(s, &event, err);
 }
 
 fn session_money(s: &ChatSession, at: DateTime<Utc>) -> String {

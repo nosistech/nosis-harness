@@ -7,6 +7,7 @@ use crate::worker::ApprovalRequest;
 use crate::{SharedScrubber, BUDGET_REASON};
 use chrono::{DateTime, FixedOffset, Utc};
 use nh_core::receipt::{FailureClass, Outcome, Receipt};
+use nh_core::session_ledger::RestoredSession;
 use nh_core::wire::{cache_hit_pct, ThinkingEffort, Usage};
 use nh_law::{Law, PolicyView};
 use nh_routes::{
@@ -209,6 +210,7 @@ pub struct TuiConfig {
     pub workdir: PathBuf,
     pub palette_entries: Vec<PaletteEntry>,
     pub credentialed_providers: Vec<String>,
+    pub resume: Option<RestoredSession>,
 }
 
 pub(super) struct UiDiscovery {
@@ -278,6 +280,7 @@ pub struct App {
     pub(super) session_cost: Vec<SessionCost>,
     pub(super) has_failed_turn: bool,
     pub(super) session_allow: Vec<String>,
+    pub(super) resumed: bool,
 }
 
 impl App {
@@ -337,6 +340,7 @@ impl App {
             session_cost: Vec::new(),
             has_failed_turn: false,
             session_allow: Vec::new(),
+            resumed: false,
         }
     }
 
@@ -538,6 +542,9 @@ impl App {
             self.route.peak_status(now, self.local_offset)
         ));
         line.push_str(&format!(" · profile {}", self.active_profile));
+        if self.resumed {
+            line.push_str(" · resumed");
+        }
         if let Some(limit) = self.budget {
             let used = self.used_tokens();
             let pct = if limit == 0 {
