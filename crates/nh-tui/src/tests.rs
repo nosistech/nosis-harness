@@ -1632,31 +1632,72 @@ fn cost_hud_and_timeline_distinguish_absent_cache_from_measured_zero() {
 }
 
 #[test]
-fn measured_usage_without_cached_counter_refuses_cost_and_savings() {
+fn measured_usage_without_cached_counter_bounds_both_tui_cost_sites_and_session() {
     let mut app = meter_app();
     let usage = Usage {
-        prompt_tokens: 20,
-        completion_tokens: 2,
+        prompt_tokens: 100_000,
+        completion_tokens: 50_000,
         cached_tokens: None,
         evidence: UsageEvidence::Measured,
     };
 
-    record_turn_cost(&mut app, &usage, fixed_at());
-
-    assert!(app.session_cost.is_empty());
-    assert!(app.session_cost_incomplete);
-    assert_eq!(
-        app.session_money(fixed_at()),
-        "unavailable - meter incomplete"
+    apply_event(
+        &mut app,
+        AgentEvent::TaskReceipt(TimelineSummary {
+            route_id: "meter-route".into(),
+            receipt: receipt("cold cache", Outcome::Pass, Some(usage.clone())),
+            answer: "done".into(),
+        }),
     );
+    apply_event(&mut app, AgentEvent::Usage(usage.clone()));
+
+    assert_eq!(app.session_cost.len(), 1);
+    assert!(app.session_cost[0].upper_bound);
+    assert!(!app.session_cost[0].uncertain);
+    assert!(!app.session_cost_incomplete);
+    assert_eq!(app.session_money(fixed_at()), "at most ¥0.20 (≈$0.03)");
     assert_eq!(
         savings_lines(&app.resolver, &app.route, &usage, fixed_at()),
-        vec!["cost unavailable - cached-token evidence was not reported"]
+        vec!["cost at most ¥0.20 (≈$0.03) - cache split not reported by provider"]
+    );
+    assert_eq!(
+        app.transcript.first().map(|line| line.text.as_str()),
+        Some("cost at most ¥0.20 (≈$0.03) - cache split not reported by provider")
     );
     assert!(!app
         .transcript
         .iter()
         .any(|line| line.text.contains("saved")));
+    assert!(!app
+        .transcript
+        .iter()
+        .any(|line| line.text.contains("naive")));
+
+    let verify_live_catalog = METER_CATALOG.replacen(
+        "price_confidence = \"confirmed\"",
+        "price_confidence = \"verify_live\"",
+        1,
+    );
+    let mut verify_live = meter_app_from(&verify_live_catalog);
+    record_turn_cost(&mut verify_live, &usage, fixed_at());
+    assert!(verify_live.session_cost[0].upper_bound);
+    assert!(verify_live.session_cost[0].uncertain);
+    assert_eq!(
+        verify_live.session_money(fixed_at()),
+        "at most ¥0.20 (≈$0.03)*"
+    );
+    assert_eq!(
+        savings_lines(
+            &verify_live.resolver,
+            &verify_live.route,
+            &usage,
+            fixed_at()
+        ),
+        vec![
+            "cost at most ¥0.20 (≈$0.03)* - cache split not reported by provider",
+            "*price verify_live",
+        ]
+    );
 }
 
 #[test]
@@ -1680,8 +1721,8 @@ fn money_hud_uses_accumulated_turn_cost_in_native_currency() {
 }
 
 #[test]
-fn savings_line_renders_counterfactuals_and_omits_cold_claim() {
-    let app = meter_app();
+fn savings_line_renders_counterfactuals_and_keeps_measured_zero_exact() {
+    let mut app = meter_app();
     let usage = Usage {
         prompt_tokens: 100_000,
         completion_tokens: 50_000,
@@ -1703,6 +1744,10 @@ fn savings_line_renders_counterfactuals_and_omits_cold_claim() {
     let cold_lines = savings_lines(&app.resolver, &app.route, &cold, fixed_at());
     assert_eq!(cold_lines[0], "cost ¥0.20 (≈$0.03)");
     assert!(!cold_lines[0].contains("saved"));
+    assert!(!cold_lines[0].contains("at most"));
+    record_turn_cost(&mut app, &cold, fixed_at());
+    assert!(!app.session_cost[0].upper_bound);
+    assert!(!app.session_money(fixed_at()).contains("at most"));
 }
 
 #[test]
@@ -2764,7 +2809,7 @@ fn real_worker_and_ledger_replay_mark_a_measured_plus_unmetered_session() {
     let free_money = free_replay.session_money(fixed_at());
     assert_eq!(free_money, "unavailable - meter incomplete");
     assert!(!free_money.contains("0.00"));
-    free_replay.add_session_cost(Currency::Usd, 0.01, false);
+    free_replay.add_session_cost(Currency::Usd, 0.01, false, false);
     let mixed_free_money = free_replay.session_money(fixed_at());
     assert!(mixed_free_money.starts_with("~$0.01"));
     assert!(!mixed_free_money.contains("¥0.00"));

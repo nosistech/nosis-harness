@@ -579,7 +579,7 @@ fn legacy_unknown_run_usage_renders_like_absence_without_leaking_counters() {
 }
 
 #[test]
-fn measured_tokens_without_cache_evidence_refuse_cost_and_savings() {
+fn measured_tokens_without_cache_evidence_render_an_upper_bound() {
     let resolver = RouteResolver::from_toml(PEAK_CATALOG).unwrap();
     let route = resolver.resolve("peak-route").unwrap();
     let at = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
@@ -605,10 +605,54 @@ fn measured_tokens_without_cache_evidence_refuse_cost_and_savings() {
 
     assert_eq!(
         lines[1],
-        "cost unknown - cached tokens not reported by provider"
+        "cost at most $0.0001 - cache split not reported by provider"
     );
+    assert!(!lines[1].contains("cost unknown"));
     assert!(!lines.iter().any(|line| line.contains("saved")));
-    assert!(!lines.iter().any(|line| line.contains('$')));
+    assert!(!lines.iter().any(|line| line.contains("peak")));
+
+    let verify_live_catalog = PEAK_CATALOG.replace(
+        "price_confidence = \"confirmed\"",
+        "price_confidence = \"verify_live\"",
+    );
+    let resolver = RouteResolver::from_toml(&verify_live_catalog).unwrap();
+    let route = resolver.resolve("peak-route").unwrap();
+    let verify_live = run_meter_lines(
+        &resolver,
+        &route,
+        Some(&usage),
+        &Default::default(),
+        1,
+        0,
+        RunTiming {
+            started: at,
+            ended: at,
+        },
+    );
+    assert_eq!(
+        verify_live[1],
+        "cost at most $0.0001* - cache split not reported by provider · *price verify_live"
+    );
+
+    let cached_heavy_catalog = PEAK_CATALOG.replace("cache_hit = 0.1", "cache_hit = 3.0");
+    let resolver = RouteResolver::from_toml(&cached_heavy_catalog).unwrap();
+    let route = resolver.resolve("peak-route").unwrap();
+    let cached_heavy = run_meter_lines(
+        &resolver,
+        &route,
+        Some(&usage),
+        &Default::default(),
+        1,
+        0,
+        RunTiming {
+            started: at,
+            ended: at,
+        },
+    );
+    assert_eq!(
+        cached_heavy[1],
+        "cost at most $0.0003 - cache split not reported by provider"
+    );
 }
 
 struct MeteredRunFailure;
@@ -797,6 +841,10 @@ fn run_meter_distinguishes_absent_cache_measurement_from_measured_zero() {
         },
     );
     assert_eq!(absent[0], "turns 1 | tool calls 0 | tokens 100 in / 20 out");
+    assert_eq!(
+        absent[1],
+        "cost at most $0.0001 - cache split not reported by provider"
+    );
 
     let measured_zero = run_meter_lines(
         &resolver,
@@ -814,6 +862,8 @@ fn run_meter_distinguishes_absent_cache_measurement_from_measured_zero() {
         measured_zero[0],
         "turns 1 | tool calls 0 | tokens 100 in / 20 out / 0 cached | cache 0%"
     );
+    assert!(measured_zero[1].starts_with("cost $0.0001"));
+    assert!(!measured_zero[1].contains("at most"));
 }
 
 #[test]

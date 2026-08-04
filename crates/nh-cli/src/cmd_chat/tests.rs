@@ -191,6 +191,24 @@ impl ChatClient for UnmeteredClient {
     }
 }
 
+struct ColdCacheClient;
+
+impl ChatClient for ColdCacheClient {
+    fn complete(&self, _request: &ChatRequest) -> anyhow::Result<ChatResponse> {
+        Ok(ChatResponse {
+            message: assistant_msg("cold-cache answer"),
+            finish_reason: "stop".into(),
+            usage: Some(Usage {
+                prompt_tokens: 20,
+                completion_tokens: 2,
+                cached_tokens: None,
+                evidence: UsageEvidence::Measured,
+            }),
+            retries: Default::default(),
+        })
+    }
+}
+
 struct MeteredFailingClient;
 
 impl ChatClient for MeteredFailingClient {
@@ -320,11 +338,18 @@ fn reopen_test_session(restored: RestoredSession, tmp: &Path) -> (ChatSession, A
     (session, calls)
 }
 
-fn session_cost_snapshot(session: &ChatSession) -> Vec<(Currency, u64, bool)> {
+fn session_cost_snapshot(session: &ChatSession) -> Vec<(Currency, u64, bool, bool)> {
     session
         .session_cost
         .iter()
-        .map(|cost| (cost.currency, cost.amount.to_bits(), cost.uncertain))
+        .map(|cost| {
+            (
+                cost.currency,
+                cost.amount.to_bits(),
+                cost.uncertain,
+                cost.upper_bound,
+            )
+        })
         .collect()
 }
 
@@ -649,6 +674,41 @@ fn session_usage_accumulates_across_turns_and_switches() {
 }
 
 #[test]
+fn cold_cache_chat_turn_and_restored_session_render_the_same_upper_bound() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut live, _) = test_session("deepseek-v4-flash", tmp.path());
+    live.agent.client = Box::new(ColdCacheClient);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+
+    run_task(&mut live, "cold cache", &mut out, &mut err);
+
+    let err = String::from_utf8(err).unwrap();
+    assert!(
+        err.contains("cost at most <¥0.0001 (≈<$0.0001) - cache split not reported by provider")
+    );
+    assert!(err.contains("session at most <¥0.0001 (≈<$0.0001)"));
+    assert_eq!(live.incomplete_cost_turns, 0);
+    assert!(live.session_cost[0].upper_bound);
+    assert!(!live.session_cost[0].uncertain);
+    live.incomplete_cost_turns = 1;
+    assert_eq!(
+        session_money(&live, off_peak_now()),
+        "unknown (incomplete - 1 turn)"
+    );
+
+    let restored = read_session(tmp.path(), "test-session").unwrap();
+    let (reopened, _) = reopen_test_session(restored, tmp.path());
+    let reopened_footer = footer(&reopened);
+    assert!(
+        reopened_footer.contains("session at most <¥0.0001"),
+        "got: {reopened_footer}"
+    );
+    assert!(reopened.session_cost[0].upper_bound);
+    assert!(!reopened.session_cost[0].uncertain);
+}
+
+#[test]
 fn unmetered_then_measured_chat_marks_live_and_resumed_totals_as_lower_bounds() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut live, calls) = test_session("deepseek-v4-flash", tmp.path());
@@ -734,6 +794,7 @@ fn incomplete_free_session_refuses_instead_of_rendering_zero_dollars() {
         currency: paid_currency,
         amount: 0.01,
         uncertain: false,
+        upper_bound: false,
     });
     let mixed = footer(&session);
     assert!(
@@ -1144,8 +1205,12 @@ fn footer_distinguishes_absent_cache_measurement_from_measured_zero() {
     let absent = footer(&s);
     assert!(!absent.contains("cached"), "got: {absent}");
     assert!(!absent.contains("| cache"), "got: {absent}");
-    assert!(absent.contains("session unknown"), "got: {absent}");
-    assert!(!absent.contains("$0.00"), "got: {absent}");
+    assert!(
+        absent.contains("session at most <¥0.0001 (≈<$0.0001)"),
+        "got: {absent}"
+    );
+    assert!(s.session_cost[0].upper_bound);
+    assert!(!s.session_cost[0].uncertain);
 
     let tmp = tempfile::tempdir().unwrap();
     let (mut s, _calls) = test_session("deepseek-v4-flash", tmp.path());
@@ -1162,6 +1227,8 @@ fn footer_distinguishes_absent_cache_measurement_from_measured_zero() {
         measured_zero.contains("tokens 20 in / 2 out / 0 cached | cache 0%"),
         "got: {measured_zero}"
     );
+    assert!(!measured_zero.contains("at most"), "got: {measured_zero}");
+    assert!(!s.session_cost[0].upper_bound);
 }
 
 // ------------------------------------------------------------- loop basics

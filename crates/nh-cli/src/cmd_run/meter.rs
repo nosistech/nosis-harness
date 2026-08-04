@@ -5,8 +5,8 @@ use nh_core::agent::CompactionEvent;
 use nh_core::receipt::CompactionStats;
 use nh_core::wire::{cache_hit_pct, Usage, UsageEvidence};
 use nh_routes::{
-    cost_of, money, money_with_gloss, saved_pct, PriceConfidence, ResolvedRoute, RouteClass,
-    RouteResolver, LOCAL_METER_COPY,
+    cache_split_cost_upper_bound, cost_of, money, money_with_gloss, saved_pct, PriceConfidence,
+    ResolvedRoute, RouteClass, RouteResolver, LOCAL_METER_COPY,
 };
 
 #[derive(Clone, Copy)]
@@ -257,19 +257,30 @@ pub(crate) fn turn_cost_line(
         }
         UsageEvidence::Unknown => return Some("cost unknown - usage unknown".into()),
     }
-    let Some(cached) = usage.cached_tokens else {
-        return Some("cost unknown - cached tokens not reported by provider".into());
-    };
     let Some(quote) = route.price_at(at) else {
         return Some("cost unpriced - no price data".into());
     };
-    let Some(actual) = cost_of(&quote, usage.prompt_tokens, cached, usage.completion_tokens) else {
+    let actual = usage.cached_tokens.map_or_else(
+        || cache_split_cost_upper_bound(&quote, usage.prompt_tokens, usage.completion_tokens),
+        |cached| cost_of(&quote, usage.prompt_tokens, cached, usage.completion_tokens),
+    );
+    let Some(actual) = actual else {
         return Some("cost unpriced - invalid usage; meter incomplete".into());
     };
     let mut paid = money_with_gloss(actual, quote.currency, resolver.fx(), at);
     if quote.confidence == PriceConfidence::VerifyLive {
         paid.push('*');
     }
+    if usage.cached_tokens.is_none() {
+        let mut line = format!("cost at most {paid} - cache split not reported by provider");
+        if quote.confidence == PriceConfidence::VerifyLive {
+            line.push_str(" · *price verify_live");
+        }
+        return Some(line);
+    }
+    let cached = usage
+        .cached_tokens
+        .expect("cache evidence checked before exact-cost comparison");
     let mut line = format!("cost {paid}");
     let naive = resolver.naive_cost(
         route,

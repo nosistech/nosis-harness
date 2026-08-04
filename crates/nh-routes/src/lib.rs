@@ -9,8 +9,8 @@ mod resolver;
 mod route;
 
 pub use pricing::{
-    cost_of, money, money_with_gloss, saved_pct, to_usd_approx, Currency, Fx, NaiveCost,
-    PeakWindows, PriceConfidence, PriceQuote, RoutePrice,
+    cache_split_cost_upper_bound, cost_of, money, money_with_gloss, saved_pct, to_usd_approx,
+    Currency, Fx, NaiveCost, PeakWindows, PriceConfidence, PriceQuote, RoutePrice,
 };
 pub use profiles::*;
 pub use resolver::{RejectionTrace, ResolvedRoute, RouteRejection, RouteResolver};

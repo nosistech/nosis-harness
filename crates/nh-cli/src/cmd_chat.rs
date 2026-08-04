@@ -18,8 +18,8 @@ use nh_core::wire::{
     ensure_image_capable, ChatClient, ChatMessage, ContentPart, Usage, UsageEvidence,
 };
 use nh_routes::{
-    cost_of, money, money_with_gloss, Currency, PriceConfidence, Profiles, ResolvedRoute,
-    RouteClass, RouteResolver, LOCAL_METER_COPY,
+    cache_split_cost_upper_bound, cost_of, money, money_with_gloss, Currency, PriceConfidence,
+    Profiles, ResolvedRoute, RouteClass, RouteResolver, LOCAL_METER_COPY,
 };
 use nh_tools::Tool;
 use nh_vault::{Scrubber, SecretRegistry, SecretValue};
@@ -88,6 +88,7 @@ struct SessionCost {
     currency: Currency,
     amount: f64,
     uncertain: bool,
+    upper_bound: bool,
 }
 
 /// Everything one chat session owns. History and usage survive route switches.
@@ -600,24 +601,20 @@ fn add_route_cost(
         s.incomplete_cost_turns = s.incomplete_cost_turns.saturating_add(1);
         return;
     };
-    let Some(cached_tokens) = usage.cached_tokens else {
-        s.incomplete_cost_turns = s.incomplete_cost_turns.saturating_add(1);
-        return;
-    };
     let Some(quote) = route.price_at(at) else {
         s.incomplete_cost_turns = s.incomplete_cost_turns.saturating_add(1);
         return;
     };
-    let Some(amount) = cost_of(
-        &quote,
-        usage.prompt_tokens,
-        cached_tokens,
-        usage.completion_tokens,
-    ) else {
+    let amount = usage.cached_tokens.map_or_else(
+        || cache_split_cost_upper_bound(&quote, usage.prompt_tokens, usage.completion_tokens),
+        |cached| cost_of(&quote, usage.prompt_tokens, cached, usage.completion_tokens),
+    );
+    let Some(amount) = amount else {
         s.incomplete_cost_turns = s.incomplete_cost_turns.saturating_add(1);
         return;
     };
     let uncertain = quote.confidence == PriceConfidence::VerifyLive;
+    let upper_bound = usage.cached_tokens.is_none();
     if let Some(index) = s
         .session_cost
         .iter()
@@ -631,11 +628,13 @@ fn add_route_cost(
         }
         total.amount = sum;
         total.uncertain |= uncertain;
+        total.upper_bound |= upper_bound;
     } else {
         s.session_cost.push(SessionCost {
             currency: quote.currency,
             amount,
             uncertain,
+            upper_bound,
         });
     }
 }
@@ -708,7 +707,8 @@ fn end_session(s: &mut ChatSession, err: &mut dyn Write) {
 fn session_money(s: &ChatSession, at: DateTime<Utc>) -> String {
     let incomplete = s.incomplete_cost_turns > 0;
     if incomplete
-        && (s.session_cost.is_empty()
+        && (s.session_cost.iter().any(|total| total.upper_bound)
+            || s.session_cost.is_empty()
             || s.session_cost
                 .iter()
                 .all(|total| total.amount.abs() <= f64::EPSILON))
@@ -757,6 +757,9 @@ fn session_money(s: &ChatSession, at: DateTime<Utc>) -> String {
                         };
                         if total.uncertain {
                             display.push('*');
+                        }
+                        if total.upper_bound {
+                            display.insert_str(0, "at most ");
                         }
                         if incomplete {
                             display.insert(0, '~');

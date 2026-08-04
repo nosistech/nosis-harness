@@ -255,6 +255,7 @@ pub(super) struct SessionCost {
     pub(super) currency: Currency,
     pub(super) amount: f64,
     pub(super) uncertain: bool,
+    pub(super) upper_bound: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -484,7 +485,13 @@ impl App {
         drop(self.pending_approval.take());
     }
 
-    pub(super) fn add_session_cost(&mut self, currency: Currency, amount: f64, uncertain: bool) {
+    pub(super) fn add_session_cost(
+        &mut self,
+        currency: Currency,
+        amount: f64,
+        uncertain: bool,
+        upper_bound: bool,
+    ) {
         if let Some(total) = self
             .session_cost
             .iter_mut()
@@ -492,11 +499,13 @@ impl App {
         {
             total.amount += amount;
             total.uncertain |= uncertain;
+            total.upper_bound |= upper_bound;
         } else {
             self.session_cost.push(SessionCost {
                 currency,
                 amount,
                 uncertain,
+                upper_bound,
             });
         }
     }
@@ -507,7 +516,8 @@ impl App {
 
     pub(super) fn session_money(&self, now: DateTime<Utc>) -> String {
         if self.session_cost_incomplete
-            && (self.session_cost.is_empty()
+            && (self.session_cost.iter().any(|total| total.upper_bound)
+                || self.session_cost.is_empty()
                 || self
                     .session_cost
                     .iter()
@@ -560,6 +570,9 @@ impl App {
                             };
                             if total.uncertain {
                                 display.push('*');
+                            }
+                            if total.upper_bound {
+                                display.insert_str(0, "at most ");
                             }
                             if self.session_cost_incomplete {
                                 display.insert(0, '~');

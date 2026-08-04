@@ -8,8 +8,8 @@ use nh_core::agent::CompactionEvent;
 use nh_core::receipt::{CompactionStats, FailureClass, Outcome};
 use nh_core::wire::{cache_hit_pct, Usage, UsageEvidence};
 use nh_routes::{
-    cost_of, money, money_with_gloss, saved_pct, PriceConfidence, ResolvedRoute, RouteClass,
-    RouteResolver, LOCAL_METER_COPY,
+    cache_split_cost_upper_bound, cost_of, money, money_with_gloss, saved_pct, PriceConfidence,
+    ResolvedRoute, RouteClass, RouteResolver, LOCAL_METER_COPY,
 };
 
 pub(super) fn outcome_name(outcome: Outcome) -> &'static str {
@@ -299,9 +299,7 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
         }
         AgentEvent::Usage(usage) => {
             if app.route.class() == RouteClass::Api
-                && (!usage.evidence.is_measured()
-                    || usage.cached_tokens.is_none()
-                    || app.route.price_at(Utc::now()).is_none())
+                && (!usage.evidence.is_measured() || app.route.price_at(Utc::now()).is_none())
             {
                 app.mark_session_cost_incomplete();
             }
@@ -432,13 +430,6 @@ fn record_route_turn_cost(
             return;
         }
     }
-    let Some(cached) = usage.cached_tokens else {
-        unavailable(
-            app,
-            "cost unavailable - cached-token evidence was not reported",
-        );
-        return;
-    };
     let Some(at) = at else {
         unavailable(app, "cost unavailable - receipt timestamp is invalid");
         return;
@@ -447,12 +438,21 @@ fn record_route_turn_cost(
         unavailable(app, "cost unpriced - no price data");
         return;
     };
-    let Some(actual) = cost_of(&quote, usage.prompt_tokens, cached, usage.completion_tokens) else {
+    let actual = usage.cached_tokens.map_or_else(
+        || cache_split_cost_upper_bound(&quote, usage.prompt_tokens, usage.completion_tokens),
+        |cached| cost_of(&quote, usage.prompt_tokens, cached, usage.completion_tokens),
+    );
+    let Some(actual) = actual else {
         unavailable(app, "cost unpriced - invalid usage");
         return;
     };
     let uncertain = quote.confidence == PriceConfidence::VerifyLive;
-    app.add_session_cost(quote.currency, actual, uncertain);
+    app.add_session_cost(
+        quote.currency,
+        actual,
+        uncertain,
+        usage.cached_tokens.is_none(),
+    );
     if show_details {
         for line in savings_lines(&app.resolver, route, usage, at) {
             app.push_line(&line, TranscriptKind::Progress);
@@ -474,13 +474,14 @@ pub(super) fn savings_lines(
         UsageEvidence::Partial => return vec!["cost unavailable - usage is a lower bound".into()],
         UsageEvidence::Unknown => return vec!["cost unavailable - usage unknown".into()],
     }
-    let Some(cached) = usage.cached_tokens else {
-        return vec!["cost unavailable - cached-token evidence was not reported".into()];
-    };
     let Some(quote) = route.price_at(at) else {
         return vec!["cost unpriced - no price data".into()];
     };
-    let Some(actual) = cost_of(&quote, usage.prompt_tokens, cached, usage.completion_tokens) else {
+    let actual = usage.cached_tokens.map_or_else(
+        || cache_split_cost_upper_bound(&quote, usage.prompt_tokens, usage.completion_tokens),
+        |cached| cost_of(&quote, usage.prompt_tokens, cached, usage.completion_tokens),
+    );
+    let Some(actual) = actual else {
         return vec!["cost unpriced - invalid usage".into()];
     };
     let mut paid = money_with_gloss(actual, quote.currency, resolver.fx(), at);
@@ -488,6 +489,18 @@ pub(super) fn savings_lines(
     if uncertain {
         paid.push('*');
     }
+    if usage.cached_tokens.is_none() {
+        let mut lines = vec![format!(
+            "cost at most {paid} - cache split not reported by provider"
+        )];
+        if uncertain {
+            lines.push("*price verify_live".into());
+        }
+        return lines;
+    }
+    let cached = usage
+        .cached_tokens
+        .expect("cache evidence checked before exact-cost comparison");
     let mut headline = format!("cost {paid}");
     let naive = resolver.naive_cost(
         route,

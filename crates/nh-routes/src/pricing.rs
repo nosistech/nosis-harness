@@ -130,6 +130,19 @@ pub fn cost_of(
     amount.is_finite().then_some(amount)
 }
 
+/// Maximum possible cost when the provider reported prompt and output tokens
+/// but omitted the cached-token split. Both feasible endpoints are evaluated
+/// so the bound remains sound regardless of cache-hit and cache-miss ordering.
+pub fn cache_split_cost_upper_bound(
+    quote: &PriceQuote,
+    prompt_tokens: u64,
+    output_tokens: u64,
+) -> Option<f64> {
+    let no_cache = cost_of(quote, prompt_tokens, 0, output_tokens)?;
+    let all_cached = cost_of(quote, prompt_tokens, prompt_tokens, output_tokens)?;
+    Some(no_cache.max(all_cached))
+}
+
 /// Percent saved by cache reuse versus the same route with no cache.
 pub fn saved_pct(actual: f64, no_cache: f64) -> Option<u8> {
     if !actual.is_finite() || !no_cache.is_finite() || no_cache <= actual {

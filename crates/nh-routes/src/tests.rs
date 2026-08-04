@@ -642,6 +642,54 @@ fn cost_of_splits_cached_miss_and_output_tokens() {
 }
 
 #[test]
+fn cache_split_cost_upper_bound_uses_larger_endpoint_and_bounds_every_split() {
+    let quote = PriceQuote {
+        cache_hit: 10.0,
+        cache_miss: 1.0,
+        output: 2.0,
+        currency: Currency::Usd,
+        peak: false,
+        confidence: PriceConfidence::Confirmed,
+    };
+    let prompt_tokens = 1_000;
+    let output_tokens = 100;
+    let bound = cache_split_cost_upper_bound(&quote, prompt_tokens, output_tokens).unwrap();
+    let no_cache = cost_of(&quote, prompt_tokens, 0, output_tokens).unwrap();
+    let all_cached = cost_of(&quote, prompt_tokens, prompt_tokens, output_tokens).unwrap();
+
+    assert!(all_cached > no_cache);
+    assert!(close(bound, all_cached));
+    for cached_tokens in 0..=prompt_tokens {
+        let actual = cost_of(&quote, prompt_tokens, cached_tokens, output_tokens).unwrap();
+        assert!(
+            bound >= actual,
+            "cached={cached_tokens}: {bound} < {actual}"
+        );
+    }
+
+    let invalid_cached_endpoint = PriceQuote {
+        cache_hit: f64::MAX,
+        cache_miss: 1.0,
+        output: 0.0,
+        ..quote.clone()
+    };
+    assert_eq!(
+        cache_split_cost_upper_bound(&invalid_cached_endpoint, 2, 0),
+        None
+    );
+    let invalid_miss_endpoint = PriceQuote {
+        cache_hit: 1.0,
+        cache_miss: f64::MAX,
+        output: 0.0,
+        ..quote
+    };
+    assert_eq!(
+        cache_split_cost_upper_bound(&invalid_miss_endpoint, 2, 0),
+        None
+    );
+}
+
+#[test]
 fn price_block_without_freshness_key_loads_and_produces_normal_quote() {
     let catalog = r#"
         [routes.native]
