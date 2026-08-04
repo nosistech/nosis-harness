@@ -1,29 +1,42 @@
 //! Task preparation, credential preflight, test-provider wiring, and display helpers.
 
-use crate::engine::{PreparedTask, TestProvider};
+use crate::engine::PreparedTask;
+#[cfg(feature = "test-provider")]
+use crate::engine::TestProvider;
 use crate::model::{validate_task_specs, Backend, EventCallback, Ladder, TaskSpec};
-use crate::{DEFAULT_MAX_WORKERS, TEST_LOG_LOCK, TEST_PROVIDER_ENV};
-#[cfg(any(test, debug_assertions))]
-use crate::{TEST_EXECUTION_LOG_ENV, TEST_OUTCOME_ENV, TEST_SLEEP_MS_ENV};
+use crate::DEFAULT_MAX_WORKERS;
+#[cfg(feature = "test-provider")]
+use crate::{
+    TEST_EXECUTION_LOG_ENV, TEST_LOG_LOCK, TEST_OUTCOME_ENV, TEST_PROVIDER_ENV, TEST_SLEEP_MS_ENV,
+};
 use anyhow::bail;
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-provider")]
 use anyhow::Context as _;
 use nh_core::credential;
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-provider")]
 use nh_core::receipt::Outcome;
-use nh_core::wire::{ChatClient, ChatMessage, ChatRequest, ChatResponse, ThinkingEffort, Usage};
+use nh_core::wire::ThinkingEffort;
+#[cfg(feature = "test-provider")]
+use nh_core::wire::{ChatClient, ChatMessage, ChatRequest, ChatResponse, Usage};
 use nh_law::Law;
 use nh_routes::{RouteClass, RouteResolver, ThinkingDialect};
 use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, SecretRegistry};
 use std::collections::{BTreeSet, HashSet};
+#[cfg(feature = "test-provider")]
 use std::fs::{self, OpenOptions};
+#[cfg(feature = "test-provider")]
 use std::io::Write as _;
+#[cfg(feature = "test-provider")]
 use std::path::Path;
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-provider")]
 use std::path::PathBuf;
+#[cfg(feature = "test-provider")]
 use std::thread;
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-provider")]
 use std::time::Duration;
+
+#[cfg(feature = "test-provider")]
+const TEST_PROVIDER_ROOT: &str = ".nosis/fleet-test-provider";
 
 pub(super) fn prepare_new_tasks(
     resolver: &RouteResolver,
@@ -108,11 +121,7 @@ pub(super) fn preflight_keys(
     tasks: &[PreparedTask],
     ladder: Option<&Ladder>,
     law: &Law,
-    using_test_provider: bool,
 ) -> anyhow::Result<SecretRegistry> {
-    if using_test_provider {
-        return Ok(SecretRegistry::new());
-    }
     let vault = EnvFallbackVault {
         inner: KeyringVault,
     };
@@ -142,62 +151,112 @@ pub(super) fn preflight_keys(
     Ok(literals)
 }
 
-/// TEST-ONLY provider seam used by the kill/resume process test. It is inert
-/// unless the exact `NH_FLEET_TEST_PROVIDER=echo` opt-in is present; ordinary
-/// runs always take the vault-backed credential boundary.
-#[cfg(any(test, debug_assertions))]
-pub(super) fn test_provider_from_env() -> anyhow::Result<Option<TestProvider>> {
+/// Report whether this build may honor the explicit Fleet test-provider switch.
+///
+/// Ordinary builds compile without `test-provider`, reject the switch, and contain
+/// no echo client or credential-bypass path. Feature-enabled test builds honor only
+/// the exact `NH_FLEET_TEST_PROVIDER=echo` value.
+#[cfg(feature = "test-provider")]
+pub fn test_provider_active() -> anyhow::Result<bool> {
     match std::env::var(TEST_PROVIDER_ENV) {
-        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotPresent) => Ok(false),
         Err(error) => Err(anyhow::anyhow!(
             "could not read {TEST_PROVIDER_ENV}: {error}"
         )),
-        Ok(value) if value == "echo" => {
-            let sleep_ms = std::env::var(TEST_SLEEP_MS_ENV)
-                .ok()
-                .map(|value| value.parse::<u64>())
-                .transpose()
-                .context("NH_FLEET_TEST_SLEEP_MS must be a whole number")?
-                .unwrap_or(150);
-            let outcome = match std::env::var(TEST_OUTCOME_ENV) {
-                Err(std::env::VarError::NotPresent) => Outcome::Pass,
-                Ok(value) if value == "pass" => Outcome::Pass,
-                Ok(value) if value == "fail" => Outcome::Fail,
-                Ok(value) if value == "partial" => Outcome::Partial,
-                Ok(value) if value == "skip" => Outcome::Skip,
-                Ok(value) if value == "timeout" => Outcome::Timeout,
-                Err(error) => {
-                    return Err(anyhow::anyhow!(
-                        "could not read {TEST_OUTCOME_ENV}: {error}"
-                    ))
-                }
-                Ok(_) => {
-                    bail!("NH_FLEET_TEST_OUTCOME accepts pass, fail, partial, skip, or timeout")
-                }
-            };
-            Ok(Some(TestProvider {
-                execution_log: std::env::var_os(TEST_EXECUTION_LOG_ENV).map(PathBuf::from),
-                sleep: Duration::from_millis(sleep_ms),
-                outcome,
-            }))
-        }
+        Ok(value) if value == "echo" => Ok(true),
         Ok(_) => bail!("NH_FLEET_TEST_PROVIDER only accepts the test value 'echo'"),
     }
 }
 
-#[cfg(not(any(test, debug_assertions)))]
-pub(super) fn test_provider_from_env() -> anyhow::Result<Option<TestProvider>> {
-    if std::env::var_os(TEST_PROVIDER_ENV).is_some() {
-        bail!("{TEST_PROVIDER_ENV} is unavailable in release builds");
+#[cfg(not(feature = "test-provider"))]
+pub fn test_provider_active() -> anyhow::Result<bool> {
+    if std::env::var_os("NH_FLEET_TEST_PROVIDER").is_some() {
+        bail!("NH_FLEET_TEST_PROVIDER is unavailable in builds without the test-provider feature");
     }
-    Ok(None)
+    Ok(false)
 }
 
+#[cfg(feature = "test-provider")]
+pub(super) fn test_provider_from_env(
+    run_root: &Path,
+    run_id: &str,
+) -> anyhow::Result<Option<TestProvider>> {
+    if !test_provider_active()? {
+        return Ok(None);
+    }
+    let sleep_ms = std::env::var(TEST_SLEEP_MS_ENV)
+        .ok()
+        .map(|value| value.parse::<u64>())
+        .transpose()
+        .context("NH_FLEET_TEST_SLEEP_MS must be a whole number")?
+        .unwrap_or(150);
+    let outcome = match std::env::var(TEST_OUTCOME_ENV) {
+        Err(std::env::VarError::NotPresent) => Outcome::Pass,
+        Ok(value) if value == "pass" => Outcome::Pass,
+        Ok(value) if value == "fail" => Outcome::Fail,
+        Ok(value) if value == "partial" => Outcome::Partial,
+        Ok(value) if value == "skip" => Outcome::Skip,
+        Ok(value) if value == "timeout" => Outcome::Timeout,
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "could not read {TEST_OUTCOME_ENV}: {error}"
+            ))
+        }
+        Ok(_) => bail!("NH_FLEET_TEST_OUTCOME accepts pass, fail, partial, skip, or timeout"),
+    };
+    let provider_root =
+        nh_core::runtime_path::ensure_contained_dir(run_root, Path::new(TEST_PROVIDER_ROOT))?;
+    let receipt_root = nh_core::runtime_path::ensure_contained_dir(
+        &provider_root,
+        &Path::new("receipts").join(run_id),
+    )?;
+    let execution_log = std::env::var_os(TEST_EXECUTION_LOG_ENV)
+        .map(PathBuf::from)
+        .map(|target| {
+            let target = if target.is_absolute() {
+                let parent = target.parent().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "{TEST_EXECUTION_LOG_ENV} must name a file beneath the isolated test-provider root"
+                    )
+                })?;
+                let file_name = target.file_name().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "{TEST_EXECUTION_LOG_ENV} must name a file beneath the isolated test-provider root"
+                    )
+                })?;
+                fs::canonicalize(parent)
+                    .context("could not resolve the fleet test execution-log parent")?
+                    .join(file_name)
+            } else {
+                provider_root.join(target)
+            };
+            nh_core::runtime_path::ensure_contained_file(
+                &provider_root,
+                &target,
+                "fleet test execution log",
+            )
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "{TEST_EXECUTION_LOG_ENV} must stay beneath the isolated test-provider root under the run root: {error:#}"
+                )
+            })
+        })
+        .transpose()?;
+    Ok(Some(TestProvider {
+        execution_log,
+        receipt_root,
+        sleep: Duration::from_millis(sleep_ms),
+        outcome,
+    }))
+}
+
+#[cfg(feature = "test-provider")]
 pub(super) struct EchoClient {
     pub(super) task_id: String,
     pub(super) config: TestProvider,
 }
 
+#[cfg(feature = "test-provider")]
 impl ChatClient for EchoClient {
     fn complete(&self, _req: &ChatRequest) -> anyhow::Result<ChatResponse> {
         thread::sleep(self.config.sleep);
@@ -225,6 +284,7 @@ impl ChatClient for EchoClient {
     }
 }
 
+#[cfg(feature = "test-provider")]
 pub(super) fn append_execution_log(path: &Path, task_id: &str) -> anyhow::Result<()> {
     let _guard = TEST_LOG_LOCK
         .lock()

@@ -16,7 +16,7 @@ use nh_routes::RouteResolver;
 use nh_vault::Scrubber;
 use std::fs;
 use std::sync::atomic::Ordering;
-use std::sync::{mpsc, MutexGuard};
+use std::sync::{mpsc, Mutex, MutexGuard};
 use std::thread;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -79,6 +79,7 @@ fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
 struct TestEnv {
     _guard: MutexGuard<'static, ()>,
     old_provider: Option<std::ffi::OsString>,
+    old_execution_log: Option<std::ffi::OsString>,
     old_sleep: Option<std::ffi::OsString>,
     old_outcome: Option<std::ffi::OsString>,
 }
@@ -87,14 +88,17 @@ impl TestEnv {
     fn echo() -> Self {
         let guard = ENV_LOCK.lock().unwrap();
         let old_provider = std::env::var_os(TEST_PROVIDER_ENV);
+        let old_execution_log = std::env::var_os(TEST_EXECUTION_LOG_ENV);
         let old_sleep = std::env::var_os(TEST_SLEEP_MS_ENV);
         let old_outcome = std::env::var_os(TEST_OUTCOME_ENV);
         std::env::set_var(TEST_PROVIDER_ENV, "echo");
+        std::env::remove_var(TEST_EXECUTION_LOG_ENV);
         std::env::set_var(TEST_SLEEP_MS_ENV, "0");
         std::env::remove_var(TEST_OUTCOME_ENV);
         Self {
             _guard: guard,
             old_provider,
+            old_execution_log,
             old_sleep,
             old_outcome,
         }
@@ -106,6 +110,10 @@ impl Drop for TestEnv {
         match self.old_provider.take() {
             Some(value) => std::env::set_var(TEST_PROVIDER_ENV, value),
             None => std::env::remove_var(TEST_PROVIDER_ENV),
+        }
+        match self.old_execution_log.take() {
+            Some(value) => std::env::set_var(TEST_EXECUTION_LOG_ENV, value),
+            None => std::env::remove_var(TEST_EXECUTION_LOG_ENV),
         }
         match self.old_sleep.take() {
             Some(value) => std::env::set_var(TEST_SLEEP_MS_ENV, value),
@@ -242,7 +250,7 @@ fn runtime_and_preflight_refuse_an_unapproved_route_origin_before_key_access() {
         backend: Backend::Native,
     };
 
-    let preflight_error = preflight_keys(&resolver, std::slice::from_ref(&job), None, &law, false)
+    let preflight_error = preflight_keys(&resolver, std::slice::from_ref(&job), None, &law)
         .unwrap_err()
         .to_string();
     assert!(
@@ -257,6 +265,7 @@ fn runtime_and_preflight_refuse_an_unapproved_route_origin_before_key_access() {
         run_root: root.path().to_path_buf(),
         workdir: root.path().to_path_buf(),
         key_literals: SecretRegistry::new(),
+        #[cfg(feature = "test-provider")]
         test_provider: None,
         clock: Arc::new(SystemClock),
         swarm: Arc::new(PendingSwarmClient),

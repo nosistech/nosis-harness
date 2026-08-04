@@ -2,7 +2,9 @@
 
 use crate::ledger::now_utc;
 use crate::model::{Backend, Clock, LedgerEvent, RunReport, SwarmClient};
-use crate::prepare::{effort_for, effort_name, EchoClient};
+#[cfg(feature = "test-provider")]
+use crate::prepare::EchoClient;
+use crate::prepare::{effort_for, effort_name};
 use crate::{FLEET_OUTPUT_CAP, HEARTBEAT_INTERVAL, LOCK_RETRY_INTERVAL, MAX_TURNS};
 use anyhow::{bail, Context as _};
 use nh_core::agent::{identity_constitution, AgentLoop};
@@ -47,14 +49,17 @@ pub(super) struct Runtime {
     pub(super) run_root: PathBuf,
     pub(super) workdir: PathBuf,
     pub(super) key_literals: SecretRegistry,
+    #[cfg(feature = "test-provider")]
     pub(super) test_provider: Option<TestProvider>,
     pub(super) clock: Arc<dyn Clock>,
     pub(super) swarm: Arc<dyn SwarmClient>,
 }
 
 #[derive(Clone)]
+#[cfg(feature = "test-provider")]
 pub(super) struct TestProvider {
     pub(super) execution_log: Option<PathBuf>,
+    pub(super) receipt_root: PathBuf,
     pub(super) sleep: Duration,
     pub(super) outcome: Outcome,
 }
@@ -400,25 +405,7 @@ pub(super) fn run_one_task(
             .submit_and_collect(&job.task_id, &job.task)
             .map_err(|error| error.to_string());
     }
-    let client: Box<dyn ChatClient> = match &runtime.test_provider {
-        Some(provider) => Box::new(EchoClient {
-            task_id: job.task_id.clone(),
-            config: provider.clone(),
-        }),
-        None => {
-            let vault = EnvFallbackVault {
-                inner: KeyringVault,
-            };
-            credential::connect(
-                &vault,
-                &route,
-                &runtime.law.policy.approved_audiences(route.vault_entry()),
-                Some(FLEET_OUTPUT_CAP),
-            )
-            .map(|(client, _)| client)
-            .map_err(|error| error.to_string())?
-        }
-    };
+    let client = client_for_task(runtime, job, &route)?;
     let policy = runtime.law.policy.clone();
     let approval_events = events.clone();
     let approval_task_id = job.task_id.clone();
@@ -441,11 +428,17 @@ pub(super) fn run_one_task(
     let progress_events = events.clone();
     let progress_task_id = job.task_id.clone();
     let progress_scrubber = runtime.key_literals.scrubber();
+    let receipt_root = runtime.run_root.clone();
+    #[cfg(feature = "test-provider")]
+    let receipt_root = runtime
+        .test_provider
+        .as_ref()
+        .map_or(receipt_root, |provider| provider.receipt_root.clone());
     let mut agent = AgentLoop {
         client,
         tools: builtin_tools(),
         ctx,
-        receipts: ReceiptWriter::project(runtime.run_root.clone(), runtime.key_literals.scrubber()),
+        receipts: ReceiptWriter::project(receipt_root, runtime.key_literals.scrubber()),
         model_id: route.model_id().to_owned(),
         max_turns: MAX_TURNS,
         thinking: job
@@ -465,10 +458,13 @@ pub(super) fn run_one_task(
         })),
     };
     let mut history: Vec<ChatMessage> = Vec::new();
-    let mut receipt = agent
+    let receipt = agent
         .run_with_history(&mut history, &job.task)
         .map(|(_, receipt)| receipt)
         .map_err(|error| error.to_string())?;
+    #[cfg(feature = "test-provider")]
+    let mut receipt = receipt;
+    #[cfg(feature = "test-provider")]
     if let Some(provider) = &runtime.test_provider {
         // The echo seam is inert outside its explicit opt-in and only controls test receipts.
         receipt.outcome = provider.outcome;
@@ -479,6 +475,33 @@ pub(super) fn run_one_task(
         };
     }
     Ok(receipt)
+}
+
+fn client_for_task(
+    runtime: &Runtime,
+    job: &PreparedTask,
+    route: &nh_routes::ResolvedRoute,
+) -> Result<Box<dyn ChatClient>, String> {
+    #[cfg(feature = "test-provider")]
+    if let Some(provider) = &runtime.test_provider {
+        return Ok(Box::new(EchoClient {
+            task_id: job.task_id.clone(),
+            config: provider.clone(),
+        }));
+    }
+    #[cfg(not(feature = "test-provider"))]
+    let _ = job;
+    let vault = EnvFallbackVault {
+        inner: KeyringVault,
+    };
+    credential::connect(
+        &vault,
+        route,
+        &runtime.law.policy.approved_audiences(route.vault_entry()),
+        Some(FLEET_OUTPUT_CAP),
+    )
+    .map(|(client, _)| client)
+    .map_err(|error| error.to_string())
 }
 
 pub(super) fn verdict_to_guard(verdict: nh_law::Verdict) -> Guard {

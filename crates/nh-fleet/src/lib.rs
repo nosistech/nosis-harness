@@ -18,10 +18,9 @@ use ledger::{
     ledger_has_committed_events, now_utc, queued_tasks, read_ledger, receipt_tokens,
     repair_uncommitted_tail, run_meta, terminal_counts, validate_run_id,
 };
-use prepare::{
-    effective_workers, emit, preflight_keys, prepare_new_tasks, scrub_prepared_tasks,
-    test_provider_from_env,
-};
+#[cfg(feature = "test-provider")]
+use prepare::test_provider_from_env;
+use prepare::{effective_workers, emit, preflight_keys, prepare_new_tasks, scrub_prepared_tasks};
 use scheduler::{execute_tasks, ExecutionRequest};
 
 pub use ledger::{new_run_id, read_run_ledger};
@@ -31,11 +30,14 @@ pub use model::{
     PendingSwarmClient, ResumePlan, RunReport, Step, SwarmClient, SystemClock, TaskSpec, Tier,
     MAX_FLEET_TASKS, MAX_TASK_ID_BYTES,
 };
+pub use prepare::test_provider_active;
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(feature = "test-provider")]
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{bail, Context as _};
@@ -45,12 +47,13 @@ const DEFAULT_MAX_WORKERS: usize = 4;
 const MAX_TURNS: u32 = 20;
 const FLEET_OUTPUT_CAP: u64 = 16_384;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+#[cfg(feature = "test-provider")]
 const TEST_PROVIDER_ENV: &str = "NH_FLEET_TEST_PROVIDER";
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-provider")]
 const TEST_EXECUTION_LOG_ENV: &str = "NH_FLEET_TEST_EXECUTION_LOG";
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-provider")]
 const TEST_SLEEP_MS_ENV: &str = "NH_FLEET_TEST_SLEEP_MS";
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-provider")]
 const TEST_OUTCOME_ENV: &str = "NH_FLEET_TEST_OUTCOME";
 const SCHEDULER_WAKE_INTERVAL: Duration = Duration::from_millis(100);
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(50);
@@ -60,6 +63,7 @@ const RESUME_LOCK_RETRY_WINDOW: Duration = Duration::from_secs(2);
 const RESUME_LOCK_RETRY_WINDOW: Duration = Duration::from_millis(150);
 
 static RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "test-provider")]
 static TEST_LOG_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn run(config: FleetConfig) -> anyhow::Result<RunReport> {
@@ -128,7 +132,10 @@ fn run_with_id_inner(
     }
     let max_workers = config.max_workers;
     let workdir = std::env::current_dir().context("could not read the current directory")?;
-    let test_provider = test_provider_from_env()?;
+    #[cfg(feature = "test-provider")]
+    let test_provider = test_provider_from_env(&config.run_root, &run_id)?;
+    #[cfg(not(feature = "test-provider"))]
+    test_provider_active()?;
     let ladder = config.ladder.clone();
     let mut tasks = prepare_new_tasks(
         &config.resolver,
@@ -137,13 +144,14 @@ fn run_with_id_inner(
         config.defer_offpeak,
         ladder.as_ref(),
     )?;
-    let key_literals = preflight_keys(
-        &config.resolver,
-        &tasks,
-        ladder.as_ref(),
-        &config.law,
-        test_provider.is_some(),
-    )?;
+    #[cfg(feature = "test-provider")]
+    let key_literals = if test_provider.is_some() {
+        SecretRegistry::new()
+    } else {
+        preflight_keys(&config.resolver, &tasks, ladder.as_ref(), &config.law)?
+    };
+    #[cfg(not(feature = "test-provider"))]
+    let key_literals = preflight_keys(&config.resolver, &tasks, ladder.as_ref(), &config.law)?;
     failure_literals.clone_from(&key_literals);
     scrub_prepared_tasks(&mut tasks, &key_literals.scrubber())?;
 
@@ -196,6 +204,7 @@ fn run_with_id_inner(
         run_root: config.run_root.clone(),
         workdir,
         key_literals: key_literals.clone(),
+        #[cfg(feature = "test-provider")]
         test_provider,
         clock: config
             .clock
@@ -333,13 +342,27 @@ fn resume_inner(
 
     let max_workers = effective_workers(config.max_workers, Some(meta.max_workers))?;
     let budget_tokens = config.budget_tokens.or(meta.budget_tokens);
-    let test_provider = test_provider_from_env()?;
+    #[cfg(feature = "test-provider")]
+    let test_provider = test_provider_from_env(run_root, &run_id)?;
+    #[cfg(not(feature = "test-provider"))]
+    test_provider_active()?;
+    #[cfg(feature = "test-provider")]
+    let key_literals = if test_provider.is_some() {
+        SecretRegistry::new()
+    } else {
+        preflight_keys(
+            &config.resolver,
+            &tasks,
+            effective_ladder.as_ref(),
+            &config.law,
+        )?
+    };
+    #[cfg(not(feature = "test-provider"))]
     let key_literals = preflight_keys(
         &config.resolver,
         &tasks,
         effective_ladder.as_ref(),
         &config.law,
-        test_provider.is_some(),
     )?;
     failure_literals.clone_from(&key_literals);
     let ledger = DurableWriter::open(ledger_path, key_literals.scrubber())?;
@@ -369,6 +392,7 @@ fn resume_inner(
         run_root: run_root.to_path_buf(),
         workdir,
         key_literals: key_literals.clone(),
+        #[cfg(feature = "test-provider")]
         test_provider,
         clock: config
             .clock

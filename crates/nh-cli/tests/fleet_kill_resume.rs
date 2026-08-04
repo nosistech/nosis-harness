@@ -27,9 +27,6 @@ const CATALOG: &str = r#"
 
 #[test]
 fn kill_then_resume_does_not_rerun_committed_tasks() {
-    if !cfg!(debug_assertions) {
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     fs::write(tmp.path().join("catalog.toml"), CATALOG).unwrap();
     let home = tmp.path().join("home");
@@ -46,7 +43,11 @@ fn kill_then_resume_does_not_rerun_committed_tasks() {
             .unwrap(),
     )
     .unwrap();
-    let execution_log = tmp.path().join("execution.log");
+    let execution_log = tmp
+        .path()
+        .join(".nosis")
+        .join("fleet-test-provider")
+        .join("execution.log");
     let binary = env!("CARGO_BIN_EXE_nh");
 
     let mut child = Command::new(binary)
@@ -55,8 +56,9 @@ fn kill_then_resume_does_not_rerun_committed_tasks() {
         .env("USERPROFILE", &home)
         .env("HOME", &home)
         .env("NH_FLEET_TEST_PROVIDER", "echo")
-        .env("NH_FLEET_TEST_EXECUTION_LOG", &execution_log)
+        .env("NH_FLEET_TEST_EXECUTION_LOG", "execution.log")
         .env("NH_FLEET_TEST_SLEEP_MS", "250")
+        .env_remove("NH_FLEET_TEST_OUTCOME")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -65,7 +67,12 @@ fn kill_then_resume_does_not_rerun_committed_tasks() {
     let deadline = Instant::now() + Duration::from_secs(20);
     let (ledger_path, before_kill) = loop {
         if let Some(status) = child.try_wait().unwrap() {
-            panic!("fleet child exited before it could be killed: {status}");
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "fleet child exited before it could be killed: {status}\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
         if let Some(path) = find_ledger(tmp.path()) {
             let events = read_events(&path);
@@ -107,8 +114,9 @@ fn kill_then_resume_does_not_rerun_committed_tasks() {
         .env("USERPROFILE", &home)
         .env("HOME", &home)
         .env("NH_FLEET_TEST_PROVIDER", "echo")
-        .env("NH_FLEET_TEST_EXECUTION_LOG", &execution_log)
+        .env("NH_FLEET_TEST_EXECUTION_LOG", "execution.log")
         .env("NH_FLEET_TEST_SLEEP_MS", "20")
+        .env_remove("NH_FLEET_TEST_OUTCOME")
         .output()
         .unwrap();
     assert!(
@@ -181,9 +189,8 @@ fn kill_then_resume_does_not_rerun_committed_tasks() {
     }
 }
 
-#[cfg(not(debug_assertions))]
 #[test]
-fn release_binary_refuses_the_test_provider_switch() {
+fn binary_without_the_test_provider_feature_refuses_the_switch() {
     let tmp = tempfile::tempdir().unwrap();
     fs::write(tmp.path().join("catalog.toml"), CATALOG).unwrap();
     let home = tmp.path().join("home");
@@ -195,23 +202,72 @@ fn release_binary_refuses_the_test_provider_switch() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_nh"))
+    let output = Command::new(build_plain_nh_binary())
         .args(["fleet", "run", "tasks.json", "--max-workers", "1"])
         .current_dir(tmp.path())
         .env("USERPROFILE", &home)
         .env("HOME", &home)
         .env("NH_FLEET_TEST_PROVIDER", "echo")
+        .env_remove("NH_FLEET_TEST_EXECUTION_LOG")
+        .env_remove("NH_FLEET_TEST_SLEEP_MS")
+        .env_remove("NH_FLEET_TEST_OUTCOME")
         .output()
         .unwrap();
 
     assert!(!output.status.success());
     assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("NH_FLEET_TEST_PROVIDER is unavailable in release builds"),
+        String::from_utf8_lossy(&output.stderr).contains(
+            "NH_FLEET_TEST_PROVIDER is unavailable in builds without the test-provider feature"
+        ),
         "stdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn build_plain_nh_binary() -> PathBuf {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .canonicalize()
+        .unwrap();
+    let target = workspace.join("target").join("no-test-provider");
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut command = Command::new(cargo);
+    command
+        .current_dir(&workspace)
+        .args([
+            "build",
+            "--locked",
+            "--offline",
+            "--no-default-features",
+            "-p",
+            "nh-cli",
+            "--bin",
+            "nh",
+            "--target-dir",
+        ])
+        .arg(&target)
+        .env_remove("NH_FLEET_TEST_PROVIDER")
+        .env_remove("NH_FLEET_TEST_EXECUTION_LOG")
+        .env_remove("NH_FLEET_TEST_SLEEP_MS")
+        .env_remove("NH_FLEET_TEST_OUTCOME");
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        command.arg("--release");
+        "release"
+    };
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "plain nh build failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    target
+        .join(profile)
+        .join(format!("nh{}", std::env::consts::EXE_SUFFIX))
 }
 
 fn find_ledger(root: &Path) -> Option<PathBuf> {

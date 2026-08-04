@@ -8,6 +8,10 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+test-provider = []
+
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
@@ -20,4 +24,5 @@ nh-tools = { path = "../nh-tools", version = "0.1.0" }
 nh-vault = { path = "../nh-vault", version = "0.1.0" }
 
 [dev-dependencies]
+nh-fleet = { path = ".", features = ["test-provider"] }
 tempfile.workspace = true

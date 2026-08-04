@@ -36,6 +36,7 @@ const PEAK_CATALOG: &str = r#"
     windows = ["09:00-12:00", "14:00-18:00"]
 "#;
 const TEST_PROVIDER_ENV: &str = "NH_FLEET_TEST_PROVIDER";
+const TEST_EXECUTION_LOG_ENV: &str = "NH_FLEET_TEST_EXECUTION_LOG";
 const TEST_SLEEP_MS_ENV: &str = "NH_FLEET_TEST_SLEEP_MS";
 const TEST_OUTCOME_ENV: &str = "NH_FLEET_TEST_OUTCOME";
 
@@ -44,22 +45,33 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 struct TestEnv {
     _guard: MutexGuard<'static, ()>,
     old_provider: Option<std::ffi::OsString>,
+    old_execution_log: Option<std::ffi::OsString>,
     old_sleep: Option<std::ffi::OsString>,
     old_outcome: Option<std::ffi::OsString>,
 }
 
 impl TestEnv {
     fn echo(outcome: &str) -> Self {
+        Self::echo_with_execution_log(outcome, None)
+    }
+
+    fn echo_with_execution_log(outcome: &str, execution_log: Option<&Path>) -> Self {
         let guard = ENV_LOCK.lock().unwrap();
         let old_provider = std::env::var_os(TEST_PROVIDER_ENV);
+        let old_execution_log = std::env::var_os(TEST_EXECUTION_LOG_ENV);
         let old_sleep = std::env::var_os(TEST_SLEEP_MS_ENV);
         let old_outcome = std::env::var_os(TEST_OUTCOME_ENV);
         std::env::set_var(TEST_PROVIDER_ENV, "echo");
+        match execution_log {
+            Some(path) => std::env::set_var(TEST_EXECUTION_LOG_ENV, path),
+            None => std::env::remove_var(TEST_EXECUTION_LOG_ENV),
+        }
         std::env::set_var(TEST_SLEEP_MS_ENV, "0");
         std::env::set_var(TEST_OUTCOME_ENV, outcome);
         Self {
             _guard: guard,
             old_provider,
+            old_execution_log,
             old_sleep,
             old_outcome,
         }
@@ -68,14 +80,17 @@ impl TestEnv {
     fn clear() -> Self {
         let guard = ENV_LOCK.lock().unwrap();
         let old_provider = std::env::var_os(TEST_PROVIDER_ENV);
+        let old_execution_log = std::env::var_os(TEST_EXECUTION_LOG_ENV);
         let old_sleep = std::env::var_os(TEST_SLEEP_MS_ENV);
         let old_outcome = std::env::var_os(TEST_OUTCOME_ENV);
         std::env::remove_var(TEST_PROVIDER_ENV);
+        std::env::remove_var(TEST_EXECUTION_LOG_ENV);
         std::env::remove_var(TEST_SLEEP_MS_ENV);
         std::env::remove_var(TEST_OUTCOME_ENV);
         Self {
             _guard: guard,
             old_provider,
+            old_execution_log,
             old_sleep,
             old_outcome,
         }
@@ -85,6 +100,7 @@ impl TestEnv {
 impl Drop for TestEnv {
     fn drop(&mut self) {
         restore_env(TEST_PROVIDER_ENV, self.old_provider.take());
+        restore_env(TEST_EXECUTION_LOG_ENV, self.old_execution_log.take());
         restore_env(TEST_SLEEP_MS_ENV, self.old_sleep.take());
         restore_env(TEST_OUTCOME_ENV, self.old_outcome.take());
     }
@@ -149,9 +165,6 @@ fn task(id: &str) -> TaskSpec {
 
 #[test]
 fn e2_deferred_task_parks_at_peak_then_dispatches_off_peak() {
-    if !cfg!(debug_assertions) {
-        return;
-    }
     let _env = TestEnv::echo("pass");
     let tmp = tempfile::tempdir().unwrap();
     let peak = Utc.with_ymd_and_hms(2026, 7, 15, 2, 0, 0).unwrap();
@@ -205,9 +218,6 @@ fn e2_deferred_task_parks_at_peak_then_dispatches_off_peak() {
 
 #[test]
 fn non_deferred_task_dispatches_during_peak() {
-    if !cfg!(debug_assertions) {
-        return;
-    }
     let _env = TestEnv::echo("pass");
     let tmp = tempfile::tempdir().unwrap();
     let peak = Utc.with_ymd_and_hms(2026, 7, 15, 2, 0, 0).unwrap();
@@ -224,9 +234,6 @@ fn non_deferred_task_dispatches_during_peak() {
 
 #[test]
 fn live_ladder_attaches_receipts_and_gates_once() {
-    if !cfg!(debug_assertions) {
-        return;
-    }
     let _env = TestEnv::echo("fail");
     let tmp = tempfile::tempdir().unwrap();
     let lines = Arc::new(Mutex::new(Vec::new()));
@@ -315,9 +322,6 @@ fn live_ladder_attaches_receipts_and_gates_once() {
 
 #[test]
 fn resume_continues_escalation_from_the_ledger_ladder_position() {
-    if !cfg!(debug_assertions) {
-        return;
-    }
     let _env = TestEnv::echo("fail");
     let tmp = tempfile::tempdir().unwrap();
     let run_id = "resume-climb";
@@ -415,9 +419,6 @@ fn resume_continues_escalation_from_the_ledger_ladder_position() {
 
 #[test]
 fn no_ladder_failure_is_one_attempt_and_task_failed() {
-    if !cfg!(debug_assertions) {
-        return;
-    }
     let _env = TestEnv::echo("fail");
     let tmp = tempfile::tempdir().unwrap();
     let report = nh_fleet::run(config(tmp.path(), vec![task("single")])).unwrap();
@@ -435,6 +436,85 @@ fn no_ladder_failure_is_one_attempt_and_task_failed() {
         event,
         LedgerEvent::TaskFailed { task_id, .. } if task_id == "single"
     )));
+}
+
+#[test]
+fn echo_provider_keeps_the_project_receipt_ledger_unchanged() {
+    let _env = TestEnv::echo("pass");
+    let tmp = tempfile::tempdir().unwrap();
+    let canonical = tmp.path().join(".nosis").join("receipts.jsonl");
+    fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+    let sentinel = b"owner-metered-ledger\n";
+    fs::write(&canonical, sentinel).unwrap();
+    let run_id = "receipt-isolation";
+
+    let report = nh_fleet::run_with_id(
+        run_id.to_string(),
+        config(tmp.path(), vec![task("isolated")]),
+    )
+    .unwrap();
+
+    assert_eq!(report.done, 1);
+    assert_eq!(fs::read(&canonical).unwrap(), sentinel);
+    let isolated = tmp
+        .path()
+        .join(".nosis")
+        .join("fleet-test-provider")
+        .join("receipts")
+        .join(run_id)
+        .join(".nosis")
+        .join("receipts.jsonl");
+    assert!(
+        isolated.is_file(),
+        "echo receipt was not written to its isolated ledger: {}",
+        isolated.display()
+    );
+}
+
+#[test]
+fn echo_execution_log_refuses_a_path_outside_the_run_root() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let escaped = outside.path().join("escaped-execution.log");
+    let _env = TestEnv::echo_with_execution_log("pass", Some(&escaped));
+
+    let error = nh_fleet::run_with_id(
+        "execution-log-escape".into(),
+        config(root.path(), vec![task("must-not-run")]),
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains(TEST_EXECUTION_LOG_ENV), "{error}");
+    assert!(
+        error.contains("must stay beneath the isolated test-provider root under the run root"),
+        "{error}"
+    );
+    assert!(
+        !escaped.exists(),
+        "escaping execution log was created: {}",
+        escaped.display()
+    );
+}
+
+#[test]
+fn echo_execution_log_cannot_alias_the_project_receipt_ledger() {
+    let root = tempfile::tempdir().unwrap();
+    let canonical = root.path().join(".nosis").join("receipts.jsonl");
+    fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+    let sentinel = b"owner-metered-ledger\n";
+    fs::write(&canonical, sentinel).unwrap();
+    let _env = TestEnv::echo_with_execution_log("pass", Some(&canonical));
+
+    let error = nh_fleet::run_with_id(
+        "execution-log-ledger-alias".into(),
+        config(root.path(), vec![task("must-not-run")]),
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains(TEST_EXECUTION_LOG_ENV), "{error}");
+    assert_eq!(fs::read(&canonical).unwrap(), sentinel);
 }
 
 struct MockSwarm;

@@ -23,5 +23,6 @@ nh-routes = { path = "../nh-routes", version = "0.1.0" }
 nh-vault = { path = "../nh-vault", version = "0.1.0" }
 
 [dev-dependencies]
+nh-fleet = { path = "../nh-fleet", version = "0.1.0", features = ["test-provider"] }
 nh-tools = { path = "../nh-tools", version = "0.1.0" }
 tempfile.workspace = true

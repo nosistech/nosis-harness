@@ -135,8 +135,7 @@ pub(super) fn preflight_fleet_run(
     law: &nh_law::Law,
 ) -> anyhow::Result<()> {
     nh_fleet::validate_task_specs(tasks)?;
-    let using_test_provider = cfg!(any(test, debug_assertions))
-        && std::env::var("NH_FLEET_TEST_PROVIDER").as_deref() == Ok("echo");
+    let using_test_provider = nh_fleet::test_provider_active()?;
     let vault = nh_vault::EnvFallbackVault {
         inner: nh_vault::KeyringVault,
     };

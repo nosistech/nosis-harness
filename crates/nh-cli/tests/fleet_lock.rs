@@ -20,9 +20,6 @@ const CATALOG: &str = r#"
 
 #[test]
 fn live_coordinator_refuses_resume_then_kill_releases_lock() {
-    if !cfg!(debug_assertions) {
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     fs::write(tmp.path().join("catalog.toml"), CATALOG).unwrap();
     let home = tmp.path().join("home");
@@ -47,6 +44,8 @@ fn live_coordinator_refuses_resume_then_kill_releases_lock() {
         .env("HOME", &home)
         .env("NH_FLEET_TEST_PROVIDER", "echo")
         .env("NH_FLEET_TEST_SLEEP_MS", "750")
+        .env_remove("NH_FLEET_TEST_EXECUTION_LOG")
+        .env_remove("NH_FLEET_TEST_OUTCOME")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -59,6 +58,9 @@ fn live_coordinator_refuses_resume_then_kill_releases_lock() {
         .env("USERPROFILE", &home)
         .env("HOME", &home)
         .env("NH_FLEET_TEST_PROVIDER", "echo")
+        .env_remove("NH_FLEET_TEST_EXECUTION_LOG")
+        .env_remove("NH_FLEET_TEST_SLEEP_MS")
+        .env_remove("NH_FLEET_TEST_OUTCOME")
         .output()
         .unwrap();
     assert!(
@@ -82,6 +84,8 @@ fn live_coordinator_refuses_resume_then_kill_releases_lock() {
         .env("HOME", &home)
         .env("NH_FLEET_TEST_PROVIDER", "echo")
         .env("NH_FLEET_TEST_SLEEP_MS", "20")
+        .env_remove("NH_FLEET_TEST_EXECUTION_LOG")
+        .env_remove("NH_FLEET_TEST_OUTCOME")
         .output()
         .unwrap();
     assert!(

@@ -1289,6 +1289,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "nh-core",
+ "nh-fleet",
  "nh-law",
  "nh-routes",
  "nh-tools",
