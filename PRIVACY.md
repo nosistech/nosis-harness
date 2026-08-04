@@ -53,8 +53,8 @@ their own policies.
 ## The MCP preview
 
 `nh mcp serve` binds **loopback (`127.0.0.1`) only** and is guarded by a bearer token.
-The MCP server is a **preview** and must not be exposed publicly before the MCP final
-spec lands on **2026-07-28**.
+The MCP server is a **preview** and **must not be exposed on a public interface**. This is
+not a restriction that lapses on a date.
 
 ## Provider policies
 
