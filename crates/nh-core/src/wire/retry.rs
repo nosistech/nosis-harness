@@ -3,7 +3,7 @@
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::{RetryStats, Usage};
+use super::{RetryStats, Usage, UsageEvidence};
 
 /// Scale for jitter samples. Values consumed by [`next_delay`] are in
 /// `[0, JITTER_SCALE)`, matching [`Duration::subsec_nanos`].
@@ -41,11 +41,10 @@ pub(super) enum AttemptOutcome {
     HttpStatus(u16),
 }
 
-/// A status proves the provider answered without a completion, so that
-/// attempt was not billed. A request timeout proves nothing: the provider may
-/// have generated and billed a full response that never reached us. Retrying
-/// a timeout could therefore double-charge while the receipt reports only one
-/// completion.
+/// Ratified transient statuses may be retried. Their bodies can carry billed
+/// usage, and missing counters are not evidence that no billing occurred. A
+/// request timeout proves even less: the provider may have generated and
+/// billed a full response that never reached us, so timeouts are never retried.
 pub(super) fn is_retryable(outcome: AttemptOutcome) -> bool {
     match outcome {
         AttemptOutcome::TransportFailure { timed_out } => !timed_out,
@@ -69,6 +68,19 @@ pub(super) struct RetryOutput<T> {
     pub(super) value: T,
     pub(super) stats: RetryStats,
     pub(super) salvaged_usage: Option<Usage>,
+    usage_overflowed: bool,
+}
+
+impl<T> RetryOutput<T> {
+    /// Combine retry-attempt evidence with the successful response. Overflow
+    /// refuses a numeric result instead of relabelling the last attempt exact.
+    pub(super) fn combine_success_usage(&mut self, success: Option<Usage>) -> Option<Usage> {
+        if self.usage_overflowed {
+            self.salvaged_usage = None;
+            return None;
+        }
+        combine_usage(self.salvaged_usage.take(), success)
+    }
 }
 
 #[derive(Debug)]
@@ -162,16 +174,30 @@ pub(super) fn run_with_retry<T>(
     let mut elapsed = Duration::ZERO;
     let mut stats = RetryStats::default();
     let mut salvaged_usage = None;
-    let mut usage_complete = true;
+    let mut usage_overflowed = false;
+    let mut saw_unreported_usage = false;
 
     loop {
         attempts = attempts.saturating_add(1);
         match attempt(attempts) {
             AttemptResult::Success(value) => {
+                if !usage_overflowed && saw_unreported_usage && salvaged_usage.is_none() {
+                    salvaged_usage = Some(Usage {
+                        prompt_tokens: 0,
+                        completion_tokens: 0,
+                        cached_tokens: None,
+                        evidence: UsageEvidence::Unknown,
+                    });
+                }
                 return Ok(RetryOutput {
                     value,
                     stats,
-                    salvaged_usage: if usage_complete { salvaged_usage } else { None },
+                    salvaged_usage: if usage_overflowed {
+                        None
+                    } else {
+                        salvaged_usage
+                    },
+                    usage_overflowed,
                 });
             }
             AttemptResult::Failure {
@@ -185,16 +211,28 @@ pub(super) fn run_with_retry<T>(
                 if outcome == AttemptOutcome::HttpStatus(429) {
                     stats.rate_limited = stats.rate_limited.saturating_add(1);
                 }
-                if let Some(usage) = usage {
-                    if usage_complete {
-                        usage_complete = merge_usage(&mut salvaged_usage, usage);
+                if !usage_overflowed {
+                    if let Some(mut usage) = usage {
+                        if saw_unreported_usage {
+                            usage.mark_unreported_component();
+                        }
+                        usage_overflowed = !merge_usage(&mut salvaged_usage, usage);
+                    } else if let Some(salvaged) = &mut salvaged_usage {
+                        saw_unreported_usage = true;
+                        salvaged.mark_unreported_component();
+                    } else {
+                        saw_unreported_usage = true;
                     }
                 }
 
                 if !is_retryable(outcome) {
                     return Err(RetryExhausted {
                         stats,
-                        usage: if usage_complete { salvaged_usage } else { None },
+                        usage: if usage_overflowed {
+                            None
+                        } else {
+                            salvaged_usage
+                        },
                         last_failure: detail,
                         attempts,
                         elapsed,
@@ -207,7 +245,11 @@ pub(super) fn run_with_retry<T>(
                 else {
                     return Err(RetryExhausted {
                         stats,
-                        usage: if usage_complete { salvaged_usage } else { None },
+                        usage: if usage_overflowed {
+                            None
+                        } else {
+                            salvaged_usage
+                        },
                         last_failure: detail,
                         attempts,
                         elapsed,
@@ -226,33 +268,21 @@ fn merge_usage(total: &mut Option<Usage>, next: Usage) -> bool {
         *total = Some(next);
         return true;
     };
-    let Some(prompt_tokens) = existing.prompt_tokens.checked_add(next.prompt_tokens) else {
-        return false;
-    };
-    let Some(completion_tokens) = existing
-        .completion_tokens
-        .checked_add(next.completion_tokens)
-    else {
-        return false;
-    };
-    let cached_tokens = match (existing.cached_tokens, next.cached_tokens) {
-        (Some(total), Some(next)) => match total.checked_add(next) {
-            Some(sum) => Some(sum),
-            None => return false,
-        },
-        _ => None,
-    };
-    existing.prompt_tokens = prompt_tokens;
-    existing.completion_tokens = completion_tokens;
-    existing.cached_tokens = cached_tokens;
-    true
+    existing.checked_add_assign(&next)
 }
 
 pub(super) fn combine_usage(first: Option<Usage>, second: Option<Usage>) -> Option<Usage> {
     let mut total = first;
-    if let Some(usage) = second {
-        if !merge_usage(&mut total, usage) {
-            return None;
+    match second {
+        Some(usage) => {
+            if !merge_usage(&mut total, usage) {
+                return None;
+            }
+        }
+        None => {
+            if let Some(usage) = &mut total {
+                usage.mark_unreported_component();
+            }
         }
     }
     total
@@ -261,6 +291,7 @@ pub(super) fn combine_usage(first: Option<Usage>, second: Option<Usage>) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wire::UsageEvidence;
     use std::cell::RefCell;
 
     fn zero_policy(max_attempts: u32) -> RetryPolicy {
@@ -448,6 +479,7 @@ mod tests {
                     prompt_tokens: 10,
                     completion_tokens: 2,
                     cached_tokens: Some(3),
+                    evidence: UsageEvidence::Measured,
                 }),
             ),
             failure(
@@ -456,6 +488,7 @@ mod tests {
                     prompt_tokens: 4,
                     completion_tokens: 1,
                     cached_tokens: Some(1),
+                    evidence: UsageEvidence::Measured,
                 }),
             ),
             AttemptResult::Success("done"),
@@ -482,6 +515,57 @@ mod tests {
         assert_eq!(usage.completion_tokens, 3);
         assert_eq!(usage.cached_tokens, Some(4));
         assert_eq!(*slept.borrow(), vec![Duration::ZERO, Duration::ZERO]);
+    }
+
+    #[test]
+    fn unmetered_failed_attempt_degrades_success_in_retry_caller() {
+        let missing = crate::wire::openai::extract_usage(
+            r#"{"error":{"message":"temporarily unavailable"}}"#,
+        );
+        let success = crate::wire::openai::parse_response(
+            r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":4}}"#,
+        )
+        .unwrap()
+        .usage;
+        let script = RefCell::new(vec![
+            failure(AttemptOutcome::HttpStatus(503), missing),
+            AttemptResult::Success("done"),
+        ]);
+        let mut output = run_with_retry(zero_policy(2), &|_| {}, &|| 0, |_| {
+            script.borrow_mut().remove(0)
+        })
+        .unwrap();
+
+        let usage = output.combine_success_usage(success).unwrap();
+
+        assert_eq!(usage.evidence, UsageEvidence::Partial);
+        assert_eq!((usage.prompt_tokens, usage.completion_tokens), (7, 4));
+    }
+
+    #[test]
+    fn retry_usage_overflow_refuses_success_number() {
+        let first = crate::wire::openai::extract_usage(
+            r#"{"error":{"message":"busy"},"usage":{"prompt_tokens":18446744073709551615,"completion_tokens":0}}"#,
+        );
+        let second = crate::wire::openai::extract_usage(
+            r#"{"error":{"message":"still busy"},"usage":{"prompt_tokens":1,"completion_tokens":0}}"#,
+        );
+        let success = crate::wire::openai::parse_response(
+            r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1}}"#,
+        )
+        .unwrap()
+        .usage;
+        let script = RefCell::new(vec![
+            failure(AttemptOutcome::HttpStatus(429), first),
+            failure(AttemptOutcome::HttpStatus(503), second),
+            AttemptResult::Success("done"),
+        ]);
+        let mut output = run_with_retry(zero_policy(3), &|_| {}, &|| 0, |_| {
+            script.borrow_mut().remove(0)
+        })
+        .unwrap();
+
+        assert!(output.combine_success_usage(success).is_none());
     }
 
     #[test]

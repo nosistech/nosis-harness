@@ -6,7 +6,7 @@ use crate::{APPROVAL_LEGEND, BUDGET_REASON};
 use chrono::{DateTime, TimeZone, Utc};
 use nh_core::agent::CompactionEvent;
 use nh_core::receipt::{CompactionStats, FailureClass, Outcome};
-use nh_core::wire::{cache_hit_pct, Usage};
+use nh_core::wire::{cache_hit_pct, Usage, UsageEvidence};
 use nh_routes::{
     cost_of, money, money_with_gloss, saved_pct, PriceConfidence, ResolvedRoute, RouteClass,
     RouteResolver, LOCAL_METER_COPY,
@@ -34,15 +34,26 @@ pub(super) fn failure_class_name(class: FailureClass) -> &'static str {
 }
 
 pub(super) fn timeline_row(entry: &TimelineEntry) -> String {
-    let (input, output, cached) = entry.tokens();
     let compacted = if entry.compacted { "  [compact]" } else { "" };
-    let mut tokens = format!("{input}/{output}");
-    if let Some(cached) = cached {
-        tokens.push_str(&format!("/{cached}"));
-        if let Some(pct) = cache_hit_pct(input, Some(cached)) {
-            tokens.push_str(&format!(" cache {pct:.0}%"));
+    let tokens = match (entry.usage.as_ref(), entry.tokens()) {
+        (Some(usage), Some((input, output, _))) if usage.evidence == UsageEvidence::Partial => {
+            format!("~{input}/~{output} lower bound")
         }
-    }
+        (Some(usage), Some((input, output, cached))) => {
+            let mut tokens = format!("{input}/{output}");
+            if usage.evidence.is_measured() {
+                if let Some(cached) = cached {
+                    tokens.push_str(&format!("/{cached}"));
+                    if let Some(pct) = cache_hit_pct(input, Some(cached)) {
+                        tokens.push_str(&format!(" cache {pct:.0}%"));
+                    }
+                }
+            }
+            tokens
+        }
+        (Some(_), None) => "usage unknown".into(),
+        (None, _) => "usage unreported".into(),
+    };
     format!(
         "#{}  {}  {tokens}{compacted}",
         entry.turn,
@@ -51,18 +62,29 @@ pub(super) fn timeline_row(entry: &TimelineEntry) -> String {
 }
 
 pub(super) fn timeline_detail_lines(entry: &TimelineEntry) -> Vec<String> {
-    let (input, output, cached) = entry.tokens();
     let failure = entry
         .failure_class
         .map(failure_class_name)
         .unwrap_or("none");
-    let mut tokens = format!("tokens: {input} in / {output} out");
-    if let Some(cached) = cached {
-        tokens.push_str(&format!(" / {cached} cached"));
-        if let Some(pct) = cache_hit_pct(input, Some(cached)) {
-            tokens.push_str(&format!(" | cache {pct:.0}%"));
+    let tokens = match (entry.usage.as_ref(), entry.tokens()) {
+        (Some(usage), Some((input, output, _))) if usage.evidence == UsageEvidence::Partial => {
+            format!("tokens: ~{input} in / ~{output} out - lower bound")
         }
-    }
+        (Some(usage), Some((input, output, cached))) => {
+            let mut tokens = format!("tokens: {input} in / {output} out");
+            if usage.evidence.is_measured() {
+                if let Some(cached) = cached {
+                    tokens.push_str(&format!(" / {cached} cached"));
+                    if let Some(pct) = cache_hit_pct(input, Some(cached)) {
+                        tokens.push_str(&format!(" | cache {pct:.0}%"));
+                    }
+                }
+            }
+            tokens
+        }
+        (Some(_), None) => "tokens: unavailable - usage unknown".into(),
+        (None, _) => "tokens: unavailable - usage unreported".into(),
+    };
     let mut lines = vec![
         format!("TURN #{}", entry.turn),
         format!("timestamp: {}", entry.ts_utc),
@@ -276,7 +298,14 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
             }
         }
         AgentEvent::Usage(usage) => {
-            app.usage = usage;
+            if app.route.class() == RouteClass::Api
+                && (!usage.evidence.is_measured()
+                    || usage.cached_tokens.is_none()
+                    || app.route.price_at(Utc::now()).is_none())
+            {
+                app.mark_session_cost_incomplete();
+            }
+            app.usage = Some(usage);
             if app.budget_reached() {
                 app.set_status(Status::Blocked(BUDGET_REASON.into()), Utc::now());
             }
@@ -288,14 +317,19 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
                 .ok()
                 .map(|at| at.with_timezone(&Utc));
             if let Some(route) = &receipt_route {
-                if route.class() == RouteClass::Local {
-                    app.push_line(LOCAL_METER_COPY, TranscriptKind::Progress);
-                } else if let (Some(usage), Some(at)) = (summary.receipt.usage.as_ref(), receipt_at)
-                {
-                    record_route_turn_cost(app, route, usage, at, true);
-                }
+                record_route_turn_cost(
+                    app,
+                    route,
+                    summary.receipt.usage.as_ref(),
+                    receipt_at,
+                    true,
+                );
             } else {
-                app.has_failed_turn = true;
+                app.mark_session_cost_incomplete();
+                app.push_line(
+                    "cost unavailable - receipt route is not in the catalog",
+                    TranscriptKind::Progress,
+                );
             }
             let turn = app.timeline.len().saturating_add(1);
             let live_compaction = std::mem::take(&mut app.current_task_compaction);
@@ -329,7 +363,6 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
             };
             app.set_status(status, Utc::now());
         }
-        AgentEvent::MeterIncomplete => app.has_failed_turn = true,
         AgentEvent::Failed(reason) => {
             app.active_model = None;
             app.active_tool = None;
@@ -353,23 +386,23 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
 #[cfg(test)]
 pub(super) fn record_turn_cost(app: &mut App, usage: &Usage, at: DateTime<Utc>) {
     let route = app.route.clone();
-    record_route_turn_cost(app, &route, usage, at, true);
+    record_route_turn_cost(app, &route, Some(usage), Some(at), true);
 }
 
 pub(super) fn record_restored_turn_cost(
     app: &mut App,
     route: &ResolvedRoute,
-    usage: &Usage,
+    usage: Option<&Usage>,
     at: DateTime<Utc>,
 ) {
-    record_route_turn_cost(app, route, usage, at, false);
+    record_route_turn_cost(app, route, usage, Some(at), false);
 }
 
 fn record_route_turn_cost(
     app: &mut App,
     route: &ResolvedRoute,
-    usage: &Usage,
-    at: DateTime<Utc>,
+    usage: Option<&Usage>,
+    at: Option<DateTime<Utc>>,
     show_details: bool,
 ) {
     if route.class() == RouteClass::Local {
@@ -378,12 +411,44 @@ fn record_route_turn_cost(
         }
         return;
     }
-    let Some(quote) = route.price_at(at) else {
+    let unavailable = |app: &mut App, reason: &str| {
+        app.mark_session_cost_incomplete();
+        if show_details {
+            app.push_line(reason, TranscriptKind::Progress);
+        }
+    };
+    let Some(usage) = usage else {
+        unavailable(app, "cost unavailable - usage unreported");
         return;
     };
-    let cached = usage.cached_tokens.unwrap_or(0);
+    match usage.evidence {
+        UsageEvidence::Measured => {}
+        UsageEvidence::Partial => {
+            unavailable(app, "cost unavailable - usage is a lower bound");
+            return;
+        }
+        UsageEvidence::Unknown => {
+            unavailable(app, "cost unavailable - usage unknown");
+            return;
+        }
+    }
+    let Some(cached) = usage.cached_tokens else {
+        unavailable(
+            app,
+            "cost unavailable - cached-token evidence was not reported",
+        );
+        return;
+    };
+    let Some(at) = at else {
+        unavailable(app, "cost unavailable - receipt timestamp is invalid");
+        return;
+    };
+    let Some(quote) = route.price_at(at) else {
+        unavailable(app, "cost unpriced - no price data");
+        return;
+    };
     let Some(actual) = cost_of(&quote, usage.prompt_tokens, cached, usage.completion_tokens) else {
-        let _ = apply_event(app, AgentEvent::MeterIncomplete);
+        unavailable(app, "cost unpriced - invalid usage");
         return;
     };
     let uncertain = quote.confidence == PriceConfidence::VerifyLive;
@@ -404,12 +469,19 @@ pub(super) fn savings_lines(
     if route.class() == RouteClass::Local {
         return vec![LOCAL_METER_COPY.to_owned()];
     }
-    let Some(quote) = route.price_at(at) else {
-        return Vec::new();
+    match usage.evidence {
+        UsageEvidence::Measured => {}
+        UsageEvidence::Partial => return vec!["cost unavailable - usage is a lower bound".into()],
+        UsageEvidence::Unknown => return vec!["cost unavailable - usage unknown".into()],
+    }
+    let Some(cached) = usage.cached_tokens else {
+        return vec!["cost unavailable - cached-token evidence was not reported".into()];
     };
-    let cached = usage.cached_tokens.unwrap_or(0);
+    let Some(quote) = route.price_at(at) else {
+        return vec!["cost unpriced - no price data".into()];
+    };
     let Some(actual) = cost_of(&quote, usage.prompt_tokens, cached, usage.completion_tokens) else {
-        return vec!["cost unpriced - invalid usage; meter incomplete".into()];
+        return vec!["cost unpriced - invalid usage".into()];
     };
     let mut paid = money_with_gloss(actual, quote.currency, resolver.fx(), at);
     let uncertain = quote.confidence == PriceConfidence::VerifyLive;

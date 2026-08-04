@@ -9,12 +9,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use chrono::Utc;
-use nh_core::agent::{AgentLoop, CompactionEvent};
-use nh_core::receipt::{FailureClass, Outcome, Receipt, ReceiptWriter, RepairStats};
+use nh_core::agent::{AgentLoop, AgentRunError, CompactionEvent};
+use nh_core::receipt::ReceiptWriter;
 use nh_core::session_ledger::{
     new_session_id, RestoredSession, SessionEvent, SessionLedger, Surface,
 };
-use nh_core::wire::{ChatClient, ChatMessage, ChatRequest, ChatResponse, ThinkingEffort, Usage};
+use nh_core::wire::{
+    ChatClient, ChatMessage, ChatRequest, ChatResponse, ThinkingEffort, Usage, UsageEvidence,
+};
 use nh_law::{Law, Verdict};
 use nh_routes::{Profiles, ResolvedRoute};
 use nh_tools::{builtin_tools, Access, Guard, Tool, ToolArgs, ToolCtx, ToolExecution, ToolSpec};
@@ -294,7 +296,7 @@ struct WorkerSession {
     agent: AgentLoop,
     history: Vec<ChatMessage>,
     preceding_cached_tokens: Option<u64>,
-    session_usage: Usage,
+    session_usage: Option<Usage>,
     scrubber: SharedScrubber,
     connect: ConnectFn,
     key_literals: SecretRegistry,
@@ -416,14 +418,10 @@ impl WorkerSession {
                 .is_some_and(|turn| turn.route_id != saved.route_id)
                 .then(|| route_context_message(current_constitution.clone()))
         });
-        let mut session_usage = Usage {
-            cached_tokens: Some(0),
-            ..Usage::default()
-        };
-        let mut usage_incomplete = false;
+        let mut session_usage = None;
         if let Some(saved) = &resume {
-            for usage in saved.turns.iter().filter_map(|turn| turn.usage.as_ref()) {
-                usage_incomplete |= add_usage(&mut session_usage, usage);
+            for turn in &saved.turns {
+                add_usage(&mut session_usage, turn.usage.as_ref());
             }
         }
         let lifecycle = resume.as_ref().map_or_else(
@@ -440,9 +438,6 @@ impl WorkerSession {
             },
         );
         let ledger_failed = ledger.append(&lifecycle).is_err();
-        if usage_incomplete {
-            let _ = events.send(AgentEvent::MeterIncomplete);
-        }
         if ledger_failed {
             let _ = events.send(AgentEvent::Progress(safe_line(&scrubber, PERSISTENCE_OFF)));
         }
@@ -612,7 +607,7 @@ impl WorkerSession {
             if self.stopped() {
                 return false;
             }
-            self.send_failure(&task, &error.to_string(), false);
+            self.send_unreceipted_failure(&error.to_string());
             return true;
         }
 
@@ -628,16 +623,22 @@ impl WorkerSession {
         if result.is_err() {
             self.preceding_cached_tokens = None;
         }
-        let usage = result
-            .as_ref()
-            .ok()
-            .and_then(|(_, receipt)| receipt.usage.clone());
+        let receipt = match &result {
+            Ok((_, receipt)) => Some(receipt),
+            Err(error) => error
+                .downcast_ref::<AgentRunError>()
+                .map(AgentRunError::receipt),
+        };
+        let usage = receipt.and_then(|receipt| receipt.usage.clone());
         let messages = self
             .history
             .get(history_before..)
             .map_or_else(Vec::new, <[ChatMessage]>::to_vec);
         let turn = SessionEvent::Turn {
-            ts_utc: session_timestamp(Utc::now()),
+            ts_utc: receipt.map_or_else(
+                || session_timestamp(Utc::now()),
+                |receipt| receipt.ts_utc.clone(),
+            ),
             route_id: self.route.id().to_owned(),
             messages,
             usage,
@@ -649,27 +650,32 @@ impl WorkerSession {
                 if self.stopped() {
                     return false;
                 }
-                if let Some(usage) = &receipt.usage {
-                    if add_usage(&mut self.session_usage, usage) {
-                        let _ = self.events.send(AgentEvent::MeterIncomplete);
-                    } else {
-                        let _ = self
-                            .events
-                            .send(AgentEvent::Usage(self.session_usage.clone()));
-                    }
-                }
-                let _ = self.events.send(AgentEvent::Answer(answer.clone()));
+                let usage = receipt.usage.clone();
                 let _ = self.events.send(AgentEvent::TaskReceipt(TimelineSummary {
                     route_id: self.route.id().to_owned(),
                     receipt,
-                    answer,
+                    answer: answer.clone(),
                 }));
+                self.observe_usage(usage.as_ref());
+                let _ = self.events.send(AgentEvent::Answer(answer));
             }
             Err(error) => {
                 if self.stopped() {
                     return false;
                 }
-                self.send_failure(&task, &error.to_string(), true);
+                let reason = safe_line(&self.scrubber, &error.to_string());
+                if let Some(run_error) = error.downcast_ref::<AgentRunError>() {
+                    let receipt = run_error.receipt().clone();
+                    let _ = self.events.send(AgentEvent::TaskReceipt(TimelineSummary {
+                        route_id: self.route.id().to_owned(),
+                        receipt,
+                        answer: format!("error: {reason}"),
+                    }));
+                    self.observe_usage(run_error.receipt().usage.as_ref());
+                    let _ = self.events.send(AgentEvent::Failed(reason));
+                } else {
+                    self.send_unreceipted_failure(&reason);
+                }
             }
         }
         true
@@ -691,20 +697,18 @@ impl WorkerSession {
         }
     }
 
-    fn send_failure(&self, task: &str, error: &str, meter_incomplete: bool) {
-        let reason = safe_line(&self.scrubber, error);
-        if meter_incomplete {
-            let _ = self.events.send(AgentEvent::MeterIncomplete);
+    fn observe_usage(&mut self, usage: Option<&Usage>) {
+        add_usage(&mut self.session_usage, usage);
+        if let Some(total) = &self.session_usage {
+            let _ = self.events.send(AgentEvent::Usage(total.clone()));
         }
-        let _ = self.events.send(AgentEvent::Failed(reason.clone()));
-        let _ = self
-            .events
-            .send(AgentEvent::TaskReceipt(failed_timeline_summary(
-                self.route.id(),
-                self.route.model_id(),
-                task,
-                &reason,
-            )));
+    }
+
+    fn send_unreceipted_failure(&self, error: &str) {
+        let reason = safe_line(&self.scrubber, error);
+        let _ = self.events.send(AgentEvent::Failed(format!(
+            "{reason} - receipt unavailable"
+        )));
     }
 }
 
@@ -752,28 +756,34 @@ impl ChatClient for NotConnected {
     }
 }
 
-pub(super) fn add_usage(total: &mut Usage, usage: &Usage) -> bool {
-    let Some(prompt_tokens) = total.prompt_tokens.checked_add(usage.prompt_tokens) else {
-        return true;
-    };
-    let Some(completion_tokens) = total.completion_tokens.checked_add(usage.completion_tokens)
-    else {
-        return true;
-    };
-    let cached_tokens = match (total.cached_tokens, usage.cached_tokens) {
-        (Some(total_cached), Some(cached)) => {
-            let Some(total_cached) = total_cached.checked_add(cached) else {
-                return true;
-            };
-            Some(total_cached)
+pub(super) fn add_usage(total: &mut Option<Usage>, usage: Option<&Usage>) -> bool {
+    match (total.as_mut(), usage) {
+        (Some(total), Some(usage)) => {
+            if total.checked_add_assign(usage) {
+                false
+            } else {
+                total.mark_unreported_component();
+                true
+            }
         }
-        _ => None,
-    };
-
-    total.prompt_tokens = prompt_tokens;
-    total.completion_tokens = completion_tokens;
-    total.cached_tokens = cached_tokens;
-    false
+        (Some(total), None) => {
+            total.mark_unreported_component();
+            false
+        }
+        (None, Some(usage)) => {
+            *total = Some(usage.clone());
+            false
+        }
+        (None, None) => {
+            *total = Some(Usage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                cached_tokens: None,
+                evidence: UsageEvidence::Unknown,
+            });
+            false
+        }
+    }
 }
 
 fn route_context_message(content: String) -> ChatMessage {
@@ -789,33 +799,6 @@ fn route_context_message(content: String) -> ChatMessage {
 
 fn session_timestamp(at: chrono::DateTime<Utc>) -> String {
     at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-}
-
-fn failed_timeline_summary(
-    route_id: &str,
-    model_id: &str,
-    task: &str,
-    reason: &str,
-) -> TimelineSummary {
-    TimelineSummary {
-        route_id: route_id.to_owned(),
-        receipt: Receipt {
-            ts_utc: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            model_id: model_id.to_owned(),
-            task: task.to_owned(),
-            turns: 0,
-            tool_calls: 0,
-            outcome: Outcome::Fail,
-            failure_class: Some(FailureClass::Verification),
-            usage: None,
-            cache_hit_pct: None,
-            repairs: RepairStats::default(),
-            retries: Default::default(),
-            compaction: Default::default(),
-            effective_profile: None,
-        },
-        answer: format!("error: {reason}"),
-    }
 }
 
 fn verdict_to_guard(verdict: Verdict) -> Guard {

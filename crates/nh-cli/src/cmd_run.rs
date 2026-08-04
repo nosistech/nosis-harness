@@ -6,7 +6,9 @@ mod config;
 mod meter;
 
 pub(crate) use config::{find_catalog, load_and_vet_mcp_configs};
-pub(crate) use meter::{compaction_meter_line, progress_meter_line, turn_cost_line};
+pub(crate) use meter::{
+    compaction_meter_line, progress_meter_line, turn_cost_line, usage_token_summary,
+};
 
 #[cfg(test)]
 use config::{
@@ -23,12 +25,12 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::sync::Arc;
 
 use chrono::Utc;
-use nh_core::agent::{validate_task, AgentLoop};
+use nh_core::agent::{validate_task, AgentLoop, AgentRunError};
 use nh_core::credential;
 use nh_core::receipt::{Outcome, ReceiptWriter};
-#[cfg(test)]
-use nh_core::wire::Usage;
 use nh_core::wire::{ensure_image_capable, resolve_effort, ContentPart, ThinkingEffort};
+#[cfg(test)]
+use nh_core::wire::{Usage, UsageEvidence};
 use nh_law::{Autonomy, LoadOptions};
 use nh_routes::{RouteClass, RouteResolver, ThinkingDialect, ThinkingPosture, Wire};
 use nh_tools::{builtin_tools, load_image, Access, ToolCtx, MAX_IMAGES_PER_MESSAGE};
@@ -213,8 +215,24 @@ pub fn run(
         agent.run_with_history_and_parts(&mut history, task, image_parts)
     };
     let ended = Utc::now();
-    let (answer, receipt) =
-        result.map_err(|e| anyhow::anyhow!("{}", safe_line(&scrubber, &e.to_string())))?;
+    let (answer, receipt) = match result {
+        Ok(completed) => completed,
+        Err(error) => {
+            if let Some(meter_lines) =
+                failed_run_meter_lines(&error, &resolver, &route, RunTiming { started, ended })
+            {
+                let stderr = io::stderr();
+                let mut stderr = stderr.lock();
+                for line in meter_lines {
+                    writeln!(stderr, "{}", safe_line(&scrubber, &line))?;
+                }
+            }
+            return Err(anyhow::anyhow!(
+                "{}",
+                safe_line(&scrubber, &error.to_string())
+            ));
+        }
+    };
 
     let meter_lines = run_meter_lines(
         &resolver,
@@ -234,6 +252,24 @@ pub fn run(
         anyhow::bail!("{}", max_turns_timeout_message(max_turns));
     }
     Ok(())
+}
+
+fn failed_run_meter_lines(
+    error: &anyhow::Error,
+    resolver: &RouteResolver,
+    route: &nh_routes::ResolvedRoute,
+    timing: RunTiming,
+) -> Option<Vec<String>> {
+    let receipt = error.downcast_ref::<AgentRunError>()?.receipt();
+    Some(run_meter_lines(
+        resolver,
+        route,
+        receipt.usage.as_ref(),
+        &receipt.compaction,
+        receipt.turns,
+        receipt.tool_calls,
+        timing,
+    ))
 }
 
 pub(crate) fn validate_image_count(count: usize) -> anyhow::Result<()> {

@@ -407,7 +407,7 @@ fn factory_anthropic_wire_posts_v1_messages_with_required_headers() {
     );
     let resp = client.complete(&request).unwrap();
     assert_eq!(resp.message.content.as_deref(), Some("hello"));
-    assert_eq!(resp.finish_reason, "end_turn");
+    assert_eq!(resp.finish_reason, nh_core::wire::FinishReason::Stop);
     let usage = resp.usage.unwrap();
     assert_eq!(usage.prompt_tokens, 9);
     assert_eq!(usage.completion_tokens, 4);

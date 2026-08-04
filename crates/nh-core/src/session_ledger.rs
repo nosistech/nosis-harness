@@ -436,6 +436,7 @@ mod tests {
                     prompt_tokens: 12,
                     completion_tokens: 4,
                     cached_tokens: Some(8),
+                    evidence: crate::wire::UsageEvidence::Measured,
                 }),
             })
             .unwrap();
@@ -447,6 +448,26 @@ mod tests {
             original_bytes
         );
         assert!(!restored.dropped_torn_tail);
+    }
+
+    #[test]
+    fn legacy_turn_usage_bytes_upgrade_to_unknown_evidence() {
+        let old = br#"{"event":"turn","ts_utc":"2026-07-31T14:06:00Z","route_id":"test-route","messages":[],"usage":{"prompt_tokens":12,"completion_tokens":4,"cached_tokens":3}}"#;
+
+        let parsed: SessionEvent = serde_json::from_slice(old).unwrap();
+        let SessionEvent::Turn {
+            usage: Some(usage), ..
+        } = &parsed
+        else {
+            panic!("legacy turn must retain usage");
+        };
+        assert_eq!(usage.evidence, crate::wire::UsageEvidence::Unknown);
+
+        let upgraded = serde_json::to_vec(&parsed).unwrap();
+        assert_eq!(
+            upgraded,
+            br#"{"event":"turn","ts_utc":"2026-07-31T14:06:00Z","route_id":"test-route","messages":[],"usage":{"prompt_tokens":12,"completion_tokens":4,"cached_tokens":3,"evidence":"unknown"}}"#
+        );
     }
 
     #[test]

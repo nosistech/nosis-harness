@@ -218,6 +218,7 @@ impl ChatClient for EchoClient {
                 prompt_tokens: 1,
                 completion_tokens: 1,
                 cached_tokens: None,
+                evidence: nh_core::wire::UsageEvidence::Measured,
             }),
             retries: Default::default(),
         })

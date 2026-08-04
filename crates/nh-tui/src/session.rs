@@ -37,9 +37,6 @@ fn validate_resume(
         );
     }
     for turn in &restored.turns {
-        if turn.usage.is_none() {
-            continue;
-        }
         resolver.resolve(&turn.route_id).map_err(|_| {
             anyhow::anyhow!(
                 "session route {} is no longer available - restore it in catalog.toml, then retry",
@@ -53,23 +50,17 @@ fn validate_resume(
     Ok(())
 }
 
-fn restore_app(
+pub(super) fn restore_app(
     app: &mut App,
     restored: &RestoredSession,
     law_constitution: &str,
 ) -> anyhow::Result<()> {
     app.resumed = true;
     for turn in &restored.turns {
-        let Some(usage) = &turn.usage else {
-            continue;
-        };
-        if crate::worker::add_usage(&mut app.usage, usage) {
-            app.has_failed_turn = true;
-            continue;
-        }
+        crate::worker::add_usage(&mut app.usage, turn.usage.as_ref());
         let route = app.resolver.resolve(&turn.route_id)?;
         let at = DateTime::parse_from_rfc3339(&turn.ts_utc)?.with_timezone(&Utc);
-        record_restored_turn_cost(app, &route, usage, at);
+        record_restored_turn_cost(app, &route, turn.usage.as_ref(), at);
     }
     app.push_line(
         &format!(

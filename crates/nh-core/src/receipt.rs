@@ -309,11 +309,29 @@ mod tests {
             prompt_tokens: 20,
             completion_tokens: 2,
             cached_tokens: Some(0),
+            evidence: crate::wire::UsageEvidence::Measured,
         });
         measured.cache_hit_pct = Some(0.0);
         let measured = serde_json::to_value(measured).unwrap();
         assert_eq!(measured["cache_hit_pct"], 0.0);
         assert_eq!(measured["usage"]["cached_tokens"], 0);
+    }
+
+    #[test]
+    fn legacy_usage_bytes_upgrade_to_unknown_evidence() {
+        let old = br#"{"ts_utc":"2026-07-22T00:00:00Z","model_id":"test-model","task":"legacy","turns":1,"tool_calls":0,"outcome":"pass","usage":{"prompt_tokens":12,"completion_tokens":4,"cached_tokens":3}}"#;
+
+        let parsed: Receipt = serde_json::from_slice(old).unwrap();
+        assert_eq!(
+            parsed.usage.as_ref().unwrap().evidence,
+            crate::wire::UsageEvidence::Unknown
+        );
+
+        let upgraded = serde_json::to_vec(&parsed).unwrap();
+        assert_eq!(
+            upgraded,
+            br#"{"ts_utc":"2026-07-22T00:00:00Z","model_id":"test-model","task":"legacy","turns":1,"tool_calls":0,"outcome":"pass","usage":{"prompt_tokens":12,"completion_tokens":4,"cached_tokens":3,"evidence":"unknown"}}"#
+        );
     }
 
     #[test]

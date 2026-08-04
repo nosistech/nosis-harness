@@ -8,8 +8,8 @@ pub use context::{effective_context, PrefixSeal};
 
 use crate::receipt::{CompactionStats, FailureClass, Outcome, Receipt, ReceiptWriter, RepairStats};
 use crate::wire::{
-    ChatClient, ChatMessage, ChatRequest, ContentPart, RetryExhausted, RetryStats, ThinkingEffort,
-    ToolCallReq, Usage,
+    ChatClient, ChatMessage, ChatRequest, ContentPart, FinishReason, RetryExhausted, RetryStats,
+    ThinkingEffort, ToolCallReq, Usage,
 };
 use context::{
     compact_history, compaction_input_tokens, context_percentage, estimate_request_tokens,
@@ -34,11 +34,40 @@ pub fn validate_task(task: &str) -> anyhow::Result<()> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FinishKind {
     Normal,
+    ToolUse,
     Truncated,
     Context,
     Filtered,
     Interrupted,
+    Missing,
     Unknown,
+}
+
+/// Provider-call failure paired with the real receipt already attempted by
+/// core. Presentation layers may project this receipt; they must never invent
+/// a replacement.
+#[derive(Debug)]
+pub struct AgentRunError {
+    receipt: Receipt,
+    source: anyhow::Error,
+}
+
+impl AgentRunError {
+    pub fn receipt(&self) -> &Receipt {
+        &self.receipt
+    }
+}
+
+impl std::fmt::Display for AgentRunError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.source, formatter)
+    }
+}
+
+impl std::error::Error for AgentRunError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
 }
 
 struct ToolRun {
@@ -70,39 +99,47 @@ struct ReceiptFields {
     compaction: CompactionStats,
 }
 
-fn classify_finish_reason(raw: &str) -> FinishKind {
-    match raw.trim() {
-        "" | "stop" | "end_turn" | "stop_sequence" => FinishKind::Normal,
-        "length" | "max_tokens" | "model_length" => FinishKind::Truncated,
-        "model_context_window_exceeded" => FinishKind::Context,
-        "content_filter" | "sensitive" => FinishKind::Filtered,
-        "network_error" | "insufficient_system_resource" => FinishKind::Interrupted,
-        _ => FinishKind::Unknown,
+fn classify_finish_reason(reason: &FinishReason) -> FinishKind {
+    match reason {
+        FinishReason::Stop => FinishKind::Normal,
+        FinishReason::ToolUse => FinishKind::ToolUse,
+        FinishReason::Truncated => FinishKind::Truncated,
+        FinishReason::ContextWindow => FinishKind::Context,
+        FinishReason::Filtered => FinishKind::Filtered,
+        FinishReason::Interrupted => FinishKind::Interrupted,
+        FinishReason::Missing => FinishKind::Missing,
+        FinishReason::Unknown(_) => FinishKind::Unknown,
     }
 }
 
 fn add_usage_checked(total: &mut Usage, usage: &Usage) -> bool {
-    let Some(prompt_tokens) = total.prompt_tokens.checked_add(usage.prompt_tokens) else {
-        return false;
-    };
-    let Some(completion_tokens) = total.completion_tokens.checked_add(usage.completion_tokens)
-    else {
-        return false;
-    };
-    let cached_tokens = match (total.cached_tokens, usage.cached_tokens) {
-        (Some(total_cached), Some(cached)) => {
-            let Some(total_cached) = total_cached.checked_add(cached) else {
-                return false;
-            };
-            Some(total_cached)
+    total.checked_add_assign(usage)
+}
+
+fn observe_usage_checked(
+    total: &mut Option<Usage>,
+    saw_unreported: &mut bool,
+    usage: Option<&Usage>,
+) -> bool {
+    let Some(usage) = usage else {
+        *saw_unreported = true;
+        if let Some(total) = total {
+            total.mark_unreported_component();
         }
-        _ => None,
+        return true;
     };
 
-    total.prompt_tokens = prompt_tokens;
-    total.completion_tokens = completion_tokens;
-    total.cached_tokens = cached_tokens;
-    true
+    let mut usage = usage.clone();
+    if *saw_unreported {
+        usage.mark_unreported_component();
+    }
+    match total {
+        Some(total) => add_usage_checked(total, &usage),
+        None => {
+            *total = Some(usage);
+            true
+        }
+    }
 }
 
 fn add_retry_stats(total: &mut RetryStats, retries: RetryStats) {
@@ -425,11 +462,8 @@ impl AgentLoop {
         let mut turns: u32 = 0;
         let mut tool_calls: u32 = 0;
         let mut repairs = RepairStats::default();
-        let mut usage_total = Usage {
-            cached_tokens: Some(0),
-            ..Usage::default()
-        };
-        let mut saw_usage = false;
+        let mut usage_total: Option<Usage> = None;
+        let mut saw_unreported_usage = false;
         let mut usage_overflowed = false;
         let mut latest_prompt_tokens = None;
         let mut retry_total = RetryStats::default();
@@ -481,14 +515,21 @@ impl AgentLoop {
                 Ok(r) => r,
                 Err(e) => {
                     *latest_cached_tokens = None;
-                    if let Some(exhausted) = e.downcast_ref::<RetryExhausted>() {
+                    let failure_usage = if let Some(exhausted) = e.downcast_ref::<RetryExhausted>()
+                    {
                         add_retry_stats(&mut retry_total, exhausted.stats);
-                        if let Some(usage) = &exhausted.usage {
-                            saw_usage = true;
-                            if !usage_overflowed && !add_usage_checked(&mut usage_total, usage) {
-                                usage_overflowed = true;
-                            }
-                        }
+                        exhausted.usage.as_ref()
+                    } else {
+                        None
+                    };
+                    if !usage_overflowed
+                        && !observe_usage_checked(
+                            &mut usage_total,
+                            &mut saw_unreported_usage,
+                            failure_usage,
+                        )
+                    {
+                        usage_overflowed = true;
                     }
                     self.report_prefix_drift(&prefix_seal, history, &mut prefix_drift_reported);
                     let mut receipt = self.make_receipt(
@@ -498,14 +539,18 @@ impl AgentLoop {
                             tool_calls,
                             outcome: Outcome::Fail,
                             failure_class: Some(FailureClass::Verification),
-                            usage: (!usage_overflowed && saw_usage).then(|| usage_total.clone()),
+                            usage: if usage_overflowed {
+                                None
+                            } else {
+                                usage_total.clone()
+                            },
                             repairs,
                             retries: retry_total,
                             compaction: compaction_total,
                         },
                     );
                     self.append_receipt(&mut receipt);
-                    return Err(e);
+                    return Err(anyhow::Error::new(AgentRunError { receipt, source: e }));
                 }
             };
             add_retry_stats(&mut retry_total, resp.retries);
@@ -516,37 +561,66 @@ impl AgentLoop {
                     resp.retries.rate_limited
                 ));
             }
-            latest_prompt_tokens = resp.usage.as_ref().map(|u| u.prompt_tokens);
+            latest_prompt_tokens = if resp.retries.retries == 0 {
+                resp.usage
+                    .as_ref()
+                    .filter(|usage| usage.evidence.is_measured())
+                    .map(|usage| usage.prompt_tokens)
+            } else {
+                None
+            };
             // Wire clients fold any usage salvaged from failed retry attempts
             // into the successful response. That aggregate remains correct for
             // metered totals, but it is not an exact final-call cache measure.
             *latest_cached_tokens = if resp.retries.retries == 0 {
-                resp.usage.as_ref().and_then(|u| u.cached_tokens)
+                resp.usage
+                    .as_ref()
+                    .filter(|usage| usage.evidence.is_measured())
+                    .and_then(|usage| usage.cached_tokens)
             } else {
                 None
             };
-            if let Some(u) = &resp.usage {
-                saw_usage = true;
-                if !usage_overflowed && !add_usage_checked(&mut usage_total, u) {
-                    usage_overflowed = true;
-                }
+            if !usage_overflowed
+                && !observe_usage_checked(
+                    &mut usage_total,
+                    &mut saw_unreported_usage,
+                    resp.usage.as_ref(),
+                )
+            {
+                usage_overflowed = true;
             }
             push_message(history, &mut appended, resp.message.clone());
             let calls = resp.message.tool_calls.clone().unwrap_or_default();
-            if calls.is_empty() {
+            let finish_kind = classify_finish_reason(&resp.finish_reason);
+            let tool_use_confirmed = matches!(finish_kind, FinishKind::ToolUse);
+            if calls.is_empty() || !tool_use_confirmed {
                 self.report_prefix_drift(&prefix_seal, history, &mut prefix_drift_reported);
                 let text = resp.message.content.clone().unwrap_or_default();
-                let finish_reason = resp.finish_reason.trim();
-                let (outcome, failure_class) = match classify_finish_reason(finish_reason) {
-                    FinishKind::Normal => (Outcome::Pass, None),
+                if !calls.is_empty() {
+                    self.emit(
+                        "finish reason did not confirm tool use - tool calls were not executed",
+                    );
+                }
+                let (outcome, failure_class) = match finish_kind {
+                    FinishKind::Normal if calls.is_empty() => (Outcome::Pass, None),
+                    FinishKind::Normal | FinishKind::ToolUse => {
+                        if calls.is_empty() {
+                            self.emit(
+                                "tool-use finish reason without tool calls - treated as partial",
+                            );
+                        }
+                        (Outcome::Partial, Some(FailureClass::Constraint))
+                    }
                     FinishKind::Truncated => (Outcome::Partial, Some(FailureClass::Constraint)),
                     FinishKind::Context => (Outcome::Partial, Some(FailureClass::Context)),
                     FinishKind::Filtered => (Outcome::Fail, Some(FailureClass::Filtered)),
                     FinishKind::Interrupted => (Outcome::Partial, Some(FailureClass::Constraint)),
+                    FinishKind::Missing => {
+                        self.emit("finish reason missing - treated as partial");
+                        (Outcome::Partial, Some(FailureClass::Constraint))
+                    }
                     FinishKind::Unknown => {
-                        self.emit(&format!(
-                            "unrecognized finish reason '{finish_reason}' - treated as partial"
-                        ));
+                        self.emit("unrecognized finish reason - treated as partial");
                         (Outcome::Partial, Some(FailureClass::Constraint))
                     }
                 };
@@ -557,7 +631,11 @@ impl AgentLoop {
                         tool_calls,
                         outcome,
                         failure_class,
-                        usage: (!usage_overflowed && saw_usage).then(|| usage_total.clone()),
+                        usage: if usage_overflowed {
+                            None
+                        } else {
+                            usage_total.clone()
+                        },
                         repairs,
                         retries: retry_total,
                         compaction: compaction_total,
@@ -621,7 +699,11 @@ impl AgentLoop {
                 tool_calls,
                 outcome: Outcome::Timeout,
                 failure_class: Some(FailureClass::Constraint),
-                usage: (!usage_overflowed && saw_usage).then(|| usage_total.clone()),
+                usage: if usage_overflowed {
+                    None
+                } else {
+                    usage_total.clone()
+                },
                 repairs,
                 retries: retry_total,
                 compaction: compaction_total,
@@ -729,6 +811,7 @@ impl AgentLoop {
         } = fields;
         let cache_hit_pct = usage
             .as_ref()
+            .filter(|usage| usage.evidence.is_measured())
             .and_then(|usage| crate::wire::cache_hit_pct(usage.prompt_tokens, usage.cached_tokens));
         Receipt {
             ts_utc: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),

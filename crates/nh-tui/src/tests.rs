@@ -9,6 +9,7 @@ use nh_core::agent::{CompactionEvent, MAX_TASK_BYTES};
 use nh_core::receipt::CompactionStats;
 use nh_core::session_ledger::{list_sessions, read_session};
 use nh_core::wire::{ChatRequest, ChatResponse};
+use nh_routes::Currency;
 use ratatui::{
     backend::TestBackend,
     layout::Rect,
@@ -222,7 +223,11 @@ fn test_app(budget: Option<u64>) -> App {
 }
 
 fn meter_app() -> App {
-    let resolver = RouteResolver::from_toml(METER_CATALOG).unwrap();
+    meter_app_from(METER_CATALOG)
+}
+
+fn meter_app_from(catalog: &str) -> App {
+    let resolver = RouteResolver::from_toml(catalog).unwrap();
     let route = resolver.resolve("meter-route").unwrap();
     App::new(
         resolver,
@@ -372,6 +377,7 @@ fn timeline_event_on(route_id: &str, task: &str, answer: &str) -> AgentEvent {
                 prompt_tokens: 10,
                 completion_tokens: 2,
                 cached_tokens: Some(4),
+                evidence: UsageEvidence::Measured,
             }),
         ),
         answer: answer.into(),
@@ -778,15 +784,60 @@ fn failed_event_renders_one_friendly_line_without_a_trace() {
 }
 
 #[test]
-fn failed_billed_turn_marks_the_session_meter_incomplete() {
+fn unknown_billed_turn_refuses_session_money_and_token_numbers() {
     let mut app = meter_app();
-    apply_event(&mut app, AgentEvent::MeterIncomplete);
+    app.budget = Some(100);
+    let usage = Usage {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        cached_tokens: None,
+        evidence: UsageEvidence::Unknown,
+    };
+    apply_event(&mut app, AgentEvent::Usage(usage.clone()));
+    apply_event(
+        &mut app,
+        AgentEvent::TaskReceipt(TimelineSummary {
+            route_id: "meter-route".into(),
+            receipt: receipt("unmetered", Outcome::Fail, Some(usage)),
+            answer: "error".into(),
+        }),
+    );
 
     let money = app.session_money(fixed_at());
-    assert!(
-        money.contains("? incomplete - failed turn usage not reported"),
-        "got: {money}"
+    assert_eq!(money, "unavailable - meter incomplete");
+    let hud = app.hud_line(fixed_at());
+    assert!(hud.contains("tokens unavailable - usage unknown"));
+    assert!(hud.contains("budget usage unavailable/100"));
+    assert!(!hud.contains("in 0"), "got: {hud}");
+    assert_eq!(timeline_row(&app.timeline[0]), "#1  fail  usage unknown");
+    assert_eq!(
+        timeline_detail_lines(&app.timeline[0])[8],
+        "tokens: unavailable - usage unknown"
     );
+}
+
+#[test]
+fn partial_timeline_usage_is_a_lower_bound_without_a_cache_claim() {
+    let entry = TimelineEntry::from_receipt(
+        1,
+        receipt(
+            "partial meter",
+            Outcome::Pass,
+            Some(Usage {
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                cached_tokens: Some(4),
+                evidence: UsageEvidence::Partial,
+            }),
+        ),
+        "done".into(),
+        Default::default(),
+    );
+
+    assert_eq!(timeline_row(&entry), "#1  pass  ~10/~2 lower bound");
+    let detail = &timeline_detail_lines(&entry)[8];
+    assert_eq!(detail, "tokens: ~10 in / ~2 out - lower bound");
+    assert!(!detail.contains("cache"));
 }
 
 #[test]
@@ -800,6 +851,7 @@ fn timeline_entry_projects_receipt_outcome_and_tokens() {
                 prompt_tokens: 120,
                 completion_tokens: 30,
                 cached_tokens: Some(50),
+                evidence: UsageEvidence::Measured,
             }),
         ),
         "partial answer".into(),
@@ -808,7 +860,7 @@ fn timeline_entry_projects_receipt_outcome_and_tokens() {
 
     assert_eq!(entry.turn, 7);
     assert_eq!(entry.outcome, Outcome::Partial);
-    assert_eq!(entry.tokens(), (120, 30, Some(50)));
+    assert_eq!(entry.tokens(), Some((120, 30, Some(50))));
     assert_eq!(entry.turns, 3);
     assert_eq!(entry.tool_calls, 2);
     assert_eq!(entry.answer, "partial answer");
@@ -1521,7 +1573,7 @@ fn code_key(code: KeyCode) -> KeyEvent {
 fn cost_hud_omits_cache_before_usage_and_shows_it_after() {
     let mut app = test_app(None);
     let before = app.hud_line(Utc::now());
-    assert!(before.contains("session - · in 0 · out 0"), "got: {before}");
+    assert!(before.contains("session - · no usage yet"), "got: {before}");
     assert!(before.contains("no price data"), "got: {before}");
     assert!(!before.contains("| cache "), "got: {before}");
     assert!(!before.contains("· cache "), "got: {before}");
@@ -1531,6 +1583,7 @@ fn cost_hud_omits_cache_before_usage_and_shows_it_after() {
             prompt_tokens: 100,
             completion_tokens: 20,
             cached_tokens: Some(25),
+            evidence: UsageEvidence::Measured,
         }),
     );
     let after = app.hud_line(Utc::now());
@@ -1541,17 +1594,18 @@ fn cost_hud_omits_cache_before_usage_and_shows_it_after() {
 #[test]
 fn cost_hud_and_timeline_distinguish_absent_cache_from_measured_zero() {
     let mut app = test_app(None);
-    app.usage = Usage {
+    app.usage = Some(Usage {
         prompt_tokens: 20,
         completion_tokens: 2,
         cached_tokens: None,
-    };
+        evidence: UsageEvidence::Measured,
+    });
     let absent_hud = app.hud_line(Utc::now());
     assert!(!absent_hud.contains("cache 0%"), "got: {absent_hud}");
 
     let absent_entry = TimelineEntry::from_receipt(
         1,
-        receipt("absent", Outcome::Pass, Some(app.usage.clone())),
+        receipt("absent", Outcome::Pass, app.usage.clone()),
         "done".into(),
         Default::default(),
     );
@@ -1561,12 +1615,12 @@ fn cost_hud_and_timeline_distinguish_absent_cache_from_measured_zero() {
         "tokens: 20 in / 2 out"
     );
 
-    app.usage.cached_tokens = Some(0);
+    app.usage.as_mut().unwrap().cached_tokens = Some(0);
     let measured_hud = app.hud_line(Utc::now());
     assert!(measured_hud.contains("cache 0%"), "got: {measured_hud}");
     let measured_entry = TimelineEntry::from_receipt(
         1,
-        receipt("zero", Outcome::Pass, Some(app.usage.clone())),
+        receipt("zero", Outcome::Pass, app.usage.clone()),
         "done".into(),
         Default::default(),
     );
@@ -1578,14 +1632,43 @@ fn cost_hud_and_timeline_distinguish_absent_cache_from_measured_zero() {
 }
 
 #[test]
+fn measured_usage_without_cached_counter_refuses_cost_and_savings() {
+    let mut app = meter_app();
+    let usage = Usage {
+        prompt_tokens: 20,
+        completion_tokens: 2,
+        cached_tokens: None,
+        evidence: UsageEvidence::Measured,
+    };
+
+    record_turn_cost(&mut app, &usage, fixed_at());
+
+    assert!(app.session_cost.is_empty());
+    assert!(app.session_cost_incomplete);
+    assert_eq!(
+        app.session_money(fixed_at()),
+        "unavailable - meter incomplete"
+    );
+    assert_eq!(
+        savings_lines(&app.resolver, &app.route, &usage, fixed_at()),
+        vec!["cost unavailable - cached-token evidence was not reported"]
+    );
+    assert!(!app
+        .transcript
+        .iter()
+        .any(|line| line.text.contains("saved")));
+}
+
+#[test]
 fn money_hud_uses_accumulated_turn_cost_in_native_currency() {
     let mut app = meter_app();
     let usage = Usage {
         prompt_tokens: 100_000,
         completion_tokens: 50_000,
         cached_tokens: Some(90_000),
+        evidence: UsageEvidence::Measured,
     };
-    app.usage = usage.clone();
+    app.usage = Some(usage.clone());
     record_turn_cost(&mut app, &usage, fixed_at());
 
     let hud = app.hud_line(fixed_at());
@@ -1603,6 +1686,7 @@ fn savings_line_renders_counterfactuals_and_omits_cold_claim() {
         prompt_tokens: 100_000,
         completion_tokens: 50_000,
         cached_tokens: Some(90_000),
+        evidence: UsageEvidence::Measured,
     };
     assert_eq!(
         savings_lines(&app.resolver, &app.route, &usage, fixed_at()),
@@ -1629,6 +1713,7 @@ fn local_hud_and_turn_meter_do_not_present_hardware_cost_as_zero() {
         prompt_tokens: 100,
         completion_tokens: 20,
         cached_tokens: None,
+        evidence: UsageEvidence::Measured,
     };
 
     assert!(
@@ -1656,6 +1741,7 @@ fn compaction_without_exact_preceding_cache_refuses_money() {
         prompt_tokens: 100_000,
         completion_tokens: 10_000,
         cached_tokens: Some(90_000),
+        evidence: UsageEvidence::Measured,
     };
     let mut stats = CompactionStats::default();
     stats.record_at(8, 40_000, None, fixed_at().timestamp());
@@ -1752,6 +1838,7 @@ fn compaction_prices_cache_hit_saving_and_reports_negative_net() {
             prompt_tokens: 100_000,
             completion_tokens: 0,
             cached_tokens: Some(0),
+            evidence: UsageEvidence::Measured,
         }),
     );
     compacted.ts_utc = "2026-07-14T02:00:00Z".into();
@@ -1800,6 +1887,7 @@ fn delayed_receipt_uses_its_origin_route_without_restoring_a_stale_hud() {
             prompt_tokens: 100_000,
             completion_tokens: 0,
             cached_tokens: Some(0),
+            evidence: UsageEvidence::Measured,
         }),
     );
     compacted.compaction = Box::new(stats);
@@ -1857,6 +1945,7 @@ fn compaction_estimates_do_not_change_usage_or_session_cost() {
         prompt_tokens: 100_000,
         completion_tokens: 50_000,
         cached_tokens: Some(90_000),
+        evidence: UsageEvidence::Measured,
     };
     let mut plain = meter_app();
     let mut compacted = meter_app();
@@ -1886,9 +1975,7 @@ fn compaction_estimates_do_not_change_usage_or_session_cost() {
         }),
     );
 
-    assert_eq!(compacted.usage.prompt_tokens, usage.prompt_tokens);
-    assert_eq!(compacted.usage.completion_tokens, usage.completion_tokens);
-    assert_eq!(compacted.usage.cached_tokens, usage.cached_tokens);
+    assert_eq!(compacted.usage.as_ref().unwrap(), &usage);
     assert_eq!(
         compacted.session_money(fixed_at()),
         plain.session_money(fixed_at())
@@ -1907,6 +1994,7 @@ fn default_compaction_keeps_timeline_and_hud_copy_exact() {
         prompt_tokens: 100_000,
         completion_tokens: 50_000,
         cached_tokens: Some(90_000),
+        evidence: UsageEvidence::Measured,
     };
     apply_event(&mut app, AgentEvent::Usage(usage.clone()));
     apply_event(
@@ -1988,6 +2076,45 @@ fn why_command_uses_live_resolver_trace() {
         .transcript
         .iter()
         .any(|line| line.text.starts_with("skipped ")));
+}
+
+#[test]
+fn why_and_model_picker_refuse_to_price_partial_prior_usage() {
+    let mut app = picker_app();
+    apply_event(
+        &mut app,
+        AgentEvent::TaskReceipt(TimelineSummary {
+            route_id: "a-cheap".into(),
+            receipt: receipt(
+                "partial",
+                Outcome::Pass,
+                Some(Usage {
+                    prompt_tokens: 100,
+                    completion_tokens: 20,
+                    cached_tokens: Some(25),
+                    evidence: UsageEvidence::Partial,
+                }),
+            ),
+            answer: "done".into(),
+        }),
+    );
+
+    assert_eq!(explain_why(&mut app), UiAction::None);
+    assert!(app
+        .transcript
+        .iter()
+        .any(|line| line.text.contains("prior usage is a lower bound")));
+    app.input = "/model".into();
+    assert_eq!(execute_command_menu(&mut app), UiAction::None);
+    let Overlay::Picker { rows, .. } = &app.overlay else {
+        panic!("/model must open the picker");
+    };
+    assert!(rows
+        .iter()
+        .filter(|row| row.value != "f-local")
+        .all(|row| row
+            .label
+            .contains("est unavailable: prior usage is a lower bound")));
 }
 
 #[test]
@@ -2099,6 +2226,7 @@ fn budget_reached_blocks_and_refuses_another_dispatch() {
                 prompt_tokens: 80,
                 completion_tokens: 20,
                 cached_tokens: None,
+                evidence: UsageEvidence::Measured,
             }),
         ),
         &Status::Blocked(BUDGET_REASON.into())
@@ -2270,11 +2398,38 @@ struct RecordingClient {
 
 struct MeasuredCacheClient;
 
+struct MeterGapClient {
+    calls: Arc<AtomicU64>,
+}
+
 struct FailingClient;
 
 impl ChatClient for FailingClient {
     fn complete(&self, _request: &ChatRequest) -> anyhow::Result<ChatResponse> {
         anyhow::bail!("provider failed after request")
+    }
+}
+
+impl ChatClient for MeterGapClient {
+    fn complete(&self, request: &ChatRequest) -> anyhow::Result<ChatResponse> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let mut message = request.messages.last().cloned().expect("user message");
+        message.role = "assistant".into();
+        message.content = Some("ok".into());
+        message.tool_calls = None;
+        message.tool_call_id = None;
+        message.reasoning_content = None;
+        Ok(ChatResponse {
+            message,
+            finish_reason: "stop".into(),
+            usage: (call == 0).then_some(Usage {
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                cached_tokens: Some(4),
+                evidence: UsageEvidence::Measured,
+            }),
+            retries: Default::default(),
+        })
     }
 }
 
@@ -2309,6 +2464,7 @@ impl ChatClient for RecordingClient {
                 prompt_tokens: 10,
                 completion_tokens: 2,
                 cached_tokens: Some(4),
+                evidence: UsageEvidence::Measured,
             }),
             retries: Default::default(),
         })
@@ -2330,6 +2486,7 @@ impl ChatClient for MeasuredCacheClient {
                 prompt_tokens: 900,
                 completion_tokens: 2,
                 cached_tokens: Some(600),
+                evidence: UsageEvidence::Measured,
             }),
             retries: Default::default(),
         })
@@ -2355,6 +2512,7 @@ impl ChatClient for MockClient {
                 prompt_tokens: 10,
                 completion_tokens: 2,
                 cached_tokens: Some(4),
+                evidence: UsageEvidence::Measured,
             }),
             retries: Default::default(),
         })
@@ -2405,7 +2563,7 @@ fn detached_worker_shutdown_is_reported_as_unclean() {
 }
 
 #[test]
-fn worker_error_marks_the_rendered_session_meter_incomplete() {
+fn worker_error_projects_cores_real_receipt_and_unknown_meter() {
     let root = temp_dir();
     let connect: ConnectFn = Box::new(|_, _| {
         Ok((
@@ -2432,23 +2590,185 @@ fn worker_error_marks_the_rendered_session_meter_incomplete() {
         .send(WorkerCommand::Task("failing task".into()))
         .unwrap();
     let mut app = meter_app();
+    let mut projected_receipt = None;
+    let mut saw_usage = false;
     loop {
         let event = worker
             .events
             .recv_timeout(Duration::from_secs(2))
             .expect("failed worker reports its receipt");
-        let done = matches!(event, AgentEvent::TaskReceipt(_));
+        let terminal = matches!(&event, AgentEvent::Failed(_));
+        match &event {
+            AgentEvent::TaskReceipt(summary) => {
+                assert!(projected_receipt.is_none());
+                projected_receipt = Some(summary.receipt.clone());
+            }
+            AgentEvent::Usage(_) => {
+                assert!(projected_receipt.is_some(), "usage preceded its receipt");
+                saw_usage = true;
+            }
+            AgentEvent::Failed(_) => {
+                assert!(projected_receipt.is_some(), "failure preceded its receipt");
+                assert!(saw_usage, "failure preceded cumulative usage");
+            }
+            _ => {}
+        }
         apply_event(&mut app, event);
-        if done {
+        if terminal {
             break;
         }
     }
+    let projected_receipt = projected_receipt.unwrap();
 
-    assert!(app.has_failed_turn);
+    let durable = std::fs::read(root.join(".nosis").join("receipts.jsonl")).unwrap();
+    let expected = format!(
+        "{{\"ts_utc\":\"{}\",\"model_id\":\"test-route\",\"task\":\"failing task\",\"turns\":1,\"tool_calls\":0,\"outcome\":\"fail\",\"failure_class\":\"verification\",\"effective_profile\":\"balanced\"}}\n",
+        projected_receipt.ts_utc
+    );
+    assert_eq!(
+        durable,
+        expected.into_bytes(),
+        "timeline receipt must be the exact durable receipt bytes"
+    );
+
+    assert_eq!(
+        app.session_money(fixed_at()),
+        "unavailable - meter incomplete"
+    );
+    assert_eq!(app.usage.as_ref().unwrap().evidence, UsageEvidence::Unknown);
+    assert_eq!(app.timeline.len(), 1);
+    assert_eq!(app.timeline[0].ts_utc, projected_receipt.ts_utc);
+    assert_eq!(app.timeline[0].model_id, projected_receipt.model_id);
+    assert_eq!(app.timeline[0].task, projected_receipt.task);
+    assert_eq!(app.timeline[0].turns, 1);
+    assert_eq!(app.timeline[0].tool_calls, 0);
+    assert_eq!(app.timeline[0].outcome, Outcome::Fail);
+    assert_eq!(
+        app.timeline[0].failure_class,
+        Some(FailureClass::Verification)
+    );
+    assert!(app.timeline[0].usage.is_none());
+    assert_eq!(worker.shutdown(), WorkerShutdown::Clean);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn real_worker_and_ledger_replay_mark_a_measured_plus_unmetered_session() {
+    let root = temp_dir();
+    let calls = Arc::new(AtomicU64::new(0));
+    let client_calls = Arc::clone(&calls);
+    let connect: ConnectFn = Box::new(move |_, _| {
+        Ok((
+            Box::new(MeterGapClient {
+                calls: Arc::clone(&client_calls),
+            }),
+            nh_vault::secret("fake-key-meter-gap"),
+        ))
+    });
+    let resolver = RouteResolver::from_toml(METER_CATALOG).unwrap();
+    let route = resolver.resolve("meter-route").unwrap();
+    let law = nh_law::load(&root, &nh_law::LoadOptions { cli_autonomy: None });
+    let mut worker = spawn_worker(WorkerConfig {
+        route,
+        profiles: Profiles::bundled(),
+        active_profile: "balanced".into(),
+        law,
+        repo_root: root.clone(),
+        workdir: root.clone(),
+        scrubber: Arc::new(RwLock::new(Scrubber::new(Vec::new()))),
+        connect,
+        initial: None,
+        resume: None,
+    })
+    .unwrap();
+    let mut app = meter_app();
+    app.budget = Some(100);
+
+    for task in ["metered", "unmetered"] {
+        worker
+            .commands
+            .send(WorkerCommand::Task(task.into()))
+            .unwrap();
+        let mut saw_receipt = false;
+        let mut saw_usage = false;
+        loop {
+            let event = worker.events.recv_timeout(Duration::from_secs(2)).unwrap();
+            let done = matches!(&event, AgentEvent::Answer(_));
+            match &event {
+                AgentEvent::TaskReceipt(_) => saw_receipt = true,
+                AgentEvent::Usage(_) => {
+                    assert!(saw_receipt, "usage preceded its receipt");
+                    saw_usage = true;
+                }
+                AgentEvent::Answer(_) => {
+                    assert!(saw_receipt, "answer preceded its receipt");
+                    assert!(saw_usage, "answer preceded cumulative usage");
+                }
+                _ => {}
+            }
+            apply_event(&mut app, event);
+            if done {
+                break;
+            }
+        }
+    }
+
+    let usage = app.usage.as_ref().unwrap();
+    assert_eq!(usage.evidence, UsageEvidence::Partial);
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (10, 2));
+    assert!(app.session_money(fixed_at()).starts_with('~'));
     assert!(app
         .session_money(fixed_at())
-        .contains("? incomplete - failed turn usage not reported"));
+        .contains("subtotal; meter incomplete"));
+    let hud = app.hud_line(fixed_at());
+    assert!(
+        hud.contains("in ~10 · out ~2 · token lower bound"),
+        "got: {hud}"
+    );
+    assert!(hud.contains("~12% ~12/100 lower bound"), "got: {hud}");
+    assert_eq!(timeline_row(&app.timeline[1]), "#2  pass  usage unreported");
+    assert_eq!(
+        timeline_detail_lines(&app.timeline[1])[8],
+        "tokens: unavailable - usage unreported"
+    );
+
     assert_eq!(worker.shutdown(), WorkerShutdown::Clean);
+    let sessions = list_sessions(&root).unwrap();
+    assert_eq!(sessions.sessions.len(), 1);
+    let restored = read_session(&root, &sessions.sessions[0].session_id).unwrap();
+    assert_eq!(restored.turns.len(), 2);
+    assert_eq!(
+        restored.turns[0].usage.as_ref().unwrap().evidence,
+        UsageEvidence::Measured
+    );
+    assert!(restored.turns[1].usage.is_none());
+
+    let mut replay = meter_app();
+    replay.budget = Some(100);
+    restore_app(&mut replay, &restored, "law bytes").unwrap();
+    assert_eq!(
+        replay.usage.as_ref().unwrap().evidence,
+        UsageEvidence::Partial
+    );
+    assert!(replay.session_money(fixed_at()).starts_with('~'));
+    let replay_hud = replay.hud_line(fixed_at());
+    assert!(replay_hud.contains("~12% ~12/100 lower bound"));
+    assert!(replay_hud.contains("resumed"));
+
+    let free_catalog = METER_CATALOG
+        .replace("cache_hit = 0.02", "cache_hit = 0.0")
+        .replace("cache_miss = 1.0", "cache_miss = 0.0")
+        .replace("output = 2.0", "output = 0.0");
+    let mut free_replay = meter_app_from(&free_catalog);
+    restore_app(&mut free_replay, &restored, "law bytes").unwrap();
+    let free_money = free_replay.session_money(fixed_at());
+    assert_eq!(free_money, "unavailable - meter incomplete");
+    assert!(!free_money.contains("0.00"));
+    free_replay.add_session_cost(Currency::Usd, 0.01, false);
+    let mixed_free_money = free_replay.session_money(fixed_at());
+    assert!(mixed_free_money.starts_with("~$0.01"));
+    assert!(!mixed_free_money.contains("¥0.00"));
+
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -2588,16 +2908,14 @@ fn keyless_switch_accepts_route_then_next_task_surfaces_add_key_line() {
     match worker.events.recv_timeout(Duration::from_secs(2)).unwrap() {
         AgentEvent::Failed(reason) => {
             assert!(reason.contains("nh key add other"), "got: {reason}");
+            assert!(reason.contains("receipt unavailable"), "got: {reason}");
         }
         _ => panic!("keyless switched task must fail with one friendly line"),
     }
-    match worker.events.recv_timeout(Duration::from_secs(2)).unwrap() {
-        AgentEvent::TaskReceipt(summary) => {
-            assert_eq!(summary.receipt.model_id, "other-route");
-            assert_eq!(summary.receipt.task, "hello");
-        }
-        _ => panic!("failed switched task must produce a timeline receipt"),
-    }
+    assert!(worker
+        .events
+        .recv_timeout(Duration::from_millis(100))
+        .is_err());
     assert!(request_lengths.lock().unwrap().is_empty());
     assert_eq!(worker.shutdown(), WorkerShutdown::Clean);
     std::fs::remove_dir_all(root).unwrap();
@@ -2658,7 +2976,6 @@ fn worker_uses_injected_client_and_keeps_one_history_across_tasks() {
                 | AgentEvent::ModelFinished { .. }
                 | AgentEvent::ToolStarted { .. }
                 | AgentEvent::ToolFinished { .. } => {}
-                AgentEvent::MeterIncomplete => panic!("successful worker lost meter data"),
                 AgentEvent::Approval(_) => panic!("mock never asks for approval"),
                 AgentEvent::Failed(reason) => panic!("worker failed: {reason}"),
             }
@@ -2876,7 +3193,6 @@ fn worker_profile_change_reconnects_with_clamp_and_records_next_turn() {
             | AgentEvent::ModelFinished { .. }
             | AgentEvent::ToolStarted { .. }
             | AgentEvent::ToolFinished { .. } => {}
-            AgentEvent::MeterIncomplete => panic!("successful worker lost meter data"),
             AgentEvent::Approval(_) => panic!("mock never asks for approval"),
             AgentEvent::Failed(reason) => panic!("worker failed: {reason}"),
         }
@@ -2918,18 +3234,15 @@ fn keyless_worker_starts_and_task_surfaces_the_add_key_line() {
     match worker.events.recv_timeout(Duration::from_secs(2)).unwrap() {
         AgentEvent::Failed(reason) => {
             assert!(reason.contains("nh key add test"), "got: {reason}");
+            assert!(reason.contains("receipt unavailable"), "got: {reason}");
             assert!(!reason.chars().any(char::is_control), "got: {reason}");
         }
         _ => panic!("keyless task must fail with one friendly line"),
     }
-    match worker.events.recv_timeout(Duration::from_secs(2)).unwrap() {
-        AgentEvent::TaskReceipt(summary) => {
-            assert_eq!(summary.receipt.task, "hello");
-            assert_eq!(summary.receipt.outcome, Outcome::Fail);
-            assert!(summary.answer.starts_with("error: "));
-        }
-        _ => panic!("failed task must still produce one timeline receipt"),
-    }
+    assert!(worker
+        .events
+        .recv_timeout(Duration::from_millis(100))
+        .is_err());
     assert_eq!(worker.shutdown(), WorkerShutdown::Clean);
     std::fs::remove_dir_all(root).unwrap();
 }

@@ -10,8 +10,8 @@ use super::http::{
     MAX_PROVIDER_BODY_BYTES,
 };
 use super::retry::{
-    combine_usage, is_retryable, parse_retry_after, run_with_retry, system_jitter, AttemptOutcome,
-    AttemptResult, RetryPolicy,
+    is_retryable, parse_retry_after, run_with_retry, system_jitter, AttemptOutcome, AttemptResult,
+    RetryPolicy,
 };
 use super::usage_debug::UsageDebug;
 use super::{
@@ -74,7 +74,7 @@ impl ChatClient for OpenAiCompatClient {
     fn complete(&self, request: &ChatRequest) -> anyhow::Result<ChatResponse> {
         let url = endpoint(&self.base_url);
         let request_body = build_body(request, self.policy);
-        let output = run_with_retry(
+        let mut output = run_with_retry(
             RetryPolicy::DEFAULT,
             &std::thread::sleep,
             &system_jitter,
@@ -151,9 +151,11 @@ impl ChatClient for OpenAiCompatClient {
             },
         )
         .map_err(anyhow::Error::new)?;
+        let success_usage = output.value.usage.take();
+        let combined_usage = output.combine_success_usage(success_usage);
         let mut response = output.value;
         response.retries = output.stats;
-        response.usage = combine_usage(output.salvaged_usage, response.usage);
+        response.usage = combined_usage;
         Ok(response)
     }
 }
@@ -375,9 +377,9 @@ struct WireFunction {
 #[derive(serde::Deserialize)]
 struct WireUsage {
     #[serde(default)]
-    prompt_tokens: u64,
+    prompt_tokens: Option<u64>,
     #[serde(default)]
-    completion_tokens: u64,
+    completion_tokens: Option<u64>,
     #[serde(default)]
     prompt_tokens_details: Option<WirePromptDetails>,
     #[serde(default)]
@@ -395,10 +397,13 @@ fn usage_from_wire(usage: WireUsage) -> Usage {
         .prompt_tokens_details
         .and_then(|details| details.cached_tokens)
         .or(usage.prompt_cache_hit_tokens);
+    let evidence =
+        super::usage_evidence(usage.prompt_tokens, usage.completion_tokens, cached_tokens);
     Usage {
-        prompt_tokens: usage.prompt_tokens,
-        completion_tokens: usage.completion_tokens,
+        prompt_tokens: usage.prompt_tokens.unwrap_or(0),
+        completion_tokens: usage.completion_tokens.unwrap_or(0),
         cached_tokens,
+        evidence,
     }
 }
 
@@ -436,7 +441,7 @@ pub(super) fn parse_response(body: &str) -> anyhow::Result<ChatResponse> {
             tool_call_id: None,
             reasoning_content: choice.message.reasoning_content,
         },
-        finish_reason: choice.finish_reason.unwrap_or_default(),
+        finish_reason: super::FinishReason::from_wire(choice.finish_reason, "tool_calls"),
         usage: wire.usage.map(usage_from_wire),
         retries: RetryStats::default(),
     })

@@ -11,10 +11,11 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use chrono::{DateTime, FixedOffset, Utc};
-use nh_core::agent::{AgentLoop, MAX_TASK_BYTES};
+use nh_core::agent::{AgentLoop, AgentRunError, MAX_TASK_BYTES};
+use nh_core::receipt::Receipt;
 use nh_core::session_ledger::{RestoredSession, RestoredTurn, SessionEvent, SessionLedger};
 use nh_core::wire::{
-    cache_hit_pct, ensure_image_capable, ChatClient, ChatMessage, ContentPart, Usage,
+    ensure_image_capable, ChatClient, ChatMessage, ContentPart, Usage, UsageEvidence,
 };
 use nh_routes::{
     cost_of, money, money_with_gloss, Currency, PriceConfidence, Profiles, ResolvedRoute,
@@ -98,15 +99,15 @@ struct ChatSession {
     agent: AgentLoop,
     law_constitution: String,
     history: Vec<ChatMessage>,
-    session_in: u64,
-    session_out: u64,
-    session_cached: Option<u64>,
+    /// None means no task has run. Once a task is attempted, its typed evidence
+    /// is retained even when the provider reported no usable counters.
+    session_usage: Option<Usage>,
     /// Cache evidence from the provider call immediately before the next task.
-    /// Unlike `session_cached`, this is not a total: compaction pricing may use
+    /// Unlike `session_usage`, this is not a total: compaction pricing may use
     /// only the preceding call's measured value.
     last_cached_tokens: Option<u64>,
     session_cost: Vec<SessionCost>,
-    unpriced_turns: usize,
+    incomplete_cost_turns: usize,
     /// Every key literal this session has seen - switched-away keys stay scrubbed.
     key_literals: SecretRegistry,
     scrubber: SharedScrubber,
@@ -320,10 +321,13 @@ fn run_task(s: &mut ChatSession, task: &str, out: &mut dyn Write, err: &mut dyn 
         s.last_cached_tokens = None;
     }
     let at = (s.now)();
-    let usage = result
-        .as_ref()
-        .ok()
-        .and_then(|(_, receipt)| receipt.usage.clone());
+    let receipt = match &result {
+        Ok((_, receipt)) => Some(receipt),
+        Err(error) => error
+            .downcast_ref::<AgentRunError>()
+            .map(AgentRunError::receipt),
+    };
+    let usage = receipt.and_then(|receipt| receipt.usage.clone());
     let messages = s
         .history
         .get(history_before..)
@@ -341,29 +345,48 @@ fn run_task(s: &mut ChatSession, task: &str, out: &mut dyn Write, err: &mut dyn 
     match result {
         Ok((answer, receipt)) => {
             let _ = writeln!(out, "{}", scrub_text(&s.scrubber, &answer));
-            let is_local = s.route.class() == RouteClass::Local;
-            if let Some(u) = &receipt.usage {
-                if add_session_usage(s, u) {
-                    add_session_cost(s, u, at);
-                    if !is_local {
-                        if let Some(line) = cmd_run::turn_cost_line(&s.resolver, &s.route, u, at) {
-                            let _ = writeln!(err, "{}", scrub_line(&s.scrubber, &line));
-                        }
-                    }
-                }
-            }
-            if is_local {
-                let _ = writeln!(err, "{LOCAL_METER_COPY}");
-            }
-            if let Some(line) =
-                cmd_run::compaction_meter_line(&s.resolver, &s.route, &receipt.compaction)
-            {
-                let _ = writeln!(err, "{}", scrub_line(&s.scrubber, &line));
-            }
-            let _ = writeln!(err, "{}", scrub_line(&s.scrubber, &footer(s)));
+            project_turn_meter(s, Some(&receipt), at, err);
         }
-        Err(e) => print_err(s, err, &e.to_string()),
+        Err(error) => {
+            print_err(s, err, &error.to_string());
+            let receipt = error
+                .downcast_ref::<AgentRunError>()
+                .map(AgentRunError::receipt);
+            project_turn_meter(s, receipt, at, err);
+        }
     }
+}
+
+fn project_turn_meter(
+    s: &mut ChatSession,
+    receipt: Option<&Receipt>,
+    at: DateTime<Utc>,
+    err: &mut dyn Write,
+) {
+    let usage = receipt.and_then(|receipt| receipt.usage.as_ref());
+    let route = s.route.clone();
+    if add_session_usage(s, usage) {
+        add_session_cost(s, usage, at);
+    }
+
+    if route.class() == RouteClass::Local {
+        let _ = writeln!(err, "{LOCAL_METER_COPY}");
+    } else {
+        let line = usage.map_or_else(
+            || "cost unknown - tokens not reported by provider".to_owned(),
+            |usage| {
+                cmd_run::turn_cost_line(&s.resolver, &route, usage, at)
+                    .unwrap_or_else(|| "cost unknown".to_owned())
+            },
+        );
+        let _ = writeln!(err, "{}", scrub_line(&s.scrubber, &line));
+    }
+    if let Some(line) = receipt.and_then(|receipt| {
+        cmd_run::compaction_meter_line(&s.resolver, &route, &receipt.compaction)
+    }) {
+        let _ = writeln!(err, "{}", scrub_line(&s.scrubber, &line));
+    }
+    let _ = writeln!(err, "{}", scrub_line(&s.scrubber, &footer(s)));
 }
 
 fn refresh_progress_meter(s: &mut ChatSession) {
@@ -482,13 +505,12 @@ fn print_price(s: &ChatSession, out: &mut dyn Write) {
         return;
     };
     let line = format!(
-        "{} | {} | in {:.4} hit / {:.4} miss | out {:.4} | {}/M tokens | confidence {} | session {}",
+        "{} | {} | in {} hit / {} miss | out {} | per million tokens | confidence {} | session {}",
         s.route.id(),
         s.route.peak_status(now, s.local_offset),
-        quote.cache_hit,
-        quote.cache_miss,
-        quote.output,
-        quote.currency,
+        money(quote.cache_hit, quote.currency),
+        money(quote.cache_miss, quote.currency),
+        money(quote.output, quote.currency),
         quote.confidence,
         session_money(s, now)
     );
@@ -517,80 +539,97 @@ fn print_tools(s: &ChatSession, out: &mut dyn Write, err: &mut dyn Write) {
 fn footer(s: &ChatSession) -> String {
     let now = (s.now)();
     let mut line = format!(
-        "{} | {} | session {} | tokens {} in / {} out",
+        "{} | {} | session {} | {}",
         s.route.id(),
         s.route.peak_status(now, s.local_offset),
         session_money(s, now),
-        s.session_in,
-        s.session_out
+        s.session_usage.as_ref().map_or_else(
+            || "tokens 0 in / 0 out".to_owned(),
+            |usage| cmd_run::usage_token_summary(Some(usage)),
+        )
     );
-    if let (Some(cached), Some(pct)) = (
-        s.session_cached,
-        cache_hit_pct(s.session_in, s.session_cached),
-    ) {
-        line.push_str(&format!(" / {cached} cached | cache {pct:.0}%"));
-    }
     if s.resumed {
         line.push_str(" | resumed");
     }
     line
 }
 
-fn add_session_usage(s: &mut ChatSession, usage: &nh_core::wire::Usage) -> bool {
-    let Some(session_in) = s.session_in.checked_add(usage.prompt_tokens) else {
-        s.unpriced_turns = s.unpriced_turns.saturating_add(1);
-        return false;
-    };
-    let Some(session_out) = s.session_out.checked_add(usage.completion_tokens) else {
-        s.unpriced_turns = s.unpriced_turns.saturating_add(1);
-        return false;
-    };
-    let session_cached = match (s.session_cached, usage.cached_tokens) {
-        (Some(session_cached), Some(cached)) => {
-            let Some(session_cached) = session_cached.checked_add(cached) else {
-                s.unpriced_turns = s.unpriced_turns.saturating_add(1);
-                return false;
-            };
-            Some(session_cached)
-        }
-        _ => None,
-    };
-
-    s.session_in = session_in;
-    s.session_out = session_out;
-    s.session_cached = session_cached;
-    true
+fn unknown_usage() -> Usage {
+    Usage {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        cached_tokens: None,
+        evidence: UsageEvidence::Unknown,
+    }
 }
 
-fn add_session_cost(s: &mut ChatSession, usage: &nh_core::wire::Usage, at: DateTime<Utc>) {
+fn add_session_usage(s: &mut ChatSession, usage: Option<&Usage>) -> bool {
+    let usage = usage.cloned().unwrap_or_else(unknown_usage);
+    match &mut s.session_usage {
+        Some(total) => {
+            if total.checked_add_assign(&usage) {
+                true
+            } else {
+                total.evidence = UsageEvidence::Partial;
+                s.incomplete_cost_turns = s.incomplete_cost_turns.saturating_add(1);
+                false
+            }
+        }
+        None => {
+            s.session_usage = Some(usage);
+            true
+        }
+    }
+}
+
+fn add_session_cost(s: &mut ChatSession, usage: Option<&Usage>, at: DateTime<Utc>) {
     let route = s.route.clone();
     add_route_cost(s, &route, usage, at);
 }
 
-fn add_route_cost(s: &mut ChatSession, route: &ResolvedRoute, usage: &Usage, at: DateTime<Utc>) {
+fn add_route_cost(
+    s: &mut ChatSession,
+    route: &ResolvedRoute,
+    usage: Option<&Usage>,
+    at: DateTime<Utc>,
+) {
     if route.class() == RouteClass::Local {
         return;
     }
+    let Some(usage) = usage.filter(|usage| usage.evidence == UsageEvidence::Measured) else {
+        s.incomplete_cost_turns = s.incomplete_cost_turns.saturating_add(1);
+        return;
+    };
+    let Some(cached_tokens) = usage.cached_tokens else {
+        s.incomplete_cost_turns = s.incomplete_cost_turns.saturating_add(1);
+        return;
+    };
     let Some(quote) = route.price_at(at) else {
-        s.unpriced_turns = s.unpriced_turns.saturating_add(1);
+        s.incomplete_cost_turns = s.incomplete_cost_turns.saturating_add(1);
         return;
     };
     let Some(amount) = cost_of(
         &quote,
         usage.prompt_tokens,
-        usage.cached_tokens.unwrap_or(0),
+        cached_tokens,
         usage.completion_tokens,
     ) else {
-        s.unpriced_turns = s.unpriced_turns.saturating_add(1);
+        s.incomplete_cost_turns = s.incomplete_cost_turns.saturating_add(1);
         return;
     };
     let uncertain = quote.confidence == PriceConfidence::VerifyLive;
-    if let Some(total) = s
+    if let Some(index) = s
         .session_cost
-        .iter_mut()
-        .find(|total| total.currency == quote.currency)
+        .iter()
+        .position(|total| total.currency == quote.currency)
     {
-        total.amount += amount;
+        let total = &mut s.session_cost[index];
+        let sum = total.amount + amount;
+        if !sum.is_finite() {
+            s.incomplete_cost_turns = s.incomplete_cost_turns.saturating_add(1);
+            return;
+        }
+        total.amount = sum;
         total.uncertain |= uncertain;
     } else {
         s.session_cost.push(SessionCost {
@@ -604,9 +643,6 @@ fn add_route_cost(s: &mut ChatSession, route: &ResolvedRoute, usage: &Usage, at:
 fn restore_session_totals(s: &mut ChatSession, turns: &[RestoredTurn]) -> anyhow::Result<()> {
     let mut replay = Vec::new();
     for turn in turns {
-        let Some(usage) = &turn.usage else {
-            continue;
-        };
         let route = s.resolver.resolve(&turn.route_id).map_err(|_| {
             anyhow::anyhow!(
                 "session route {} is no longer available - restore it in catalog.toml, then retry",
@@ -618,11 +654,11 @@ fn restore_session_totals(s: &mut ChatSession, turns: &[RestoredTurn]) -> anyhow
                 anyhow::anyhow!("session has an invalid turn timestamp - inspect its ledger")
             })?
             .with_timezone(&Utc);
-        replay.push((route, usage.clone(), at));
+        replay.push((route, turn.usage.clone(), at));
     }
     for (route, usage, at) in replay {
-        if add_session_usage(s, &usage) {
-            add_route_cost(s, &route, &usage, at);
+        if add_session_usage(s, usage.as_ref()) {
+            add_route_cost(s, &route, usage.as_ref(), at);
         }
     }
     Ok(())
@@ -670,6 +706,20 @@ fn end_session(s: &mut ChatSession, err: &mut dyn Write) {
 }
 
 fn session_money(s: &ChatSession, at: DateTime<Utc>) -> String {
+    let incomplete = s.incomplete_cost_turns > 0;
+    if incomplete
+        && (s.session_cost.is_empty()
+            || s.session_cost
+                .iter()
+                .all(|total| total.amount.abs() <= f64::EPSILON))
+    {
+        let noun = if s.incomplete_cost_turns == 1 {
+            "turn"
+        } else {
+            "turns"
+        };
+        return format!("unknown (incomplete - {} {noun})", s.incomplete_cost_turns);
+    }
     let mut display = if s.session_cost.is_empty() {
         if s.route.class() == RouteClass::Local {
             "no billed tokens".into()
@@ -686,13 +736,19 @@ fn session_money(s: &ChatSession, at: DateTime<Utc>) -> String {
             )
         }
     } else {
-        let mixed = s.session_cost.len() > 1;
+        let visible_totals = s
+            .session_cost
+            .iter()
+            .filter(|total| !incomplete || total.amount.abs() > f64::EPSILON)
+            .count();
+        let mixed = visible_totals > 1;
         [Currency::Cny, Currency::Usd]
             .into_iter()
             .filter_map(|currency| {
                 s.session_cost
                     .iter()
                     .find(|total| total.currency == currency)
+                    .filter(|total| !incomplete || total.amount.abs() > f64::EPSILON)
                     .map(|total| {
                         let mut display = if mixed {
                             money(total.amount, total.currency)
@@ -702,21 +758,24 @@ fn session_money(s: &ChatSession, at: DateTime<Utc>) -> String {
                         if total.uncertain {
                             display.push('*');
                         }
+                        if incomplete {
+                            display.insert(0, '~');
+                        }
                         display
                     })
             })
             .collect::<Vec<_>>()
             .join(" · ")
     };
-    if s.unpriced_turns > 0 {
-        let noun = if s.unpriced_turns == 1 {
+    if incomplete {
+        let noun = if s.incomplete_cost_turns == 1 {
             "turn"
         } else {
             "turns"
         };
         display.push_str(&format!(
-            " (incomplete - {} unpriced {noun})",
-            s.unpriced_turns
+            " (lower bound - {} incomplete {noun})",
+            s.incomplete_cost_turns
         ));
     }
     display

@@ -6,7 +6,7 @@ use nh_core::agent::{AgentLoop, CompactionEvent, PrefixSeal};
 use nh_core::receipt::ReceiptWriter;
 use nh_core::wire::{
     cache_hit_pct, ChatClient, ChatMessage, ChatRequest, ChatResponse, ThinkingEffort, ToolCallReq,
-    Usage,
+    Usage, UsageEvidence,
 };
 use nh_tools::ToolCtx;
 
@@ -14,7 +14,12 @@ struct FinalAnswerClient;
 
 impl ChatClient for FinalAnswerClient {
     fn complete(&self, _req: &ChatRequest) -> anyhow::Result<ChatResponse> {
-        Ok(final_answer(Some(Usage::default())))
+        Ok(final_answer(Some(Usage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cached_tokens: None,
+            evidence: UsageEvidence::Measured,
+        })))
     }
 }
 
@@ -55,6 +60,7 @@ impl ChatClient for PrefixCachingClient {
             prompt_tokens,
             completion_tokens: 1,
             cached_tokens: Some(cached_tokens),
+            evidence: UsageEvidence::Measured,
         })))
     }
 }

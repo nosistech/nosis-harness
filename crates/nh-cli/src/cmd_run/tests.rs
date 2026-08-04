@@ -1,5 +1,8 @@
 use super::*;
 use chrono::TimeZone;
+use nh_core::wire::{ChatClient, ChatRequest, ChatResponse, RetryExhausted};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 const PEAK_CATALOG: &str = r#"
     [routes.peak-route]
@@ -445,6 +448,239 @@ fn missing_usage_is_reported_without_a_zero_cost() {
     assert!(!lines[0].contains("cost $0.00"));
 }
 
+struct MeasuredThenUnmeteredSuccess {
+    calls: AtomicUsize,
+}
+
+impl ChatClient for MeasuredThenUnmeteredSuccess {
+    fn complete(&self, _request: &ChatRequest) -> anyhow::Result<ChatResponse> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Ok(ChatResponse {
+                message: serde_json::from_value(serde_json::json!({
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "name": "read_file",
+                        "arguments": "{\"path\":\"evidence.txt\"}"
+                    }]
+                }))
+                .unwrap(),
+                finish_reason: "tool_calls".into(),
+                usage: Some(Usage {
+                    prompt_tokens: 100,
+                    completion_tokens: 20,
+                    cached_tokens: Some(10),
+                    evidence: UsageEvidence::Measured,
+                }),
+                retries: Default::default(),
+            });
+        }
+        Ok(ChatResponse {
+            message: serde_json::from_value(serde_json::json!({
+                "role": "assistant",
+                "content": "done"
+            }))
+            .unwrap(),
+            finish_reason: "stop".into(),
+            usage: None,
+            retries: Default::default(),
+        })
+    }
+}
+
+#[test]
+fn real_measured_then_unmetered_run_is_a_marked_lower_bound_and_refuses_cost() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("evidence.txt"), b"real tool input").unwrap();
+    let resolver = RouteResolver::from_toml(PEAK_CATALOG).unwrap();
+    let route = resolver.resolve("peak-route").unwrap();
+    let at = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+    let mut agent = AgentLoop {
+        client: Box::new(MeasuredThenUnmeteredSuccess {
+            calls: AtomicUsize::new(0),
+        }),
+        tools: builtin_tools(),
+        ctx: ToolCtx::new(tmp.path().to_path_buf(), Box::new(|_| false)),
+        receipts: ReceiptWriter::for_path(
+            tmp.path(),
+            tmp.path().join("receipts.jsonl"),
+            Scrubber::new(Vec::new()),
+        ),
+        model_id: route.model_id().to_owned(),
+        max_turns: 2,
+        thinking: ThinkingEffort::None,
+        profile: None,
+        constitution: None,
+        context_limit: route.context(),
+        on_event: None,
+    };
+    let (_, receipt) = agent.run("read the evidence").unwrap();
+    let usage = receipt.usage.as_ref().unwrap();
+
+    assert_eq!(usage.evidence, UsageEvidence::Partial);
+    assert_eq!(receipt.turns, 2);
+    assert_eq!(receipt.tool_calls, 1);
+
+    let lines = run_meter_lines(
+        &resolver,
+        &route,
+        Some(usage),
+        &receipt.compaction,
+        receipt.turns,
+        receipt.tool_calls,
+        RunTiming {
+            started: at,
+            ended: at,
+        },
+    );
+
+    assert_eq!(
+        lines,
+        vec![
+            "turns 2 | tool calls 1 | tokens ~100 in / ~20 out / ~10 cached (lower bound)",
+            "cost unknown - usage is a lower bound",
+        ]
+    );
+    assert!(!lines.iter().any(|line| line.contains("saved")));
+    assert!(!lines.iter().any(|line| line.contains('$')));
+}
+
+#[test]
+fn legacy_unknown_run_usage_renders_like_absence_without_leaking_counters() {
+    let resolver = RouteResolver::from_toml(PEAK_CATALOG).unwrap();
+    let route = resolver.resolve("peak-route").unwrap();
+    let at = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+    let usage = Usage {
+        prompt_tokens: 91,
+        completion_tokens: 7,
+        cached_tokens: Some(40),
+        evidence: UsageEvidence::Unknown,
+    };
+    let timing = RunTiming {
+        started: at,
+        ended: at,
+    };
+
+    let unknown = run_meter_lines(
+        &resolver,
+        &route,
+        Some(&usage),
+        &Default::default(),
+        1,
+        0,
+        timing,
+    );
+    let absent = run_meter_lines(&resolver, &route, None, &Default::default(), 1, 0, timing);
+
+    assert_eq!(unknown, absent);
+    assert!(unknown[0].contains("tokens: not reported by provider - cost unknown"));
+    assert!(!unknown[0].contains("91"));
+    assert!(!unknown[0].contains("$0.00"));
+}
+
+#[test]
+fn measured_tokens_without_cache_evidence_refuse_cost_and_savings() {
+    let resolver = RouteResolver::from_toml(PEAK_CATALOG).unwrap();
+    let route = resolver.resolve("peak-route").unwrap();
+    let at = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+    let usage = Usage {
+        prompt_tokens: 100,
+        completion_tokens: 20,
+        cached_tokens: None,
+        evidence: UsageEvidence::Measured,
+    };
+
+    let lines = run_meter_lines(
+        &resolver,
+        &route,
+        Some(&usage),
+        &Default::default(),
+        1,
+        0,
+        RunTiming {
+            started: at,
+            ended: at,
+        },
+    );
+
+    assert_eq!(
+        lines[1],
+        "cost unknown - cached tokens not reported by provider"
+    );
+    assert!(!lines.iter().any(|line| line.contains("saved")));
+    assert!(!lines.iter().any(|line| line.contains('$')));
+}
+
+struct MeteredRunFailure;
+
+impl ChatClient for MeteredRunFailure {
+    fn complete(&self, _request: &ChatRequest) -> anyhow::Result<ChatResponse> {
+        Err(anyhow::Error::new(RetryExhausted {
+            stats: Default::default(),
+            usage: Some(Usage {
+                prompt_tokens: 100,
+                completion_tokens: 20,
+                cached_tokens: Some(10),
+                evidence: UsageEvidence::Measured,
+            }),
+            last_failure: "provider failed after metering".into(),
+            attempts: 1,
+            elapsed: Duration::from_millis(5),
+        }))
+    }
+}
+
+#[test]
+fn failed_run_projects_the_real_agent_error_receipt_meter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let resolver = RouteResolver::from_toml(PEAK_CATALOG).unwrap();
+    let route = resolver.resolve("peak-route").unwrap();
+    let mut agent = AgentLoop {
+        client: Box::new(MeteredRunFailure),
+        tools: Vec::new(),
+        ctx: ToolCtx::new(tmp.path().to_path_buf(), Box::new(|_| false)),
+        receipts: ReceiptWriter::for_path(
+            tmp.path(),
+            tmp.path().join("receipts.jsonl"),
+            Scrubber::new(Vec::new()),
+        ),
+        model_id: route.model_id().to_owned(),
+        max_turns: 1,
+        thinking: ThinkingEffort::None,
+        profile: None,
+        constitution: None,
+        context_limit: route.context(),
+        on_event: None,
+    };
+    let error = agent.run("fail after metering").unwrap_err();
+    let at = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+
+    let lines = failed_run_meter_lines(
+        &error,
+        &resolver,
+        &route,
+        RunTiming {
+            started: at,
+            ended: at,
+        },
+    )
+    .expect("the production run error path recognizes AgentRunError");
+
+    assert_eq!(
+        lines[0],
+        "turns 1 | tool calls 0 | tokens 100 in / 20 out / 10 cached | cache 10%"
+    );
+    assert!(lines[1].starts_with("cost $0.0001"), "got: {lines:?}");
+    let durable: nh_core::receipt::Receipt =
+        serde_json::from_str(&std::fs::read_to_string(tmp.path().join("receipts.jsonl")).unwrap())
+            .unwrap();
+    assert_eq!(
+        durable.usage.as_ref().map(|usage| usage.evidence),
+        Some(UsageEvidence::Measured)
+    );
+    assert_eq!(durable.turns, 1);
+}
+
 #[test]
 fn local_run_meter_uses_the_ratified_qualifier_with_or_without_usage() {
     let resolver = RouteResolver::from_toml(
@@ -474,6 +710,7 @@ fn local_run_meter_uses_the_ratified_qualifier_with_or_without_usage() {
         prompt_tokens: 100,
         completion_tokens: 20,
         cached_tokens: None,
+        evidence: UsageEvidence::Measured,
     };
 
     let reported = run_meter_lines(
@@ -540,6 +777,7 @@ fn run_meter_distinguishes_absent_cache_measurement_from_measured_zero() {
         prompt_tokens: 100,
         completion_tokens: 20,
         cached_tokens: None,
+        evidence: UsageEvidence::Measured,
     };
     let measured_zero = Usage {
         cached_tokens: Some(0),
@@ -602,6 +840,7 @@ fn compaction_without_preceding_cache_refuses_money_even_when_current_usage_has_
         prompt_tokens: 500,
         completion_tokens: 20,
         cached_tokens: Some(400),
+        evidence: UsageEvidence::Measured,
     };
     let mut compaction = nh_core::receipt::CompactionStats::default();
     compaction.record(8, 100, None);
@@ -660,6 +899,7 @@ fn receipt_compaction_uses_stored_event_time_instead_of_run_end_time() {
         prompt_tokens: 500,
         completion_tokens: 20,
         cached_tokens: Some(400),
+        evidence: UsageEvidence::Measured,
     };
     let mut compaction = nh_core::receipt::CompactionStats::default();
     compaction.record_at(8, 1_000, Some(3_000), event_at.timestamp());
@@ -782,6 +1022,7 @@ fn run_cost_marks_only_a_peak_boundary_crossing() {
         prompt_tokens: 100,
         completion_tokens: 50,
         cached_tokens: Some(20),
+        evidence: UsageEvidence::Measured,
     };
     let before_peak = Utc.with_ymd_and_hms(2026, 7, 15, 0, 30, 0).unwrap();
     let in_peak = Utc.with_ymd_and_hms(2026, 7, 15, 1, 30, 0).unwrap();

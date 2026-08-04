@@ -18,7 +18,7 @@ use nh_core::wire::ChatClient;
 #[cfg(test)]
 use nh_core::{
     receipt::{FailureClass, Outcome, Receipt},
-    wire::{ThinkingEffort, Usage},
+    wire::{ThinkingEffort, Usage, UsageEvidence},
 };
 #[cfg(test)]
 use nh_law::{Autonomy, PolicyView};
@@ -36,7 +36,7 @@ pub use palette::{filter_palette, mcp_palette_entries};
 use render::*;
 
 #[cfg(test)]
-use session::{emit_taskbar_transition, finish_worker_shutdown, scrub_full_line};
+use session::{emit_taskbar_transition, finish_worker_shutdown, restore_app, scrub_full_line};
 pub use session::{identity_constitution, run};
 pub use state::{
     AgentEvent, App, McpState, PaletteEntry, Status, TimelineEntry, TimelineSummary, TuiConfig,

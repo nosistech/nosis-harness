@@ -956,6 +956,7 @@ fn status_fold_counts_unmetered_receipts_without_fabricating_tokens() {
         prompt_tokens: 3,
         completion_tokens: 2,
         cached_tokens: None,
+        evidence: nh_core::wire::UsageEvidence::Measured,
     }));
     assert_eq!(tokens_in(&unmetered), 0);
     let events = vec![

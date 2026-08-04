@@ -6,6 +6,7 @@ use nh_core::agent::{AgentLoop, CompactionEvent, MAX_TASK_BYTES};
 use nh_core::receipt::{CompactionStats, FailureClass, Outcome, Receipt, ReceiptWriter};
 use nh_core::wire::{
     ChatClient, ChatMessage, ChatRequest, ChatResponse, RetryStats, ToolCallReq, Usage,
+    UsageEvidence,
 };
 use nh_tools::{Tool, ToolCtx, ToolSpec};
 
@@ -234,6 +235,7 @@ fn edits_file_passes_and_scrubs_receipt() {
                 prompt_tokens: 10,
                 completion_tokens: 5,
                 cached_tokens: Some(2),
+                evidence: UsageEvidence::Measured,
             }),
         ),
         text_resp(
@@ -242,6 +244,7 @@ fn edits_file_passes_and_scrubs_receipt() {
                 prompt_tokens: 20,
                 completion_tokens: 3,
                 cached_tokens: None,
+                evidence: UsageEvidence::Measured,
             }),
         ),
     ];
@@ -404,6 +407,7 @@ fn real_loop_accumulates_multiple_compactions_without_mixing_estimates_into_usag
                 prompt_tokens: 620,
                 completion_tokens: 11,
                 cached_tokens: Some(480),
+                evidence: UsageEvidence::Measured,
             }),
         ),
         text_resp(
@@ -412,6 +416,7 @@ fn real_loop_accumulates_multiple_compactions_without_mixing_estimates_into_usag
                 prompt_tokens: 730,
                 completion_tokens: 7,
                 cached_tokens: Some(420),
+                evidence: UsageEvidence::Measured,
             }),
         ),
         text_resp(
@@ -420,6 +425,7 @@ fn real_loop_accumulates_multiple_compactions_without_mixing_estimates_into_usag
                 prompt_tokens: 810,
                 completion_tokens: 3,
                 cached_tokens: Some(500),
+                evidence: UsageEvidence::Measured,
             }),
         ),
     ];
@@ -545,6 +551,7 @@ fn retried_response_usage_is_not_relabelled_as_final_call_cache_evidence() {
             prompt_tokens: 30,
             completion_tokens: 4,
             cached_tokens: Some(12),
+            evidence: UsageEvidence::Measured,
         }),
     );
     response.retries = RetryStats {
@@ -606,6 +613,7 @@ fn persistent_task_without_compaction_returns_exact_final_cache_measurement() {
                     prompt_tokens: 20,
                     completion_tokens: 2,
                     cached_tokens: Some(9),
+                    evidence: UsageEvidence::Measured,
                 }),
             )]),
         }),

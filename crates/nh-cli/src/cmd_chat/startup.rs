@@ -206,14 +206,12 @@ where
         agent,
         law_constitution,
         history,
-        session_in: 0,
-        session_out: 0,
-        session_cached: Some(0),
+        session_usage: None,
         // Turn-ledger usage is task-cumulative, so it cannot prove the final
         // provider call's cache measurement after a resume.
         last_cached_tokens: None,
         session_cost: Vec::new(),
-        unpriced_turns: 0,
+        incomplete_cost_turns: 0,
         key_literals: initial.key_literals,
         scrubber,
         connect,

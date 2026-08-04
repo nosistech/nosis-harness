@@ -62,15 +62,19 @@ const METER_CATALOG: &str = r#"
 "#;
 
 fn test_server() -> (tempfile::TempDir, McpServer) {
-    let root = tempfile::tempdir().unwrap();
     let catalog =
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../catalog.toml")).to_string();
+    test_server_with_catalog(&catalog, "deepseek-v4-flash")
+}
+
+fn test_server_with_catalog(catalog: &str, default_route: &str) -> (tempfile::TempDir, McpServer) {
+    let root = tempfile::tempdir().unwrap();
     let law = nh_law::load(root.path(), &nh_law::LoadOptions { cli_autonomy: None });
     let server = McpServer::start(ServeConfig {
         addr: "127.0.0.1:0".parse().unwrap(),
-        catalog,
+        catalog: catalog.to_string(),
         law,
-        default_route: "deepseek-v4-flash".into(),
+        default_route: default_route.into(),
         run_root: root.path().to_path_buf(),
         token: None,
         max_workers: 1,
@@ -247,6 +251,15 @@ fn why_matches_resolver_cost_and_rejection_trace_without_cold_savings_claim() {
     assert_eq!(expected_saved, None);
     assert!(result["structuredContent"].get("savings").is_none());
     let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("\u{a5}0.0012 (est) | price confirmed"),
+        "{text}"
+    );
+    assert_eq!(result["structuredContent"]["cost"]["estimated"], true);
+    assert_eq!(
+        result["structuredContent"]["cost"]["price_confidence"],
+        "confirmed"
+    );
     assert!(!text.contains("saved"), "{text}");
 }
 
@@ -318,6 +331,107 @@ fn route_cost_rejects_caller_usage_with_more_cached_than_prompt_tokens() {
 }
 
 #[test]
+fn route_cost_http_uses_canonical_tiny_money_and_exposes_estimate_provenance() {
+    let (_root, server) = test_server_with_catalog(METER_CATALOG, "cheap");
+    let response = raw_post(
+        server.addr(),
+        &server.addr().to_string(),
+        None,
+        Some(server.token()),
+        &tools_call(
+            "route_cost",
+            json!({
+                "model": "cheap",
+                "prompt_tokens": 1,
+                "cached_tokens": 0,
+                "output_tokens": 0
+            }),
+        ),
+    );
+    let value = response_value(&response);
+    let result = &value["result"];
+    let text = result["content"][0]["text"].as_str().unwrap();
+
+    assert_eq!(
+        text,
+        "cheap | <\u{a5}0.0001 (est) | price confirmed | 1 prompt (0 cached) | 0 output"
+    );
+    assert!(!text.contains("0.000000"), "{text}");
+    assert_eq!(result["structuredContent"]["cost"]["estimated"], true);
+    assert_eq!(
+        result["structuredContent"]["cost"]["price_confidence"],
+        "confirmed"
+    );
+    assert_eq!(
+        result["structuredContent"]["cost"]["value"].as_f64(),
+        Some(0.000001)
+    );
+    server.shutdown().unwrap();
+}
+
+#[test]
+fn route_cost_http_exposes_reported_price_provenance() {
+    let (_root, server) = test_server_with_catalog(METER_CATALOG, "cheap");
+    let response = raw_post(
+        server.addr(),
+        &server.addr().to_string(),
+        None,
+        Some(server.token()),
+        &tools_call(
+            "route_cost",
+            json!({
+                "model": "expensive",
+                "prompt_tokens": 1_000,
+                "cached_tokens": 0,
+                "output_tokens": 100
+            }),
+        ),
+    );
+    let result = &response_value(&response)["result"];
+    let text = result["content"][0]["text"].as_str().unwrap();
+
+    assert!(text.contains("(est) | price reported"), "{text}");
+    assert_eq!(
+        result["structuredContent"]["cost"]["price_confidence"],
+        "reported"
+    );
+    server.shutdown().unwrap();
+}
+
+#[test]
+fn why_http_preserves_verify_live_price_asterisk_convention() {
+    let catalog = METER_CATALOG.replacen(
+        "price_confidence = \"confirmed\"",
+        "price_confidence = \"verify_live\"",
+        1,
+    );
+    let (_root, server) = test_server_with_catalog(&catalog, "cheap");
+    let response = raw_post(
+        server.addr(),
+        &server.addr().to_string(),
+        None,
+        Some(server.token()),
+        &tools_call(
+            "why",
+            json!({
+                "prompt_tokens": 1_000,
+                "output_tokens": 100,
+                "allowed": ["cheap"]
+            }),
+        ),
+    );
+    let result = &response_value(&response)["result"];
+    let text = result["content"][0]["text"].as_str().unwrap();
+
+    assert!(text.contains("(est) | *price verify_live"), "{text}");
+    assert_eq!(
+        result["structuredContent"]["cost"]["price_confidence"],
+        "verify_live"
+    );
+    server.shutdown().unwrap();
+}
+
+#[test]
 fn receipts_redact_literals_and_shapes_tolerate_torn_tail_and_never_mutate() {
     let (root, server) = test_server();
     let addr = server.addr();
@@ -371,6 +485,10 @@ fn receipts_redact_literals_and_shapes_tolerate_torn_tail_and_never_mutate() {
 
     assert_eq!(before, after);
     assert_eq!(result["structuredContent"]["count"], 1);
+    assert_eq!(
+        result["structuredContent"]["receipts"][0]["usage"]["evidence"],
+        "unknown"
+    );
     assert!(!response.contains(&token), "{response}");
     assert!(!response.contains(&shaped), "{response}");
     assert!(task.matches("[REDACTED]").count() >= 2, "{task}");
@@ -378,7 +496,144 @@ fn receipts_redact_literals_and_shapes_tolerate_torn_tail_and_never_mutate() {
     assert!(!content.contains(&token));
     assert!(!content.contains(&shaped));
     assert!(content.matches("[REDACTED]").count() >= 2, "{content}");
+    assert!(content.contains("usage unknown"), "{content}");
+    assert!(!content.contains("15 tokens"), "{content}");
     server.shutdown().unwrap();
+}
+
+#[test]
+fn receipts_http_marks_partial_usage_and_refuses_overflow_totals() {
+    let (root, server) = test_server();
+    let receipt = |task: &str, usage: Option<Value>| {
+        let mut receipt = json!({
+            "ts_utc": "2026-08-03T12:00:00Z",
+            "model_id": task,
+            "task": task,
+            "turns": 1,
+            "tool_calls": 0,
+            "outcome": "pass"
+        });
+        if let Some(usage) = usage {
+            receipt["usage"] = usage;
+        }
+        receipt
+    };
+    let receipts = [
+        receipt(
+            "measured",
+            Some(json!({
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "evidence": "measured"
+            })),
+        ),
+        receipt(
+            "partial",
+            Some(json!({
+                "prompt_tokens": 7,
+                "completion_tokens": 2,
+                "evidence": "partial"
+            })),
+        ),
+        receipt(
+            "overflow",
+            Some(json!({
+                "prompt_tokens": u64::MAX,
+                "completion_tokens": 1,
+                "evidence": "measured"
+            })),
+        ),
+        receipt("absent", None),
+    ];
+    let path = root.path().join(".nosis").join("receipts.jsonl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut bytes = receipts
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .into_bytes();
+    bytes.push(b'\n');
+    std::fs::write(path, bytes).unwrap();
+
+    let response = raw_post(
+        server.addr(),
+        &server.addr().to_string(),
+        None,
+        Some(server.token()),
+        &tools_call("receipts", json!({ "limit": 10 })),
+    );
+    let result = &response_value(&response)["result"];
+    let text = result["content"][0]["text"].as_str().unwrap();
+
+    assert!(
+        text.contains("measured | pass | 1 turns | 15 tokens"),
+        "{text}"
+    );
+    assert!(
+        text.contains("partial | pass | 1 turns | ~9 tokens (lower bound)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("overflow | pass | 1 turns | token total unavailable (overflow)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("absent | pass | 1 turns | unmetered"),
+        "{text}"
+    );
+    assert!(!text.contains(&u64::MAX.to_string()), "{text}");
+    server.shutdown().unwrap();
+}
+
+#[test]
+fn legacy_fleet_ledger_usage_bytes_parse_as_unknown() {
+    let root = tempfile::tempdir().unwrap();
+    let run_id = "legacy-usage";
+    write_fleet_ledger(
+        root.path(),
+        run_id,
+        &[json!({
+            "event": "task_receipt",
+            "task_id": "one",
+            "attempt": 1,
+            "receipt": {
+                "ts_utc": "2026-07-20T12:00:00Z",
+                "model_id": "fixture",
+                "task": "legacy",
+                "turns": 1,
+                "tool_calls": 0,
+                "outcome": "pass",
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "cached_tokens": 4
+                }
+            }
+        })],
+    );
+    let path = root
+        .path()
+        .join(".nosis")
+        .join("fleet")
+        .join(run_id)
+        .join("ledger.jsonl");
+    let before = std::fs::read(&path).unwrap();
+
+    let receipt = nh_fleet::read_run_ledger(root.path(), run_id)
+        .unwrap()
+        .into_iter()
+        .find_map(|event| match event {
+            nh_fleet::LedgerEvent::TaskReceipt { receipt, .. } => Some(receipt),
+            _ => None,
+        })
+        .unwrap();
+
+    assert_eq!(
+        receipt.usage.unwrap().evidence,
+        nh_core::wire::UsageEvidence::Unknown
+    );
+    assert_eq!(std::fs::read(path).unwrap(), before);
 }
 
 #[test]

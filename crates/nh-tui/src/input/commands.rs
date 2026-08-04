@@ -2,9 +2,9 @@
 
 use super::{activate_palette_entry, UiAction};
 use crate::session::{effort_for, effort_name, parse_effort};
-use crate::state::{AgentEvent, App, Overlay, PaletteEntry, PickerKind, PickerRow, TranscriptKind};
-use crate::timeline::apply_event;
+use crate::state::{App, Overlay, PaletteEntry, PickerKind, PickerRow, TranscriptKind};
 use chrono::Utc;
+use nh_core::wire::UsageEvidence;
 use nh_routes::{
     cost_of, money_with_gloss, to_usd_approx, Currency, PriceConfidence, ResolvedRoute, RouteClass,
 };
@@ -171,12 +171,27 @@ fn selected_row(rows: &[PickerRow], value: &str) -> usize {
     rows.iter().position(|row| row.value == value).unwrap_or(0)
 }
 
+fn prior_meter(app: &App) -> Result<(u64, u64), &'static str> {
+    let Some(entry) = app.timeline.last() else {
+        return Ok((0, 0));
+    };
+    let Some(usage) = entry.usage.as_ref() else {
+        return Err("prior usage unreported");
+    };
+    match usage.evidence {
+        UsageEvidence::Measured => usage
+            .cached_tokens
+            .map(|cached| (usage.prompt_tokens, cached))
+            .ok_or("prior cached-token evidence unreported"),
+        UsageEvidence::Partial => Err("prior usage is a lower bound"),
+        UsageEvidence::Unknown => Err("prior usage unknown"),
+    }
+}
+
 fn model_picker_rows(app: &App) -> Vec<PickerRow> {
-    let prompt_est = app
-        .timeline
-        .last()
-        .and_then(|entry| entry.usage.as_ref())
-        .map_or(0, |usage| usage.prompt_tokens);
+    let prior_meter = prior_meter(app);
+    let prompt_est = prior_meter.as_ref().map_or(0, |(prompt, _)| *prompt);
+    let meter_reason = prior_meter.err();
     let output_est = 1_024;
     let required = prompt_est.saturating_add(output_est);
     let ids = app.resolver.available();
@@ -206,6 +221,8 @@ fn model_picker_rows(app: &App) -> Vec<PickerRow> {
             let quote = route.price_at(at);
             let capability = if route.class() == RouteClass::Delegate {
                 "unavailable: delegate".to_owned()
+            } else if let Some(reason) = meter_reason {
+                format!("context estimate unavailable: {reason}")
             } else if route.context().is_none() && required > 0 {
                 "context unknown".to_owned()
             } else if route.context().is_some_and(|context| context < required) {
@@ -213,23 +230,33 @@ fn model_picker_rows(app: &App) -> Vec<PickerRow> {
             } else {
                 "capable".to_owned()
             };
-            let price = quote.as_ref().map_or_else(
-                || "price unknown".to_owned(),
-                |quote| {
-                    cost_of(quote, prompt_est, 0, output_est).map_or_else(
-                        || "price invalid".to_owned(),
-                        |amount| {
-                            if amount == 0.0 {
-                                "free".to_owned()
-                            } else {
-                                format!(
-                                    "est {}",
-                                    money_with_gloss(amount, quote.currency, app.resolver.fx(), at)
-                                )
-                            }
+            let price = meter_reason.map_or_else(
+                || {
+                    quote.as_ref().map_or_else(
+                        || "price unknown".to_owned(),
+                        |quote| {
+                            cost_of(quote, prompt_est, 0, output_est).map_or_else(
+                                || "price invalid".to_owned(),
+                                |amount| {
+                                    if amount == 0.0 {
+                                        "free".to_owned()
+                                    } else {
+                                        format!(
+                                            "est {}",
+                                            money_with_gloss(
+                                                amount,
+                                                quote.currency,
+                                                app.resolver.fx(),
+                                                at
+                                            )
+                                        )
+                                    }
+                                },
+                            )
                         },
                     )
                 },
+                |reason| format!("est unavailable: {reason}"),
             );
             let price_state = quote.as_ref().map_or("", |quote| {
                 let fx_refuses_comparison = mixed_currency
@@ -309,18 +336,12 @@ pub(super) fn set_profile(app: &mut App, name: &str) -> UiAction {
 }
 
 pub(crate) fn explain_why(app: &mut App) -> UiAction {
-    let prompt_est = app
-        .timeline
-        .last()
-        .and_then(|entry| entry.usage.as_ref())
-        .map_or(0, |usage| usage.prompt_tokens);
-    let cached_est = app
-        .timeline
-        .last()
-        .and_then(|entry| entry.usage.as_ref())
-        .and_then(|usage| usage.cached_tokens)
-        .unwrap_or(0)
-        .min(prompt_est);
+    let (prompt_est, cached_est) = match prior_meter(app) {
+        Ok((prompt, cached)) => (prompt, cached.min(prompt)),
+        Err(reason) => {
+            return command_error(app, reason, "complete a measured turn with cache evidence")
+        }
+    };
     let output_est = 1_024;
     let available = app.resolver.available();
     let allowed: Vec<&str> = available
@@ -361,10 +382,7 @@ pub(crate) fn explain_why(app: &mut App) -> UiAction {
                 "  {} this turn (est)",
                 money_with_gloss(estimate, quote.currency, app.resolver.fx(), at)
             ),
-            None => {
-                let _ = apply_event(app, AgentEvent::MeterIncomplete);
-                "  unpriced this turn (est) - meter incomplete".into()
-            }
+            None => "  unpriced this turn (est) - meter incomplete".into(),
         };
         if quote.confidence == PriceConfidence::VerifyLive {
             line.push_str(" · *price verify_live");

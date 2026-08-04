@@ -1,5 +1,6 @@
 use super::context::{estimate_tokens, message_bytes, IMAGE_ESTIMATE_TOKENS};
 use super::*;
+use crate::wire::UsageEvidence;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -152,6 +153,7 @@ impl ChatClient for RetryFailureClient {
                 prompt_tokens: 18,
                 completion_tokens: 3,
                 cached_tokens: Some(4),
+                evidence: UsageEvidence::Measured,
             }),
             last_failure: "provider returned HTTP 429 - rate limited".into(),
             attempts: 3,
@@ -219,6 +221,7 @@ impl ChatClient for UsageFinishClient {
                 prompt_tokens: 20,
                 completion_tokens: 2,
                 cached_tokens: self.cached_tokens,
+                evidence: UsageEvidence::Measured,
             }),
             retries: Default::default(),
         })
@@ -226,7 +229,7 @@ impl ChatClient for UsageFinishClient {
 }
 
 struct FinishReasonClient {
-    finish_reason: String,
+    finish_reason: FinishReason,
 }
 
 impl ChatClient for FinishReasonClient {
@@ -270,6 +273,7 @@ impl ChatClient for OverflowUsageClient {
                     prompt_tokens: u64::MAX,
                     completion_tokens: u64::MAX,
                     cached_tokens: Some(u64::MAX),
+                    evidence: UsageEvidence::Measured,
                 }),
                 retries: Default::default(),
             });
@@ -282,6 +286,7 @@ impl ChatClient for OverflowUsageClient {
                 prompt_tokens: 1,
                 completion_tokens: 1,
                 cached_tokens: Some(1),
+                evidence: UsageEvidence::Measured,
             }),
             retries: Default::default(),
         })
@@ -312,13 +317,17 @@ fn agent_with_receipt_path(
 }
 
 fn run_finish_reason(reason: &str) -> (String, Receipt, Vec<String>) {
+    run_finish_reason_value(reason.into())
+}
+
+fn run_finish_reason_value(reason: FinishReason) -> (String, Receipt, Vec<String>) {
     let dir = tempfile::tempdir().unwrap();
     let events = Arc::new(Mutex::new(Vec::new()));
     let mut agent = agent_with_receipt_path(
         dir.path(),
         dir.path().join("receipts.jsonl"),
         Box::new(FinishReasonClient {
-            finish_reason: reason.to_owned(),
+            finish_reason: reason,
         }),
         Arc::clone(&events),
     );
@@ -329,13 +338,23 @@ fn run_finish_reason(reason: &str) -> (String, Receipt, Vec<String>) {
 
 #[test]
 fn normal_finish_reasons_remain_passes() {
-    for reason in ["", "stop", "end_turn", "stop_sequence"] {
+    for reason in ["stop", "end_turn", "stop_sequence"] {
         let (answer, receipt, emitted) = run_finish_reason(reason);
         assert_eq!(answer, "usable answer", "{reason}");
         assert_eq!(receipt.outcome, Outcome::Pass, "{reason}");
         assert_eq!(receipt.failure_class, None, "{reason}");
         assert!(emitted.is_empty(), "{reason}: {emitted:?}");
     }
+}
+
+#[test]
+fn missing_finish_reason_is_partial_and_never_normal() {
+    let (answer, receipt, emitted) = run_finish_reason_value(FinishReason::Missing);
+
+    assert_eq!(answer, "usable answer");
+    assert_eq!(receipt.outcome, Outcome::Partial);
+    assert_eq!(receipt.failure_class, Some(FailureClass::Constraint));
+    assert_eq!(emitted, vec!["finish reason missing - treated as partial"]);
 }
 
 #[test]
@@ -394,15 +413,151 @@ fn provider_interrupt_finish_reasons_are_constraint_partials() {
 
 #[test]
 fn unknown_finish_reason_returns_the_answer_as_partial_and_emits() {
-    let (answer, receipt, emitted) = run_finish_reason(" future_reason ");
+    let (answer, receipt, emitted) = run_finish_reason("future_reason\nforged progress");
 
     assert_eq!(answer, "usable answer");
     assert_eq!(receipt.outcome, Outcome::Partial);
     assert_eq!(receipt.failure_class, Some(FailureClass::Constraint));
     assert_eq!(
         emitted,
-        vec!["unrecognized finish reason 'future_reason' - treated as partial"]
+        vec!["unrecognized finish reason - treated as partial"]
     );
+}
+
+struct MeasuredThenUnmeteredClient {
+    calls: Mutex<u8>,
+}
+
+impl ChatClient for MeasuredThenUnmeteredClient {
+    fn complete(&self, _req: &ChatRequest) -> anyhow::Result<crate::wire::ChatResponse> {
+        let mut calls = self.calls.lock().unwrap();
+        let first = *calls == 0;
+        *calls += 1;
+        drop(calls);
+        if first {
+            return Ok(crate::wire::ChatResponse {
+                message: ChatMessage {
+                    role: "assistant".into(),
+                    content: None,
+                    parts: None,
+                    tool_calls: Some(vec![ToolCallReq {
+                        id: "meter-probe".into(),
+                        name: "missing_tool".into(),
+                        arguments: "{}".into(),
+                    }]),
+                    tool_call_id: None,
+                    reasoning_content: None,
+                },
+                finish_reason: FinishReason::ToolUse,
+                usage: Some(Usage {
+                    prompt_tokens: 12,
+                    completion_tokens: 3,
+                    cached_tokens: Some(4),
+                    evidence: UsageEvidence::Measured,
+                }),
+                retries: Default::default(),
+            });
+        }
+        Ok(crate::wire::ChatResponse {
+            message: message("assistant", "done"),
+            finish_reason: FinishReason::Stop,
+            usage: None,
+            retries: Default::default(),
+        })
+    }
+}
+
+#[test]
+fn unmetered_final_call_degrades_prior_measurement_to_partial() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = agent_with_receipt_path(
+        dir.path(),
+        dir.path().join("receipts.jsonl"),
+        Box::new(MeasuredThenUnmeteredClient {
+            calls: Mutex::new(0),
+        }),
+        events,
+    );
+    agent.max_turns = 2;
+
+    let (_, receipt) = agent.run("meter this").unwrap();
+    let usage = receipt.usage.unwrap();
+
+    assert_eq!(usage.evidence, UsageEvidence::Partial);
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (12, 3));
+}
+
+struct UnsafeFinishToolClient {
+    finish_reason: FinishReason,
+}
+
+impl ChatClient for UnsafeFinishToolClient {
+    fn complete(&self, _req: &ChatRequest) -> anyhow::Result<crate::wire::ChatResponse> {
+        Ok(crate::wire::ChatResponse {
+            message: ChatMessage {
+                role: "assistant".into(),
+                content: Some("unsafe completion".into()),
+                parts: None,
+                tool_calls: Some(vec![ToolCallReq {
+                    id: "must-not-run".into(),
+                    name: "count_tool".into(),
+                    arguments: "{}".into(),
+                }]),
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            finish_reason: self.finish_reason.clone(),
+            usage: None,
+            retries: Default::default(),
+        })
+    }
+}
+
+struct CountingTool(Arc<AtomicUsize>);
+
+impl Tool for CountingTool {
+    fn spec(&self) -> nh_tools::ToolSpec {
+        nh_tools::ToolSpec {
+            name: "count_tool".into(),
+            description: "count executions".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    fn execute(&self, _args: serde_json::Value, _ctx: &ToolCtx) -> anyhow::Result<String> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok("executed".into())
+    }
+}
+
+#[test]
+fn truncated_or_filtered_completion_never_executes_attached_tool_call() {
+    for (finish_reason, expected_outcome) in [
+        (FinishReason::Truncated, Outcome::Partial),
+        (FinishReason::Filtered, Outcome::Fail),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let executions = Arc::new(AtomicUsize::new(0));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut agent = agent_with_receipt_path(
+            dir.path(),
+            dir.path().join("receipts.jsonl"),
+            Box::new(UnsafeFinishToolClient { finish_reason }),
+            events,
+        );
+        agent.tools = vec![Box::new(CountingTool(Arc::clone(&executions)))];
+        let mut history = Vec::new();
+
+        let (_, receipt) = agent
+            .run_with_history(&mut history, "do not execute")
+            .unwrap();
+
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        assert_eq!(receipt.tool_calls, 0);
+        assert_eq!(receipt.outcome, expected_outcome);
+        assert!(!history.iter().any(|message| message.role == "tool"));
+    }
 }
 
 #[test]
@@ -451,8 +606,10 @@ fn receipt_cache_percentage_distinguishes_absent_from_measured_zero() {
 #[test]
 fn cumulative_cache_measurement_is_absent_if_any_turn_omits_it() {
     let mut total = Usage {
+        prompt_tokens: 0,
+        completion_tokens: 0,
         cached_tokens: Some(0),
-        ..Usage::default()
+        evidence: UsageEvidence::Measured,
     };
     assert!(add_usage_checked(
         &mut total,
@@ -460,6 +617,7 @@ fn cumulative_cache_measurement_is_absent_if_any_turn_omits_it() {
             prompt_tokens: 10,
             completion_tokens: 1,
             cached_tokens: None,
+            evidence: UsageEvidence::Measured,
         }
     ));
     assert!(add_usage_checked(
@@ -468,6 +626,7 @@ fn cumulative_cache_measurement_is_absent_if_any_turn_omits_it() {
             prompt_tokens: 10,
             completion_tokens: 1,
             cached_tokens: Some(5),
+            evidence: UsageEvidence::Measured,
         }
     ));
     assert_eq!(total.prompt_tokens, 20);

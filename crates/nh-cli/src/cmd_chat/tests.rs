@@ -2,12 +2,15 @@ use super::*;
 use chrono::TimeZone;
 use nh_core::receipt::ReceiptWriter;
 use nh_core::session_ledger::{read_session, RestoredSession};
-use nh_core::wire::{ChatRequest, ChatResponse, ThinkingEffort, Usage};
+use nh_core::wire::{
+    ChatRequest, ChatResponse, RetryExhausted, ThinkingEffort, Usage, UsageEvidence,
+};
 use nh_law::LoadOptions;
 use nh_routes::{ThinkingDialect, ThinkingPosture, Wire};
 use nh_tools::{builtin_tools, ToolCtx};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 /// Self-contained catalog: a peak-priced deepseek route, kimi, two free glm
 /// routes (alphabetical tie-break), a delegate route, and an unpriced route.
@@ -160,6 +163,7 @@ impl ChatClient for MockClient {
                 prompt_tokens: 12,
                 completion_tokens: 7,
                 cached_tokens: Some(4),
+                evidence: UsageEvidence::Measured,
             }),
             retries: Default::default(),
         })
@@ -171,6 +175,38 @@ struct FailingClient;
 impl ChatClient for FailingClient {
     fn complete(&self, _request: &ChatRequest) -> anyhow::Result<ChatResponse> {
         anyhow::bail!("provider failed after accepting the turn")
+    }
+}
+
+struct UnmeteredClient;
+
+impl ChatClient for UnmeteredClient {
+    fn complete(&self, _request: &ChatRequest) -> anyhow::Result<ChatResponse> {
+        Ok(ChatResponse {
+            message: assistant_msg("unmetered answer"),
+            finish_reason: "stop".into(),
+            usage: None,
+            retries: Default::default(),
+        })
+    }
+}
+
+struct MeteredFailingClient;
+
+impl ChatClient for MeteredFailingClient {
+    fn complete(&self, _request: &ChatRequest) -> anyhow::Result<ChatResponse> {
+        Err(anyhow::Error::new(RetryExhausted {
+            stats: Default::default(),
+            usage: Some(Usage {
+                prompt_tokens: 12,
+                completion_tokens: 7,
+                cached_tokens: Some(4),
+                evidence: UsageEvidence::Measured,
+            }),
+            last_failure: "provider failed after metering".into(),
+            attempts: 1,
+            elapsed: Duration::from_millis(5),
+        }))
     }
 }
 
@@ -242,12 +278,10 @@ fn test_session(model: &str, tmp: &Path) -> (ChatSession, Arc<AtomicUsize>) {
         agent,
         law_constitution: law_constitution.into(),
         history: Vec::new(),
-        session_in: 0,
-        session_out: 0,
-        session_cached: Some(0),
+        session_usage: None,
         last_cached_tokens: None,
         session_cost: Vec::new(),
-        unpriced_turns: 0,
+        incomplete_cost_turns: 0,
         scrubber: Arc::new(RwLock::new(test_scrubber)),
         key_literals,
         connect,
@@ -512,7 +546,7 @@ fn price_off_peak_line_is_scannable() {
     let (out, _err) = drive(&mut s, &["/price"]);
     assert_eq!(
         out,
-        "deepseek-v4-flash | off-peak | in 0.0200 hit / 1.0000 miss | out 2.0000 | CNY/M tokens | confidence confirmed | session ¥0.00 (≈$0.00)\n"
+        "deepseek-v4-flash | off-peak | in ¥0.02 hit / ¥1.00 miss | out ¥2.00 | per million tokens | confidence confirmed | session ¥0.00 (≈$0.00)\n"
     );
 }
 
@@ -525,7 +559,7 @@ fn price_peak_doubles_rates_and_shows_boundary() {
     let (out, _err) = drive(&mut s, &["/price"]);
     assert_eq!(
         out,
-        "deepseek-v4-flash | peak 2x until 12:00 | in 0.0400 hit / 2.0000 miss | out 4.0000 | CNY/M tokens | confidence confirmed | session ¥0.00 (≈$0.00)\n"
+        "deepseek-v4-flash | peak 2x until 12:00 | in ¥0.04 hit / ¥2.00 miss | out ¥4.00 | per million tokens | confidence confirmed | session ¥0.00 (≈$0.00)\n"
     );
 }
 
@@ -615,6 +649,138 @@ fn session_usage_accumulates_across_turns_and_switches() {
 }
 
 #[test]
+fn unmetered_then_measured_chat_marks_live_and_resumed_totals_as_lower_bounds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut live, calls) = test_session("deepseek-v4-flash", tmp.path());
+    live.agent.client = Box::new(UnmeteredClient);
+    let mut out = Vec::new();
+    let mut first_err = Vec::new();
+
+    run_task(&mut live, "unmetered", &mut out, &mut first_err);
+
+    let first_err = String::from_utf8(first_err).unwrap();
+    assert!(first_err.contains("cost unknown - tokens not reported by provider"));
+    assert!(first_err.contains("session unknown (incomplete - 1 turn)"));
+    assert!(first_err.contains("tokens: not reported by provider"));
+    assert!(!first_err.contains("$0.00"), "got: {first_err}");
+
+    live.agent.client = Box::new(MockClient {
+        reply: "measured answer".into(),
+        calls,
+    });
+    let mut second_err = Vec::new();
+    run_task(&mut live, "measured", &mut out, &mut second_err);
+
+    let live_footer = footer(&live);
+    assert!(
+        live_footer.contains("session ~<¥0.0001"),
+        "got: {live_footer}"
+    );
+    assert!(
+        live_footer.contains("(lower bound - 1 incomplete turn)"),
+        "got: {live_footer}"
+    );
+    assert!(
+        live_footer.contains("tokens ~12 in / ~7 out / ~4 cached (lower bound)"),
+        "got: {live_footer}"
+    );
+    assert!(!live_footer.contains("cache 33%"), "got: {live_footer}");
+    let mut price = Vec::new();
+    print_price(&live, &mut price);
+    let price = String::from_utf8(price).unwrap();
+    assert!(price.contains("session ~<¥0.0001"), "got: {price}");
+    assert!(price.contains("lower bound"), "got: {price}");
+
+    let restored = read_session(tmp.path(), "test-session").unwrap();
+    assert!(restored.turns[0].usage.is_none());
+    assert_eq!(
+        restored.turns[1].usage.as_ref().map(|usage| usage.evidence),
+        Some(UsageEvidence::Measured)
+    );
+    let (reopened, _) = reopen_test_session(restored, tmp.path());
+    let resumed_footer = footer(&reopened);
+    assert!(
+        resumed_footer.contains("tokens ~12 in / ~7 out / ~4 cached (lower bound)"),
+        "got: {resumed_footer}"
+    );
+    assert!(
+        resumed_footer.contains("session ~<¥0.0001"),
+        "got: {resumed_footer}"
+    );
+    assert!(!resumed_footer.contains("$0.00"), "got: {resumed_footer}");
+}
+
+#[test]
+fn incomplete_free_session_refuses_instead_of_rendering_zero_dollars() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut session, _) = test_session("glm-4.5-flash", tmp.path());
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    run_task(&mut session, "measured free turn", &mut out, &mut err);
+    session.agent.client = Box::new(UnmeteredClient);
+    run_task(&mut session, "unmetered turn", &mut out, &mut err);
+
+    let line = footer(&session);
+    assert!(line.contains("session unknown (incomplete - 1 turn)"));
+    assert!(line.contains("tokens ~12 in / ~7 out / ~4 cached (lower bound)"));
+    assert!(!line.contains("$0.00"), "got: {line}");
+
+    let zero_currency = session.session_cost[0].currency;
+    let paid_currency = match zero_currency {
+        Currency::Cny => Currency::Usd,
+        Currency::Usd => Currency::Cny,
+    };
+    session.session_cost.push(SessionCost {
+        currency: paid_currency,
+        amount: 0.01,
+        uncertain: false,
+    });
+    let mixed = footer(&session);
+    assert!(
+        mixed.contains(&format!("~{}", money(0.01, paid_currency))),
+        "got: {mixed}"
+    );
+    assert!(
+        !mixed.contains(&format!("~{}", money(0.0, zero_currency))),
+        "got: {mixed}"
+    );
+}
+
+#[test]
+fn resume_replays_legacy_unknown_usage_without_exposing_its_counters() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (session, _calls) = test_session("deepseek-v4-flash", tmp.path());
+    let path = session_path(tmp.path(), "test-session");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    writeln!(
+        file,
+        r#"{{"event":"turn","ts_utc":"2026-07-15T00:00:00.000Z","route_id":"deepseek-v4-flash","messages":[],"usage":{{"prompt_tokens":91,"completion_tokens":7,"cached_tokens":40}}}}"#
+    )
+    .unwrap();
+    drop(file);
+    drop(session);
+
+    let restored = read_session(tmp.path(), "test-session").unwrap();
+    assert_eq!(
+        restored.turns[0].usage.as_ref().map(|usage| usage.evidence),
+        Some(UsageEvidence::Unknown)
+    );
+    let (reopened, _) = reopen_test_session(restored, tmp.path());
+    let line = footer(&reopened);
+
+    assert!(line.contains("session unknown (incomplete - 1 turn)"));
+    assert!(line.contains("tokens: not reported by provider"));
+    assert!(
+        !line.contains("91"),
+        "legacy counters leaked as evidence: {line}"
+    );
+    assert!(!line.contains("$0.00"), "got: {line}");
+}
+
+#[test]
 fn restored_totals_match_live_totals_across_route_switch() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut live, calls) = test_session("deepseek-v4-flash", tmp.path());
@@ -636,19 +802,15 @@ fn restored_totals_match_live_totals_across_route_switch() {
     assert_eq!(restored.route_id, "kimi-k2.6");
 
     let live_totals = (
-        live.session_in,
-        live.session_out,
-        live.session_cached,
+        live.session_usage.clone(),
         session_cost_snapshot(&live),
-        live.unpriced_turns,
+        live.incomplete_cost_turns,
     );
     let (reopened, _) = reopen_test_session(restored, tmp.path());
     let restored_totals = (
-        reopened.session_in,
-        reopened.session_out,
-        reopened.session_cached,
+        reopened.session_usage.clone(),
         session_cost_snapshot(&reopened),
-        reopened.unpriced_turns,
+        reopened.incomplete_cost_turns,
     );
 
     assert_eq!(restored_totals, live_totals);
@@ -669,9 +831,10 @@ fn failed_agent_turn_still_persists_its_history_delta() {
 
     assert!(out.is_empty());
     assert_eq!(session.last_cached_tokens, None);
-    assert!(String::from_utf8(err)
-        .unwrap()
-        .contains("provider failed after accepting the turn"));
+    let err = String::from_utf8(err).unwrap();
+    assert!(err.contains("provider failed after accepting the turn"));
+    assert!(err.contains("tokens: not reported by provider"));
+    assert!(!err.contains("tokens 0 in"), "got: {err}");
     let events = session_events(tmp.path(), "test-session");
     let turn = events
         .iter()
@@ -699,6 +862,45 @@ fn failed_agent_turn_still_persists_its_history_delta() {
         serde_json::to_vec(messages).unwrap(),
         serde_json::to_vec(&session.history).unwrap()
     );
+    assert_eq!(
+        session.session_usage.as_ref().map(|usage| usage.evidence),
+        Some(UsageEvidence::Unknown)
+    );
+}
+
+#[test]
+fn failed_chat_turn_projects_the_real_agent_receipt_usage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut session, _) = test_session("deepseek-v4-flash", tmp.path());
+    session.agent.client = Box::new(MeteredFailingClient);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+
+    run_task(&mut session, "meter before failing", &mut out, &mut err);
+
+    assert!(out.is_empty());
+    let err = String::from_utf8(err).unwrap();
+    assert!(err.contains("provider failed after metering"), "got: {err}");
+    assert!(err.contains("cost <¥0.0001"), "got: {err}");
+    assert!(
+        err.contains("tokens 12 in / 7 out / 4 cached | cache 33%"),
+        "got: {err}"
+    );
+    let durable: Receipt = std::fs::read_to_string(tmp.path().join("receipts.jsonl"))
+        .unwrap()
+        .lines()
+        .next()
+        .map(serde_json::from_str)
+        .unwrap()
+        .unwrap();
+    let ledger_usage = session_events(tmp.path(), "test-session")
+        .into_iter()
+        .find_map(|event| match event {
+            SessionEvent::Turn { usage, .. } => usage,
+            _ => None,
+        });
+    assert_eq!(ledger_usage, durable.usage);
+    assert_eq!(session.session_usage, durable.usage);
 }
 
 #[test]
@@ -780,11 +982,11 @@ fn footer_without_price_table_says_no_price_data() {
     let (_out, err) = drive(&mut s, &["hello"]);
     assert!(
         err.contains(
-            "unpriced | no price data | session - (incomplete - 1 unpriced turn) | tokens 12 in / 7 out / 4 cached | cache 33%"
+            "unpriced | no price data | session unknown (incomplete - 1 turn) | tokens 12 in / 7 out / 4 cached | cache 33%"
         ),
         "got: {err}"
     );
-    assert_eq!(s.unpriced_turns, 1);
+    assert_eq!(s.incomplete_cost_turns, 1);
 }
 
 #[test]
@@ -795,12 +997,13 @@ fn invalid_usage_marks_the_session_cost_incomplete() {
         prompt_tokens: 10,
         completion_tokens: 1,
         cached_tokens: Some(11),
+        evidence: UsageEvidence::Measured,
     };
 
-    add_session_cost(&mut s, &usage, off_peak_now());
+    add_session_cost(&mut s, Some(&usage), off_peak_now());
 
     assert!(s.session_cost.is_empty());
-    assert_eq!(s.unpriced_turns, 1);
+    assert_eq!(s.incomplete_cost_turns, 1);
     assert!(session_money(&s, off_peak_now()).contains("incomplete"));
 }
 
@@ -808,20 +1011,30 @@ fn invalid_usage_marks_the_session_cost_incomplete() {
 fn session_usage_overflow_is_atomic_and_marks_the_meter_incomplete() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut s, _calls) = test_session("deepseek-v4-flash", tmp.path());
-    s.session_in = u64::MAX;
-    s.session_out = 7;
-    s.session_cached = Some(3);
+    s.session_usage = Some(Usage {
+        prompt_tokens: u64::MAX,
+        completion_tokens: 7,
+        cached_tokens: Some(3),
+        evidence: UsageEvidence::Measured,
+    });
     let usage = Usage {
         prompt_tokens: 1,
         completion_tokens: 2,
         cached_tokens: Some(1),
+        evidence: UsageEvidence::Measured,
     };
 
-    assert!(!add_session_usage(&mut s, &usage));
-    assert_eq!(s.session_in, u64::MAX);
-    assert_eq!(s.session_out, 7);
-    assert_eq!(s.session_cached, Some(3));
-    assert_eq!(s.unpriced_turns, 1);
+    assert!(!add_session_usage(&mut s, Some(&usage)));
+    assert_eq!(
+        s.session_usage,
+        Some(Usage {
+            prompt_tokens: u64::MAX,
+            completion_tokens: 7,
+            cached_tokens: Some(3),
+            evidence: UsageEvidence::Partial,
+        })
+    );
+    assert_eq!(s.incomplete_cost_turns, 1);
 }
 
 #[test]
@@ -843,13 +1056,12 @@ fn compaction_projection_never_changes_session_usage_or_cost_totals() {
         prompt_tokens: 12,
         completion_tokens: 7,
         cached_tokens: Some(4),
+        evidence: UsageEvidence::Measured,
     };
-    assert!(add_session_usage(&mut s, &usage));
-    add_session_cost(&mut s, &usage, off_peak_now());
+    assert!(add_session_usage(&mut s, Some(&usage)));
+    add_session_cost(&mut s, Some(&usage), off_peak_now());
     let before = (
-        s.session_in,
-        s.session_out,
-        s.session_cached,
+        s.session_usage.clone(),
         session_cost_snapshot(&s),
         footer(&s),
     );
@@ -865,9 +1077,7 @@ fn compaction_projection_never_changes_session_usage_or_cost_totals() {
     );
     assert_eq!(
         (
-            s.session_in,
-            s.session_out,
-            s.session_cached,
+            s.session_usage.clone(),
             session_cost_snapshot(&s),
             footer(&s),
         ),
@@ -903,8 +1113,13 @@ fn real_chat_compaction_keeps_estimates_out_of_measured_session_totals() {
         "got: {compaction}"
     );
     assert_eq!(
-        (s.session_in, s.session_out, s.session_cached),
-        (12, 7, Some(4))
+        s.session_usage,
+        Some(Usage {
+            prompt_tokens: 12,
+            completion_tokens: 7,
+            cached_tokens: Some(4),
+            evidence: UsageEvidence::Measured,
+        })
     );
     assert_eq!(s.last_cached_tokens, None);
     assert!(
@@ -918,29 +1133,30 @@ fn real_chat_compaction_keeps_estimates_out_of_measured_session_totals() {
 fn footer_distinguishes_absent_cache_measurement_from_measured_zero() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut s, _calls) = test_session("deepseek-v4-flash", tmp.path());
-
-    assert!(add_session_usage(
-        &mut s,
-        &Usage {
-            prompt_tokens: 20,
-            completion_tokens: 2,
-            cached_tokens: None,
-        }
-    ));
+    let usage = Usage {
+        prompt_tokens: 20,
+        completion_tokens: 2,
+        cached_tokens: None,
+        evidence: UsageEvidence::Measured,
+    };
+    assert!(add_session_usage(&mut s, Some(&usage)));
+    add_session_cost(&mut s, Some(&usage), off_peak_now());
     let absent = footer(&s);
     assert!(!absent.contains("cached"), "got: {absent}");
     assert!(!absent.contains("| cache"), "got: {absent}");
+    assert!(absent.contains("session unknown"), "got: {absent}");
+    assert!(!absent.contains("$0.00"), "got: {absent}");
 
     let tmp = tempfile::tempdir().unwrap();
     let (mut s, _calls) = test_session("deepseek-v4-flash", tmp.path());
-    assert!(add_session_usage(
-        &mut s,
-        &Usage {
-            prompt_tokens: 20,
-            completion_tokens: 2,
-            cached_tokens: Some(0),
-        }
-    ));
+    let usage = Usage {
+        prompt_tokens: 20,
+        completion_tokens: 2,
+        cached_tokens: Some(0),
+        evidence: UsageEvidence::Measured,
+    };
+    assert!(add_session_usage(&mut s, Some(&usage)));
+    add_session_cost(&mut s, Some(&usage), off_peak_now());
     let measured_zero = footer(&s);
     assert!(
         measured_zero.contains("tokens 20 in / 2 out / 0 cached | cache 0%"),

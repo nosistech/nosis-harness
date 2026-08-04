@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use nh_core::agent::CompactionEvent;
 use nh_core::receipt::CompactionStats;
-use nh_core::wire::{cache_hit_pct, Usage};
+use nh_core::wire::{cache_hit_pct, Usage, UsageEvidence};
 use nh_routes::{
     cost_of, money, money_with_gloss, saved_pct, PriceConfidence, ResolvedRoute, RouteClass,
     RouteResolver, LOCAL_METER_COPY,
@@ -24,9 +24,11 @@ pub(super) fn run_meter_lines(
     tool_calls: u32,
     timing: RunTiming,
 ) -> Vec<String> {
-    let Some(usage) = usage else {
+    let usage_unknown = usage.is_none_or(|usage| usage.evidence == UsageEvidence::Unknown);
+    let token_summary = usage_token_summary(usage);
+    if usage_unknown {
         let mut lines = vec![format!(
-            "turns {turns} | tool calls {tool_calls} | tokens: not reported by provider - cost unknown"
+            "turns {turns} | tool calls {tool_calls} | {token_summary} - cost unknown"
         )];
         if route.class() == RouteClass::Local {
             lines.push(LOCAL_METER_COPY.to_owned());
@@ -35,18 +37,11 @@ pub(super) fn run_meter_lines(
             lines.push(line);
         }
         return lines;
-    };
-    let mut token_line = format!(
-        "turns {turns} | tool calls {tool_calls} | tokens {} in / {} out",
-        usage.prompt_tokens, usage.completion_tokens
-    );
-    if let (Some(cached), Some(pct)) = (
-        usage.cached_tokens,
-        cache_hit_pct(usage.prompt_tokens, usage.cached_tokens),
-    ) {
-        token_line.push_str(&format!(" / {cached} cached | cache {pct:.0}%"));
     }
-    let mut lines = vec![token_line];
+    let usage = usage.expect("known usage checked above");
+    let mut lines = vec![format!(
+        "turns {turns} | tool calls {tool_calls} | {token_summary}"
+    )];
     if let Some(line) = turn_cost_line_for_run(resolver, route, usage, timing.started, timing.ended)
     {
         lines.push(line);
@@ -55,6 +50,30 @@ pub(super) fn run_meter_lines(
         lines.push(line);
     }
     lines
+}
+
+pub(crate) fn usage_token_summary(usage: Option<&Usage>) -> String {
+    let Some(usage) = usage.filter(|usage| usage.evidence != UsageEvidence::Unknown) else {
+        return "tokens: not reported by provider".into();
+    };
+    let partial = usage.evidence == UsageEvidence::Partial;
+    let marker = if partial { "~" } else { "" };
+    let mut summary = format!(
+        "tokens {marker}{} in / {marker}{} out",
+        usage.prompt_tokens, usage.completion_tokens
+    );
+    if partial {
+        if let Some(cached) = usage.cached_tokens {
+            summary.push_str(&format!(" / ~{cached} cached"));
+        }
+        summary.push_str(" (lower bound)");
+    } else if let (Some(cached), Some(pct)) = (
+        usage.cached_tokens,
+        cache_hit_pct(usage.prompt_tokens, usage.cached_tokens),
+    ) {
+        summary.push_str(&format!(" / {cached} cached | cache {pct:.0}%"));
+    }
+    summary
 }
 
 /// Render one progress callback. Ordinary core progress remains byte-for-byte
@@ -212,7 +231,11 @@ pub(super) fn turn_cost_line_for_run(
         (route.price_at(started), route.price_at(ended)),
         (Some(start), Some(end)) if start.peak != end.peak
     );
-    if crossed && !line.starts_with("cost unpriced") {
+    if crossed
+        && usage.evidence.is_measured()
+        && usage.cached_tokens.is_some()
+        && !line.starts_with("cost unpriced")
+    {
         line.push_str(" · *priced at run end - spans a peak boundary");
     }
     Some(line)
@@ -227,8 +250,19 @@ pub(crate) fn turn_cost_line(
     if route.class() == RouteClass::Local {
         return Some(LOCAL_METER_COPY.to_owned());
     }
-    let quote = route.price_at(at)?;
-    let cached = usage.cached_tokens.unwrap_or(0);
+    match usage.evidence {
+        UsageEvidence::Measured => {}
+        UsageEvidence::Partial => {
+            return Some("cost unknown - usage is a lower bound".into());
+        }
+        UsageEvidence::Unknown => return Some("cost unknown - usage unknown".into()),
+    }
+    let Some(cached) = usage.cached_tokens else {
+        return Some("cost unknown - cached tokens not reported by provider".into());
+    };
+    let Some(quote) = route.price_at(at) else {
+        return Some("cost unpriced - no price data".into());
+    };
     let Some(actual) = cost_of(&quote, usage.prompt_tokens, cached, usage.completion_tokens) else {
         return Some("cost unpriced - invalid usage; meter incomplete".into());
     };

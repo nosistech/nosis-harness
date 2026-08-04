@@ -9,7 +9,7 @@ use chrono::{DateTime, FixedOffset, Utc};
 use nh_core::agent::CompactionEvent;
 use nh_core::receipt::{CompactionStats, FailureClass, Outcome, Receipt};
 use nh_core::session_ledger::RestoredSession;
-use nh_core::wire::{cache_hit_pct, ThinkingEffort, Usage};
+use nh_core::wire::{cache_hit_pct, ThinkingEffort, Usage, UsageEvidence};
 use nh_law::{Law, PolicyView};
 use nh_routes::{
     money, money_with_gloss, Currency, PriceConfidence, Profiles, ResolvedRoute, RouteClass,
@@ -77,13 +77,13 @@ impl TimelineEntry {
         }
     }
 
-    pub(super) fn tokens(&self) -> (u64, u64, Option<u64>) {
-        self.usage.as_ref().map_or((0, 0, None), |usage| {
-            (
+    pub(super) fn tokens(&self) -> Option<(u64, u64, Option<u64>)> {
+        self.usage.as_ref().and_then(|usage| {
+            usage.evidence.has_reported_counters().then_some((
                 usage.prompt_tokens,
                 usage.completion_tokens,
                 usage.cached_tokens,
-            )
+            ))
         })
     }
 }
@@ -213,7 +213,6 @@ pub enum AgentEvent {
     Usage(Usage),
     TaskReceipt(TimelineSummary),
     Answer(String),
-    MeterIncomplete,
     Failed(String),
 }
 
@@ -283,7 +282,7 @@ pub struct App {
     pub(super) effort: ThinkingEffort,
     pub(super) transcript: Vec<TranscriptLine>,
     pub(super) pending_approval: Option<ApprovalRequest>,
-    pub(super) usage: Usage,
+    pub(super) usage: Option<Usage>,
     pub(super) input: String,
     pub(super) budget: Option<u64>,
     pub(super) scroll_back: u16,
@@ -298,7 +297,7 @@ pub struct App {
     pub(super) current_task_compaction: CompactionStats,
     pub(super) last_compaction_hud: Option<String>,
     pub(super) session_cost: Vec<SessionCost>,
-    pub(super) has_failed_turn: bool,
+    pub(super) session_cost_incomplete: bool,
     pub(super) session_allow: Vec<String>,
     pub(super) resumed: bool,
 }
@@ -341,10 +340,7 @@ impl App {
             active_profile: execution_policy.profile,
             transcript: Vec::new(),
             pending_approval: None,
-            usage: Usage {
-                cached_tokens: Some(0),
-                ..Usage::default()
-            },
+            usage: None,
             input: String::new(),
             budget,
             scroll_back: 0,
@@ -359,7 +355,7 @@ impl App {
             current_task_compaction: CompactionStats::default(),
             last_compaction_hud: None,
             session_cost: Vec::new(),
-            has_failed_turn: false,
+            session_cost_incomplete: false,
             session_allow: Vec::new(),
             resumed: false,
         }
@@ -403,14 +399,20 @@ impl App {
         }
     }
 
-    pub(super) fn used_tokens(&self) -> u64 {
-        self.usage
-            .prompt_tokens
-            .saturating_add(self.usage.completion_tokens)
+    pub(super) fn used_tokens(&self) -> Option<u64> {
+        match self.usage.as_ref() {
+            None => Some(0),
+            Some(usage) if usage.evidence.has_reported_counters() => {
+                Some(usage.prompt_tokens.saturating_add(usage.completion_tokens))
+            }
+            Some(_) => None,
+        }
     }
 
     pub(super) fn budget_reached(&self) -> bool {
-        self.budget.is_some_and(|limit| self.used_tokens() >= limit)
+        self.budget
+            .zip(self.used_tokens())
+            .is_some_and(|(limit, used)| used >= limit)
     }
 
     pub(super) fn dispatch(&mut self) -> Option<String> {
@@ -499,8 +501,21 @@ impl App {
         }
     }
 
+    pub(super) fn mark_session_cost_incomplete(&mut self) {
+        self.session_cost_incomplete = true;
+    }
+
     pub(super) fn session_money(&self, now: DateTime<Utc>) -> String {
-        let mut display = if self.session_cost.is_empty() {
+        if self.session_cost_incomplete
+            && (self.session_cost.is_empty()
+                || self
+                    .session_cost
+                    .iter()
+                    .all(|total| total.amount.abs() <= f64::EPSILON))
+        {
+            return "unavailable - meter incomplete".into();
+        }
+        let display = if self.session_cost.is_empty() {
             if self.route.class() == RouteClass::Local {
                 "no billed tokens".into()
             } else {
@@ -517,13 +532,21 @@ impl App {
                 )
             }
         } else {
-            let mixed = self.session_cost.len() > 1;
+            let visible_totals = self
+                .session_cost
+                .iter()
+                .filter(|total| !self.session_cost_incomplete || total.amount.abs() > f64::EPSILON)
+                .count();
+            let mixed = visible_totals > 1;
             [Currency::Cny, Currency::Usd]
                 .into_iter()
                 .filter_map(|currency| {
                     self.session_cost
                         .iter()
                         .find(|total| total.currency == currency)
+                        .filter(|total| {
+                            !self.session_cost_incomplete || total.amount.abs() > f64::EPSILON
+                        })
                         .map(|total| {
                             let mut display = if mixed {
                                 money(total.amount, total.currency)
@@ -538,27 +561,42 @@ impl App {
                             if total.uncertain {
                                 display.push('*');
                             }
+                            if self.session_cost_incomplete {
+                                display.insert(0, '~');
+                            }
                             display
                         })
                 })
                 .collect::<Vec<_>>()
                 .join(" · ")
         };
-        if self.has_failed_turn {
-            display.push_str(" ? incomplete - failed turn usage not reported");
+        if self.session_cost_incomplete {
+            format!("{display} - subtotal; meter incomplete")
+        } else {
+            display
         }
-        display
     }
 
     pub(super) fn hud_line(&self, now: DateTime<Utc>) -> String {
-        let mut line = format!(
-            "session {} · in {} · out {}",
-            self.session_money(now),
-            self.usage.prompt_tokens,
-            self.usage.completion_tokens
-        );
-        if let Some(pct) = cache_hit_pct(self.usage.prompt_tokens, self.usage.cached_tokens) {
-            line.push_str(&format!(" · cache {pct:.0}%"));
+        let mut line = format!("session {}", self.session_money(now));
+        match self.usage.as_ref() {
+            None => line.push_str(" · no usage yet"),
+            Some(usage) if usage.evidence == UsageEvidence::Measured => {
+                line.push_str(&format!(
+                    " · in {} · out {}",
+                    usage.prompt_tokens, usage.completion_tokens
+                ));
+                if let Some(pct) = cache_hit_pct(usage.prompt_tokens, usage.cached_tokens) {
+                    line.push_str(&format!(" · cache {pct:.0}%"));
+                }
+            }
+            Some(usage) if usage.evidence == UsageEvidence::Partial => {
+                line.push_str(&format!(
+                    " · in ~{} · out ~{} · token lower bound",
+                    usage.prompt_tokens, usage.completion_tokens
+                ));
+            }
+            Some(_) => line.push_str(" · tokens unavailable - usage unknown"),
         }
         if let Some(compaction) = &self.last_compaction_hud {
             line.push_str(" · ");
@@ -573,17 +611,25 @@ impl App {
             line.push_str(" · resumed");
         }
         if let Some(limit) = self.budget {
-            let used = self.used_tokens();
-            let pct = if limit == 0 {
-                100
-            } else {
-                used.saturating_mul(100).checked_div(limit).unwrap_or(100)
+            match (self.used_tokens(), self.usage.as_ref()) {
+                (Some(used), Some(usage)) if usage.evidence == UsageEvidence::Partial => {
+                    let pct = budget_pct(used, limit);
+                    line.push_str(&format!(
+                        " · {} ~{pct}% ~{used}/{limit} lower bound",
+                        budget_bar(used, limit)
+                    ));
+                }
+                (Some(used), _) => {
+                    let pct = budget_pct(used, limit);
+                    line.push_str(&format!(
+                        " · {} {pct}% {used}/{limit}",
+                        budget_bar(used, limit)
+                    ));
+                }
+                (None, _) => {
+                    line.push_str(&format!(" · budget usage unavailable/{limit}"));
+                }
             }
-            .min(100);
-            line.push_str(&format!(
-                " · {} {pct}% {used}/{limit}",
-                budget_bar(used, limit)
-            ));
         }
         if let Some(quote) = self.route.price_at(now) {
             if quote.confidence == PriceConfidence::VerifyLive {
@@ -592,6 +638,15 @@ impl App {
         }
         safe_line(&self.scrubber, &line)
     }
+}
+
+fn budget_pct(used: u64, limit: u64) -> u64 {
+    if limit == 0 {
+        100
+    } else {
+        used.saturating_mul(100).checked_div(limit).unwrap_or(100)
+    }
+    .min(100)
 }
 
 impl Drop for App {

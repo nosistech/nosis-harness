@@ -10,8 +10,8 @@ use super::http::{
     MAX_PROVIDER_BODY_BYTES,
 };
 use super::retry::{
-    combine_usage, is_retryable, parse_retry_after, run_with_retry, system_jitter, AttemptOutcome,
-    AttemptResult, RetryPolicy,
+    is_retryable, parse_retry_after, run_with_retry, system_jitter, AttemptOutcome, AttemptResult,
+    RetryPolicy,
 };
 use super::usage_debug::UsageDebug;
 use super::{ChatClient, ChatMessage, ChatRequest, ChatResponse, RetryStats, ToolCallReq, Usage};
@@ -50,7 +50,7 @@ impl ChatClient for AnthropicMessagesClient {
     fn complete(&self, request: &ChatRequest) -> anyhow::Result<ChatResponse> {
         let url = endpoint(&self.base_url);
         let request_body = build_body(request, self.max_tokens, self.dialect);
-        let output = run_with_retry(
+        let mut output = run_with_retry(
             RetryPolicy::DEFAULT,
             &std::thread::sleep,
             &system_jitter,
@@ -128,9 +128,11 @@ impl ChatClient for AnthropicMessagesClient {
             },
         )
         .map_err(anyhow::Error::new)?;
+        let success_usage = output.value.usage.take();
+        let combined_usage = output.combine_success_usage(success_usage);
         let mut response = output.value;
         response.retries = output.stats;
-        response.usage = combine_usage(output.salvaged_usage, response.usage);
+        response.usage = combined_usage;
         Ok(response)
     }
 }
@@ -267,18 +269,24 @@ struct AnthropicBlock {
 #[derive(serde::Deserialize)]
 struct AnthropicUsage {
     #[serde(default)]
-    input_tokens: u64,
+    input_tokens: Option<u64>,
     #[serde(default)]
-    output_tokens: u64,
+    output_tokens: Option<u64>,
     #[serde(default)]
     cache_read_input_tokens: Option<u64>,
 }
 
 fn usage_from_wire(usage: AnthropicUsage) -> Usage {
+    let evidence = super::usage_evidence(
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cache_read_input_tokens,
+    );
     Usage {
-        prompt_tokens: usage.input_tokens,
-        completion_tokens: usage.output_tokens,
+        prompt_tokens: usage.input_tokens.unwrap_or(0),
+        completion_tokens: usage.output_tokens.unwrap_or(0),
         cached_tokens: usage.cache_read_input_tokens,
+        evidence,
     }
 }
 
@@ -330,7 +338,7 @@ pub(super) fn parse_response(body: &str) -> anyhow::Result<ChatResponse> {
             tool_call_id: None,
             reasoning_content: None,
         },
-        finish_reason: wire.stop_reason.unwrap_or_default(),
+        finish_reason: super::FinishReason::from_wire(wire.stop_reason, "tool_use"),
         usage: wire.usage.map(usage_from_wire),
         retries: RetryStats::default(),
     })

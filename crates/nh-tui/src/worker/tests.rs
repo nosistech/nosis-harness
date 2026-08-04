@@ -160,46 +160,54 @@ fn shutdown_aware_client_refuses_a_new_provider_call() {
 
 #[test]
 fn add_usage_reports_overflow_without_partially_mutating_totals() {
-    let mut total = Usage {
+    let mut total = Some(Usage {
         prompt_tokens: u64::MAX,
         completion_tokens: 7,
         cached_tokens: Some(3),
-    };
+        evidence: UsageEvidence::Measured,
+    });
     let usage = Usage {
         prompt_tokens: 1,
         completion_tokens: 2,
         cached_tokens: Some(1),
+        evidence: UsageEvidence::Measured,
     };
 
-    assert!(add_usage(&mut total, &usage));
+    assert!(add_usage(&mut total, Some(&usage)));
+    let total = total.unwrap();
     assert_eq!(total.prompt_tokens, u64::MAX);
     assert_eq!(total.completion_tokens, 7);
     assert_eq!(total.cached_tokens, Some(3));
+    assert_eq!(total.evidence, UsageEvidence::Partial);
 }
 
 #[test]
 fn add_usage_keeps_absent_cache_measurement_sticky() {
-    let mut total = Usage {
+    let mut total = Some(Usage {
+        prompt_tokens: 0,
+        completion_tokens: 0,
         cached_tokens: Some(0),
-        ..Usage::default()
-    };
+        evidence: UsageEvidence::Measured,
+    });
     assert!(!add_usage(
         &mut total,
-        &Usage {
+        Some(&Usage {
             prompt_tokens: 10,
             completion_tokens: 1,
             cached_tokens: None,
-        }
+            evidence: UsageEvidence::Measured,
+        })
     ));
     assert!(!add_usage(
         &mut total,
-        &Usage {
+        Some(&Usage {
             prompt_tokens: 10,
             completion_tokens: 1,
             cached_tokens: Some(5),
-        }
+            evidence: UsageEvidence::Measured,
+        })
     ));
-    assert_eq!(total.cached_tokens, None);
+    assert_eq!(total.unwrap().cached_tokens, None);
 }
 
 #[test]

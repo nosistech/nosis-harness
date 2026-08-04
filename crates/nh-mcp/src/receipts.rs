@@ -3,6 +3,7 @@
 use crate::response::{tool_error, tool_result};
 use crate::{Runtime, MAX_RECEIPT_TAIL_BYTES};
 use anyhow::{bail, Context as _};
+use nh_core::wire::{Usage, UsageEvidence};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::VecDeque;
@@ -140,23 +141,36 @@ pub(super) fn receipts_text(receipts: &[Value]) -> String {
                 .and_then(Value::as_str)
                 .unwrap_or("?");
             let turns = receipt.get("turns").and_then(Value::as_u64).unwrap_or(0);
-            let tokens = receipt.get("usage").map_or_else(
-                || "unmetered".to_string(),
-                |usage| {
-                    let prompt = usage
-                        .get("prompt_tokens")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0);
-                    let completion = usage
-                        .get("completion_tokens")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0);
-                    format!("{} tokens", prompt.saturating_add(completion))
-                },
-            );
+            let tokens = receipt_usage_text(receipt);
             format!("{ts} | {model} | {outcome} | {turns} turns | {tokens}")
         })
         .collect::<Vec<_>>()
         .join(" || ");
     format!("receipts: {} | {rows}", receipts.len())
+}
+
+fn receipt_usage_text(receipt: &Value) -> String {
+    let Some(value) = receipt.get("usage") else {
+        return "unmetered".into();
+    };
+    let Ok(usage) = serde_json::from_value::<Usage>(value.clone()) else {
+        return "usage unavailable".into();
+    };
+    match usage.evidence {
+        UsageEvidence::Measured => usage
+            .prompt_tokens
+            .checked_add(usage.completion_tokens)
+            .map_or_else(
+                || "token total unavailable (overflow)".into(),
+                |tokens| format!("{tokens} tokens"),
+            ),
+        UsageEvidence::Partial => usage
+            .prompt_tokens
+            .checked_add(usage.completion_tokens)
+            .map_or_else(
+                || "token lower bound unavailable (overflow)".into(),
+                |tokens| format!("~{tokens} tokens (lower bound)"),
+            ),
+        UsageEvidence::Unknown => "usage unknown".into(),
+    }
 }

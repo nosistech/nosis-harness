@@ -119,7 +119,9 @@ pub(super) fn why_at(arguments: &Value, runtime: &Runtime, at: chrono::DateTime<
 
     let mut cost = json!({
         "value": actual,
-        "currency": quote.currency.as_str()
+        "currency": quote.currency.as_str(),
+        "estimated": true,
+        "price_confidence": quote.confidence.as_str()
     });
     if let Some(usd_approx) = usd_approx {
         cost["usd_approx"] = json!(usd_approx);
@@ -150,9 +152,8 @@ pub(super) fn why_at(arguments: &Value, runtime: &Runtime, at: chrono::DateTime<
     let text = why_text(
         route.id(),
         route.provider(),
-        actual,
-        quote.currency,
-        usd_approx,
+        &nh_routes::money_with_gloss(actual, quote.currency, resolver.fx(), at),
+        quote.confidence,
         saved_pct,
         trace.rejections.len(),
     );
@@ -162,24 +163,28 @@ pub(super) fn why_at(arguments: &Value, runtime: &Runtime, at: chrono::DateTime<
 pub(super) fn why_text(
     route_id: &str,
     provider: &str,
-    actual: f64,
-    currency: nh_routes::Currency,
-    usd_approx: Option<f64>,
+    cost: &str,
+    confidence: nh_routes::PriceConfidence,
     saved_pct: Option<u8>,
     skipped: usize,
 ) -> String {
     let mut text = format!(
-        "cheapest capable: {route_id} | {provider} | {actual:.6} {}",
-        currency.as_str()
+        "cheapest capable: {route_id} | {provider} | {cost} (est) | {}",
+        price_confidence_label(confidence)
     );
-    if let Some(usd) = usd_approx {
-        text.push_str(&format!(" (~${usd:.6})"));
-    }
     if let Some(saved_pct) = saved_pct {
         text.push_str(&format!(" | saved {saved_pct}% vs no-cache"));
     }
     text.push_str(&format!(" | {skipped} routes skipped"));
     text
+}
+
+fn price_confidence_label(confidence: nh_routes::PriceConfidence) -> &'static str {
+    match confidence {
+        nh_routes::PriceConfidence::Confirmed => "price confirmed",
+        nh_routes::PriceConfidence::Reported => "price reported",
+        nh_routes::PriceConfidence::VerifyLive => "*price verify_live",
+    }
 }
 
 #[derive(Deserialize)]
@@ -234,7 +239,9 @@ pub(super) fn route_cost_at(
         .and_then(|fx| nh_routes::to_usd_approx(value, quote.currency, fx, at));
     let mut cost = json!({
         "value": value,
-        "currency": quote.currency.as_str()
+        "currency": quote.currency.as_str(),
+        "estimated": true,
+        "price_confidence": quote.confidence.as_str()
     });
     if let Some(usd_approx) = usd_approx {
         cost["usd_approx"] = json!(usd_approx);
@@ -255,10 +262,12 @@ pub(super) fn route_cost_at(
         },
         "cost": cost
     });
-    let mut text = format!("{} | {value:.6} {}", route.id(), quote.currency.as_str());
-    if let Some(usd) = usd_approx {
-        text.push_str(&format!(" (~${usd:.6})"));
-    }
+    let mut text = format!(
+        "{} | {} (est) | {}",
+        route.id(),
+        nh_routes::money_with_gloss(value, quote.currency, resolver.fx(), at),
+        price_confidence_label(quote.confidence)
+    );
     text.push_str(&format!(
         " | {} prompt ({} cached) | {} output",
         args.prompt_tokens, args.cached_tokens, args.output_tokens

@@ -641,7 +641,7 @@ fn anthropic_response_round_trips_text_tool_use_and_usage() {
     assert_eq!(calls[0].name, "read_file");
     let args: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
     assert_eq!(args["path"], "a.txt");
-    assert_eq!(resp.finish_reason, "tool_use");
+    assert_eq!(resp.finish_reason, FinishReason::ToolUse);
     let usage = resp.usage.unwrap();
     assert_eq!(usage.prompt_tokens, 11);
     assert_eq!(usage.completion_tokens, 7);
@@ -703,13 +703,52 @@ fn parses_message_finish_reason_and_usage() {
         }
     }"#;
     let resp = parse_response(body).unwrap();
-    assert_eq!(resp.finish_reason, "tool_calls");
+    assert_eq!(resp.finish_reason, FinishReason::ToolUse);
     let calls = resp.message.tool_calls.unwrap();
     assert_eq!(calls[0].name, "edit_file");
     let usage = resp.usage.unwrap();
     assert_eq!(usage.prompt_tokens, 12);
     assert_eq!(usage.completion_tokens, 7);
     assert_eq!(usage.cached_tokens, Some(4));
+}
+
+#[test]
+fn finish_reason_vocabulary_is_validated_per_wire() {
+    let openai = parse_response(
+        r#"{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c1","function":{"name":"read_file","arguments":"{}"}}]},"finish_reason":"tool_use"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        openai.finish_reason,
+        FinishReason::Unknown("tool_use".into())
+    );
+
+    let anthropic = parse_anthropic_response(
+        r#"{"content":[{"type":"tool_use","id":"c1","name":"read_file","input":{}}],"stop_reason":"tool_calls"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        anthropic.finish_reason,
+        FinishReason::Unknown("tool_calls".into())
+    );
+
+    let openai_foreign_stop = parse_response(
+        r#"{"choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"end_turn"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        openai_foreign_stop.finish_reason,
+        FinishReason::Unknown("end_turn".into())
+    );
+
+    let anthropic_foreign_stop = parse_anthropic_response(
+        r#"{"content":[{"type":"text","text":"done"}],"stop_reason":"stop"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        anthropic_foreign_stop.finish_reason,
+        FinishReason::Unknown("stop".into())
+    );
 }
 
 #[test]
@@ -752,8 +791,58 @@ fn parses_plain_content_without_usage() {
     let body = r#"{"choices":[{"message":{"role":"assistant","content":"done"}}]}"#;
     let resp = parse_response(body).unwrap();
     assert_eq!(resp.message.content.as_deref(), Some("done"));
-    assert_eq!(resp.finish_reason, "");
+    assert_eq!(resp.finish_reason, FinishReason::Missing);
     assert!(resp.usage.is_none());
+}
+
+#[test]
+fn openai_wire_distinguishes_absent_empty_partial_and_measured_usage() {
+    let response = |usage: &str| {
+        parse_response(&format!(
+            r#"{{"choices":[{{"message":{{"role":"assistant","content":"ok"}},"finish_reason":"stop"}}]{usage}}}"#
+        ))
+        .unwrap()
+        .usage
+    };
+
+    assert!(response("").is_none());
+
+    let empty = response(r#", "usage": {}"#).unwrap();
+    assert_eq!(empty.evidence, UsageEvidence::Unknown);
+    assert_eq!((empty.prompt_tokens, empty.completion_tokens), (0, 0));
+
+    let partial = response(r#", "usage": {"prompt_tokens": 9}"#).unwrap();
+    assert_eq!(partial.evidence, UsageEvidence::Partial);
+    assert_eq!((partial.prompt_tokens, partial.completion_tokens), (9, 0));
+
+    let measured = response(r#", "usage": {"prompt_tokens": 9, "completion_tokens": 2}"#).unwrap();
+    assert_eq!(measured.evidence, UsageEvidence::Measured);
+    assert_eq!((measured.prompt_tokens, measured.completion_tokens), (9, 2));
+}
+
+#[test]
+fn anthropic_wire_distinguishes_absent_empty_partial_and_measured_usage() {
+    let response = |usage: &str| {
+        parse_anthropic_response(&format!(
+            r#"{{"content":[{{"type":"text","text":"ok"}}],"stop_reason":"end_turn"{usage}}}"#
+        ))
+        .unwrap()
+        .usage
+    };
+
+    assert!(response("").is_none());
+
+    let empty = response(r#", "usage": {}"#).unwrap();
+    assert_eq!(empty.evidence, UsageEvidence::Unknown);
+    assert_eq!((empty.prompt_tokens, empty.completion_tokens), (0, 0));
+
+    let partial = response(r#", "usage": {"output_tokens": 2}"#).unwrap();
+    assert_eq!(partial.evidence, UsageEvidence::Partial);
+    assert_eq!((partial.prompt_tokens, partial.completion_tokens), (0, 2));
+
+    let measured = response(r#", "usage": {"input_tokens": 9, "output_tokens": 2}"#).unwrap();
+    assert_eq!(measured.evidence, UsageEvidence::Measured);
+    assert_eq!((measured.prompt_tokens, measured.completion_tokens), (9, 2));
 }
 
 #[test]
@@ -779,35 +868,81 @@ fn wire_specific_error_usage_is_salvaged_without_estimation() {
 }
 
 #[test]
-fn salvaged_and_success_usage_sum_while_absence_contributes_zero() {
+fn measured_salvage_and_success_usage_sum() {
     let salvaged = Usage {
         prompt_tokens: 11,
         completion_tokens: 2,
         cached_tokens: Some(3),
+        evidence: UsageEvidence::Measured,
     };
     let success = Usage {
         prompt_tokens: 7,
         completion_tokens: 4,
         cached_tokens: Some(2),
+        evidence: UsageEvidence::Measured,
     };
     let combined = combine_usage(Some(salvaged), Some(success)).unwrap();
     assert_eq!(combined.prompt_tokens, 18);
     assert_eq!(combined.completion_tokens, 6);
     assert_eq!(combined.cached_tokens, Some(5));
+}
 
+#[test]
+fn success_without_salvage_stays_measured() {
     let observed = combine_usage(
         None,
         Some(Usage {
             prompt_tokens: 7,
             completion_tokens: 4,
             cached_tokens: None,
+            evidence: UsageEvidence::Measured,
         }),
     )
     .unwrap();
     assert_eq!(observed.prompt_tokens, 7);
     assert_eq!(observed.completion_tokens, 4);
     assert_eq!(observed.cached_tokens, None);
+    assert_eq!(observed.evidence, UsageEvidence::Measured);
     assert!(combine_usage(None, None).is_none());
+}
+
+#[test]
+fn unknown_counters_never_enter_a_partial_lower_bound() {
+    let mut legacy_unknown: Usage = serde_json::from_slice(
+        br#"{"prompt_tokens":900,"completion_tokens":90,"cached_tokens":800}"#,
+    )
+    .unwrap();
+    let measured = parse_response(
+        r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":4,"prompt_tokens_details":{"cached_tokens":2}}}"#,
+    )
+    .unwrap()
+    .usage
+    .unwrap();
+
+    assert!(legacy_unknown.checked_add_assign(&measured));
+    assert_eq!(legacy_unknown.evidence, UsageEvidence::Partial);
+    assert_eq!(legacy_unknown.prompt_tokens, 7);
+    assert_eq!(legacy_unknown.completion_tokens, 4);
+    assert_eq!(legacy_unknown.cached_tokens, Some(2));
+}
+
+#[test]
+fn measured_salvage_followed_by_unmetered_success_is_partial() {
+    let salvaged = extract_openai_usage(
+        r#"{"error":{"message":"busy"},"usage":{"prompt_tokens":11,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":3}}}"#,
+    )
+    .unwrap();
+    let success = parse_response(
+        r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#,
+    )
+    .unwrap();
+
+    let combined = combine_usage(Some(salvaged), success.usage).unwrap();
+
+    assert_eq!(combined.evidence, UsageEvidence::Partial);
+    assert_eq!(combined.prompt_tokens, 11);
+    assert_eq!(combined.completion_tokens, 2);
+    assert_eq!(combined.cached_tokens, Some(3));
 }
 
 #[test]
