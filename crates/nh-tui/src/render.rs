@@ -9,7 +9,9 @@ pub(super) use transcript::{transcript_scroll_state, wrapped_rows};
 use crate::input::command_matches;
 use crate::palette::{filter_palette, trust_dial_lines};
 use crate::session::{effort_name, safe_line};
-use crate::state::{search_match_lines, App, Overlay, PickerKind, PickerRow, Status};
+use crate::state::{
+    search_match_count, search_match_lines, App, Overlay, PickerKind, PickerRow, Status,
+};
 use crate::timeline::{timeline_detail_lines, timeline_row};
 use chrono::{DateTime, Utc};
 use ratatui::{
@@ -36,7 +38,18 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &App) {
             Constraint::Length(1),
         ])
         .split(inner);
-    render_transcript(frame, app, regions[0]);
+    let transcript_area = if matches!(app.overlay, Overlay::Search { .. }) {
+        let panel = search_modal_area(area);
+        Rect::new(
+            regions[0].x,
+            regions[0].y,
+            regions[0].width,
+            panel.y.saturating_sub(regions[0].y).min(regions[0].height),
+        )
+    } else {
+        regions[0]
+    };
+    render_transcript(frame, app, transcript_area);
     render_key_hints(frame, app, regions[1]);
     render_separator(frame, app, regions[2]);
     render_input(frame, app, regions[3]);
@@ -113,6 +126,11 @@ pub(super) fn render_separator(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
 pub(super) fn render_input(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let prompt = safe_line(&app.scrubber, "❯ ");
+    let queued = if app.pending_send {
+        safe_line(&app.scrubber, "[queued] ")
+    } else {
+        String::new()
+    };
     let input = safe_line(&app.scrubber, &app.input);
     let mut spans = vec![Span::styled(
         prompt.clone(),
@@ -120,6 +138,14 @@ pub(super) fn render_input(frame: &mut Frame<'_>, app: &App, area: Rect) {
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     )];
+    if app.pending_send {
+        spans.push(Span::styled(
+            queued.clone(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     if app.input.is_empty() {
         spans.push(Span::styled(
             safe_line(&app.scrubber, "type a task and press Enter…"),
@@ -136,7 +162,7 @@ pub(super) fn render_input(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 
     if app.overlay == Overlay::None && area.width > 0 && area.height > 0 {
-        let cursor_width = Line::from(format!("{prompt}{input}")).width();
+        let cursor_width = Line::from(format!("{prompt}{queued}{input}")).width();
         let cursor_x = area.x.saturating_add(
             u16::try_from(cursor_width)
                 .unwrap_or(u16::MAX)
@@ -158,7 +184,13 @@ pub(super) fn render_overlay(frame: &mut Frame<'_>, app: &App) {
         Overlay::None => {}
         Overlay::Search {
             query, selected, ..
-        } => render_search(frame, app, modal_area(frame.area(), 8), query, *selected),
+        } => render_search(
+            frame,
+            app,
+            search_modal_area(frame.area()),
+            query,
+            *selected,
+        ),
         Overlay::CommandMenu { selected } => {
             render_command_menu(frame, app, modal_area(frame.area(), 14), *selected)
         }
@@ -223,13 +255,14 @@ pub(super) fn render_search(
         "Type literal text · ↑/↓ match · Enter keep · Esc cancel",
     );
     let matches = search_match_lines(&app.transcript, query);
-    let position = if matches.is_empty() {
+    let match_count = search_match_count(&matches);
+    let position = if match_count == 0 {
         "0 matches".to_owned()
     } else {
         format!(
             "match {}/{}",
-            selected.min(matches.len() - 1) + 1,
-            matches.len()
+            selected.min(match_count - 1) + 1,
+            match_count
         )
     };
     let lines = vec![
@@ -504,6 +537,15 @@ pub(super) fn modal_area(area: Rect, desired_height: u16) -> Rect {
         width,
         height,
     )
+}
+
+pub(super) fn search_modal_area(area: Rect) -> Rect {
+    let mut modal = modal_area(area, 8);
+    modal.y = area
+        .bottom()
+        .saturating_sub(modal.height)
+        .saturating_sub(u16::from(area.height > modal.height));
+    modal
 }
 
 pub(super) fn render_modal_shell(

@@ -1,6 +1,6 @@
 use super::*;
 use crate::palette::trust_dial_lines;
-use crate::state::{Overlay, PickerKind, UiDiscovery};
+use crate::state::{search_match_lines, Overlay, PickerKind, UiDiscovery};
 use crate::timeline::{timeline_detail_lines, timeline_row};
 use crate::worker::WorkerCommand;
 use chrono::{DateTime, Utc};
@@ -308,8 +308,9 @@ fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
 
 fn find_ascii_text(buffer: &ratatui::buffer::Buffer, needle: &str) -> (u16, u16) {
     for (y, row) in buffer_rows(buffer).iter().enumerate() {
-        if let Some(x) = row.find(needle) {
-            return (u16::try_from(x).unwrap(), u16::try_from(y).unwrap());
+        if let Some(byte_x) = row.find(needle) {
+            let cell_x = row[..byte_x].chars().count();
+            return (u16::try_from(cell_x).unwrap(), u16::try_from(y).unwrap());
         }
     }
     panic!("could not find {needle:?} in {}", buffer_text(buffer));
@@ -476,7 +477,7 @@ fn empty_state_and_key_strip_are_self_teaching_then_conversation_replaces_welcom
 }
 
 #[test]
-fn centered_modal_frames_clear_transcript_for_every_overlay() {
+fn modal_frames_clear_transcript_for_every_overlay() {
     let terminal = Rect::new(0, 0, 100, 30);
     let cases = [
         (
@@ -485,7 +486,7 @@ fn centered_modal_frames_clear_transcript_for_every_overlay() {
                 selected: 0,
                 original_scroll: 0,
             },
-            modal_area(terminal, 8),
+            search_modal_area(terminal),
             "Search transcript",
         ),
         (
@@ -621,6 +622,118 @@ fn reducer_drives_every_semaforo_transition() {
 }
 
 #[test]
+fn working_enter_queues_an_editable_task_and_idle_dispatches_it_exactly_once() {
+    let mut app = test_app(None);
+    app.status = Status::Working;
+    type_text(&mut app, "next task");
+
+    assert_eq!(
+        reduce_key(&mut app, code_key(KeyCode::Enter)),
+        UiAction::None
+    );
+    assert_eq!(app.status, Status::Working);
+    assert_eq!(app.input, "next task");
+    assert!(app.pending_send);
+    assert!(app
+        .transcript
+        .iter()
+        .all(|line| line.kind != TranscriptKind::Task));
+
+    type_text(&mut app, "!");
+    reduce_key(&mut app, code_key(KeyCode::Backspace));
+    assert_eq!(app.input, "next task");
+    assert!(app.pending_send);
+
+    let queued = render_buffer(&app, 90, 20);
+    let (queued_x, queued_y) = find_ascii_text(&queued, "[queued]");
+    assert_eq!(queued[(queued_x, queued_y)].fg, Color::Yellow);
+    assert!(queued[(queued_x, queued_y)]
+        .modifier
+        .contains(Modifier::BOLD));
+
+    let (previous, action) =
+        reduce_agent_event(&mut app, AgentEvent::Answer("current done".into()));
+    assert_eq!(previous, Status::Working);
+    assert_eq!(action, UiAction::Dispatch("next task".into()));
+    assert_eq!(app.status, Status::Working);
+    assert!(app.input.is_empty());
+    assert!(!app.pending_send);
+    assert_eq!(
+        app.transcript
+            .iter()
+            .filter(|line| line.kind == TranscriptKind::Task)
+            .count(),
+        1
+    );
+
+    let (_, repeated) = reduce_agent_event(&mut app, AgentEvent::Progress("late event".into()));
+    assert_eq!(repeated, UiAction::None);
+    assert_eq!(
+        app.transcript
+            .iter()
+            .filter(|line| line.kind == TranscriptKind::Task)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn clearing_or_blank_queued_input_never_dispatches() {
+    let mut app = test_app(None);
+    app.status = Status::Working;
+    type_text(&mut app, "x");
+    reduce_key(&mut app, code_key(KeyCode::Enter));
+    assert!(app.pending_send);
+
+    reduce_key(&mut app, code_key(KeyCode::Backspace));
+    assert!(app.input.is_empty());
+    assert!(!app.pending_send);
+    assert!(!buffer_text(&render_buffer(&app, 90, 20)).contains("[queued]"));
+    let (_, action) = reduce_agent_event(&mut app, AgentEvent::Answer("done".into()));
+    assert_eq!(action, UiAction::None);
+    assert!(app
+        .transcript
+        .iter()
+        .all(|line| line.kind != TranscriptKind::Task));
+
+    let mut whitespace = test_app(None);
+    whitespace.status = Status::Working;
+    type_text(&mut whitespace, "   ");
+    reduce_key(&mut whitespace, code_key(KeyCode::Enter));
+    assert!(!whitespace.pending_send);
+    let (_, action) = reduce_agent_event(&mut whitespace, AgentEvent::Answer("done".into()));
+    assert_eq!(action, UiAction::None);
+    assert_eq!(whitespace.input, "   ");
+    assert!(whitespace
+        .transcript
+        .iter()
+        .all(|line| line.kind != TranscriptKind::Task));
+}
+
+#[test]
+fn queued_slash_input_uses_the_command_path_instead_of_becoming_a_task() {
+    let mut app = test_app(None);
+    app.status = Status::Working;
+    type_text(&mut app, "/typo");
+    assert_eq!(app.overlay, Overlay::None);
+    reduce_key(&mut app, code_key(KeyCode::Enter));
+
+    let (_, action) = reduce_agent_event(&mut app, AgentEvent::Answer("done".into()));
+
+    assert_eq!(action, UiAction::None);
+    assert!(app.input.is_empty());
+    assert!(!app.pending_send);
+    assert!(app
+        .transcript
+        .iter()
+        .any(|line| line.text.contains("unknown command")));
+    assert!(app
+        .transcript
+        .iter()
+        .all(|line| line.kind != TranscriptKind::Task));
+}
+
+#[test]
 fn approval_forwards_yes_and_no_then_returns_to_working() {
     for approved in [true, false] {
         let mut app = test_app(None);
@@ -639,22 +752,30 @@ fn approval_reducer_accepts_only_explicit_choices() {
     for (key, expected) in [
         (KeyCode::Char('y'), true),
         (KeyCode::Char('Y'), true),
+        (KeyCode::Char('a'), true),
+        (KeyCode::Char('A'), true),
         (KeyCode::Char('n'), false),
         (KeyCode::Char('N'), false),
         (KeyCode::Esc, false),
     ] {
         let mut app = test_app(None);
         app.status = Status::Working;
+        type_text(&mut app, "queued draft");
+        reduce_key(&mut app, code_key(KeyCode::Enter));
         let (event, answer) = approval("cargo test --workspace");
         apply_event(&mut app, event);
         assert_eq!(reduce_key(&mut app, code_key(key)), UiAction::None);
         assert_eq!(answer.recv().unwrap(), expected);
         assert!(app.pending_approval.is_none());
         assert_eq!(app.status, Status::Working);
+        assert_eq!(app.input, "queued draft");
+        assert!(app.pending_send);
     }
 
     let mut app = test_app(None);
     app.status = Status::Working;
+    type_text(&mut app, "queued draft");
+    reduce_key(&mut app, code_key(KeyCode::Enter));
     let (event, answer) = approval("cargo test --workspace");
     apply_event(&mut app, event);
     assert_eq!(
@@ -664,6 +785,8 @@ fn approval_reducer_accepts_only_explicit_choices() {
     assert_eq!(answer.try_recv(), Err(TryRecvError::Empty));
     assert!(app.pending_approval.is_some());
     assert_eq!(app.status, Status::Waiting);
+    assert_eq!(app.input, "queued draft");
+    assert!(app.pending_send);
 }
 
 #[test]
@@ -1005,6 +1128,28 @@ fn paste_appends_to_input_without_dispatching() {
 }
 
 #[test]
+fn paste_while_working_appends_to_the_queued_input_buffer() {
+    let mut app = test_app(None);
+    app.status = Status::Working;
+    type_text(&mut app, "next ");
+
+    let action = reduce_input_event(&mut app, Event::Paste("line\nfrom paste".into()));
+
+    assert_eq!(action, UiAction::None);
+    assert_eq!(app.input, "next line from paste");
+    assert_eq!(app.overlay, Overlay::None);
+    assert_eq!(app.status, Status::Working);
+    assert!(app.transcript.is_empty());
+    assert!(!app.pending_send);
+    assert!(!buffer_text(&render_buffer(&app, 90, 20)).contains("[queued]"));
+
+    reduce_key(&mut app, code_key(KeyCode::Enter));
+    reduce_input_event(&mut app, Event::Paste(" edited".into()));
+    assert_eq!(app.input, "next line from paste edited");
+    assert!(app.pending_send);
+}
+
+#[test]
 fn multiline_paste_becomes_one_input_line_without_dispatching() {
     let mut app = test_app(None);
 
@@ -1340,7 +1485,7 @@ fn keyboard_arrows_pages_and_end_control_transcript_scroll() {
 }
 
 #[test]
-fn working_state_keeps_scroll_live_and_blocks_text_input() {
+fn working_state_keeps_all_scroll_keys_live_while_text_remains_editable() {
     let mut app = test_app(None);
     app.status = Status::Working;
     app.max_scroll.set(20);
@@ -1348,7 +1493,16 @@ fn working_state_keeps_scroll_live_and_blocks_text_input() {
 
     reduce_key(&mut app, code_key(KeyCode::PageUp));
     assert_eq!(app.scroll_back, 5);
+    reduce_key(&mut app, code_key(KeyCode::Up));
+    assert_eq!(app.scroll_back, 6);
+    reduce_key(&mut app, code_key(KeyCode::Down));
+    assert_eq!(app.scroll_back, 5);
+    reduce_key(&mut app, code_key(KeyCode::PageDown));
+    assert_eq!(app.scroll_back, 0);
+
     reduce_key(&mut app, char_key('x'));
+    assert_eq!(app.input, "unchangedx");
+    reduce_key(&mut app, code_key(KeyCode::Backspace));
     assert_eq!(app.input, "unchanged");
 }
 
@@ -1434,6 +1588,182 @@ fn search_matches_case_insensitively_navigates_in_order_and_wraps() {
 
     let rendered = buffer_text(&render_buffer(&app, 90, 20));
     assert!(rendered.contains("match 3/3"), "got: {rendered}");
+}
+
+#[test]
+fn search_match_ranges_are_exact_for_mixed_case_ascii_occurrences() {
+    let mut app = test_app(None);
+    app.push_line("start AlPhA and ALPHA end", TranscriptKind::Answer);
+
+    let matches = search_match_lines(&app.transcript, "aLpHa");
+
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].line_index, 0);
+    assert_eq!(matches[0].ranges, vec![6..11, 16..21]);
+    assert_eq!(
+        &app.transcript[0].text[matches[0].ranges[0].clone()],
+        "AlPhA"
+    );
+    assert_eq!(
+        &app.transcript[0].text[matches[0].ranges[1].clone()],
+        "ALPHA"
+    );
+}
+
+#[test]
+fn search_ranges_stay_utf8_safe_and_non_ascii_case_is_literal() {
+    let mut app = test_app(None);
+    app.push_line("préfix ALPHA café", TranscriptKind::Answer);
+
+    let ascii = search_match_lines(&app.transcript, "alpha");
+    let expected_start = "préfix ".len();
+    assert_eq!(ascii[0].ranges, vec![expected_start..expected_start + 5]);
+    assert_eq!(&app.transcript[0].text[ascii[0].ranges[0].clone()], "ALPHA");
+    assert!(app.transcript[0]
+        .text
+        .is_char_boundary(ascii[0].ranges[0].start));
+    assert!(app.transcript[0]
+        .text
+        .is_char_boundary(ascii[0].ranges[0].end));
+
+    reduce_key(&mut app, ctrl_key('f'));
+    type_text(&mut app, "alpha");
+    let rendered = render_buffer(&app, 100, 30);
+    let (match_x, match_y) = find_ascii_text(&rendered, "ALPHA café");
+    for offset in 0..5 {
+        let cell = &rendered[(match_x.saturating_add(offset), match_y)];
+        assert_eq!(cell.fg, Color::Cyan);
+        assert!(cell.modifier.contains(Modifier::BOLD | Modifier::REVERSED));
+    }
+    assert_eq!(
+        rendered[(match_x.saturating_sub(1), match_y)].fg,
+        Color::White
+    );
+    assert_eq!(
+        rendered[(match_x.saturating_add(5), match_y)].fg,
+        Color::White
+    );
+    reduce_key(&mut app, code_key(KeyCode::Esc));
+
+    assert!(search_match_lines(&app.transcript, "CAFÉ").is_empty());
+    let literal = search_match_lines(&app.transcript, "CAFé");
+    assert_eq!(literal.len(), 1);
+    assert_eq!(
+        &app.transcript[0].text[literal[0].ranges[0].clone()],
+        "café"
+    );
+}
+
+#[test]
+fn search_highlights_every_visible_hit_marks_the_selection_and_closes_cleanly() {
+    let mut app = test_app(None);
+    for index in 0..8 {
+        app.push_line(&format!("older filler {index}"), TranscriptKind::Answer);
+    }
+    app.push_line("first needle result", TranscriptKind::Answer);
+    app.push_line("between results", TranscriptKind::Answer);
+    app.push_line("second NeEdLe and NEEDLE result", TranscriptKind::Answer);
+    for index in 0..40 {
+        app.push_line(&format!("newer filler {index}"), TranscriptKind::Answer);
+    }
+
+    reduce_key(&mut app, ctrl_key('f'));
+    type_text(&mut app, "nEeDlE");
+    reduce_key(&mut app, code_key(KeyCode::Down));
+    let highlighted = render_buffer(&app, 100, 30);
+    let highlighted_text = buffer_text(&highlighted);
+    assert!(
+        highlighted_text.contains("match 2/3"),
+        "got: {highlighted_text}"
+    );
+
+    let (ordinary_x, ordinary_y) = find_ascii_text(&highlighted, "needle result");
+    for offset in 0..6 {
+        let ordinary = &highlighted[(ordinary_x.saturating_add(offset), ordinary_y)];
+        assert_eq!(ordinary.fg, Color::Yellow);
+        assert!(ordinary.modifier.contains(Modifier::BOLD));
+        assert!(!ordinary.modifier.contains(Modifier::REVERSED));
+    }
+
+    let (selected_x, selected_y) = find_ascii_text(&highlighted, "NeEdLe and");
+    for offset in 0..6 {
+        let selected = &highlighted[(selected_x.saturating_add(offset), selected_y)];
+        assert_eq!(selected.fg, Color::Cyan);
+        assert!(selected
+            .modifier
+            .contains(Modifier::BOLD | Modifier::REVERSED));
+    }
+    assert!(selected_y < search_modal_area(Rect::new(0, 0, 100, 30)).y);
+    assert_eq!(
+        highlighted[(selected_x.saturating_sub(1), selected_y)].fg,
+        Color::White
+    );
+    assert_eq!(
+        highlighted[(selected_x.saturating_add(6), selected_y)].fg,
+        Color::White
+    );
+
+    let (additional_x, additional_y) = find_ascii_text(&highlighted, "NEEDLE result");
+    for offset in 0..6 {
+        let additional = &highlighted[(additional_x.saturating_add(offset), additional_y)];
+        assert_eq!(additional.fg, Color::Yellow);
+        assert!(additional.modifier.contains(Modifier::BOLD));
+        assert!(!additional.modifier.contains(Modifier::REVERSED));
+    }
+    assert_eq!(
+        highlighted[(additional_x.saturating_add(6), additional_y)].fg,
+        Color::White
+    );
+
+    reduce_key(&mut app, code_key(KeyCode::Down));
+    let third = render_buffer(&app, 100, 30);
+    assert!(buffer_text(&third).contains("match 3/3"));
+    let (former_x, former_y) = find_ascii_text(&third, "NeEdLe and");
+    let (third_x, third_y) = find_ascii_text(&third, "NEEDLE result");
+    assert_eq!(third[(former_x, former_y)].fg, Color::Yellow);
+    assert_eq!(third[(third_x, third_y)].fg, Color::Cyan);
+    assert!(third[(third_x, third_y)]
+        .modifier
+        .contains(Modifier::BOLD | Modifier::REVERSED));
+
+    reduce_key(&mut app, code_key(KeyCode::Enter));
+    assert_eq!(app.overlay, Overlay::None);
+    let closed = render_buffer(&app, 100, 30);
+    for needle in ["NeEdLe and", "NEEDLE result"] {
+        let (closed_x, closed_y) = find_ascii_text(&closed, needle);
+        for offset in 0..6 {
+            let closed_match = &closed[(closed_x.saturating_add(offset), closed_y)];
+            assert_eq!(closed_match.fg, Color::White);
+            assert!(!closed_match
+                .modifier
+                .intersects(Modifier::BOLD | Modifier::REVERSED));
+        }
+    }
+}
+
+#[test]
+fn selected_search_highlight_stays_visible_without_transcript_overflow() {
+    let mut app = test_app(None);
+    for index in 0..10 {
+        app.push_line(&format!("short filler {index}"), TranscriptKind::Answer);
+    }
+    app.push_line("short selected needle", TranscriptKind::Answer);
+    let panel = search_modal_area(Rect::new(0, 0, 90, 20));
+    let natural = render_buffer(&app, 90, 20);
+    let (_, natural_y) = find_ascii_text(&natural, "needle");
+    assert!(natural_y >= panel.y);
+
+    reduce_key(&mut app, ctrl_key('f'));
+    type_text(&mut app, "needle");
+
+    let rendered = render_buffer(&app, 90, 20);
+    let (x, y) = find_ascii_text(&rendered, "needle");
+    assert!(y < panel.y);
+    for offset in 0..6 {
+        let cell = &rendered[(x.saturating_add(offset), y)];
+        assert_eq!(cell.fg, Color::Cyan);
+        assert!(cell.modifier.contains(Modifier::BOLD | Modifier::REVERSED));
+    }
 }
 
 #[test]
@@ -2623,25 +2953,49 @@ fn taskbar_semaforo_writes_only_on_waiting_transitions() {
 fn budget_reached_blocks_and_refuses_another_dispatch() {
     let mut app = test_app(Some(100));
     app.status = Status::Working;
-    assert_eq!(
-        apply_event(
-            &mut app,
-            AgentEvent::Usage(Usage {
-                prompt_tokens: 80,
-                completion_tokens: 20,
-                cached_tokens: None,
-                evidence: UsageEvidence::Measured,
-            }),
-        ),
-        &Status::Blocked(BUDGET_REASON.into())
+    type_text(&mut app, "must not run");
+    reduce_key(&mut app, code_key(KeyCode::Enter));
+    assert!(app.pending_send);
+
+    let (previous, usage_action) = reduce_agent_event(
+        &mut app,
+        AgentEvent::Usage(Usage {
+            prompt_tokens: 80,
+            completion_tokens: 20,
+            cached_tokens: None,
+            evidence: UsageEvidence::Measured,
+        }),
     );
-    app.input = "must not run".into();
-    assert!(app.dispatch().is_none());
+    assert_eq!(previous, Status::Working);
+    assert_eq!(usage_action, UiAction::None);
+    assert_eq!(app.status, Status::Blocked(BUDGET_REASON.into()));
+
+    let (previous, answer_action) =
+        reduce_agent_event(&mut app, AgentEvent::Answer("finished".into()));
+    assert_eq!(previous, Status::Blocked(BUDGET_REASON.into()));
+    assert_eq!(answer_action, UiAction::None);
+    assert_eq!(app.status, Status::Blocked(BUDGET_REASON.into()));
+    assert_eq!(app.input, "must not run");
+    assert!(app.pending_send);
+    assert!(app
+        .transcript
+        .iter()
+        .all(|line| line.kind != TranscriptKind::Task));
+
+    assert_eq!(
+        reduce_key(&mut app, code_key(KeyCode::Enter)),
+        UiAction::None
+    );
+    assert_eq!(app.input, "must not run");
+    let (_, repeated) = reduce_agent_event(&mut app, AgentEvent::Progress("meter settled".into()));
+    assert_eq!(repeated, UiAction::None);
+    assert!(app
+        .transcript
+        .iter()
+        .all(|line| line.kind != TranscriptKind::Task));
     let hud = app.hud_line(Utc::now());
     assert!(hud.contains("[#######] 100%"), "got: {hud}");
     assert!(hud.contains("100/100"), "got: {hud}");
-    apply_event(&mut app, AgentEvent::Answer("finished".into()));
-    assert_eq!(app.status, Status::Blocked(BUDGET_REASON.into()));
 }
 
 #[test]
@@ -3173,6 +3527,69 @@ fn real_worker_and_ledger_replay_mark_a_measured_plus_unmetered_session() {
     assert!(mixed_free_money.starts_with("~$0.01"));
     assert!(!mixed_free_money.contains("¥0.00"));
 
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn queued_task_transition_is_forwarded_to_the_worker_exactly_once() {
+    let root = temp_dir();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let requests_for_connect = Arc::clone(&requests);
+    let connect: ConnectFn = Box::new(move |_, _| {
+        Ok((
+            Box::new(RecordingClient {
+                requests: Arc::clone(&requests_for_connect),
+            }),
+            nh_vault::secret("fake-key-queued-worker"),
+        ))
+    });
+    let law = nh_law::load(&root, &nh_law::LoadOptions { cli_autonomy: None });
+    let mut worker = spawn_worker(WorkerConfig {
+        route: test_route(),
+        profiles: Profiles::bundled(),
+        active_profile: "balanced".into(),
+        law,
+        repo_root: root.clone(),
+        workdir: root.clone(),
+        scrubber: Arc::new(RwLock::new(Scrubber::new(Vec::new()))),
+        connect,
+        initial: None,
+        resume: None,
+    })
+    .unwrap();
+    let mut app = test_app(None);
+
+    type_text(&mut app, "first task");
+    assert!(!handle_key(&mut app, &mut worker, code_key(KeyCode::Enter)));
+    type_text(&mut app, "queued task");
+    reduce_key(&mut app, code_key(KeyCode::Enter));
+    assert!(app.pending_send);
+
+    let mut answers = 0;
+    while answers < 2 {
+        let event = worker
+            .events
+            .recv_timeout(Duration::from_secs(2))
+            .expect("queued worker task completes");
+        match &event {
+            AgentEvent::Approval(_) => panic!("recording client never asks for approval"),
+            AgentEvent::Failed(reason) => panic!("worker failed: {reason}"),
+            AgentEvent::Answer(_) => answers += 1,
+            _ => {}
+        }
+        let (_, should_quit) = handle_agent_event(&mut app, &mut worker, event);
+        assert!(!should_quit);
+    }
+
+    assert_eq!(
+        app.transcript
+            .iter()
+            .filter(|line| line.kind == TranscriptKind::Task)
+            .count(),
+        2
+    );
+    assert_eq!(requests.lock().unwrap().len(), 2);
+    assert_eq!(worker.shutdown(), WorkerShutdown::Clean);
     std::fs::remove_dir_all(root).unwrap();
 }
 

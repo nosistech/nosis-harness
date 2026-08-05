@@ -16,6 +16,7 @@ use nh_routes::{
     RouteResolver,
 };
 use std::cell::Cell;
+use std::ops::Range;
 use std::path::PathBuf;
 
 /// The single status shown by the semáforo.
@@ -293,6 +294,7 @@ pub struct App {
     pub(super) usage: Option<Usage>,
     pub(super) last_request_usage: Option<Usage>,
     pub(super) input: String,
+    pub(super) pending_send: bool,
     pub(super) budget: Option<u64>,
     pub(super) scroll_back: usize,
     pub(super) max_scroll: Cell<usize>,
@@ -353,6 +355,7 @@ impl App {
             usage: None,
             last_request_usage: None,
             input: String::new(),
+            pending_send: false,
             budget,
             scroll_back: 0,
             max_scroll: Cell::new(0),
@@ -448,9 +451,11 @@ impl App {
         }
         let task = self.input.trim().to_owned();
         if task.is_empty() {
+            self.pending_send = false;
             return None;
         }
         self.input.clear();
+        self.pending_send = false;
         self.current_task_compaction = CompactionStats::default();
         self.last_compaction_hud = None;
         self.active_model = None;
@@ -695,17 +700,75 @@ impl App {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SearchMatchLine {
+    pub(super) line_index: usize,
+    pub(super) ranges: Vec<Range<usize>>,
+}
+
 /// Search only the scrubbed, escaped transcript projection retained by the UI.
-pub(super) fn search_match_lines(transcript: &[TranscriptLine], query: &str) -> Vec<usize> {
+pub(super) fn search_match_lines(
+    transcript: &[TranscriptLine],
+    query: &str,
+) -> Vec<SearchMatchLine> {
     if query.is_empty() {
         return Vec::new();
     }
-    let query = query.to_lowercase();
     transcript
         .iter()
         .enumerate()
-        .filter_map(|(index, line)| line.text.to_lowercase().contains(&query).then_some(index))
+        .filter_map(|(line_index, line)| {
+            let ranges = search_match_ranges(&line.text, query);
+            (!ranges.is_empty()).then_some(SearchMatchLine { line_index, ranges })
+        })
         .collect()
+}
+
+pub(super) fn search_match_count(matches: &[SearchMatchLine]) -> usize {
+    matches.iter().fold(0, |count, matched| {
+        count.saturating_add(matched.ranges.len())
+    })
+}
+
+pub(super) fn search_match_position(
+    matches: &[SearchMatchLine],
+    selected: usize,
+) -> Option<(usize, usize)> {
+    let mut remaining = selected.min(search_match_count(matches).saturating_sub(1));
+    for matched in matches {
+        if remaining < matched.ranges.len() {
+            return Some((matched.line_index, remaining));
+        }
+        remaining = remaining.saturating_sub(matched.ranges.len());
+    }
+    None
+}
+
+fn search_match_ranges(text: &str, query: &str) -> Vec<Range<usize>> {
+    let text_bytes = text.as_bytes();
+    let query_bytes = query.as_bytes();
+    let mut ranges = Vec::new();
+    let mut offset = 0;
+
+    // ASCII-only case folding is byte-length preserving, so these byte ranges map exactly
+    // onto the displayed UTF-8 text. Non-ASCII text is matched literally and case-sensitively.
+    while query_bytes.len() <= text_bytes.len().saturating_sub(offset) {
+        let Some(relative) = text_bytes[offset..]
+            .windows(query_bytes.len())
+            .position(|candidate| candidate.eq_ignore_ascii_case(query_bytes))
+        else {
+            break;
+        };
+        let start = offset.saturating_add(relative);
+        let end = start.saturating_add(query_bytes.len());
+        if text.is_char_boundary(start) && text.is_char_boundary(end) {
+            ranges.push(start..end);
+            offset = end;
+        } else {
+            offset = start.saturating_add(1);
+        }
+    }
+    ranges
 }
 
 fn budget_pct(used: u64, limit: u64) -> u64 {

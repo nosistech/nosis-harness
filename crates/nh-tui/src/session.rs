@@ -1,10 +1,10 @@
 //! Terminal session lifecycle, worker orchestration, and shared UI helpers.
 
-use crate::input::handle_input_event;
+use crate::input::{handle_action, handle_input_event, reduce_agent_event};
 use crate::render::render;
 use crate::state::{AgentEvent, App, Status, TranscriptKind, TuiConfig, UiDiscovery};
 use crate::terminal::{with_terminal_panic_hook, PanicAbort, TerminalGuard, TerminalStateHandle};
-use crate::timeline::{apply_event, record_restored_turn_cost};
+use crate::timeline::record_restored_turn_cost;
 use crate::worker::{spawn_worker, Worker, WorkerConfig, WorkerShutdown, SHUTDOWN_TIMEOUT};
 use crate::{ConnectFn, SharedScrubber, EVENT_POLL, TASKBAR_CLEAR, TASKBAR_WAITING};
 use anyhow::Context as _;
@@ -272,6 +272,16 @@ pub(super) fn parse_effort(value: &str) -> Option<ThinkingEffort> {
     }
 }
 
+pub(super) fn handle_agent_event(
+    app: &mut App,
+    worker: &mut Worker,
+    event: AgentEvent,
+) -> (Status, bool) {
+    let (previous, action) = reduce_agent_event(app, event);
+    let should_quit = handle_action(app, worker, action);
+    (previous, should_quit)
+}
+
 pub(super) fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -285,14 +295,16 @@ pub(super) fn ui_loop(
         loop {
             match worker.events.try_recv() {
                 Ok(agent_event) => {
-                    let previous = app.status.clone();
                     let ring = matches!(agent_event, AgentEvent::Approval(_))
                         && !matches!(app.status, Status::Waiting);
-                    apply_event(app, agent_event);
+                    let (previous, should_quit) = handle_agent_event(app, worker, agent_event);
                     emit_taskbar_transition(terminal.backend_mut(), &previous, &app.status)
                         .context("could not update taskbar status")?;
                     if ring {
                         ring_bell();
+                    }
+                    if should_quit {
+                        return Ok(());
                     }
                 }
                 Err(TryRecvError::Empty) => break,

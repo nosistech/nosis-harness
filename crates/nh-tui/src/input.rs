@@ -9,8 +9,8 @@ use commands::{resolved_route_action, set_profile};
 
 use crate::palette::filter_palette;
 use crate::state::{
-    search_match_lines, AgentEvent, App, Overlay, PaletteAction, PaletteEntry, PickerKind,
-    PickerRow, Status,
+    search_match_count, search_match_lines, AgentEvent, App, Overlay, PaletteAction, PaletteEntry,
+    PickerKind, PickerRow, Status,
 };
 use crate::timeline::apply_event;
 use crate::worker::{Worker, WorkerCommand};
@@ -115,6 +115,25 @@ pub(super) fn reduce_input_event(app: &mut App, input: Event) -> UiAction {
     }
 }
 
+pub(super) fn reduce_agent_event(app: &mut App, event: AgentEvent) -> (Status, UiAction) {
+    let previous = app.status.clone();
+    apply_event(app, event);
+    let action = if app.pending_send
+        && matches!(previous, Status::Working)
+        && matches!(app.status, Status::Idle)
+    {
+        if app.input.starts_with('/') {
+            app.pending_send = false;
+            execute_command_menu(app)
+        } else {
+            app.dispatch().map_or(UiAction::None, UiAction::Dispatch)
+        }
+    } else {
+        UiAction::None
+    };
+    (previous, action)
+}
+
 pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         if matches!(app.status, Status::Waiting) {
@@ -142,14 +161,37 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
         return UiAction::None;
     }
     if matches!(app.status, Status::Working) {
-        if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
-            match key.code {
-                KeyCode::Up => scroll_transcript(app, 1, true),
-                KeyCode::Down => scroll_transcript(app, 1, false),
-                KeyCode::PageUp => scroll_transcript(app, 5, true),
-                KeyCode::PageDown => scroll_transcript(app, 5, false),
-                _ => {}
+        match key.code {
+            KeyCode::Up if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
+                scroll_transcript(app, 1, true);
             }
+            KeyCode::Down if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
+                scroll_transcript(app, 1, false);
+            }
+            KeyCode::PageUp if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
+                scroll_transcript(app, 5, true);
+            }
+            KeyCode::PageDown if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
+                scroll_transcript(app, 5, false);
+            }
+            KeyCode::Enter => {
+                app.pending_send = !app.input.trim().is_empty();
+            }
+            KeyCode::Backspace => {
+                app.input.pop();
+                if app.input.trim().is_empty() {
+                    app.pending_send = false;
+                }
+            }
+            KeyCode::Char(character)
+                if !character.is_control()
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                push_input_char(&mut app.input, character);
+            }
+            _ => {}
         }
         return UiAction::None;
     }
@@ -161,6 +203,9 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
         }
         KeyCode::Backspace => {
             app.input.pop();
+            if app.input.trim().is_empty() {
+                app.pending_send = false;
+            }
         }
         KeyCode::Up => scroll_transcript(app, 1, true),
         KeyCode::Down => scroll_transcript(app, 1, false),
@@ -192,8 +237,10 @@ pub(super) fn push_input_char(input: &mut String, character: char) -> bool {
 }
 
 pub(super) fn reduce_paste(app: &mut App, text: &str) -> UiAction {
-    if matches!(app.status, Status::Working | Status::Waiting)
-        || !matches!(app.overlay, Overlay::None | Overlay::CommandMenu { .. })
+    let working = matches!(app.status, Status::Working);
+    if matches!(app.status, Status::Waiting)
+        || (working && app.overlay != Overlay::None)
+        || (!working && !matches!(app.overlay, Overlay::None | Overlay::CommandMenu { .. }))
     {
         return UiAction::None;
     }
@@ -206,6 +253,10 @@ pub(super) fn reduce_paste(app: &mut App, text: &str) -> UiAction {
         if !push_input_char(&mut app.input, character) {
             break;
         }
+    }
+
+    if working {
+        return UiAction::None;
     }
 
     if app.input.starts_with('/') {
@@ -304,7 +355,9 @@ pub(super) fn reduce_overlay_key(app: &mut App, key: KeyEvent) -> UiAction {
 
 pub(super) fn reduce_search_key(app: &mut App, key: KeyEvent) -> UiAction {
     let match_count = match &app.overlay {
-        Overlay::Search { query, .. } => search_match_lines(&app.transcript, query).len(),
+        Overlay::Search { query, .. } => {
+            search_match_count(&search_match_lines(&app.transcript, query))
+        }
         _ => return UiAction::None,
     };
     match key.code {
@@ -386,11 +439,13 @@ pub(super) fn reduce_command_menu_key(app: &mut App, key: KeyEvent) -> UiAction 
     match key.code {
         KeyCode::Esc => {
             app.input.clear();
+            app.pending_send = false;
             app.overlay = Overlay::None;
         }
         KeyCode::Backspace => {
             app.input.pop();
             if app.input.is_empty() {
+                app.pending_send = false;
                 app.overlay = Overlay::None;
             } else if let Overlay::CommandMenu { selected } = &mut app.overlay {
                 *selected = 0;

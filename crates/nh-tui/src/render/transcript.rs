@@ -1,7 +1,9 @@
 //! Transcript projection, scrolling, overflow markers, and wrapping.
 
 use crate::session::safe_line;
-use crate::state::{search_match_lines, App, Overlay, TranscriptKind};
+use crate::state::{
+    search_match_lines, search_match_position, App, Overlay, SearchMatchLine, TranscriptKind,
+};
 use ratatui::{
     layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
@@ -18,8 +20,9 @@ pub(super) fn render_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) {
         render_empty_state(frame, app, area);
         return;
     }
-    let projection = chat_projection(app);
-    let requested_scroll = search_target_line(app).map_or(app.scroll_back, |source_index| {
+    let (search_matches, selected_match) = active_search_matches(app);
+    let projection = chat_projection(app, &search_matches, selected_match);
+    let requested_scroll = selected_match.map_or(app.scroll_back, |(source_index, _)| {
         scroll_back_for_source(&projection, source_index, area)
     });
     let (scroll, max_scroll, overflow) =
@@ -40,17 +43,16 @@ pub(super) fn render_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) {
     render_overflow_markers(frame, app, area, overflow);
 }
 
-fn search_target_line(app: &App) -> Option<usize> {
+fn active_search_matches(app: &App) -> (Vec<SearchMatchLine>, Option<(usize, usize)>) {
     let Overlay::Search {
         query, selected, ..
     } = &app.overlay
     else {
-        return None;
+        return (Vec::new(), None);
     };
     let matches = search_match_lines(&app.transcript, query);
-    matches
-        .get((*selected).min(matches.len().saturating_sub(1)))
-        .copied()
+    let selected_match = search_match_position(&matches, *selected);
+    (matches, selected_match)
 }
 
 struct ChatProjection {
@@ -67,8 +69,9 @@ fn scroll_back_for_source(projection: &ChatProjection, source_index: usize, area
         .copied()
         .unwrap_or(0);
     let target_row = wrapped_rows(&projection.lines[..target_line], area.width.max(1));
+    // Keep the selected result above the search panel so its distinct style is visible.
     let viewport_top = target_row
-        .saturating_sub(usize::from(area.height) / 2)
+        .saturating_sub(usize::from(area.height) / 4)
         .min(max_scroll);
     max_scroll.saturating_sub(viewport_top)
 }
@@ -181,11 +184,26 @@ pub(super) fn render_overflow_markers(
     }
 }
 
-fn chat_projection(app: &App) -> ChatProjection {
+fn chat_projection(
+    app: &App,
+    search_matches: &[SearchMatchLine],
+    selected_match: Option<(usize, usize)>,
+) -> ChatProjection {
     let mut rendered = Vec::new();
     let mut source_positions = Vec::with_capacity(app.transcript.len());
     let mut previous = None;
-    for item in &app.transcript {
+    let mut search_index = 0;
+    for (source_index, item) in app.transcript.iter().enumerate() {
+        let matched = search_matches
+            .get(search_index)
+            .filter(|matched| matched.line_index == source_index);
+        if matched.is_some() {
+            search_index = search_index.saturating_add(1);
+        }
+        let ranges = matched.map_or(&[][..], |matched| matched.ranges.as_slice());
+        let selected_range = selected_match
+            .filter(|(line_index, _)| *line_index == source_index)
+            .map(|(_, range_index)| range_index);
         let starts_group = previous != Some(item.kind);
         if starts_group && !rendered.is_empty() {
             rendered.push(Line::from(""));
@@ -201,10 +219,14 @@ fn chat_projection(app: &App) -> ChatProjection {
                     )));
                 }
                 source_positions.push(rendered.len());
-                rendered.push(Line::from(Span::styled(
-                    format!("   {}", item.text),
+                rendered.push(highlighted_transcript_line(
+                    "   ",
+                    &item.text,
+                    "",
                     Style::default().fg(Color::White),
-                )));
+                    ranges,
+                    selected_range,
+                ));
             }
             TranscriptKind::Answer => {
                 if starts_group {
@@ -216,35 +238,51 @@ fn chat_projection(app: &App) -> ChatProjection {
                     )));
                 }
                 source_positions.push(rendered.len());
-                rendered.push(Line::from(Span::styled(
-                    format!("   {}", item.text),
+                rendered.push(highlighted_transcript_line(
+                    "   ",
+                    &item.text,
+                    "",
                     Style::default().fg(Color::White),
-                )));
+                    ranges,
+                    selected_range,
+                ));
             }
             TranscriptKind::Progress => {
                 source_positions.push(rendered.len());
-                rendered.push(Line::from(Span::styled(
-                    format!("· {}", item.text),
+                rendered.push(highlighted_transcript_line(
+                    "· ",
+                    &item.text,
+                    "",
                     Style::default()
                         .fg(Color::DarkGray)
                         .add_modifier(Modifier::DIM),
-                )));
+                    ranges,
+                    selected_range,
+                ));
             }
             TranscriptKind::Approval => {
                 source_positions.push(rendered.len());
-                rendered.push(Line::from(Span::styled(
-                    format!(" {} ", item.text),
+                rendered.push(highlighted_transcript_line(
+                    " ",
+                    &item.text,
+                    " ",
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD | Modifier::REVERSED),
-                )));
+                    ranges,
+                    selected_range,
+                ));
             }
             TranscriptKind::Error => {
                 source_positions.push(rendered.len());
-                rendered.push(Line::from(Span::styled(
-                    item.text.clone(),
+                rendered.push(highlighted_transcript_line(
+                    "",
+                    &item.text,
+                    "",
                     Style::default().fg(Color::Red),
-                )));
+                    ranges,
+                    selected_range,
+                ));
             }
         }
         previous = Some(item.kind);
@@ -253,6 +291,51 @@ fn chat_projection(app: &App) -> ChatProjection {
         lines: rendered,
         source_positions,
     }
+}
+
+fn highlighted_transcript_line(
+    prefix: &str,
+    text: &str,
+    suffix: &str,
+    base_style: Style,
+    ranges: &[std::ops::Range<usize>],
+    selected_range: Option<usize>,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(prefix.to_owned(), base_style)];
+    let mut cursor = 0;
+    for (range_index, range) in ranges.iter().enumerate() {
+        if range.start < cursor
+            || range.end > text.len()
+            || !text.is_char_boundary(range.start)
+            || !text.is_char_boundary(range.end)
+        {
+            continue;
+        }
+        if cursor < range.start {
+            spans.push(Span::styled(
+                text[cursor..range.start].to_owned(),
+                base_style,
+            ));
+        }
+        let style = if selected_range == Some(range_index) {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        };
+        spans.push(Span::styled(text[range.clone()].to_owned(), style));
+        cursor = range.end;
+    }
+    if cursor < text.len() {
+        spans.push(Span::styled(text[cursor..].to_owned(), base_style));
+    }
+    if !suffix.is_empty() {
+        spans.push(Span::styled(suffix.to_owned(), base_style));
+    }
+    Line::from(spans)
 }
 
 pub(crate) fn wrapped_rows(lines: &[Line<'_>], width: u16) -> usize {
