@@ -25,6 +25,7 @@ use nh_tools::Tool;
 use nh_vault::{Scrubber, SecretRegistry, SecretValue};
 
 use crate::cmd_run::{self, effort_for, DELEGATE_MSG};
+use crate::usage_tracker::LastRequestUsage;
 
 /// Builds a wire client + its key literal (for the Scrubber) from a route.
 /// Injected so tests drive the REPL with a mock client - no vault, no network.
@@ -103,6 +104,9 @@ struct ChatSession {
     /// None means no task has run. Once a task is attempted, its typed evidence
     /// is retained even when the provider reported no usable counters.
     session_usage: Option<Usage>,
+    /// Provider evidence for the latest request only. Unlike `session_usage`,
+    /// context occupancy is not cumulative and may fall after compaction.
+    last_request_usage: LastRequestUsage,
     /// Cache evidence from the provider call immediately before the next task.
     /// Unlike `session_usage`, this is not a total: compaction pricing may use
     /// only the preceding call's measured value.
@@ -444,7 +448,7 @@ fn install_client(s: &mut ChatSession, client: Box<dyn ChatClient>, literal: Sec
     s.agent.ctx.scrubber = registry.clone();
     s.agent.receipts.replace_scrubber(registry.clone());
     s.ledger.replace_scrubber(registry);
-    s.agent.client = client;
+    s.agent.client = s.last_request_usage.wrap(client);
     s.connected = true;
 }
 
@@ -536,7 +540,7 @@ fn print_tools(s: &ChatSession, out: &mut dyn Write, err: &mut dyn Write) {
 }
 
 /// Footer: the always-on cost HUD line, e.g.
-/// `deepseek-v4-flash | peak 2x until 22:00 | session ¥0.11 | tokens 812 in / 340 out / 512 cached | cache 63%`.
+/// `deepseek-v4-flash | peak 2x until 22:00 | session ¥0.11 | tokens 812 in / 340 out / 512 cached | cache 63% | ctx 41%`.
 fn footer(s: &ChatSession) -> String {
     let now = (s.now)();
     let mut line = format!(
@@ -549,6 +553,11 @@ fn footer(s: &ChatSession) -> String {
             |usage| cmd_run::usage_token_summary(Some(usage)),
         )
     );
+    let last_request_usage = s.last_request_usage.snapshot();
+    if let Some(context) = cmd_run::context_window_summary(&s.route, last_request_usage.as_ref()) {
+        line.push_str(" | ");
+        line.push_str(&context);
+    }
     if s.resumed {
         line.push_str(" | resumed");
     }

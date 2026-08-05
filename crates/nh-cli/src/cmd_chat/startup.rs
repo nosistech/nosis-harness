@@ -19,6 +19,7 @@ use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, SecretRegistry};
 use super::{load_mcp, scrub_line, ChatSession, ConnectFn, NotConnected, SharedScrubber};
 use crate::cmd_run::{self, effort_for, DELEGATE_MSG};
 use crate::guard_from;
+use crate::usage_tracker::LastRequestUsage;
 
 struct Startup {
     cwd: PathBuf,
@@ -146,8 +147,9 @@ where
     let policy = law.policy.clone();
     let law_constitution = law.constitution;
     let current_constitution = cmd_run::agent_constitution(&law_constitution, &route);
+    let last_request_usage = LastRequestUsage::default();
     let agent = AgentLoop {
-        client: initial.client,
+        client: last_request_usage.wrap(initial.client),
         tools,
         ctx: ToolCtx::new(
             cwd,
@@ -207,6 +209,7 @@ where
         law_constitution,
         history,
         session_usage: None,
+        last_request_usage,
         // Turn-ledger usage is task-cumulative, so it cannot prove the final
         // provider call's cache measurement after a resume.
         last_cached_tokens: None,

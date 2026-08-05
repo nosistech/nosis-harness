@@ -40,6 +40,14 @@ const TEST_CATALOG: &str = r#"
     wire = "openai"
     vault_entry = "other"
     context = 2000
+
+    [routes.zero-context]
+    provider = "test"
+    model_id = "zero-context"
+    base_url = "https://example.invalid"
+    wire = "openai"
+    vault_entry = "test"
+    context = 0
 "#;
 
 // Far-future FX metadata keeps CNY-to-USD fixture glosses deterministic.
@@ -451,7 +459,7 @@ fn empty_state_and_key_strip_are_self_teaching_then_conversation_replaces_welcom
         "got: {fresh}"
     );
     assert!(
-        fresh.contains("/ commands   ↑↓ scroll   Enter send   Ctrl+C quit"),
+        fresh.contains("/ commands   ↑↓ scroll   Ctrl+F search   Enter send   Ctrl+C quit"),
         "got: {fresh}"
     );
 
@@ -462,7 +470,7 @@ fn empty_state_and_key_strip_are_self_teaching_then_conversation_replaces_welcom
     assert!(active.contains("❯ you"), "got: {active}");
     assert!(active.contains("   start"), "got: {active}");
     assert!(
-        active.contains("/ commands   ↑↓ scroll   Enter send   Ctrl+C quit"),
+        active.contains("/ commands   ↑↓ scroll   Ctrl+F search   Enter send   Ctrl+C quit"),
         "got: {active}"
     );
 }
@@ -471,6 +479,15 @@ fn empty_state_and_key_strip_are_self_teaching_then_conversation_replaces_welcom
 fn centered_modal_frames_clear_transcript_for_every_overlay() {
     let terminal = Rect::new(0, 0, 100, 30);
     let cases = [
+        (
+            Overlay::Search {
+                query: "safe".into(),
+                selected: 0,
+                original_scroll: 0,
+            },
+            modal_area(terminal, 8),
+            "Search transcript",
+        ),
         (
             Overlay::CommandMenu { selected: 0 },
             modal_area(terminal, 14),
@@ -1353,7 +1370,7 @@ fn wrapped_rows_matches_word_wrap_and_keeps_the_newest_line_reachable() {
             frame.render_widget(
                 Paragraph::new(lines.clone())
                     .wrap(Wrap { trim: false })
-                    .scroll((scroll, 0)),
+                    .scroll((u16::try_from(scroll).unwrap(), 0)),
                 frame.area(),
             );
         })
@@ -1381,10 +1398,174 @@ fn more_markers_render_only_for_overflow_and_track_both_directions() {
     assert!(middle.contains("↑ more"), "got: {middle}");
     assert!(middle.contains("↓ more"), "got: {middle}");
 
-    app.scroll_back = u16::MAX;
+    app.scroll_back = usize::from(u16::MAX);
     let oldest = buffer_text(&render_buffer(&app, 80, 16));
     assert!(!oldest.contains("↑ more"), "got: {oldest}");
     assert!(oldest.contains("↓ more"), "got: {oldest}");
+}
+
+#[test]
+fn search_matches_case_insensitively_navigates_in_order_and_wraps() {
+    let mut app = test_app(None);
+    for line in ["Alpha first", "not this", "middle ALPHA", "alpha last"] {
+        app.push_line(line, TranscriptKind::Progress);
+    }
+
+    assert_eq!(reduce_key(&mut app, ctrl_key('f')), UiAction::None);
+    type_text(&mut app, "aLpHa");
+    let selected = |app: &App| match &app.overlay {
+        Overlay::Search {
+            query, selected, ..
+        } => {
+            assert_eq!(query, "aLpHa");
+            *selected
+        }
+        other => panic!("expected search overlay, got {other:?}"),
+    };
+    assert_eq!(selected(&app), 0);
+    reduce_key(&mut app, code_key(KeyCode::Down));
+    assert_eq!(selected(&app), 1);
+    reduce_key(&mut app, code_key(KeyCode::Down));
+    assert_eq!(selected(&app), 2);
+    reduce_key(&mut app, code_key(KeyCode::Down));
+    assert_eq!(selected(&app), 0);
+    reduce_key(&mut app, code_key(KeyCode::Up));
+    assert_eq!(selected(&app), 2);
+
+    let rendered = buffer_text(&render_buffer(&app, 90, 20));
+    assert!(rendered.contains("match 3/3"), "got: {rendered}");
+}
+
+#[test]
+fn search_zero_matches_is_explicit_and_enter_keeps_the_overlay_open() {
+    let mut app = test_app(None);
+    app.push_line("visible transcript", TranscriptKind::Answer);
+    reduce_key(&mut app, ctrl_key('f'));
+    type_text(&mut app, "missing literal");
+
+    let rendered = buffer_text(&render_buffer(&app, 90, 20));
+    assert!(rendered.contains("0 matches"), "got: {rendered}");
+    reduce_key(&mut app, code_key(KeyCode::Enter));
+    assert!(matches!(app.overlay, Overlay::Search { .. }));
+}
+
+#[test]
+fn search_escape_restores_the_exact_prior_scroll_position() {
+    let mut app = test_app(None);
+    app.push_line("old target", TranscriptKind::Progress);
+    for _ in 0..40 {
+        app.push_line("newer filler", TranscriptKind::Progress);
+    }
+    let _ = render_buffer(&app, 80, 16);
+    app.scroll_back = 7;
+
+    reduce_key(&mut app, ctrl_key('f'));
+    type_text(&mut app, "old target");
+    let _ = render_buffer(&app, 80, 16);
+    assert_ne!(app.search_match_scroll.get(), 7);
+    reduce_key(&mut app, code_key(KeyCode::Esc));
+
+    assert_eq!(app.overlay, Overlay::None);
+    assert_eq!(app.scroll_back, 7);
+}
+
+#[test]
+fn search_commits_a_match_that_was_scrolled_off_screen() {
+    let mut app = test_app(None);
+    app.push_line("unique oldest target", TranscriptKind::Progress);
+    for _ in 0..80 {
+        app.push_line("newer filler", TranscriptKind::Progress);
+    }
+    let bottom = buffer_text(&render_buffer(&app, 80, 16));
+    assert!(!bottom.contains("unique oldest target"), "got: {bottom}");
+
+    reduce_key(&mut app, ctrl_key('f'));
+    type_text(&mut app, "oldest target");
+    let _ = render_buffer(&app, 80, 16);
+    reduce_key(&mut app, code_key(KeyCode::Enter));
+
+    assert_eq!(app.overlay, Overlay::None);
+    assert!(app.scroll_back > 0);
+    let focused = buffer_text(&render_buffer(&app, 80, 16));
+    assert!(focused.contains("unique oldest target"), "got: {focused}");
+}
+
+#[test]
+fn search_reaches_a_match_beyond_the_old_u16_scrollback_cap() {
+    let mut app = test_app(None);
+    app.push_line("needle beyond cap", TranscriptKind::Progress);
+    for _ in 0..usize::from(u16::MAX).saturating_add(32) {
+        app.push_line("filler", TranscriptKind::Progress);
+    }
+    app.push_line("newest beyond paragraph cap", TranscriptKind::Progress);
+    let bottom = buffer_text(&render_buffer(&app, 40, 12));
+    assert!(
+        bottom.contains("newest beyond paragraph cap"),
+        "got: {bottom}"
+    );
+    assert!(app.max_scroll.get() > usize::from(u16::MAX));
+
+    reduce_key(&mut app, ctrl_key('f'));
+    type_text(&mut app, "needle");
+    let _ = render_buffer(&app, 40, 12);
+    reduce_key(&mut app, code_key(KeyCode::Enter));
+
+    assert!(app.scroll_back > usize::from(u16::MAX));
+    let focused = buffer_text(&render_buffer(&app, 40, 12));
+    assert!(focused.contains("needle beyond cap"), "got: {focused}");
+}
+
+#[test]
+fn search_reads_only_the_scrubbed_display_transcript() {
+    let secret = "fake-search-secret";
+    let mut app = test_app(None);
+    app.scrubber = Arc::new(RwLock::new(Scrubber::new(vec![secret.into()])));
+    app.push_line(&format!("credential={secret}"), TranscriptKind::Progress);
+    assert!(app.transcript[0].text.contains("[REDACTED]"));
+    assert!(!app.transcript[0].text.contains(secret));
+
+    reduce_key(&mut app, ctrl_key('f'));
+    type_text(&mut app, secret);
+    let raw_query = buffer_text(&render_buffer(&app, 90, 20));
+    assert!(raw_query.contains("0 matches"), "got: {raw_query}");
+    reduce_key(&mut app, code_key(KeyCode::Esc));
+
+    reduce_key(&mut app, ctrl_key('f'));
+    type_text(&mut app, "[REDACTED]");
+    let marker_query = buffer_text(&render_buffer(&app, 90, 20));
+    assert!(marker_query.contains("match 1/1"), "got: {marker_query}");
+}
+
+#[test]
+fn ctrl_f_and_search_command_share_the_same_overlay_path() {
+    let mut via_key = test_app(None);
+    via_key.input = "unfinished task".into();
+    reduce_key(&mut via_key, ctrl_key('F'));
+    assert!(matches!(
+        via_key.overlay,
+        Overlay::Search {
+            ref query,
+            selected: 0,
+            original_scroll: 0,
+        } if query.is_empty()
+    ));
+    assert_eq!(via_key.input, "unfinished task");
+
+    let mut via_command = test_app(None);
+    type_text(&mut via_command, "/search");
+    reduce_key(&mut via_command, code_key(KeyCode::Enter));
+    assert!(matches!(
+        via_command.overlay,
+        Overlay::Search {
+            ref query,
+            selected: 0,
+            original_scroll: 0,
+        } if query.is_empty()
+    ));
+    assert!(via_command.input.is_empty());
+    assert!(builtin_palette_entries()
+        .iter()
+        .any(|entry| entry.name == "/search"));
 }
 
 #[test]
@@ -1481,7 +1662,7 @@ fn trust_dial_uses_plain_none_lines_for_empty_classes() {
 
 #[test]
 fn overlays_suppress_task_dispatch_and_escape_restores_base_view() {
-    for command in ["/trust", "/help", "/timeline"] {
+    for command in ["/trust", "/help", "/timeline", "/search"] {
         let mut app = test_app(None);
         type_text(&mut app, command);
         assert_eq!(
@@ -1569,6 +1750,10 @@ fn code_key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
+fn ctrl_key(character: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
+}
+
 #[test]
 fn cost_hud_omits_cache_before_usage_and_shows_it_after() {
     let mut app = test_app(None);
@@ -1589,6 +1774,179 @@ fn cost_hud_omits_cache_before_usage_and_shows_it_after() {
     let after = app.hud_line(Utc::now());
     assert!(after.contains("in 100 · out 20"), "got: {after}");
     assert!(after.contains("cache 25%"), "got: {after}");
+}
+
+#[test]
+fn context_hud_uses_only_last_request_measured_or_partial_evidence() {
+    let mut app = test_app(None);
+    app.usage = Some(Usage {
+        prompt_tokens: 900,
+        completion_tokens: 40,
+        cached_tokens: Some(100),
+        evidence: UsageEvidence::Measured,
+    });
+    assert!(!app.hud_line(fixed_at()).contains("ctx"));
+
+    apply_event(
+        &mut app,
+        AgentEvent::ModelFinished {
+            route: "test-route".into(),
+            usage: Some(Usage {
+                prompt_tokens: 250,
+                completion_tokens: 10,
+                cached_tokens: None,
+                evidence: UsageEvidence::Measured,
+            }),
+        },
+    );
+    let measured = app.hud_line(fixed_at());
+    assert!(measured.contains("· ctx 25%"), "got: {measured}");
+    assert!(!measured.contains("ctx 90%"), "got: {measured}");
+
+    apply_event(
+        &mut app,
+        AgentEvent::ModelFinished {
+            route: "test-route".into(),
+            usage: Some(Usage {
+                prompt_tokens: 250,
+                completion_tokens: 10,
+                cached_tokens: None,
+                evidence: UsageEvidence::Partial,
+            }),
+        },
+    );
+    let partial = app.hud_line(fixed_at());
+    assert!(partial.contains("· ctx ~25%"), "got: {partial}");
+}
+
+#[test]
+fn context_hud_omits_unknown_absent_and_undeclared_evidence_without_zero_claims() {
+    let mut app = test_app(None);
+    for usage in [
+        None,
+        Some(Usage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cached_tokens: None,
+            evidence: UsageEvidence::Unknown,
+        }),
+    ] {
+        apply_event(
+            &mut app,
+            AgentEvent::ModelFinished {
+                route: "test-route".into(),
+                usage,
+            },
+        );
+        let hud = app.hud_line(fixed_at());
+        assert!(!hud.contains("ctx"), "got: {hud}");
+        assert!(!hud.contains("ctx 0"), "got: {hud}");
+    }
+
+    let mut no_context = picker_app();
+    let route = no_context.resolver.resolve("c-unknown-context").unwrap();
+    no_context.switch_route(route);
+    apply_event(
+        &mut no_context,
+        AgentEvent::ModelFinished {
+            route: "c-unknown-context".into(),
+            usage: Some(Usage {
+                prompt_tokens: 100,
+                completion_tokens: 1,
+                cached_tokens: None,
+                evidence: UsageEvidence::Measured,
+            }),
+        },
+    );
+    let hud = no_context.hud_line(fixed_at());
+    assert!(!hud.contains("ctx"), "got: {hud}");
+}
+
+#[test]
+fn context_hud_reports_over_window_and_non_finite_ratios_without_clamping() {
+    let mut app = test_app(None);
+    apply_event(
+        &mut app,
+        AgentEvent::ModelFinished {
+            route: "test-route".into(),
+            usage: Some(Usage {
+                prompt_tokens: 1_250,
+                completion_tokens: 1,
+                cached_tokens: None,
+                evidence: UsageEvidence::Measured,
+            }),
+        },
+    );
+    let over = app.hud_line(fixed_at());
+    assert!(over.contains("· ctx 125%"), "got: {over}");
+    assert!(!over.contains("· ctx 100%"), "got: {over}");
+
+    let zero_context = app.resolver.resolve("zero-context").unwrap();
+    app.switch_route(zero_context);
+    apply_event(
+        &mut app,
+        AgentEvent::ModelFinished {
+            route: "zero-context".into(),
+            usage: Some(Usage {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                cached_tokens: None,
+                evidence: UsageEvidence::Measured,
+            }),
+        },
+    );
+    let non_finite = app.hud_line(fixed_at());
+    assert!(non_finite.contains("· ctx inf%"), "got: {non_finite}");
+}
+
+#[test]
+fn context_hud_drops_after_compaction_and_clears_on_route_switch() {
+    let mut app = test_app(None);
+    apply_event(
+        &mut app,
+        AgentEvent::ModelFinished {
+            route: "test-route".into(),
+            usage: Some(Usage {
+                prompt_tokens: 900,
+                completion_tokens: 1,
+                cached_tokens: None,
+                evidence: UsageEvidence::Measured,
+            }),
+        },
+    );
+    let before = app.hud_line(fixed_at());
+    assert!(before.contains("ctx 90%"), "got: {before}");
+
+    apply_event(
+        &mut app,
+        AgentEvent::Compaction(CompactionEvent::new_at(
+            90,
+            4,
+            700,
+            None,
+            fixed_at().timestamp(),
+        )),
+    );
+    apply_event(
+        &mut app,
+        AgentEvent::ModelFinished {
+            route: "test-route".into(),
+            usage: Some(Usage {
+                prompt_tokens: 200,
+                completion_tokens: 1,
+                cached_tokens: None,
+                evidence: UsageEvidence::Measured,
+            }),
+        },
+    );
+    let after = app.hud_line(fixed_at());
+    assert!(after.contains("ctx 20%"), "got: {after}");
+    assert!(!after.contains("ctx 90%"), "got: {after}");
+
+    let other = app.resolver.resolve("other-route").unwrap();
+    app.switch_route(other);
+    let switched = app.hud_line(fixed_at());
+    assert!(!switched.contains("ctx"), "got: {switched}");
 }
 
 #[test]
@@ -2237,6 +2595,7 @@ fn in_flight_model_event_shows_route_and_factual_elapsed_time_until_finish() {
         &mut app,
         AgentEvent::ModelFinished {
             route: "other-route".into(),
+            usage: None,
         },
     );
     assert!(app.active_model.is_none());

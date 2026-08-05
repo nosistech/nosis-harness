@@ -256,6 +256,7 @@ fn test_session(model: &str, tmp: &Path) -> (ChatSession, Arc<AtomicUsize>) {
     let law_constitution = "test constitution\n";
     let constitution = cmd_run::agent_constitution(law_constitution, &route);
     let (client, literal) = connect(&route, execution_policy.output_cap).unwrap();
+    let last_request_usage = LastRequestUsage::default();
     let mut key_literals = SecretRegistry::new();
     key_literals.insert(literal);
     let test_scrubber = key_literals.scrubber();
@@ -271,7 +272,7 @@ fn test_session(model: &str, tmp: &Path) -> (ChatSession, Arc<AtomicUsize>) {
         })
         .unwrap();
     let agent = AgentLoop {
-        client,
+        client: last_request_usage.wrap(client),
         tools: builtin_tools(),
         ctx: ToolCtx::new(tmp.to_path_buf(), Box::new(|_| false)),
         receipts: ReceiptWriter::for_path(tmp, tmp.join("receipts.jsonl"), test_scrubber.clone()),
@@ -297,6 +298,7 @@ fn test_session(model: &str, tmp: &Path) -> (ChatSession, Arc<AtomicUsize>) {
         law_constitution: law_constitution.into(),
         history: Vec::new(),
         session_usage: None,
+        last_request_usage,
         last_cached_tokens: None,
         session_cost: Vec::new(),
         incomplete_cost_turns: 0,
@@ -475,11 +477,18 @@ fn route_switch_clears_preceding_call_cache_evidence() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut s, _calls) = test_session("deepseek-v4-flash", tmp.path());
     s.last_cached_tokens = Some(400);
+    s.last_request_usage.set_for_test(Some(Usage {
+        prompt_tokens: 500,
+        completion_tokens: 20,
+        cached_tokens: Some(400),
+        evidence: UsageEvidence::Measured,
+    }));
 
     let (out, _err) = drive(&mut s, &["/model kimi-k2.6"]);
 
     assert!(out.contains("switched to kimi-k2.6"), "got: {out}");
     assert_eq!(s.last_cached_tokens, None);
+    assert_eq!(s.last_request_usage.snapshot(), None);
 }
 
 #[test]
@@ -655,8 +664,75 @@ fn footer_after_each_answer_has_route_peak_and_session_tokens() {
     );
     assert_eq!(
         footer(&s),
-        "deepseek-v4-flash | off-peak | session <¥0.0001 (≈<$0.0001) | tokens 12 in / 7 out / 4 cached | cache 33%"
+        "deepseek-v4-flash | off-peak | session <¥0.0001 (≈<$0.0001) | tokens 12 in / 7 out / 4 cached | cache 33% | ctx 1%"
     );
+}
+
+#[test]
+fn footer_context_segment_uses_latest_usage_and_preserves_lower_bound_evidence() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut s, _calls) = test_session("deepseek-v4-flash", tmp.path());
+    let measured = Usage {
+        prompt_tokens: 250,
+        completion_tokens: 20,
+        cached_tokens: None,
+        evidence: UsageEvidence::Measured,
+    };
+    assert!(add_session_usage(&mut s, Some(&measured)));
+    s.last_request_usage.set_for_test(Some(measured.clone()));
+    let line = footer(&s);
+    assert!(line.contains("| ctx 25%"), "got: {line}");
+
+    let partial = Usage {
+        evidence: UsageEvidence::Partial,
+        ..measured.clone()
+    };
+    assert!(add_session_usage(&mut s, Some(&partial)));
+    s.last_request_usage.set_for_test(Some(partial.clone()));
+    let line = footer(&s);
+    assert!(line.contains("| ctx ~25%"), "got: {line}");
+
+    let over_window = Usage {
+        prompt_tokens: 1_500,
+        ..measured
+    };
+    assert!(add_session_usage(&mut s, Some(&over_window)));
+    s.last_request_usage.set_for_test(Some(over_window));
+    let line = footer(&s);
+    assert!(line.contains("| ctx 150%"), "got: {line}");
+    assert!(!line.contains("| ctx 100%"), "got: {line}");
+}
+
+#[test]
+fn footer_context_segment_is_absent_without_a_declared_window() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut s, _calls) = test_session("unpriced", tmp.path());
+    let usage = Usage {
+        prompt_tokens: 250,
+        completion_tokens: 20,
+        cached_tokens: None,
+        evidence: UsageEvidence::Measured,
+    };
+    assert!(add_session_usage(&mut s, Some(&usage)));
+    s.last_request_usage.set_for_test(Some(usage));
+
+    let line = footer(&s);
+    assert!(!line.contains("ctx"), "got: {line}");
+}
+
+#[test]
+fn footer_context_segment_is_absent_without_measured_or_partial_usage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut s, _calls) = test_session("deepseek-v4-flash", tmp.path());
+    let line = footer(&s);
+    assert!(!line.contains("ctx"), "got: {line}");
+    assert!(!line.contains("ctx 0"), "got: {line}");
+
+    assert!(add_session_usage(&mut s, None));
+    s.last_request_usage.set_for_test(Some(unknown_usage()));
+    let line = footer(&s);
+    assert!(!line.contains("ctx"), "got: {line}");
+    assert!(!line.contains("ctx 0"), "got: {line}");
 }
 
 #[test]
@@ -1158,6 +1234,13 @@ fn real_chat_compaction_keeps_estimates_out_of_measured_session_totals() {
     ];
     s.agent.context_limit = Some(1_000);
     s.last_cached_tokens = None;
+    s.last_request_usage.set_for_test(Some(Usage {
+        prompt_tokens: 900,
+        completion_tokens: 1,
+        cached_tokens: None,
+        evidence: UsageEvidence::Measured,
+    }));
+    assert!(footer(&s).contains("| ctx 90%"));
     let mut out = Vec::new();
     let mut err = Vec::new();
 
@@ -1183,6 +1266,8 @@ fn real_chat_compaction_keeps_estimates_out_of_measured_session_totals() {
         })
     );
     assert_eq!(s.last_cached_tokens, None);
+    assert!(footer(&s).contains("| ctx 1%"), "got: {}", footer(&s));
+    assert!(!footer(&s).contains("| ctx 90%"), "got: {}", footer(&s));
     assert!(
         footer(&s).contains("tokens 12 in / 7 out / 4 cached | cache 33%"),
         "got: {}",

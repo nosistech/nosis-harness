@@ -15,6 +15,7 @@ mod cmd_resume;
 mod cmd_run;
 mod cmd_tui;
 mod cmd_why;
+mod usage_tracker;
 
 fn guard_from(verdict: nh_law::Verdict) -> nh_tools::Guard {
     match verdict {

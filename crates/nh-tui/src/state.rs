@@ -128,6 +128,7 @@ impl McpState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PaletteAction {
     Quit,
+    Search,
     TrustDial,
     Timeline,
     Why,
@@ -170,6 +171,11 @@ pub(super) struct PickerRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Overlay {
     None,
+    Search {
+        query: String,
+        selected: usize,
+        original_scroll: usize,
+    },
     CommandMenu {
         selected: usize,
     },
@@ -201,6 +207,7 @@ pub enum AgentEvent {
     },
     ModelFinished {
         route: String,
+        usage: Option<Usage>,
     },
     ToolStarted {
         name: String,
@@ -284,10 +291,12 @@ pub struct App {
     pub(super) transcript: Vec<TranscriptLine>,
     pub(super) pending_approval: Option<ApprovalRequest>,
     pub(super) usage: Option<Usage>,
+    pub(super) last_request_usage: Option<Usage>,
     pub(super) input: String,
     pub(super) budget: Option<u64>,
-    pub(super) scroll_back: u16,
-    pub(super) max_scroll: Cell<u16>,
+    pub(super) scroll_back: usize,
+    pub(super) max_scroll: Cell<usize>,
+    pub(super) search_match_scroll: Cell<usize>,
     pub(super) scrubber: SharedScrubber,
     pub(super) local_offset: FixedOffset,
     pub(super) policy_view: PolicyView,
@@ -342,10 +351,12 @@ impl App {
             transcript: Vec::new(),
             pending_approval: None,
             usage: None,
+            last_request_usage: None,
             input: String::new(),
             budget,
             scroll_back: 0,
             max_scroll: Cell::new(0),
+            search_match_scroll: Cell::new(0),
             scrubber,
             local_offset: *chrono::Local::now().offset(),
             policy_view,
@@ -387,6 +398,21 @@ impl App {
             kind: TranscriptKind::Approval,
         });
         self.scroll_back = 0;
+    }
+
+    pub(super) fn open_search(&mut self) {
+        let original_scroll = match &self.overlay {
+            Overlay::Search {
+                original_scroll, ..
+            } => *original_scroll,
+            _ => self.scroll_back,
+        };
+        self.search_match_scroll.set(self.scroll_back);
+        self.overlay = Overlay::Search {
+            query: String::new(),
+            selected: 0,
+            original_scroll,
+        };
     }
 
     pub(super) fn set_status(&mut self, status: Status, now: DateTime<Utc>) {
@@ -436,6 +462,7 @@ impl App {
 
     pub(super) fn switch_route(&mut self, route: ResolvedRoute) {
         self.last_compaction_hud = None;
+        self.last_request_usage = None;
         let policy = self.profiles.effective(&self.active_profile, &route);
         self.effort = effort_for(policy.posture, route.thinking_dialect(), route.wire());
         self.active_profile = policy.profile;
@@ -611,6 +638,21 @@ impl App {
             }
             Some(_) => line.push_str(" · tokens unavailable - usage unknown"),
         }
+        if let (Some(context), Some(usage)) =
+            (self.route.context(), self.last_request_usage.as_ref())
+        {
+            match usage.evidence {
+                UsageEvidence::Measured => {
+                    let pct = usage.prompt_tokens as f64 / context as f64 * 100.0;
+                    line.push_str(&format!(" · ctx {pct:.0}%"));
+                }
+                UsageEvidence::Partial => {
+                    let pct = usage.prompt_tokens as f64 / context as f64 * 100.0;
+                    line.push_str(&format!(" · ctx ~{pct:.0}%"));
+                }
+                UsageEvidence::Unknown => {}
+            }
+        }
         if let Some(compaction) = &self.last_compaction_hud {
             line.push_str(" · ");
             line.push_str(compaction);
@@ -651,6 +693,19 @@ impl App {
         }
         safe_line(&self.scrubber, &line)
     }
+}
+
+/// Search only the scrubbed, escaped transcript projection retained by the UI.
+pub(super) fn search_match_lines(transcript: &[TranscriptLine], query: &str) -> Vec<usize> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let query = query.to_lowercase();
+    transcript
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| line.text.to_lowercase().contains(&query).then_some(index))
+        .collect()
 }
 
 fn budget_pct(used: u64, limit: u64) -> u64 {

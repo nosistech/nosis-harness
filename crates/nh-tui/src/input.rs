@@ -9,7 +9,8 @@ use commands::{resolved_route_action, set_profile};
 
 use crate::palette::filter_palette;
 use crate::state::{
-    AgentEvent, App, Overlay, PaletteAction, PaletteEntry, PickerKind, PickerRow, Status,
+    search_match_lines, AgentEvent, App, Overlay, PaletteAction, PaletteEntry, PickerKind,
+    PickerRow, Status,
 };
 use crate::timeline::apply_event;
 use crate::worker::{Worker, WorkerCommand};
@@ -121,6 +122,11 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
         }
         return UiAction::Quit;
     }
+    if matches!(key.code, KeyCode::Char('f' | 'F')) && key.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        app.open_search();
+        return UiAction::None;
+    }
     if app.overlay != Overlay::None {
         return reduce_overlay_key(app, key);
     }
@@ -215,7 +221,7 @@ pub(super) fn reduce_paste(app: &mut App, text: &str) -> UiAction {
     UiAction::None
 }
 
-pub(super) fn scroll_transcript(app: &mut App, amount: u16, toward_older: bool) {
+pub(super) fn scroll_transcript(app: &mut App, amount: usize, toward_older: bool) {
     let max_scroll = app.max_scroll.get();
     let current = app.scroll_back.min(max_scroll);
     app.scroll_back = if toward_older {
@@ -228,6 +234,9 @@ pub(super) fn scroll_transcript(app: &mut App, amount: u16, toward_older: bool) 
 pub(super) fn reduce_overlay_key(app: &mut App, key: KeyEvent) -> UiAction {
     if matches!(app.overlay, Overlay::CommandMenu { .. }) {
         return reduce_command_menu_key(app, key);
+    }
+    if matches!(app.overlay, Overlay::Search { .. }) {
+        return reduce_search_key(app, key);
     }
     if key.code == KeyCode::Esc {
         app.overlay = Overlay::None;
@@ -281,6 +290,7 @@ pub(super) fn reduce_overlay_key(app: &mut App, key: KeyEvent) -> UiAction {
             detail,
         } => palette_key(&app.palette_entries, filter, selected, detail, key),
         Overlay::None
+        | Overlay::Search { .. }
         | Overlay::CommandMenu { .. }
         | Overlay::TrustDial
         | Overlay::Timeline { .. }
@@ -290,6 +300,67 @@ pub(super) fn reduce_overlay_key(app: &mut App, key: KeyEvent) -> UiAction {
         return UiAction::None;
     };
     activate_palette_entry(app, entry)
+}
+
+pub(super) fn reduce_search_key(app: &mut App, key: KeyEvent) -> UiAction {
+    let match_count = match &app.overlay {
+        Overlay::Search { query, .. } => search_match_lines(&app.transcript, query).len(),
+        _ => return UiAction::None,
+    };
+    match key.code {
+        KeyCode::Esc => {
+            if let Overlay::Search {
+                original_scroll, ..
+            } = &app.overlay
+            {
+                app.scroll_back = *original_scroll;
+            }
+            app.overlay = Overlay::None;
+        }
+        KeyCode::Enter if match_count > 0 => {
+            app.scroll_back = app.search_match_scroll.get();
+            app.overlay = Overlay::None;
+        }
+        KeyCode::Backspace => {
+            if let Overlay::Search {
+                query, selected, ..
+            } = &mut app.overlay
+            {
+                query.pop();
+                *selected = 0;
+            }
+        }
+        KeyCode::Up if match_count > 0 => {
+            if let Overlay::Search { selected, .. } = &mut app.overlay {
+                *selected = if *selected == 0 {
+                    match_count - 1
+                } else {
+                    (*selected - 1).min(match_count - 1)
+                };
+            }
+        }
+        KeyCode::Down if match_count > 0 => {
+            if let Overlay::Search { selected, .. } = &mut app.overlay {
+                *selected = selected.saturating_add(1) % match_count;
+            }
+        }
+        KeyCode::Char(character)
+            if !character.is_control()
+                && !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            if let Overlay::Search {
+                query, selected, ..
+            } = &mut app.overlay
+            {
+                push_input_char(query, character);
+                *selected = 0;
+            }
+        }
+        _ => {}
+    }
+    UiAction::None
 }
 
 pub(super) fn picker_key(
@@ -431,6 +502,10 @@ pub(super) fn palette_key(
 pub(super) fn activate_palette_entry(app: &mut App, entry: PaletteEntry) -> UiAction {
     match entry.action {
         PaletteAction::Quit => UiAction::Quit,
+        PaletteAction::Search => {
+            app.open_search();
+            UiAction::None
+        }
         PaletteAction::TrustDial => {
             app.overlay = Overlay::TrustDial;
             UiAction::None

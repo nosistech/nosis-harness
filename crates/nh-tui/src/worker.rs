@@ -108,23 +108,31 @@ impl ChatClient for TrackedClient {
             route: self.route.clone(),
             started_at: Utc::now(),
         });
-        let _finished = ModelFinishedGuard {
+        let mut finished = ModelFinishedGuard {
             events: &self.events,
             route: &self.route,
+            usage: None,
         };
-        self.inner.complete(request)
+        let response = self.inner.complete(request);
+        finished.usage = response
+            .as_ref()
+            .ok()
+            .and_then(|response| response.usage.clone());
+        response
     }
 }
 
 struct ModelFinishedGuard<'a> {
     events: &'a Sender<AgentEvent>,
     route: &'a str,
+    usage: Option<Usage>,
 }
 
 impl Drop for ModelFinishedGuard<'_> {
     fn drop(&mut self) {
         let _ = self.events.send(AgentEvent::ModelFinished {
             route: self.route.to_owned(),
+            usage: self.usage.take(),
         });
     }
 }

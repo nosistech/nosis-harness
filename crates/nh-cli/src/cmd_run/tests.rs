@@ -433,7 +433,7 @@ fn missing_usage_is_reported_without_a_zero_cost() {
     let lines = run_meter_lines(
         &resolver,
         &route,
-        None,
+        RunUsage::new(None, None),
         &Default::default(),
         2,
         1,
@@ -446,6 +446,99 @@ fn missing_usage_is_reported_without_a_zero_cost() {
     assert_eq!(lines.len(), 1);
     assert!(lines[0].contains("tokens: not reported by provider - cost unknown"));
     assert!(!lines[0].contains("cost $0.00"));
+}
+
+#[test]
+fn run_meter_context_segment_obeys_window_and_usage_evidence() {
+    let catalog = PEAK_CATALOG.replacen(
+        "vault_entry = \"test\"",
+        "vault_entry = \"test\"\n    context = 1000",
+        1,
+    );
+    let resolver = RouteResolver::from_toml(&catalog).unwrap();
+    let route = resolver.resolve("peak-route").unwrap();
+    let at = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+    let timing = RunTiming {
+        started: at,
+        ended: at,
+    };
+    let measured = Usage {
+        prompt_tokens: 250,
+        completion_tokens: 20,
+        cached_tokens: None,
+        evidence: UsageEvidence::Measured,
+    };
+    let render = |route: &nh_routes::ResolvedRoute, usage: Option<&Usage>| {
+        run_meter_lines(
+            &resolver,
+            route,
+            RunUsage::new(usage, usage),
+            &Default::default(),
+            1,
+            0,
+            timing,
+        )[0]
+        .clone()
+    };
+
+    let line = render(&route, Some(&measured));
+    assert!(
+        line.contains("tokens 250 in / 20 out | ctx 25%"),
+        "got: {line}"
+    );
+
+    let partial = Usage {
+        evidence: UsageEvidence::Partial,
+        ..measured.clone()
+    };
+    let line = render(&route, Some(&partial));
+    assert!(line.contains("(lower bound) | ctx ~25%"), "got: {line}");
+
+    let unknown = Usage {
+        evidence: UsageEvidence::Unknown,
+        ..measured.clone()
+    };
+    let line = render(&route, Some(&unknown));
+    assert!(!line.contains("ctx"), "got: {line}");
+    assert!(!line.contains("ctx 0"), "got: {line}");
+    let line = render(&route, None);
+    assert!(!line.contains("ctx"), "got: {line}");
+    assert!(!line.contains("ctx 0"), "got: {line}");
+
+    let over_window = Usage {
+        prompt_tokens: 1_250,
+        ..measured.clone()
+    };
+    let line = render(&route, Some(&over_window));
+    assert!(line.contains("| ctx 125%"), "got: {line}");
+    assert!(!line.contains("| ctx 100%"), "got: {line}");
+
+    let zero_catalog = catalog.replace("context = 1000", "context = 0");
+    let zero_resolver = RouteResolver::from_toml(&zero_catalog).unwrap();
+    let zero_route = zero_resolver.resolve("peak-route").unwrap();
+    let lines = run_meter_lines(
+        &zero_resolver,
+        &zero_route,
+        RunUsage::new(Some(&measured), Some(&measured)),
+        &Default::default(),
+        1,
+        0,
+        timing,
+    );
+    assert!(lines[0].contains("| ctx inf%"), "got: {}", lines[0]);
+
+    let resolver_without_context = RouteResolver::from_toml(PEAK_CATALOG).unwrap();
+    let route_without_context = resolver_without_context.resolve("peak-route").unwrap();
+    let lines = run_meter_lines(
+        &resolver_without_context,
+        &route_without_context,
+        RunUsage::new(Some(&measured), Some(&measured)),
+        &Default::default(),
+        1,
+        0,
+        timing,
+    );
+    assert!(!lines[0].contains("ctx"), "got: {}", lines[0]);
 }
 
 struct MeasuredThenUnmeteredSuccess {
@@ -492,13 +585,19 @@ impl ChatClient for MeasuredThenUnmeteredSuccess {
 fn real_measured_then_unmetered_run_is_a_marked_lower_bound_and_refuses_cost() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("evidence.txt"), b"real tool input").unwrap();
-    let resolver = RouteResolver::from_toml(PEAK_CATALOG).unwrap();
+    let catalog = PEAK_CATALOG.replacen(
+        "vault_entry = \"test\"",
+        "vault_entry = \"test\"\n    context = 1000",
+        1,
+    );
+    let resolver = RouteResolver::from_toml(&catalog).unwrap();
     let route = resolver.resolve("peak-route").unwrap();
     let at = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+    let last_request_usage = LastRequestUsage::default();
     let mut agent = AgentLoop {
-        client: Box::new(MeasuredThenUnmeteredSuccess {
+        client: last_request_usage.wrap(Box::new(MeasuredThenUnmeteredSuccess {
             calls: AtomicUsize::new(0),
-        }),
+        })),
         tools: builtin_tools(),
         ctx: ToolCtx::new(tmp.path().to_path_buf(), Box::new(|_| false)),
         receipts: ReceiptWriter::for_path(
@@ -520,11 +619,16 @@ fn real_measured_then_unmetered_run_is_a_marked_lower_bound_and_refuses_cost() {
     assert_eq!(usage.evidence, UsageEvidence::Partial);
     assert_eq!(receipt.turns, 2);
     assert_eq!(receipt.tool_calls, 1);
+    let context_usage = last_request_usage.snapshot();
+    assert_eq!(
+        context_usage, None,
+        "the final provider response was unmetered"
+    );
 
     let lines = run_meter_lines(
         &resolver,
         &route,
-        Some(usage),
+        RunUsage::new(Some(usage), context_usage.as_ref()),
         &receipt.compaction,
         receipt.turns,
         receipt.tool_calls,
@@ -564,13 +668,21 @@ fn legacy_unknown_run_usage_renders_like_absence_without_leaking_counters() {
     let unknown = run_meter_lines(
         &resolver,
         &route,
-        Some(&usage),
+        RunUsage::new(Some(&usage), None),
         &Default::default(),
         1,
         0,
         timing,
     );
-    let absent = run_meter_lines(&resolver, &route, None, &Default::default(), 1, 0, timing);
+    let absent = run_meter_lines(
+        &resolver,
+        &route,
+        RunUsage::new(None, None),
+        &Default::default(),
+        1,
+        0,
+        timing,
+    );
 
     assert_eq!(unknown, absent);
     assert!(unknown[0].contains("tokens: not reported by provider - cost unknown"));
@@ -593,7 +705,7 @@ fn measured_tokens_without_cache_evidence_render_an_upper_bound() {
     let lines = run_meter_lines(
         &resolver,
         &route,
-        Some(&usage),
+        RunUsage::new(Some(&usage), None),
         &Default::default(),
         1,
         0,
@@ -620,7 +732,7 @@ fn measured_tokens_without_cache_evidence_render_an_upper_bound() {
     let verify_live = run_meter_lines(
         &resolver,
         &route,
-        Some(&usage),
+        RunUsage::new(Some(&usage), None),
         &Default::default(),
         1,
         0,
@@ -640,7 +752,7 @@ fn measured_tokens_without_cache_evidence_render_an_upper_bound() {
     let cached_heavy = run_meter_lines(
         &resolver,
         &route,
-        Some(&usage),
+        RunUsage::new(Some(&usage), None),
         &Default::default(),
         1,
         0,
@@ -703,6 +815,7 @@ fn failed_run_projects_the_real_agent_error_receipt_meter() {
         &error,
         &resolver,
         &route,
+        None,
         RunTiming {
             started: at,
             ended: at,
@@ -760,7 +873,7 @@ fn local_run_meter_uses_the_ratified_qualifier_with_or_without_usage() {
     let reported = run_meter_lines(
         &resolver,
         &route,
-        Some(&usage),
+        RunUsage::new(Some(&usage), None),
         &Default::default(),
         1,
         0,
@@ -781,7 +894,7 @@ fn local_run_meter_uses_the_ratified_qualifier_with_or_without_usage() {
     let missing = run_meter_lines(
         &resolver,
         &route,
-        None,
+        RunUsage::new(None, None),
         &Default::default(),
         1,
         0,
@@ -831,7 +944,7 @@ fn run_meter_distinguishes_absent_cache_measurement_from_measured_zero() {
     let absent = run_meter_lines(
         &resolver,
         &route,
-        Some(&absent),
+        RunUsage::new(Some(&absent), None),
         &Default::default(),
         1,
         0,
@@ -849,7 +962,7 @@ fn run_meter_distinguishes_absent_cache_measurement_from_measured_zero() {
     let measured_zero = run_meter_lines(
         &resolver,
         &route,
-        Some(&measured_zero),
+        RunUsage::new(Some(&measured_zero), None),
         &Default::default(),
         1,
         0,
@@ -898,7 +1011,7 @@ fn compaction_without_preceding_cache_refuses_money_even_when_current_usage_has_
     let lines = run_meter_lines(
         &resolver,
         &route,
-        Some(&usage),
+        RunUsage::new(Some(&usage), None),
         &compaction,
         1,
         0,
@@ -957,7 +1070,7 @@ fn receipt_compaction_uses_stored_event_time_instead_of_run_end_time() {
     let lines = run_meter_lines(
         &resolver,
         &route,
-        Some(&usage),
+        RunUsage::new(Some(&usage), None),
         &compaction,
         1,
         0,

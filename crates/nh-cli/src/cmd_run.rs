@@ -7,7 +7,8 @@ mod meter;
 
 pub(crate) use config::{find_catalog, load_and_vet_mcp_configs};
 pub(crate) use meter::{
-    compaction_meter_line, progress_meter_line, turn_cost_line, usage_token_summary,
+    compaction_meter_line, context_window_summary, progress_meter_line, turn_cost_line,
+    usage_token_summary,
 };
 
 #[cfg(test)]
@@ -17,7 +18,7 @@ use config::{
 };
 #[cfg(test)]
 use meter::turn_cost_line_for_run;
-use meter::{run_meter_lines, RunTiming};
+use meter::{run_meter_lines, RunTiming, RunUsage};
 
 #[cfg(test)]
 use std::fs;
@@ -28,9 +29,9 @@ use chrono::Utc;
 use nh_core::agent::{validate_task, AgentLoop, AgentRunError};
 use nh_core::credential;
 use nh_core::receipt::{Outcome, ReceiptWriter};
-use nh_core::wire::{ensure_image_capable, resolve_effort, ContentPart, ThinkingEffort};
 #[cfg(test)]
-use nh_core::wire::{Usage, UsageEvidence};
+use nh_core::wire::UsageEvidence;
+use nh_core::wire::{ensure_image_capable, resolve_effort, ContentPart, ThinkingEffort, Usage};
 use nh_law::{Autonomy, LoadOptions};
 use nh_routes::{RouteClass, RouteResolver, ThinkingDialect, ThinkingPosture, Wire};
 use nh_tools::{builtin_tools, load_image, Access, ToolCtx, MAX_IMAGES_PER_MESSAGE};
@@ -39,6 +40,7 @@ use nh_tools::{McpAuth, McpServerConfig, McpTrust};
 use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, SecretRegistry};
 
 use crate::guard_from;
+use crate::usage_tracker::LastRequestUsage;
 
 /// What callers print when a route resolves to a subscription delegate (M4 scope).
 pub(crate) const DELEGATE_MSG: &str = "delegate routes arrive in M4 - pick an api route";
@@ -151,6 +153,8 @@ pub fn run(
         execution_policy.output_cap,
         &resolver,
     )?;
+    let last_request_usage = LastRequestUsage::default();
+    let client = last_request_usage.wrap(client);
     let mut active_secrets = SecretRegistry::new();
     active_secrets.insert(literal);
     let session_scrubber = active_secrets.scrubber();
@@ -215,12 +219,17 @@ pub fn run(
         agent.run_with_history_and_parts(&mut history, task, image_parts)
     };
     let ended = Utc::now();
+    let context_usage = last_request_usage.snapshot();
     let (answer, receipt) = match result {
         Ok(completed) => completed,
         Err(error) => {
-            if let Some(meter_lines) =
-                failed_run_meter_lines(&error, &resolver, &route, RunTiming { started, ended })
-            {
+            if let Some(meter_lines) = failed_run_meter_lines(
+                &error,
+                &resolver,
+                &route,
+                context_usage.as_ref(),
+                RunTiming { started, ended },
+            ) {
                 let stderr = io::stderr();
                 let mut stderr = stderr.lock();
                 for line in meter_lines {
@@ -237,7 +246,7 @@ pub fn run(
     let meter_lines = run_meter_lines(
         &resolver,
         &route,
-        receipt.usage.as_ref(),
+        RunUsage::new(receipt.usage.as_ref(), context_usage.as_ref()),
         &receipt.compaction,
         receipt.turns,
         receipt.tool_calls,
@@ -258,13 +267,14 @@ fn failed_run_meter_lines(
     error: &anyhow::Error,
     resolver: &RouteResolver,
     route: &nh_routes::ResolvedRoute,
+    context_usage: Option<&Usage>,
     timing: RunTiming,
 ) -> Option<Vec<String>> {
     let receipt = error.downcast_ref::<AgentRunError>()?.receipt();
     Some(run_meter_lines(
         resolver,
         route,
-        receipt.usage.as_ref(),
+        RunUsage::new(receipt.usage.as_ref(), context_usage),
         &receipt.compaction,
         receipt.turns,
         receipt.tool_calls,

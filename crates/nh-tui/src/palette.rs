@@ -100,6 +100,11 @@ pub(super) fn builtin_palette_entries() -> Vec<PaletteEntry> {
             PaletteAction::Timeline,
         ),
         (
+            "/search",
+            "search the displayed transcript",
+            PaletteAction::Search,
+        ),
+        (
             "/why",
             "explain the chosen route and the cheaper ones it beat",
             PaletteAction::Why,

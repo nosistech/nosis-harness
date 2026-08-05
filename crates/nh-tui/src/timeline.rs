@@ -260,13 +260,16 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
         AgentEvent::ModelStarted { route, started_at } => {
             app.active_model = Some(crate::state::ActiveModel { route, started_at });
         }
-        AgentEvent::ModelFinished { route } => {
+        AgentEvent::ModelFinished { route, usage } => {
             if app
                 .active_model
                 .as_ref()
                 .is_some_and(|request| request.route == route)
             {
                 app.active_model = None;
+            }
+            if app.route.id() == route {
+                app.last_request_usage = usage;
             }
         }
         AgentEvent::ToolStarted { name, started_at } => {

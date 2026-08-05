@@ -15,17 +15,38 @@ pub(super) struct RunTiming {
     pub ended: DateTime<Utc>,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct RunUsage<'a> {
+    total: Option<&'a Usage>,
+    latest_request: Option<&'a Usage>,
+}
+
+impl<'a> RunUsage<'a> {
+    pub(super) fn new(total: Option<&'a Usage>, latest_request: Option<&'a Usage>) -> Self {
+        Self {
+            total,
+            latest_request,
+        }
+    }
+}
+
 pub(super) fn run_meter_lines(
     resolver: &RouteResolver,
     route: &ResolvedRoute,
-    usage: Option<&Usage>,
+    usage: RunUsage<'_>,
     compaction: &CompactionStats,
     turns: u32,
     tool_calls: u32,
     timing: RunTiming,
 ) -> Vec<String> {
+    let context_usage = usage.latest_request;
+    let usage = usage.total;
     let usage_unknown = usage.is_none_or(|usage| usage.evidence == UsageEvidence::Unknown);
-    let token_summary = usage_token_summary(usage);
+    let mut token_summary = usage_token_summary(usage);
+    if let Some(context) = context_window_summary(route, context_usage) {
+        token_summary.push_str(" | ");
+        token_summary.push_str(&context);
+    }
     if usage_unknown {
         let mut lines = vec![format!(
             "turns {turns} | tool calls {tool_calls} | {token_summary} - cost unknown"
@@ -74,6 +95,23 @@ pub(crate) fn usage_token_summary(usage: Option<&Usage>) -> String {
         summary.push_str(&format!(" / {cached} cached | cache {pct:.0}%"));
     }
     summary
+}
+
+pub(crate) fn context_window_summary(
+    route: &ResolvedRoute,
+    usage: Option<&Usage>,
+) -> Option<String> {
+    let window = route.context()?;
+    let usage = usage.filter(|usage| usage.evidence != UsageEvidence::Unknown)?;
+    let marker = if usage.evidence == UsageEvidence::Partial {
+        "~"
+    } else {
+        ""
+    };
+    // Keep ratios above 100% (and non-finite ratios) visible: they can expose
+    // an incorrect catalog window and must not be disguised by clamping.
+    let percent = usage.prompt_tokens as f64 / window as f64 * 100.0;
+    Some(format!("ctx {marker}{percent:.0}%"))
 }
 
 /// Render one progress callback. Ordinary core progress remains byte-for-byte

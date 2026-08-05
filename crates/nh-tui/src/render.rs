@@ -9,7 +9,7 @@ pub(super) use transcript::{transcript_scroll_state, wrapped_rows};
 use crate::input::command_matches;
 use crate::palette::{filter_palette, trust_dial_lines};
 use crate::session::{effort_name, safe_line};
-use crate::state::{App, Overlay, PickerKind, PickerRow, Status};
+use crate::state::{search_match_lines, App, Overlay, PickerKind, PickerRow, Status};
 use crate::timeline::{timeline_detail_lines, timeline_row};
 use chrono::{DateTime, Utc};
 use ratatui::{
@@ -87,7 +87,7 @@ pub(super) fn main_block(app: &App) -> Block<'static> {
 pub(super) fn render_key_hints(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let hints = safe_line(
         &app.scrubber,
-        "/ commands   ↑↓ scroll   Enter send   Ctrl+C quit",
+        "/ commands   ↑↓ scroll   Ctrl+F search   Enter send   Ctrl+C quit",
     );
     frame.render_widget(
         Paragraph::new(hints).style(
@@ -156,6 +156,9 @@ pub(super) fn render_hud(frame: &mut Frame<'_>, app: &App, area: Rect) {
 pub(super) fn render_overlay(frame: &mut Frame<'_>, app: &App) {
     match &app.overlay {
         Overlay::None => {}
+        Overlay::Search {
+            query, selected, ..
+        } => render_search(frame, app, modal_area(frame.area(), 8), query, *selected),
         Overlay::CommandMenu { selected } => {
             render_command_menu(frame, app, modal_area(frame.area(), 14), *selected)
         }
@@ -203,6 +206,40 @@ pub(super) fn render_overlay(frame: &mut Frame<'_>, app: &App) {
             rows,
         ),
     }
+}
+
+pub(super) fn render_search(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    query: &str,
+    selected: usize,
+) {
+    let body = render_modal_shell(
+        frame,
+        app,
+        area,
+        " Search transcript ",
+        "Type literal text · ↑/↓ match · Enter keep · Esc cancel",
+    );
+    let matches = search_match_lines(&app.transcript, query);
+    let position = if matches.is_empty() {
+        "0 matches".to_owned()
+    } else {
+        format!(
+            "match {}/{}",
+            selected.min(matches.len() - 1) + 1,
+            matches.len()
+        )
+    };
+    let lines = vec![
+        Line::from(safe_line(&app.scrubber, &format!("query: {query}"))),
+        Line::from(safe_line(&app.scrubber, &position)),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(Color::White).bg(Color::Black)),
+        body,
+    );
 }
 
 pub(super) fn render_trust_dial(frame: &mut Frame<'_>, app: &App, area: Rect) {

@@ -74,6 +74,15 @@ pub(super) fn execute_command(app: &mut App) -> UiAction {
             };
             UiAction::None
         }
+        ("search", None) => {
+            app.open_search();
+            UiAction::None
+        }
+        ("search", Some(_)) => command_error(
+            app,
+            "/search takes no arguments",
+            "run /search, then type a query",
+        ),
         ("why", None) => explain_why(app),
         ("why", Some(_)) => command_error(app, "/why takes no arguments", "run /why by itself"),
         ("profile", Some(name)) => set_profile(app, name),

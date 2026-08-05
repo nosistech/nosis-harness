@@ -322,7 +322,12 @@ fn tracked_client_emits_start_and_finish_on_success_and_failure() {
                     reasoning_content: None,
                 },
                 finish_reason: "stop".into(),
-                usage: None,
+                usage: Some(Usage {
+                    prompt_tokens: 250,
+                    completion_tokens: 20,
+                    cached_tokens: Some(100),
+                    evidence: UsageEvidence::Measured,
+                }),
                 retries: Default::default(),
             })
         }
@@ -343,7 +348,16 @@ fn tracked_client_emits_start_and_finish_on_success_and_failure() {
             _ => panic!("first event must start the model request"),
         }
         match received.recv().unwrap() {
-            AgentEvent::ModelFinished { route } => assert_eq!(route, "route-id"),
+            AgentEvent::ModelFinished { route, usage } => {
+                assert_eq!(route, "route-id");
+                if fail {
+                    assert!(usage.is_none());
+                } else {
+                    let usage = usage.expect("successful response usage is carried");
+                    assert_eq!(usage.prompt_tokens, 250);
+                    assert_eq!(usage.evidence, UsageEvidence::Measured);
+                }
+            }
             _ => panic!("second event must finish the model request"),
         }
     }
