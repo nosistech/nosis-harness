@@ -75,6 +75,25 @@ part of the first release rather than history. Replace `UNRELEASED` above with t
   (`kimi-k2.7-code`, `kimi-k2.7-code-highspeed`, `kimi-k2.6`), MiMo (`mimo-v2.5-pro`,
   `mimo-v2.5`), and GLM (`glm-5.2`, plus the free rate-limited `glm-4.7-flash`,
   `glm-4.6v-flash`, and `glm-4.5-flash`).
+- Context occupancy on every metered surface. The TUI footer, the `nh run` token line and
+  the `nh chat` footer report the last request's prompt size against the route's declared
+  context window as `ctx N%`. It measures the **last request**, not a buffer that only
+  grows, so it drops after a compaction. A route that declares no window prints no segment
+  at all rather than a guessed denominator; usage a provider never reported prints nothing
+  rather than `0%`; a lower-bound figure inherits the same leading `~` the token counts use;
+  and a prompt exceeding the declared window reports the real ratio instead of clamping to
+  100%, because that ratio is evidence the catalog window is wrong.
+- Transcript search in the TUI. `Ctrl+F` - or `/search` - finds text anywhere in the
+  session, with a match counter, wrapping navigation, highlighting of every visible hit, and
+  `Esc` restoring the exact prior scroll position. Search reads only the transcript as it is
+  displayed, after credential scrubbing and escaping, so text that is redacted on screen
+  cannot be found by searching for it. Matching folds case for ASCII only, which preserves
+  byte length and therefore highlights exactly; non-ASCII text matches literally, so `é`
+  does not match `É`.
+- Type-ahead while a turn is running. Text typed during generation is kept and editable
+  instead of discarded, `Enter` marks it `[queued]` rather than sending, and it dispatches
+  itself once when the turn ends. A queued `/command` runs as a command rather than being
+  sent to the model. Approval prompts are unaffected and still answer by single key.
 - Law-based approval guardrails: every shell command stops at a y/N prompt that
   defaults to deny.
 - No Nosis-operated telemetry, analytics, beacons, or crash reporting. Provider requests
@@ -98,6 +117,16 @@ part of the first release rather than history. Replace `UNRELEASED` above with t
   that are only a lower bound print with a leading `~`; usage a provider never reported
   prints as unknown rather than as `0`; and a cost is refused outright when it cannot be
   derived honestly. A missing usage figure can no longer be read as a free call.
+- A cost is now bounded rather than refused when a provider reports prompt and output tokens
+  but omits the cached-token split. Kimi and MiMo omit that field entirely on a cold cache
+  and send it only once the prefix is warm - six of the twelve catalog routes, measured on
+  the wire - so on a first run those routes previously printed no cost at all, and one such
+  turn made a whole TUI session total read as unavailable. The meter now prints
+  `cost at most <money> - cache split not reported by provider`. The bound evaluates both
+  ends of the feasible range and takes the larger, so it stays correct regardless of whether
+  a route's cache-hit price is below its cache-miss price. No savings percentage is shown
+  against a bound, no cached-token count is invented to fill the gap, and a session total
+  that includes a bounded turn stays a bound even if later turns are exact.
 - Repository catalogs are accepted only when byte-identical to the bundled catalog or to an
   exact operator-reviewed user-global copy.
 - Active credentials now share one zeroizing registry across provider, Fleet, TUI, CLI, and
