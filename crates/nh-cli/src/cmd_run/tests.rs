@@ -541,6 +541,39 @@ fn run_meter_context_segment_obeys_window_and_usage_evidence() {
     assert!(!lines[0].contains("ctx"), "got: {}", lines[0]);
 }
 
+#[test]
+fn run_meter_marks_tiny_measured_context_occupancy() {
+    let catalog = PEAK_CATALOG.replacen(
+        "vault_entry = \"test\"",
+        "vault_entry = \"test\"\n    context = 1000000",
+        1,
+    );
+    let resolver = RouteResolver::from_toml(&catalog).unwrap();
+    let route = resolver.resolve("peak-route").unwrap();
+    let usage = Usage {
+        prompt_tokens: 4_000,
+        completion_tokens: 20,
+        cached_tokens: None,
+        evidence: UsageEvidence::Measured,
+    };
+    let at = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+    let lines = run_meter_lines(
+        &resolver,
+        &route,
+        RunUsage::new(Some(&usage), Some(&usage)),
+        &Default::default(),
+        1,
+        0,
+        RunTiming {
+            started: at,
+            ended: at,
+        },
+    );
+
+    assert!(lines[0].contains("| ctx <1%"), "got: {}", lines[0]);
+    assert!(!lines[0].contains("| ctx 0%"), "got: {}", lines[0]);
+}
+
 struct MeasuredThenUnmeteredSuccess {
     calls: AtomicUsize,
 }

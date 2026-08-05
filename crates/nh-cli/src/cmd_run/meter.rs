@@ -5,8 +5,8 @@ use nh_core::agent::CompactionEvent;
 use nh_core::receipt::CompactionStats;
 use nh_core::wire::{cache_hit_pct, Usage, UsageEvidence};
 use nh_routes::{
-    cache_split_cost_upper_bound, cost_of, money, money_with_gloss, saved_pct, PriceConfidence,
-    ResolvedRoute, RouteClass, RouteResolver, LOCAL_METER_COPY,
+    cache_split_cost_upper_bound, cost_of, format_context_percent, money, money_with_gloss,
+    saved_pct, PriceConfidence, ResolvedRoute, RouteClass, RouteResolver, LOCAL_METER_COPY,
 };
 
 #[derive(Clone, Copy)]
@@ -108,10 +108,8 @@ pub(crate) fn context_window_summary(
     } else {
         ""
     };
-    // Keep ratios above 100% (and non-finite ratios) visible: they can expose
-    // an incorrect catalog window and must not be disguised by clamping.
-    let percent = usage.prompt_tokens as f64 / window as f64 * 100.0;
-    Some(format!("ctx {marker}{percent:.0}%"))
+    let percent = format_context_percent(usage.prompt_tokens, window);
+    Some(format!("ctx {marker}{percent}"))
 }
 
 /// Render one progress callback. Ordinary core progress remains byte-for-byte

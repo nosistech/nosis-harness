@@ -12,8 +12,8 @@ use nh_core::session_ledger::RestoredSession;
 use nh_core::wire::{cache_hit_pct, ThinkingEffort, Usage, UsageEvidence};
 use nh_law::{Law, PolicyView};
 use nh_routes::{
-    money, money_with_gloss, Currency, PriceConfidence, Profiles, ResolvedRoute, RouteClass,
-    RouteResolver,
+    format_context_percent, money, money_with_gloss, Currency, PriceConfidence, Profiles,
+    ResolvedRoute, RouteClass, RouteResolver,
 };
 use std::cell::Cell;
 use std::ops::Range;
@@ -648,12 +648,12 @@ impl App {
         {
             match usage.evidence {
                 UsageEvidence::Measured => {
-                    let pct = usage.prompt_tokens as f64 / context as f64 * 100.0;
-                    line.push_str(&format!(" · ctx {pct:.0}%"));
+                    let percent = format_context_percent(usage.prompt_tokens, context);
+                    line.push_str(&format!(" · ctx {percent}"));
                 }
                 UsageEvidence::Partial => {
-                    let pct = usage.prompt_tokens as f64 / context as f64 * 100.0;
-                    line.push_str(&format!(" · ctx ~{pct:.0}%"));
+                    let percent = format_context_percent(usage.prompt_tokens, context);
+                    line.push_str(&format!(" · ctx ~{percent}"));
                 }
                 UsageEvidence::Unknown => {}
             }

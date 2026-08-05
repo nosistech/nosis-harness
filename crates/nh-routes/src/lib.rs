@@ -3,11 +3,13 @@
 //! peak windows, thinking dialects, modality flags, provider defaults, banned-string
 //! rejection. Catalog and pricing stay DATA in catalog.toml - never hard-coded here.
 
+mod context;
 mod pricing;
 mod profiles;
 mod resolver;
 mod route;
 
+pub use context::format_context_percent;
 pub use pricing::{
     cache_split_cost_upper_bound, cost_of, money, money_with_gloss, saved_pct, to_usd_approx,
     Currency, Fx, NaiveCost, PeakWindows, PriceConfidence, PriceQuote, RoutePrice,

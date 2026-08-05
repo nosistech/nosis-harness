@@ -678,6 +678,114 @@ fn working_enter_queues_an_editable_task_and_idle_dispatches_it_exactly_once() {
 }
 
 #[test]
+fn pending_send_while_working_renders_plain_queued_marker() {
+    let mut app = test_app(None);
+    app.status = Status::Working;
+    type_text(&mut app, "next task");
+    reduce_key(&mut app, code_key(KeyCode::Enter));
+
+    let rendered = buffer_text(&render_buffer(&app, 90, 20));
+    assert!(rendered.contains("[queued] next task"), "got: {rendered}");
+    assert!(!rendered.contains("[queued -"), "got: {rendered}");
+}
+
+#[test]
+fn failed_turn_queue_prompts_for_enter_and_enter_dispatches() {
+    let mut app = test_app(None);
+    app.status = Status::Working;
+    type_text(&mut app, "retry");
+    reduce_key(&mut app, code_key(KeyCode::Enter));
+
+    let (previous, event_action) =
+        reduce_agent_event(&mut app, AgentEvent::Failed("offline".into()));
+    assert_eq!(previous, Status::Working);
+    assert_eq!(event_action, UiAction::None);
+    assert_eq!(app.status, Status::Blocked("offline".into()));
+    assert_eq!(app.input, "retry");
+    assert!(app.pending_send);
+    let rendered = buffer_text(&render_buffer(&app, 90, 20));
+    assert!(
+        rendered.contains("[queued - press Enter] retry"),
+        "got: {rendered}"
+    );
+
+    assert_eq!(
+        reduce_key(&mut app, code_key(KeyCode::Enter)),
+        UiAction::Dispatch("retry".into())
+    );
+    assert_eq!(app.status, Status::Working);
+    assert!(app.input.is_empty());
+    assert!(!app.pending_send);
+    assert_eq!(
+        app.transcript
+            .iter()
+            .filter(|line| line.kind == TranscriptKind::Task)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn longer_blocked_queue_marker_places_cursor_after_input() {
+    let mut app = test_app(None);
+    app.status = Status::Working;
+    type_text(&mut app, "retry");
+    reduce_key(&mut app, code_key(KeyCode::Enter));
+    reduce_agent_event(&mut app, AgentEvent::Failed("offline".into()));
+    let backend = TestBackend::new(90, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+
+    let rendered_input = "[queued - press Enter] retry";
+    let (input_x, input_y) = find_ascii_text(terminal.backend().buffer(), rendered_input);
+    let cursor = terminal.backend().cursor_position();
+    assert_eq!(
+        (cursor.x, cursor.y),
+        (
+            input_x + u16::try_from(rendered_input.len()).unwrap(),
+            input_y
+        )
+    );
+}
+
+#[test]
+fn budget_blocked_queue_reports_budget_and_enter_does_not_dispatch() {
+    let mut app = test_app(Some(100));
+    app.status = Status::Working;
+    type_text(&mut app, "must not run");
+    reduce_key(&mut app, code_key(KeyCode::Enter));
+
+    let (_, usage_action) = reduce_agent_event(
+        &mut app,
+        AgentEvent::Usage(Usage {
+            prompt_tokens: 80,
+            completion_tokens: 20,
+            cached_tokens: None,
+            evidence: UsageEvidence::Measured,
+        }),
+    );
+    assert_eq!(usage_action, UiAction::None);
+    assert_eq!(app.status, Status::Blocked(BUDGET_REASON.into()));
+    let rendered = buffer_text(&render_buffer(&app, 90, 20));
+    assert!(
+        rendered.contains("[queued - budget reached] must not run"),
+        "got: {rendered}"
+    );
+
+    assert_eq!(
+        reduce_key(&mut app, code_key(KeyCode::Enter)),
+        UiAction::None
+    );
+    assert_eq!(app.input, "must not run");
+    assert!(app.pending_send);
+    assert!(app
+        .transcript
+        .iter()
+        .all(|line| line.kind != TranscriptKind::Task));
+}
+
+#[test]
 fn clearing_or_blank_queued_input_never_dispatches() {
     let mut app = test_app(None);
     app.status = Status::Working;
@@ -688,7 +796,7 @@ fn clearing_or_blank_queued_input_never_dispatches() {
     reduce_key(&mut app, code_key(KeyCode::Backspace));
     assert!(app.input.is_empty());
     assert!(!app.pending_send);
-    assert!(!buffer_text(&render_buffer(&app, 90, 20)).contains("[queued]"));
+    assert!(!buffer_text(&render_buffer(&app, 90, 20)).contains("[queued"));
     let (_, action) = reduce_agent_event(&mut app, AgentEvent::Answer("done".into()));
     assert_eq!(action, UiAction::None);
     assert!(app
@@ -1141,7 +1249,7 @@ fn paste_while_working_appends_to_the_queued_input_buffer() {
     assert_eq!(app.status, Status::Working);
     assert!(app.transcript.is_empty());
     assert!(!app.pending_send);
-    assert!(!buffer_text(&render_buffer(&app, 90, 20)).contains("[queued]"));
+    assert!(!buffer_text(&render_buffer(&app, 90, 20)).contains("[queued"));
 
     reduce_key(&mut app, code_key(KeyCode::Enter));
     reduce_input_event(&mut app, Event::Paste(" edited".into()));
@@ -2147,6 +2255,69 @@ fn context_hud_uses_only_last_request_measured_or_partial_evidence() {
     );
     let partial = app.hud_line(fixed_at());
     assert!(partial.contains("· ctx ~25%"), "got: {partial}");
+}
+
+#[test]
+fn context_hud_marks_tiny_measured_context_occupancy() {
+    let mut app = meter_app();
+    apply_event(
+        &mut app,
+        AgentEvent::ModelFinished {
+            route: "meter-route".into(),
+            usage: Some(Usage {
+                prompt_tokens: 4_000,
+                completion_tokens: 20,
+                cached_tokens: None,
+                evidence: UsageEvidence::Measured,
+            }),
+        },
+    );
+
+    let hud = app.hud_line(fixed_at());
+    assert!(hud.contains("· ctx <1%"), "got: {hud}");
+    assert!(!hud.contains("· ctx 0%"), "got: {hud}");
+}
+
+#[test]
+fn context_hud_preserves_true_zero_context_occupancy() {
+    let mut app = meter_app();
+    apply_event(
+        &mut app,
+        AgentEvent::ModelFinished {
+            route: "meter-route".into(),
+            usage: Some(Usage {
+                prompt_tokens: 0,
+                completion_tokens: 20,
+                cached_tokens: None,
+                evidence: UsageEvidence::Measured,
+            }),
+        },
+    );
+
+    let hud = app.hud_line(fixed_at());
+    assert!(hud.contains("· ctx 0%"), "got: {hud}");
+    assert!(!hud.contains("· ctx <1%"), "got: {hud}");
+}
+
+#[test]
+fn context_hud_composes_partial_and_tiny_markers() {
+    let mut app = meter_app();
+    apply_event(
+        &mut app,
+        AgentEvent::ModelFinished {
+            route: "meter-route".into(),
+            usage: Some(Usage {
+                prompt_tokens: 4_000,
+                completion_tokens: 20,
+                cached_tokens: None,
+                evidence: UsageEvidence::Partial,
+            }),
+        },
+    );
+
+    let hud = app.hud_line(fixed_at());
+    assert!(hud.contains("· ctx ~<1%"), "got: {hud}");
+    assert!(!hud.contains("· ctx ~0%"), "got: {hud}");
 }
 
 #[test]

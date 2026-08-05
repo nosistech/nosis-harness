@@ -127,7 +127,12 @@ pub(super) fn render_separator(frame: &mut Frame<'_>, app: &App, area: Rect) {
 pub(super) fn render_input(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let prompt = safe_line(&app.scrubber, "❯ ");
     let queued = if app.pending_send {
-        safe_line(&app.scrubber, "[queued] ")
+        let marker = match &app.status {
+            Status::Blocked(_) if app.budget_reached() => "[queued - budget reached] ",
+            Status::Blocked(_) => "[queued - press Enter] ",
+            _ => "[queued] ",
+        };
+        safe_line(&app.scrubber, marker)
     } else {
         String::new()
     };

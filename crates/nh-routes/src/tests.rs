@@ -1473,6 +1473,15 @@ fn invalid_toml_is_a_friendly_error() {
 // ---------------------------------------------------------------- display helpers
 
 #[test]
+fn context_percent_formats_zero_tiny_ordinary_over_window_and_zero_window() {
+    assert_eq!(format_context_percent(0, 1_000_000), "0%");
+    assert_eq!(format_context_percent(4_000, 1_000_000), "<1%");
+    assert_eq!(format_context_percent(250, 1_000), "25%");
+    assert_eq!(format_context_percent(1_250, 1_000), "125%");
+    assert_eq!(format_context_percent(1, 0), "inf%");
+}
+
+#[test]
 fn display_strings_match_catalog_vocabulary() {
     assert_eq!(Currency::Cny.to_string(), "CNY");
     assert_eq!(Currency::Usd.to_string(), "USD");

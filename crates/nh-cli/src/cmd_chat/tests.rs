@@ -238,6 +238,14 @@ fn beijing_offset() -> FixedOffset {
 }
 
 fn test_session(model: &str, tmp: &Path) -> (ChatSession, Arc<AtomicUsize>) {
+    test_session_from_catalog(model, tmp, TEST_CATALOG)
+}
+
+fn test_session_from_catalog(
+    model: &str,
+    tmp: &Path,
+    catalog: &str,
+) -> (ChatSession, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let connect_calls = Arc::clone(&calls);
     let connect: ConnectFn = Box::new(move |route, _| {
@@ -249,7 +257,7 @@ fn test_session(model: &str, tmp: &Path) -> (ChatSession, Arc<AtomicUsize>) {
             nh_vault::secret(format!("fake-key-{}", route.vault_entry())),
         ))
     });
-    let resolver = Arc::new(RouteResolver::from_toml(TEST_CATALOG).expect("test catalog parses"));
+    let resolver = Arc::new(RouteResolver::from_toml(catalog).expect("test catalog parses"));
     let route = resolver.resolve(model).expect("known test route");
     let profiles = Profiles::bundled();
     let execution_policy = profiles.effective("balanced", &route);
@@ -701,6 +709,26 @@ fn footer_context_segment_uses_latest_usage_and_preserves_lower_bound_evidence()
     let line = footer(&s);
     assert!(line.contains("| ctx 150%"), "got: {line}");
     assert!(!line.contains("| ctx 100%"), "got: {line}");
+}
+
+#[test]
+fn footer_marks_tiny_measured_context_occupancy() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = TEST_CATALOG.replacen("context = 1000", "context = 1000000", 1);
+    let (mut session, _calls) =
+        test_session_from_catalog("deepseek-v4-flash", tmp.path(), &catalog);
+    let usage = Usage {
+        prompt_tokens: 4_000,
+        completion_tokens: 20,
+        cached_tokens: None,
+        evidence: UsageEvidence::Measured,
+    };
+    assert!(add_session_usage(&mut session, Some(&usage)));
+    session.last_request_usage.set_for_test(Some(usage));
+
+    let line = footer(&session);
+    assert!(line.contains("| ctx <1%"), "got: {line}");
+    assert!(!line.contains("| ctx 0%"), "got: {line}");
 }
 
 #[test]
