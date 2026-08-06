@@ -5,7 +5,7 @@ use crate::state::{AgentEvent, App, Status, TimelineEntry, TranscriptKind};
 use crate::{APPROVAL_LEGEND, BUDGET_REASON};
 use chrono::{DateTime, TimeZone, Utc};
 use nh_core::agent::CompactionEvent;
-use nh_core::receipt::{CompactionStats, FailureClass, Outcome};
+use nh_core::receipt::{CompactionStats, FailureClass, Outcome, ReceiptKind};
 use nh_core::wire::{cache_hit_pct, Usage, UsageEvidence};
 use nh_routes::{
     cache_split_cost_upper_bound, cost_of, money, money_with_gloss, saved_pct, PriceConfidence,
@@ -57,7 +57,11 @@ pub(super) fn timeline_row(entry: &TimelineEntry) -> String {
     format!(
         "#{}  {}  {tokens}{compacted}",
         entry.turn,
-        outcome_name(entry.outcome)
+        if entry.kind == ReceiptKind::CancelledTurn {
+            "cancelled"
+        } else {
+            outcome_name(entry.outcome)
+        }
     )
 }
 
@@ -90,6 +94,14 @@ pub(super) fn timeline_detail_lines(entry: &TimelineEntry) -> Vec<String> {
         format!("timestamp: {}", entry.ts_utc),
         format!("model: {}", entry.model_id),
         format!("task: {}", entry.task),
+        format!(
+            "kind: {}",
+            if entry.kind == ReceiptKind::CancelledTurn {
+                "cancelled_turn"
+            } else {
+                "task"
+            }
+        ),
         format!("outcome: {}", outcome_name(entry.outcome)),
         format!("agent turns: {}", entry.turns),
         format!("tool calls: {}", entry.tool_calls),
@@ -313,46 +325,22 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
             }
         }
         AgentEvent::TaskReceipt(summary) => {
-            let receipt_route_is_current = summary.route_id == app.route.id();
-            let receipt_route = app.resolver.resolve(&summary.route_id).ok();
-            let receipt_at = DateTime::parse_from_rfc3339(&summary.receipt.ts_utc)
-                .ok()
-                .map(|at| at.with_timezone(&Utc));
-            if let Some(route) = &receipt_route {
-                record_route_turn_cost(
-                    app,
-                    route,
-                    summary.receipt.usage.as_ref(),
-                    receipt_at,
-                    true,
-                );
+            record_timeline_summary(app, summary);
+        }
+        AgentEvent::CancelledTurn(summary) => {
+            app.active_model = None;
+            app.active_tool = None;
+            app.push_line(
+                "turn cancelled - the provider may still bill the completed request",
+                TranscriptKind::Progress,
+            );
+            record_timeline_summary(app, summary);
+            let status = if app.budget_reached() {
+                Status::Blocked(BUDGET_REASON.into())
             } else {
-                app.mark_session_cost_incomplete();
-                app.push_line(
-                    "cost unavailable - receipt route is not in the catalog",
-                    TranscriptKind::Progress,
-                );
-            }
-            let turn = app.timeline.len().saturating_add(1);
-            let live_compaction = std::mem::take(&mut app.current_task_compaction);
-            let mut entry =
-                TimelineEntry::from_receipt(turn, summary.receipt, summary.answer, live_compaction);
-            if !entry.compaction.is_empty() {
-                let effect =
-                    compaction_effect(&app.resolver, receipt_route.as_ref(), entry.compaction);
-                entry.compaction_detail = Some(format!(
-                    "{}{}",
-                    compaction_fact_line(entry.compaction),
-                    effect.suffix
-                ));
-                entry.compaction_hud = Some(effect.hud);
-            }
-            app.last_compaction_hud = if receipt_route_is_current {
-                entry.compaction_hud.clone()
-            } else {
-                None
+                Status::Idle
             };
-            app.timeline.push(entry);
+            app.set_status(status, Utc::now());
         }
         AgentEvent::Answer(answer) => {
             app.active_model = None;
@@ -383,6 +371,42 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
         }
     }
     &app.status
+}
+
+fn record_timeline_summary(app: &mut App, summary: crate::state::TimelineSummary) {
+    let receipt_route_is_current = summary.route_id == app.route.id();
+    let receipt_route = app.resolver.resolve(&summary.route_id).ok();
+    let receipt_at = DateTime::parse_from_rfc3339(&summary.receipt.ts_utc)
+        .ok()
+        .map(|at| at.with_timezone(&Utc));
+    if let Some(route) = &receipt_route {
+        record_route_turn_cost(app, route, summary.receipt.usage.as_ref(), receipt_at, true);
+    } else {
+        app.mark_session_cost_incomplete();
+        app.push_line(
+            "cost unavailable - receipt route is not in the catalog",
+            TranscriptKind::Progress,
+        );
+    }
+    let turn = app.timeline.len().saturating_add(1);
+    let live_compaction = std::mem::take(&mut app.current_task_compaction);
+    let mut entry =
+        TimelineEntry::from_receipt(turn, summary.receipt, summary.answer, live_compaction);
+    if !entry.compaction.is_empty() {
+        let effect = compaction_effect(&app.resolver, receipt_route.as_ref(), entry.compaction);
+        entry.compaction_detail = Some(format!(
+            "{}{}",
+            compaction_fact_line(entry.compaction),
+            effect.suffix
+        ));
+        entry.compaction_hud = Some(effect.hud);
+    }
+    app.last_compaction_hud = if receipt_route_is_current {
+        entry.compaction_hud.clone()
+    } else {
+        None
+    };
+    app.timeline.push(entry);
 }
 
 #[cfg(test)]

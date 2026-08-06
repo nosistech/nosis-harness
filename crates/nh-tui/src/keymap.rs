@@ -7,6 +7,7 @@ pub(super) struct KeyBinding {
     pub(super) detail: &'static str,
     show_in_hint: bool,
     hide_at_budget: bool,
+    working_only: bool,
 }
 
 pub(super) const KEY_BINDINGS: &[KeyBinding] = &[
@@ -16,6 +17,7 @@ pub(super) const KEY_BINDINGS: &[KeyBinding] = &[
         detail: " and tools",
         show_in_hint: true,
         hide_at_budget: false,
+        working_only: false,
     },
     KeyBinding {
         keys: "↑↓",
@@ -23,6 +25,7 @@ pub(super) const KEY_BINDINGS: &[KeyBinding] = &[
         detail: " transcript",
         show_in_hint: true,
         hide_at_budget: false,
+        working_only: false,
     },
     KeyBinding {
         keys: "PgUp/PgDn",
@@ -30,6 +33,7 @@ pub(super) const KEY_BINDINGS: &[KeyBinding] = &[
         detail: " through transcript",
         show_in_hint: false,
         hide_at_budget: false,
+        working_only: false,
     },
     KeyBinding {
         keys: "End",
@@ -37,6 +41,7 @@ pub(super) const KEY_BINDINGS: &[KeyBinding] = &[
         detail: " transcript position (when idle)",
         show_in_hint: false,
         hide_at_budget: false,
+        working_only: false,
     },
     KeyBinding {
         keys: "Ctrl+F",
@@ -44,6 +49,7 @@ pub(super) const KEY_BINDINGS: &[KeyBinding] = &[
         detail: " displayed transcript",
         show_in_hint: true,
         hide_at_budget: false,
+        working_only: false,
     },
     KeyBinding {
         keys: "Enter",
@@ -51,6 +57,7 @@ pub(super) const KEY_BINDINGS: &[KeyBinding] = &[
         detail: " task; queue while working (not during approval)",
         show_in_hint: true,
         hide_at_budget: true,
+        working_only: false,
     },
     KeyBinding {
         keys: "Ctrl+W",
@@ -58,6 +65,7 @@ pub(super) const KEY_BINDINGS: &[KeyBinding] = &[
         detail: " previous word (Ctrl+Backspace / Ctrl+H aliases)",
         show_in_hint: false,
         hide_at_budget: false,
+        working_only: false,
     },
     KeyBinding {
         keys: "Ctrl+U",
@@ -65,13 +73,15 @@ pub(super) const KEY_BINDINGS: &[KeyBinding] = &[
         detail: " input line",
         show_in_hint: false,
         hide_at_budget: false,
+        working_only: false,
     },
     KeyBinding {
         keys: "Ctrl+C",
-        action: "quit",
-        detail: " Nosis Harness",
+        action: "interrupt / clear / exit",
+        detail: " by state; exit needs two presses",
         show_in_hint: true,
         hide_at_budget: false,
+        working_only: false,
     },
     KeyBinding {
         keys: "?/F1",
@@ -79,13 +89,15 @@ pub(super) const KEY_BINDINGS: &[KeyBinding] = &[
         detail: " (F1 always; ? needs an empty input)",
         show_in_hint: true,
         hide_at_budget: false,
+        working_only: false,
     },
     KeyBinding {
         keys: "Esc",
-        action: "close",
-        detail: " overlay; decline a pending approval",
-        show_in_hint: false,
+        action: "interrupt",
+        detail: " the turn; close overlays; decline approvals",
+        show_in_hint: true,
         hide_at_budget: false,
+        working_only: true,
     },
     KeyBinding {
         keys: "y / a / n",
@@ -93,19 +105,22 @@ pub(super) const KEY_BINDINGS: &[KeyBinding] = &[
         detail: " approval yes / always / no",
         show_in_hint: false,
         hide_at_budget: false,
+        working_only: false,
     },
 ];
 
 pub(super) fn visible_key_bindings(
     budget_reached: bool,
+    working: bool,
 ) -> impl Iterator<Item = &'static KeyBinding> {
     KEY_BINDINGS
         .iter()
         .filter(move |binding| !budget_reached || !binding.hide_at_budget)
+        .filter(move |binding| working || !binding.working_only)
 }
 
-pub(super) fn key_hint_line(budget_reached: bool) -> String {
-    visible_key_bindings(budget_reached)
+pub(super) fn key_hint_line(budget_reached: bool, working: bool) -> String {
+    visible_key_bindings(budget_reached, working)
         .filter(|binding| binding.show_in_hint)
         .map(|binding| format!("{} {}", binding.keys, binding.action))
         .collect::<Vec<_>>()

@@ -25,6 +25,7 @@ use ratatui::{
 
 const BLOCKED_REASON_MAX_CHARS: usize = 32;
 const HEADER_TITLE_GAP: usize = 1;
+const BLOCKED_LABEL: &str = "● BLOCKED";
 
 pub(super) fn render(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
@@ -67,7 +68,7 @@ pub(super) fn main_block(app: &App, width: u16) -> Block<'static> {
         &app.scrubber,
         &format!(" {} · effort: {} ", app.route.id(), effort_name(app.effort)),
     );
-    let blocked_reason_width = blocked_reason_width(width, &route_label);
+    let blocked_reason_width = blocked_reason_width(width, &route_label, &app.scrubber);
     let (status, status_style) = match (&app.status, &app.active_tool, &app.active_model) {
         (Status::Working, Some(tool), _) => tool_status_chip(&tool.name, tool.started_at, now),
         (Status::Working, None, Some(request)) => {
@@ -75,20 +76,7 @@ pub(super) fn main_block(app: &App, width: u16) -> Block<'static> {
         }
         _ => status_chip(&app.status, app.working_since, now, blocked_reason_width),
     };
-    let left_title = Line::from(vec![
-        Span::styled(
-            safe_line(&app.scrubber, " nosis "),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            safe_line(&app.scrubber, "· "),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled(safe_line(&app.scrubber, &status), status_style),
-        Span::raw(safe_line(&app.scrubber, " ")),
-    ]);
+    let left_title = left_title(&app.scrubber, &status, status_style);
     let route_title =
         Line::from(Span::styled(route_label, Style::default().fg(Color::Cyan))).right_aligned();
 
@@ -101,8 +89,32 @@ pub(super) fn main_block(app: &App, width: u16) -> Block<'static> {
         .title_top(route_title)
 }
 
+fn left_title(
+    scrubber: &crate::SharedScrubber,
+    status: &str,
+    status_style: Style,
+) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            safe_line(scrubber, " nosis "),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            safe_line(scrubber, "· "),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(safe_line(scrubber, status), status_style),
+        Span::raw(safe_line(scrubber, " ")),
+    ])
+}
+
 pub(super) fn render_key_hints(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let hints = safe_line(&app.scrubber, &key_hint_line(app.budget_reached()));
+    let hints = safe_line(
+        &app.scrubber,
+        &key_hint_line(app.budget_reached(), matches!(app.status, Status::Working)),
+    );
     frame.render_widget(
         Paragraph::new(hints).style(
             Style::default()
@@ -154,7 +166,7 @@ pub(super) fn render_input(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
     if app.input.is_empty() {
         let placeholder = if app.budget_reached() {
-            "budget reached - Ctrl+C to quit"
+            "budget reached - press Ctrl+C twice to exit"
         } else {
             "type a task and press Enter…"
         };
@@ -258,27 +270,28 @@ pub(super) fn render_help(frame: &mut Frame<'_>, app: &App, area: Rect) {
         app,
         area,
         " Help · read-only ",
-        "Key bindings · Esc close",
+        "Keys for the current state",
     );
-    let lines: Vec<Line<'static>> = visible_key_bindings(app.budget_reached())
-        .map(|binding| {
-            Line::from(vec![
-                Span::styled(
-                    safe_line(&app.scrubber, &format!("{:<12}", binding.keys)),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    safe_line(
-                        &app.scrubber,
-                        &format!("{}{}", binding.action, binding.detail),
+    let lines: Vec<Line<'static>> =
+        visible_key_bindings(app.budget_reached(), matches!(app.status, Status::Working))
+            .map(|binding| {
+                Line::from(vec![
+                    Span::styled(
+                        safe_line(&app.scrubber, &format!("{:<12}", binding.keys)),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
                     ),
-                    Style::default().fg(Color::White),
-                ),
-            ])
-        })
-        .collect();
+                    Span::styled(
+                        safe_line(
+                            &app.scrubber,
+                            &format!("{}{}", binding.action, binding.detail),
+                        ),
+                        Style::default().fg(Color::White),
+                    ),
+                ])
+            })
+            .collect();
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().fg(Color::White).bg(Color::Black)),
         body,
@@ -656,6 +669,18 @@ pub(super) fn status_chip(
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
+        Status::FinishingInterrupted => (
+            working_since.map_or_else(
+                || "● WORKING - interrupted turn".into(),
+                |since| {
+                    let elapsed = now.signed_duration_since(since).num_seconds().max(0);
+                    format!("● WORKING - interrupted turn · {elapsed}s")
+                },
+            ),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Status::Waiting => (
             "● WAITING ON YOU".into(),
             Style::default()
@@ -677,9 +702,9 @@ pub(super) fn status_chip(
             };
             let reason = fit_with_ellipsis(&capped, blocked_reason_width);
             let label = if reason.is_empty() {
-                "● BLOCKED".into()
+                BLOCKED_LABEL.into()
             } else {
-                format!("● BLOCKED - {reason}")
+                format!("{BLOCKED_LABEL} - {reason}")
             };
             (
                 label,
@@ -689,9 +714,10 @@ pub(super) fn status_chip(
     }
 }
 
-fn blocked_reason_width(width: u16, route_label: &str) -> usize {
+fn blocked_reason_width(width: u16, route_label: &str, scrubber: &crate::SharedScrubber) -> usize {
     let title_width = usize::from(width.saturating_sub(2));
-    let fixed_left_width = Line::from(" nosis · ● BLOCKED -  ").width();
+    let fixed_left_width =
+        left_title(scrubber, &format!("{BLOCKED_LABEL} - "), Style::default()).width();
     title_width.saturating_sub(
         fixed_left_width
             .saturating_add(Line::from(route_label).width())

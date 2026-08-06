@@ -7,7 +7,7 @@ use crate::worker::WorkerCommand;
 use chrono::{DateTime, Utc};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use nh_core::agent::{CompactionEvent, MAX_TASK_BYTES};
-use nh_core::receipt::CompactionStats;
+use nh_core::receipt::{CompactionStats, ReceiptKind};
 use nh_core::session_ledger::{list_sessions, read_session};
 use nh_core::wire::{ChatRequest, ChatResponse};
 use nh_routes::Currency;
@@ -23,8 +23,8 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const TEST_CATALOG: &str = r#"
     [routes.test-route]
@@ -361,6 +361,7 @@ fn approval(prompt: &str) -> (AgentEvent, Receiver<bool>) {
 
 fn receipt(task: &str, outcome: Outcome, usage: Option<Usage>) -> Receipt {
     Receipt {
+        kind: nh_core::receipt::ReceiptKind::Task,
         ts_utc: "2026-07-14T12:00:00Z".into(),
         model_id: "test-route".into(),
         task: task.into(),
@@ -455,6 +456,7 @@ fn outer_frame_and_each_status_word_render() {
     let cases = [
         (Status::Idle, "○ IDLE"),
         (Status::Working, "● WORKING"),
+        (Status::FinishingInterrupted, "● WORKING - interrupted turn"),
         (Status::Waiting, "● WAITING ON YOU"),
         (Status::Blocked("offline".into()), "● BLOCKED - offline"),
     ];
@@ -547,7 +549,8 @@ fn budget_reached_hint_bar_omits_enter_send() {
     assert!(app.budget_reached());
     let rendered = buffer_text(&render_buffer(&app, 90, 20));
     assert!(
-        rendered.contains("/ commands   ↑↓ scroll   Ctrl+F search   Ctrl+C quit"),
+        rendered
+            .contains("/ commands   ↑↓ scroll   Ctrl+F search   Ctrl+C interrupt / clear / exit"),
         "got: {rendered}"
     );
     assert!(!rendered.contains("Enter send"), "got: {rendered}");
@@ -559,7 +562,9 @@ fn idle_hint_bar_keeps_enter_send() {
     assert!(!app.budget_reached());
     let rendered = buffer_text(&render_buffer(&app, 90, 20));
     assert!(
-        rendered.contains("/ commands   ↑↓ scroll   Ctrl+F search   Enter send   Ctrl+C quit"),
+        rendered.contains(
+            "/ commands   ↑↓ scroll   Ctrl+F search   Enter send   Ctrl+C interrupt / clear / exit"
+        ),
         "got: {rendered}"
     );
 }
@@ -568,7 +573,7 @@ fn idle_hint_bar_keeps_enter_send() {
 fn help_overlay_and_hint_bar_render_from_the_same_binding_table() {
     let mut app = test_app(None);
     let base = buffer_text(&render_buffer(&app, 100, 24));
-    let expected_hint = key_hint_line(false);
+    let expected_hint = key_hint_line(false, false);
     assert!(base.contains(&expected_hint), "got: {base}");
 
     assert_eq!(
@@ -578,8 +583,8 @@ fn help_overlay_and_hint_bar_render_from_the_same_binding_table() {
     assert_eq!(app.overlay, Overlay::Help);
     let help = buffer_text(&render_buffer(&app, 100, 24));
     assert!(help.contains("Help · read-only"), "got: {help}");
-    assert!(help.contains("Key bindings · Esc close"), "got: {help}");
-    for binding in visible_key_bindings(false) {
+    assert!(help.contains("Keys for the current state"), "got: {help}");
+    for binding in visible_key_bindings(false, false) {
         let description = format!("{}{}", binding.action, binding.detail);
         assert!(
             help.contains(binding.keys),
@@ -591,6 +596,27 @@ fn help_overlay_and_hint_bar_render_from_the_same_binding_table() {
             "missing {description:?}: {help}"
         );
     }
+}
+
+#[test]
+fn working_only_interrupt_binding_reaches_both_key_surfaces() {
+    let idle = test_app(None);
+    let idle_base = buffer_text(&render_buffer(&idle, 120, 24));
+    assert!(!idle_base.contains("Esc interrupt"), "got: {idle_base}");
+
+    let mut working = test_app(None);
+    working.status = Status::Working;
+    let working_base = buffer_text(&render_buffer(&working, 120, 24));
+    assert!(
+        working_base.contains("Esc interrupt"),
+        "got: {working_base}"
+    );
+    reduce_key(&mut working, code_key(KeyCode::F(1)));
+    let working_help = buffer_text(&render_buffer(&working, 120, 24));
+    assert!(
+        working_help.contains("interrupt the turn; close overlays; decline approvals"),
+        "got: {working_help}"
+    );
 }
 
 #[test]
@@ -737,7 +763,9 @@ fn failed_blocked_hint_bar_keeps_enter_send_when_budget_remains() {
 
     let rendered = buffer_text(&render_buffer(&app, 90, 20));
     assert!(
-        rendered.contains("/ commands   ↑↓ scroll   Ctrl+F search   Enter send   Ctrl+C quit"),
+        rendered.contains(
+            "/ commands   ↑↓ scroll   Ctrl+F search   Enter send   Ctrl+C interrupt / clear / exit"
+        ),
         "got: {rendered}"
     );
 }
@@ -749,7 +777,7 @@ fn budget_reached_empty_input_renders_truthful_placeholder() {
     assert!(app.input.is_empty());
     let rendered = buffer_text(&render_buffer(&app, 90, 20));
     assert!(
-        rendered.contains("❯ budget reached - Ctrl+C to quit"),
+        rendered.contains("❯ budget reached - press Ctrl+C twice to exit"),
         "got: {rendered}"
     );
     assert!(
@@ -773,7 +801,7 @@ fn failed_blocked_empty_input_keeps_normal_placeholder() {
         "got: {rendered}"
     );
     assert!(
-        !rendered.contains("budget reached - Ctrl+C to quit"),
+        !rendered.contains("budget reached - press Ctrl+C twice to exit"),
         "got: {rendered}"
     );
 }
@@ -824,6 +852,23 @@ fn long_blocked_reason_keeps_both_titles_readable_at_width_eighty() {
 }
 
 #[test]
+fn long_blocked_reason_keeps_both_titles_readable_at_width_seventy_nine() {
+    let mut app = test_app(None);
+    app.status = Status::Blocked("x".repeat(100));
+    let rows = buffer_rows(&render_buffer(&app, 79, 20));
+    let header = &rows[0];
+
+    let expected_join = format!(
+        "● BLOCKED - {}… ─ test-route · effort: none ",
+        "x".repeat(26)
+    );
+    assert!(
+        header.contains(&expected_join),
+        "titles must remain separated by the border: {header}"
+    );
+}
+
+#[test]
 fn chat_roles_label_indented_turns_and_leave_a_visual_gap() {
     let mut app = test_app(None);
     app.input = "fix this test".into();
@@ -866,7 +911,9 @@ fn empty_state_and_key_strip_are_self_teaching_then_conversation_replaces_welcom
         "got: {fresh}"
     );
     assert!(
-        fresh.contains("/ commands   ↑↓ scroll   Ctrl+F search   Enter send   Ctrl+C quit"),
+        fresh.contains(
+            "/ commands   ↑↓ scroll   Ctrl+F search   Enter send   Ctrl+C interrupt / clear / exit"
+        ),
         "got: {fresh}"
     );
 
@@ -877,7 +924,9 @@ fn empty_state_and_key_strip_are_self_teaching_then_conversation_replaces_welcom
     assert!(active.contains("❯ you"), "got: {active}");
     assert!(active.contains("   start"), "got: {active}");
     assert!(
-        active.contains("/ commands   ↑↓ scroll   Ctrl+F search   Enter send   Ctrl+C quit"),
+        active.contains(
+            "/ commands   ↑↓ scroll   Ctrl+F search   Enter send   Ctrl+C interrupt / clear / exit"
+        ),
         "got: {active}"
     );
 }
@@ -1086,6 +1135,45 @@ fn working_enter_queues_an_editable_task_and_idle_dispatches_it_exactly_once() {
 }
 
 #[test]
+fn cancelled_turn_records_measured_cost_before_dispatching_the_queue() {
+    let mut app = meter_app();
+    app.status = Status::FinishingInterrupted;
+    app.input = "next task".into();
+    app.pending_send = true;
+    let usage = Usage {
+        prompt_tokens: 100,
+        completion_tokens: 20,
+        cached_tokens: Some(40),
+        evidence: UsageEvidence::Measured,
+    };
+    let (_, usage_action) = reduce_agent_event(&mut app, AgentEvent::Usage(usage.clone()));
+    assert_eq!(usage_action, UiAction::None);
+    assert_eq!(app.status, Status::FinishingInterrupted);
+
+    let mut cancelled_receipt = receipt("interrupted", Outcome::Pass, Some(usage));
+    cancelled_receipt.kind = ReceiptKind::CancelledTurn;
+    let (previous, action) = reduce_agent_event(
+        &mut app,
+        AgentEvent::CancelledTurn(TimelineSummary {
+            route_id: "meter-route".into(),
+            receipt: cancelled_receipt,
+            answer: "cancelled before the answer was shown".into(),
+        }),
+    );
+
+    assert_eq!(previous, Status::FinishingInterrupted);
+    assert_eq!(action, UiAction::Dispatch("next task".into()));
+    assert_eq!(app.status, Status::Working);
+    assert_eq!(app.timeline.len(), 1);
+    assert_eq!(app.timeline[0].kind, ReceiptKind::CancelledTurn);
+    assert_eq!(app.timeline[0].tokens(), Some((100, 20, Some(40))));
+    assert!(!app.session_cost.is_empty());
+    assert!(app.transcript.iter().any(|line| line
+        .text
+        .contains("provider may still bill the completed request")));
+}
+
+#[test]
 fn pending_send_while_working_renders_plain_queued_marker() {
     let mut app = test_app(None);
     app.status = Status::Working;
@@ -1272,7 +1360,6 @@ fn approval_reducer_accepts_only_explicit_choices() {
         (KeyCode::Char('A'), true),
         (KeyCode::Char('n'), false),
         (KeyCode::Char('N'), false),
-        (KeyCode::Esc, false),
     ] {
         let mut app = test_app(None);
         app.status = Status::Working;
@@ -1303,6 +1390,76 @@ fn approval_reducer_accepts_only_explicit_choices() {
     assert_eq!(app.status, Status::Waiting);
     assert_eq!(app.input, "queued draft");
     assert!(app.pending_send);
+}
+
+#[test]
+fn escape_declines_approval_and_interrupts_the_turn_without_firing_the_queue() {
+    let mut app = test_app(None);
+    app.status = Status::Working;
+    type_text(&mut app, "queued draft");
+    reduce_key(&mut app, code_key(KeyCode::Enter));
+    let (event, answer) = approval("cargo test --workspace");
+    apply_event(&mut app, event);
+
+    assert_eq!(
+        reduce_key(&mut app, code_key(KeyCode::Esc)),
+        UiAction::Interrupt
+    );
+    assert!(!answer.recv().unwrap());
+    assert_eq!(app.status, Status::FinishingInterrupted);
+    assert_eq!(app.input, "queued draft");
+    assert!(app.pending_send);
+    assert!(app.pending_approval.is_none());
+    assert!(app
+        .transcript
+        .iter()
+        .all(|line| line.kind != TranscriptKind::Task));
+}
+
+#[test]
+fn ctrl_c_uses_interrupt_clear_and_double_press_steps() {
+    let mut working = test_app(None);
+    working.status = Status::Working;
+    assert_eq!(reduce_key(&mut working, ctrl_key('c')), UiAction::Interrupt);
+    assert_eq!(working.status, Status::FinishingInterrupted);
+    assert!(working.last_ctrl_c.is_none());
+
+    working.input = "draft".into();
+    working.pending_send = true;
+    assert_eq!(reduce_key(&mut working, ctrl_key('c')), UiAction::None);
+    assert!(working.input.is_empty());
+    assert!(!working.pending_send);
+    assert!(working.last_ctrl_c.is_none());
+
+    assert_eq!(reduce_key(&mut working, ctrl_key('c')), UiAction::None);
+    assert!(working.last_ctrl_c.is_some());
+    assert_eq!(reduce_key(&mut working, ctrl_key('c')), UiAction::Quit);
+}
+
+#[test]
+fn ctrl_c_exit_arm_expires_and_other_keys_disarm_it() {
+    let mut app = test_app(None);
+    app.last_ctrl_c = Some(Instant::now() - CTRL_C_EXIT_WINDOW - Duration::from_millis(1));
+    assert_eq!(reduce_key(&mut app, ctrl_key('c')), UiAction::None);
+    assert!(app.last_ctrl_c.is_some());
+
+    assert_eq!(reduce_key(&mut app, char_key('x')), UiAction::None);
+    assert!(app.last_ctrl_c.is_none());
+    app.input.clear();
+    assert_eq!(reduce_key(&mut app, ctrl_key('c')), UiAction::None);
+}
+
+#[test]
+fn ctrl_c_declines_a_pending_approval_before_interrupting() {
+    let mut app = test_app(None);
+    app.status = Status::Working;
+    let (event, answer) = approval("cargo test --workspace");
+    apply_event(&mut app, event);
+
+    assert_eq!(reduce_key(&mut app, ctrl_key('c')), UiAction::Interrupt);
+    assert!(!answer.recv().unwrap());
+    assert!(app.pending_approval.is_none());
+    assert_eq!(app.status, Status::FinishingInterrupted);
 }
 
 #[test]
@@ -1467,7 +1624,7 @@ fn unknown_billed_turn_refuses_session_money_and_token_numbers() {
     assert!(!hud.contains("in 0"), "got: {hud}");
     assert_eq!(timeline_row(&app.timeline[0]), "#1  fail  usage unknown");
     assert_eq!(
-        timeline_detail_lines(&app.timeline[0])[8],
+        timeline_detail_lines(&app.timeline[0])[9],
         "tokens: unavailable - usage unknown"
     );
 }
@@ -1491,7 +1648,7 @@ fn partial_timeline_usage_is_a_lower_bound_without_a_cache_claim() {
     );
 
     assert_eq!(timeline_row(&entry), "#1  pass  ~10/~2 lower bound");
-    let detail = &timeline_detail_lines(&entry)[8];
+    let detail = &timeline_detail_lines(&entry)[9];
     assert_eq!(detail, "tokens: ~10 in / ~2 out - lower bound");
     assert!(!detail.contains("cache"));
 }
@@ -2878,7 +3035,7 @@ fn cost_hud_and_timeline_distinguish_absent_cache_from_measured_zero() {
     );
     assert_eq!(timeline_row(&absent_entry), "#1  pass  20/2");
     assert_eq!(
-        timeline_detail_lines(&absent_entry)[8],
+        timeline_detail_lines(&absent_entry)[9],
         "tokens: 20 in / 2 out"
     );
 
@@ -2893,7 +3050,7 @@ fn cost_hud_and_timeline_distinguish_absent_cache_from_measured_zero() {
     );
     assert_eq!(timeline_row(&measured_entry), "#1  pass  20/2/0 cache 0%");
     assert_eq!(
-        timeline_detail_lines(&measured_entry)[8],
+        timeline_detail_lines(&measured_entry)[9],
         "tokens: 20 in / 2 out / 0 cached | cache 0%"
     );
 }
@@ -3359,6 +3516,7 @@ fn default_compaction_keeps_timeline_and_hud_copy_exact() {
             "timestamp: 2026-07-14T12:00:00Z",
             "model: test-route",
             "task: plain",
+            "kind: task",
             "outcome: pass",
             "agent turns: 3",
             "tool calls: 2",
@@ -3952,11 +4110,53 @@ struct MeterGapClient {
     calls: Arc<AtomicU64>,
 }
 
+struct BlockingMeasuredClient {
+    calls: Arc<AtomicU64>,
+    request_lengths: Arc<Mutex<Vec<usize>>>,
+    started: mpsc::Sender<()>,
+    release: Arc<(Mutex<bool>, Condvar)>,
+}
+
 struct FailingClient;
 
 impl ChatClient for FailingClient {
     fn complete(&self, _request: &ChatRequest) -> anyhow::Result<ChatResponse> {
         anyhow::bail!("provider failed after request")
+    }
+}
+
+impl ChatClient for BlockingMeasuredClient {
+    fn complete(&self, request: &ChatRequest) -> anyhow::Result<ChatResponse> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.request_lengths
+            .lock()
+            .unwrap()
+            .push(request.messages.len());
+        if call == 0 {
+            self.started.send(()).unwrap();
+            let (released, wake) = &*self.release;
+            let mut released = released.lock().unwrap();
+            while !*released {
+                released = wake.wait(released).unwrap();
+            }
+        }
+        let mut message = request.messages.last().cloned().expect("user message");
+        message.role = "assistant".into();
+        message.content = Some("ok".into());
+        message.tool_calls = None;
+        message.tool_call_id = None;
+        message.reasoning_content = None;
+        Ok(ChatResponse {
+            message,
+            finish_reason: "stop".into(),
+            usage: Some(Usage {
+                prompt_tokens: 31,
+                completion_tokens: 7,
+                cached_tokens: Some(11),
+                evidence: UsageEvidence::Measured,
+            }),
+            retries: Default::default(),
+        })
     }
 }
 
@@ -4110,6 +4310,124 @@ fn detached_worker_shutdown_is_reported_as_unclean() {
 
     assert!(error.to_string().contains("did not stop within 250 ms"));
     assert!(error.to_string().contains("detached"));
+}
+
+#[test]
+fn worker_cancels_one_turn_after_measuring_it_then_runs_the_next_task() {
+    let root = temp_dir();
+    let calls = Arc::new(AtomicU64::new(0));
+    let request_lengths = Arc::new(Mutex::new(Vec::new()));
+    let (started_tx, started_rx) = mpsc::channel();
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let client_calls = Arc::clone(&calls);
+    let client_lengths = Arc::clone(&request_lengths);
+    let client_release = Arc::clone(&release);
+    let connect: ConnectFn = Box::new(move |_, _| {
+        Ok((
+            Box::new(BlockingMeasuredClient {
+                calls: Arc::clone(&client_calls),
+                request_lengths: Arc::clone(&client_lengths),
+                started: started_tx.clone(),
+                release: Arc::clone(&client_release),
+            }),
+            nh_vault::secret("fake-key-cancelled-worker"),
+        ))
+    });
+    let law = nh_law::load(&root, &nh_law::LoadOptions { cli_autonomy: None });
+    let mut worker = spawn_worker(WorkerConfig {
+        route: test_route(),
+        profiles: Profiles::bundled(),
+        active_profile: "balanced".into(),
+        law,
+        repo_root: root.clone(),
+        workdir: root.clone(),
+        scrubber: Arc::new(RwLock::new(Scrubber::new(Vec::new()))),
+        connect,
+        initial: None,
+        resume: None,
+    })
+    .unwrap();
+
+    worker
+        .commands
+        .send(WorkerCommand::Task("interrupted".into()))
+        .unwrap();
+    started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("provider call started");
+    worker.cancel_turn();
+    let (released, wake) = &*release;
+    *released.lock().unwrap() = true;
+    wake.notify_all();
+
+    let cancelled = loop {
+        match worker.events.recv_timeout(Duration::from_secs(2)).unwrap() {
+            AgentEvent::CancelledTurn(summary) => break summary,
+            AgentEvent::Usage(_)
+            | AgentEvent::Progress(_)
+            | AgentEvent::Compaction(_)
+            | AgentEvent::ModelStarted { .. }
+            | AgentEvent::ModelFinished { .. }
+            | AgentEvent::ToolStarted { .. }
+            | AgentEvent::ToolFinished { .. } => {}
+            AgentEvent::TaskReceipt(_) => panic!("cancelled turn emitted a task receipt"),
+            AgentEvent::Answer(_) => panic!("cancelled turn emitted an answer"),
+            AgentEvent::Approval(_) => panic!("mock never asks for approval"),
+            AgentEvent::Failed(reason) => panic!("worker failed: {reason}"),
+        }
+    };
+    assert_eq!(cancelled.receipt.kind, ReceiptKind::CancelledTurn);
+    assert_eq!(
+        cancelled.receipt.usage,
+        Some(Usage {
+            prompt_tokens: 31,
+            completion_tokens: 7,
+            cached_tokens: Some(11),
+            evidence: UsageEvidence::Measured,
+        })
+    );
+
+    worker
+        .commands
+        .send(WorkerCommand::Task("next".into()))
+        .unwrap();
+    let mut saw_answer = false;
+    let mut saw_receipt = false;
+    while !saw_answer || !saw_receipt {
+        match worker.events.recv_timeout(Duration::from_secs(2)).unwrap() {
+            AgentEvent::Answer(answer) => {
+                assert_eq!(answer, "ok");
+                saw_answer = true;
+            }
+            AgentEvent::TaskReceipt(summary) => {
+                assert_eq!(summary.receipt.kind, ReceiptKind::Task);
+                assert_eq!(summary.receipt.task, "next");
+                saw_receipt = true;
+            }
+            AgentEvent::Usage(_)
+            | AgentEvent::Progress(_)
+            | AgentEvent::Compaction(_)
+            | AgentEvent::ModelStarted { .. }
+            | AgentEvent::ModelFinished { .. }
+            | AgentEvent::ToolStarted { .. }
+            | AgentEvent::ToolFinished { .. } => {}
+            AgentEvent::CancelledTurn(_) => panic!("next turn inherited cancellation"),
+            AgentEvent::Approval(_) => panic!("mock never asks for approval"),
+            AgentEvent::Failed(reason) => panic!("worker failed: {reason}"),
+        }
+    }
+
+    assert_eq!(*request_lengths.lock().unwrap(), vec![2, 4]);
+    let durable = std::fs::read_to_string(root.join(".nosis").join("receipts.jsonl")).unwrap();
+    let durable = durable.lines().collect::<Vec<_>>();
+    assert_eq!(durable.len(), 2);
+    assert!(durable[0].contains(r#""kind":"cancelled_turn""#));
+    assert!(durable[0].contains(
+        r#""usage":{"prompt_tokens":31,"completion_tokens":7,"cached_tokens":11,"evidence":"measured"}"#
+    ));
+    assert!(!durable[1].contains(r#""kind""#));
+    assert_eq!(worker.shutdown(), WorkerShutdown::Clean);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -4278,7 +4596,7 @@ fn real_worker_and_ledger_replay_mark_a_measured_plus_unmetered_session() {
     assert!(hud.contains("~12% ~12/100 lower bound"), "got: {hud}");
     assert_eq!(timeline_row(&app.timeline[1]), "#2  pass  usage unreported");
     assert_eq!(
-        timeline_detail_lines(&app.timeline[1])[8],
+        timeline_detail_lines(&app.timeline[1])[9],
         "tokens: unavailable - usage unreported"
     );
 
@@ -4590,6 +4908,7 @@ fn worker_uses_injected_client_and_keeps_one_history_across_tasks() {
                 | AgentEvent::ToolStarted { .. }
                 | AgentEvent::ToolFinished { .. } => {}
                 AgentEvent::Approval(_) => panic!("mock never asks for approval"),
+                AgentEvent::CancelledTurn(_) => panic!("turn was not cancelled"),
                 AgentEvent::Failed(reason) => panic!("worker failed: {reason}"),
             }
         }
@@ -4807,6 +5126,7 @@ fn worker_profile_change_reconnects_with_clamp_and_records_next_turn() {
             | AgentEvent::ToolStarted { .. }
             | AgentEvent::ToolFinished { .. } => {}
             AgentEvent::Approval(_) => panic!("mock never asks for approval"),
+            AgentEvent::CancelledTurn(_) => panic!("turn was not cancelled"),
             AgentEvent::Failed(reason) => panic!("worker failed: {reason}"),
         }
     };

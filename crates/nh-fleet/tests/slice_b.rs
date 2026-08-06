@@ -522,6 +522,7 @@ struct MockSwarm;
 impl SwarmClient for MockSwarm {
     fn submit_and_collect(&self, task_id: &str, brief: &str) -> anyhow::Result<Receipt> {
         Ok(Receipt {
+            kind: nh_core::receipt::ReceiptKind::Task,
             ts_utc: "2026-07-15T10:30:00Z".into(),
             model_id: "swarm-mock".into(),
             task: format!("{task_id}:{brief}"),
@@ -613,6 +614,7 @@ fn terminal_count(events: &[LedgerEvent], task_id: &str) -> usize {
 
 fn failed_receipt(route_id: &str) -> Receipt {
     Receipt {
+        kind: nh_core::receipt::ReceiptKind::Task,
         ts_utc: "2026-07-15T10:30:00Z".into(),
         model_id: route_id.into(),
         task: "execute climb".into(),

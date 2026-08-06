@@ -6,7 +6,9 @@ mod tool_repair;
 
 pub use context::{effective_context, PrefixSeal};
 
-use crate::receipt::{CompactionStats, FailureClass, Outcome, Receipt, ReceiptWriter, RepairStats};
+use crate::receipt::{
+    CompactionStats, FailureClass, Outcome, Receipt, ReceiptKind, ReceiptWriter, RepairStats,
+};
 use crate::wire::{
     ChatClient, ChatMessage, ChatRequest, ContentPart, FinishReason, RetryExhausted, RetryStats,
     ThinkingEffort, ToolCallReq, Usage,
@@ -787,6 +789,9 @@ impl AgentLoop {
     }
 
     fn append_receipt(&self, receipt: &mut Receipt) {
+        if self.ctx.cancel.load(std::sync::atomic::Ordering::Acquire) {
+            receipt.kind = ReceiptKind::CancelledTurn;
+        }
         if let Err(error) = self.receipts.append(receipt) {
             self.emit(&format!(
                 "receipt not written - outcome marked unreceipted: {error}"
@@ -814,6 +819,7 @@ impl AgentLoop {
             .filter(|usage| usage.evidence.is_measured())
             .and_then(|usage| crate::wire::cache_hit_pct(usage.prompt_tokens, usage.cached_tokens));
         Receipt {
+            kind: ReceiptKind::Task,
             ts_utc: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             model_id: self.model_id.clone(),
             task: task.to_string(),

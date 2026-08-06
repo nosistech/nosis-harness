@@ -987,6 +987,7 @@ fn status_fold_counts_unmetered_receipts_without_fabricating_tokens() {
 
 fn receipt(usage: Option<Usage>) -> Receipt {
     Receipt {
+        kind: nh_core::receipt::ReceiptKind::Task,
         ts_utc: "2026-07-19T00:00:00Z".into(),
         model_id: "echo-model".into(),
         task: "fixture".into(),

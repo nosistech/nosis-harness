@@ -17,6 +17,9 @@ use crate::worker::{Worker, WorkerCommand};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use nh_core::agent::MAX_TASK_BYTES;
 use nh_core::wire::ThinkingEffort;
+use std::time::{Duration, Instant};
+
+pub(super) const CTRL_C_EXIT_WINDOW: Duration = Duration::from_millis(1_500);
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum UiAction {
@@ -25,6 +28,7 @@ pub(super) enum UiAction {
     SwitchRoute(String),
     SetEffort(ThinkingEffort),
     SetProfile(String),
+    Interrupt,
     Quit,
 }
 pub(super) fn handle_input_event(app: &mut App, worker: &mut Worker, input: Event) -> bool {
@@ -36,6 +40,10 @@ pub(super) fn handle_action(app: &mut App, worker: &mut Worker, action: UiAction
     match action {
         UiAction::None => false,
         UiAction::Quit => true,
+        UiAction::Interrupt => {
+            worker.cancel_turn();
+            false
+        }
         UiAction::Dispatch(task) => {
             if worker.commands.send(WorkerCommand::Task(task)).is_err() {
                 apply_event(
@@ -119,7 +127,7 @@ pub(super) fn reduce_agent_event(app: &mut App, event: AgentEvent) -> (Status, U
     let previous = app.status.clone();
     apply_event(app, event);
     let action = if app.pending_send
-        && matches!(previous, Status::Working)
+        && matches!(previous, Status::Working | Status::FinishingInterrupted)
         && matches!(app.status, Status::Idle)
     {
         if app.input.starts_with('/') {
@@ -135,11 +143,24 @@ pub(super) fn reduce_agent_event(app: &mut App, event: AgentEvent) -> (Status, U
 }
 
 pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
-    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+    let ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+    if ctrl_c {
+        return reduce_ctrl_c(app);
+    }
+    app.last_ctrl_c = None;
+    if key.code == KeyCode::Esc && matches!(app.status, Status::Working | Status::Waiting) {
+        if let Overlay::Search {
+            original_scroll, ..
+        } = &app.overlay
+        {
+            app.scroll_back = *original_scroll;
+        }
+        app.overlay = Overlay::None;
         if matches!(app.status, Status::Waiting) {
             app.answer_approval(false);
         }
-        return UiAction::Quit;
+        app.interrupt_turn();
+        return UiAction::Interrupt;
     }
     if matches!(key.code, KeyCode::Char('f' | 'F')) && key.modifiers.contains(KeyModifiers::CONTROL)
     {
@@ -183,7 +204,7 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
         app.pending_send = false;
         return UiAction::None;
     }
-    if matches!(app.status, Status::Working) {
+    if matches!(app.status, Status::Working | Status::FinishingInterrupted) {
         match key.code {
             KeyCode::Up if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
                 scroll_transcript(app, 1, true);
@@ -251,6 +272,40 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
     UiAction::None
 }
 
+fn reduce_ctrl_c(app: &mut App) -> UiAction {
+    if matches!(app.status, Status::Working | Status::Waiting) {
+        if matches!(app.status, Status::Waiting) {
+            app.answer_approval(false);
+        }
+        app.overlay = Overlay::None;
+        app.last_ctrl_c = None;
+        app.interrupt_turn();
+        return UiAction::Interrupt;
+    }
+    if !app.input.is_empty() || app.pending_send {
+        app.input.clear();
+        app.pending_send = false;
+        app.overlay = Overlay::None;
+        app.last_ctrl_c = None;
+        return UiAction::None;
+    }
+
+    let now = Instant::now();
+    if app
+        .last_ctrl_c
+        .is_some_and(|previous| now.saturating_duration_since(previous) <= CTRL_C_EXIT_WINDOW)
+    {
+        return UiAction::Quit;
+    }
+    app.last_ctrl_c = Some(now);
+    app.overlay = Overlay::None;
+    app.push_line(
+        "press Ctrl+C again to exit",
+        crate::state::TranscriptKind::Progress,
+    );
+    UiAction::None
+}
+
 fn control_edit_key(key: KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL)
         && key
@@ -293,7 +348,7 @@ pub(super) fn push_input_char(input: &mut String, character: char) -> bool {
 }
 
 pub(super) fn reduce_paste(app: &mut App, text: &str) -> UiAction {
-    let working = matches!(app.status, Status::Working);
+    let working = matches!(app.status, Status::Working | Status::FinishingInterrupted);
     if matches!(app.status, Status::Waiting)
         || (working && app.overlay != Overlay::None)
         || (!working && !matches!(app.overlay, Overlay::None | Overlay::CommandMenu { .. }))

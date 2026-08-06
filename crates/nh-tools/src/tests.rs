@@ -1,5 +1,5 @@
 use super::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Instant;
@@ -1180,6 +1180,49 @@ fn exec_timeout_kills_child_and_prevents_late_marker() {
     assert!(
         !dir.path().join("marker.txt").exists(),
         "timed-out command continued after its shell was killed"
+    );
+}
+
+#[test]
+fn exec_cancel_kills_child_without_claiming_a_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let ctx = ctx_with(dir.path(), true).with_cancel(Arc::clone(&cancel));
+    let command = if cfg!(windows) {
+        "ping -n 6 127.0.0.1 > nul && echo late > marker.txt"
+    } else {
+        "sleep 5; echo late > marker.txt"
+    };
+    let cancel_thread = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(100));
+        cancel.store(true, Ordering::Release);
+    });
+
+    let started = Instant::now();
+    let result = ExecShell
+        .execute_with_deadlines(
+            json!({"command": command}),
+            &ctx,
+            Duration::from_secs(5),
+            Duration::from_millis(150),
+        )
+        .unwrap();
+    let elapsed = started.elapsed();
+    cancel_thread.join().unwrap();
+    thread::sleep(Duration::from_millis(1_200));
+
+    assert!(
+        result.contains("command cancelled - killed"),
+        "got: {result}"
+    );
+    assert!(!result.contains("timed out"), "got: {result}");
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "cancel waited for a descendant instead of killing its process tree: {elapsed:?}"
+    );
+    assert!(
+        !dir.path().join("marker.txt").exists(),
+        "cancelled command continued after its shell was killed"
     );
 }
 

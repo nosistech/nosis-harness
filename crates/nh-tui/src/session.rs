@@ -393,7 +393,9 @@ pub(super) fn emit_taskbar_transition(
         changed = true;
     }
 
-    if matches!(previous, Status::Working) && matches!(current, Status::Idle | Status::Blocked(_)) {
+    if matches!(previous, Status::Working | Status::FinishingInterrupted)
+        && matches!(current, Status::Idle | Status::Blocked(_))
+    {
         writer.write_all(TASKBAR_CLEAR)?;
         writer.write_all(if matches!(current, Status::Idle) {
             TITLE_IDLE

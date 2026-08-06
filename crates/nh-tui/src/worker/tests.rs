@@ -8,6 +8,7 @@ fn worker_around(join: JoinHandle<()>, shutdown: Arc<AtomicBool>) -> Worker {
         events,
         join: Some(join),
         shutdown,
+        turn_cancel: Arc::new(AtomicBool::new(false)),
     }
 }
 
@@ -92,6 +93,7 @@ fn worker_drop_unblocks_a_parked_approval() {
         events,
         join: Some(join),
         shutdown,
+        turn_cancel: Arc::new(AtomicBool::new(false)),
     };
 
     let started = Instant::now();
@@ -134,7 +136,7 @@ fn worker_drop_detaches_an_uninterruptible_operation_at_deadline() {
 }
 
 #[test]
-fn shutdown_aware_client_refuses_a_new_provider_call() {
+fn worker_aware_client_refuses_a_new_provider_call_after_shutdown() {
     struct PanicClient;
 
     impl ChatClient for PanicClient {
@@ -144,7 +146,8 @@ fn shutdown_aware_client_refuses_a_new_provider_call() {
     }
 
     let shutdown = Arc::new(AtomicBool::new(true));
-    let client = shutdown_aware(Box::new(PanicClient), &shutdown);
+    let turn_cancel = Arc::new(AtomicBool::new(false));
+    let client = worker_aware(Box::new(PanicClient), &shutdown, &turn_cancel);
     let request = ChatRequest {
         model: "test".into(),
         messages: Vec::new(),
@@ -155,6 +158,32 @@ fn shutdown_aware_client_refuses_a_new_provider_call() {
     assert_eq!(
         client.complete(&request).unwrap_err().to_string(),
         "agent worker stopped"
+    );
+}
+
+#[test]
+fn worker_aware_client_refuses_a_followup_call_after_turn_cancel() {
+    struct PanicClient;
+
+    impl ChatClient for PanicClient {
+        fn complete(&self, _request: &ChatRequest) -> anyhow::Result<ChatResponse> {
+            panic!("provider must not receive a followup call after turn cancellation")
+        }
+    }
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let turn_cancel = Arc::new(AtomicBool::new(true));
+    let client = worker_aware(Box::new(PanicClient), &shutdown, &turn_cancel);
+    let request = ChatRequest {
+        model: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+        thinking: ThinkingEffort::None,
+    };
+
+    assert_eq!(
+        client.complete(&request).unwrap_err().to_string(),
+        "turn cancelled"
     );
 }
 

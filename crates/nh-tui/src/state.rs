@@ -7,7 +7,7 @@ use crate::worker::ApprovalRequest;
 use crate::{SharedScrubber, BUDGET_REASON, BUDGET_WARN_FRACTION};
 use chrono::{DateTime, FixedOffset, Utc};
 use nh_core::agent::CompactionEvent;
-use nh_core::receipt::{CompactionStats, FailureClass, Outcome, Receipt};
+use nh_core::receipt::{CompactionStats, FailureClass, Outcome, Receipt, ReceiptKind};
 use nh_core::session_ledger::RestoredSession;
 use nh_core::wire::{cache_hit_pct, ThinkingEffort, Usage, UsageEvidence};
 use nh_law::{Law, PolicyView};
@@ -18,12 +18,14 @@ use nh_routes::{
 use std::cell::Cell;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::time::Instant;
 
 /// The single status shown by the semáforo.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Status {
     Idle,
     Working,
+    FinishingInterrupted,
     Waiting,
     Blocked(String),
 }
@@ -37,6 +39,7 @@ pub struct TimelineEntry {
     pub task: String,
     pub turns: u32,
     pub tool_calls: u32,
+    pub kind: ReceiptKind,
     pub outcome: Outcome,
     pub failure_class: Option<FailureClass>,
     pub usage: Option<Usage>,
@@ -67,6 +70,7 @@ impl TimelineEntry {
             task: short_text(&receipt.task, 120),
             turns: receipt.turns,
             tool_calls: receipt.tool_calls,
+            kind: receipt.kind,
             outcome: receipt.outcome,
             failure_class: receipt.failure_class,
             usage: receipt.usage,
@@ -221,6 +225,7 @@ pub enum AgentEvent {
     Approval(ApprovalRequest),
     Usage(Usage),
     TaskReceipt(TimelineSummary),
+    CancelledTurn(TimelineSummary),
     Answer(String),
     Failed(String),
 }
@@ -297,6 +302,7 @@ pub struct App {
     pub(super) last_request_usage: Option<Usage>,
     pub(super) input: String,
     pub(super) pending_send: bool,
+    pub(super) last_ctrl_c: Option<Instant>,
     pub(super) budget: Option<u64>,
     pub(super) budget_warned: bool,
     pub(super) color_mode: ColorMode,
@@ -361,6 +367,7 @@ impl App {
             last_request_usage: None,
             input: String::new(),
             pending_send: false,
+            last_ctrl_c: None,
             budget,
             budget_warned: false,
             color_mode,
@@ -426,14 +433,23 @@ impl App {
     }
 
     pub(super) fn set_status(&mut self, status: Status, now: DateTime<Utc>) {
-        let entering_work =
-            matches!(status, Status::Working) && !matches!(self.status, Status::Working);
+        let entering_work = matches!(status, Status::Working)
+            && !matches!(self.status, Status::Working | Status::FinishingInterrupted);
         self.status = status;
         if entering_work {
             self.working_since.get_or_insert(now);
-        } else if !matches!(self.status, Status::Working | Status::Waiting) {
+        } else if !matches!(
+            self.status,
+            Status::Working | Status::FinishingInterrupted | Status::Waiting
+        ) {
             self.working_since = None;
         }
+    }
+
+    pub(super) fn interrupt_turn(&mut self) {
+        self.active_model = None;
+        self.active_tool = None;
+        self.set_status(Status::FinishingInterrupted, Utc::now());
     }
 
     pub(super) fn used_tokens(&self) -> Option<u64> {
@@ -479,7 +495,11 @@ impl App {
     }
 
     pub(super) fn dispatch(&mut self) -> Option<String> {
-        if matches!(self.status, Status::Working | Status::Waiting) || self.budget_reached() {
+        if matches!(
+            self.status,
+            Status::Working | Status::FinishingInterrupted | Status::Waiting
+        ) || self.budget_reached()
+        {
             return None;
         }
         let task = self.input.trim().to_owned();

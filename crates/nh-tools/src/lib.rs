@@ -7,6 +7,7 @@ use serde_json::json;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{atomic::AtomicBool, Arc};
 use std::time::Duration;
 
 mod edit;
@@ -96,6 +97,7 @@ pub struct ToolCtx {
     pub approve: Box<dyn Fn(&str) -> bool + Send + Sync>,
     pub guard: GuardFn,
     pub scrubber: nh_vault::Scrubber,
+    pub cancel: Arc<AtomicBool>,
 }
 
 impl ToolCtx {
@@ -111,6 +113,7 @@ impl ToolCtx {
                 Access::Send(_) => Guard::Allow,
             }),
             scrubber: nh_vault::Scrubber::new(Vec::new()),
+            cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -123,6 +126,12 @@ impl ToolCtx {
     /// Install the session scrubber so literal vault keys cannot leave through tools.
     pub fn with_scrubber(mut self, scrubber: nh_vault::Scrubber) -> Self {
         self.scrubber = scrubber;
+        self
+    }
+
+    /// Install the observer for cancellation of the current turn.
+    pub fn with_cancel(mut self, cancel: Arc<AtomicBool>) -> Self {
+        self.cancel = cancel;
         self
     }
 }

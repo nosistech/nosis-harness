@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context as _;
 use chrono::Utc;
 use nh_core::agent::{AgentLoop, AgentRunError, CompactionEvent};
-use nh_core::receipt::ReceiptWriter;
+use nh_core::receipt::{ReceiptKind, ReceiptWriter};
 use nh_core::session_ledger::{
     new_session_id, RestoredSession, SessionEvent, SessionLedger, Surface,
 };
@@ -45,6 +45,9 @@ impl Tool for TrackedTool {
     }
 
     fn execute(&self, args: ToolArgs, ctx: &ToolCtx) -> anyhow::Result<String> {
+        if ctx.cancel.load(Ordering::Acquire) {
+            return Ok("turn cancelled".into());
+        }
         let name = self.inner.spec().name;
         let _ = self.events.send(AgentEvent::ToolStarted {
             name: name.clone(),
@@ -58,6 +61,9 @@ impl Tool for TrackedTool {
     }
 
     fn execute_with_audit(&self, args: ToolArgs, ctx: &ToolCtx) -> anyhow::Result<ToolExecution> {
+        if ctx.cancel.load(Ordering::Acquire) {
+            return Ok(ToolExecution::plain("turn cancelled".into()));
+        }
         let name = self.inner.spec().name;
         let _ = self.events.send(AgentEvent::ToolStarted {
             name: name.clone(),
@@ -190,6 +196,7 @@ pub(super) struct Worker {
     pub(super) events: Receiver<AgentEvent>,
     join: Option<JoinHandle<()>>,
     shutdown: Arc<AtomicBool>,
+    turn_cancel: Arc<AtomicBool>,
 }
 
 impl Worker {
@@ -200,6 +207,10 @@ impl Worker {
 
     pub(super) fn shutdown(&mut self) -> WorkerShutdown {
         self.shutdown_with_timeout(SHUTDOWN_TIMEOUT)
+    }
+
+    pub(super) fn cancel_turn(&self) {
+        self.turn_cancel.store(true, Ordering::Release);
     }
 
     fn shutdown_with_timeout(&mut self, timeout: Duration) -> WorkerShutdown {
@@ -269,15 +280,26 @@ pub(super) fn spawn_worker(config: WorkerConfig) -> anyhow::Result<Worker> {
     let (event_tx, event_rx) = mpsc::channel();
     let shutdown = Arc::new(AtomicBool::new(false));
     let worker_shutdown = Arc::clone(&shutdown);
+    let turn_cancel = Arc::new(AtomicBool::new(false));
+    let worker_turn_cancel = Arc::clone(&turn_cancel);
     let join = thread::Builder::new()
         .name("nh-agent".into())
-        .spawn(move || worker_loop(config, command_rx, event_tx, worker_shutdown))
+        .spawn(move || {
+            worker_loop(
+                config,
+                command_rx,
+                event_tx,
+                worker_shutdown,
+                worker_turn_cancel,
+            )
+        })
         .context("could not start the agent worker")?;
     Ok(Worker {
         commands: command_tx,
         events: event_rx,
         join: Some(join),
         shutdown,
+        turn_cancel,
     })
 }
 
@@ -286,8 +308,9 @@ fn worker_loop(
     commands: Receiver<WorkerCommand>,
     events: Sender<AgentEvent>,
     shutdown: Arc<AtomicBool>,
+    turn_cancel: Arc<AtomicBool>,
 ) {
-    WorkerSession::new(config, events, shutdown).run(commands);
+    WorkerSession::new(config, events, shutdown, turn_cancel).run(commands);
 }
 
 enum CommandAction {
@@ -311,6 +334,7 @@ struct WorkerSession {
     connected: bool,
     events: Sender<AgentEvent>,
     shutdown: Arc<AtomicBool>,
+    turn_cancel: Arc<AtomicBool>,
     ledger: SessionLedger,
     ledger_failed: bool,
     ledger_notice_sent: bool,
@@ -318,7 +342,12 @@ struct WorkerSession {
 }
 
 impl WorkerSession {
-    fn new(config: WorkerConfig, events: Sender<AgentEvent>, shutdown: Arc<AtomicBool>) -> Self {
+    fn new(
+        config: WorkerConfig,
+        events: Sender<AgentEvent>,
+        shutdown: Arc<AtomicBool>,
+        turn_cancel: Arc<AtomicBool>,
+    ) -> Self {
         let WorkerConfig {
             route,
             profiles,
@@ -343,7 +372,11 @@ impl WorkerSession {
                 let mut literals = SecretRegistry::new();
                 install_literal(&scrubber, &mut literals, literal);
                 (
-                    tracked_client(shutdown_aware(client, &shutdown), route.id(), &events),
+                    tracked_client(
+                        worker_aware(client, &shutdown, &turn_cancel),
+                        route.id(),
+                        &events,
+                    ),
                     literals,
                     true,
                 )
@@ -380,6 +413,7 @@ impl WorkerSession {
         let progress_events = events.clone();
         let ctx = ToolCtx::new(workdir, approve)
             .with_scrubber(key_literals.scrubber())
+            .with_cancel(Arc::clone(&turn_cancel))
             .with_guard(Box::new(move |access| match access {
                 Access::Read(path) => verdict_to_guard(policy.read_verdict(path)),
                 Access::Write(path) => verdict_to_guard(policy.write_verdict(path)),
@@ -465,6 +499,7 @@ impl WorkerSession {
             connected,
             events,
             shutdown,
+            turn_cancel,
             ledger,
             ledger_failed,
             ledger_notice_sent: ledger_failed,
@@ -592,8 +627,11 @@ impl WorkerSession {
             &mut self.agent,
             &mut self.ledger,
         );
-        self.agent.client =
-            tracked_client(shutdown_aware(client, &self.shutdown), route, &self.events);
+        self.agent.client = tracked_client(
+            worker_aware(client, &self.shutdown, &self.turn_cancel),
+            route,
+            &self.events,
+        );
         self.connected = true;
     }
 
@@ -610,6 +648,7 @@ impl WorkerSession {
 
     /// Returns false only when shutdown should stop the command loop.
     fn run_task(&mut self, task: String) -> bool {
+        self.turn_cancel.store(false, Ordering::Release);
         if let Err(error) = self.ensure_connected() {
             self.preceding_cached_tokens = None;
             if self.stopped() {
@@ -652,6 +691,32 @@ impl WorkerSession {
             usage,
         };
         self.append_session_event(&turn);
+
+        if self.turn_cancel.load(Ordering::Acquire) {
+            let summary = match &result {
+                Ok((_, receipt)) => {
+                    Some((receipt.clone(), "cancelled before the answer was shown"))
+                }
+                Err(error) => error.downcast_ref::<AgentRunError>().map(|run_error| {
+                    (
+                        run_error.receipt().clone(),
+                        "cancelled before the turn finished",
+                    )
+                }),
+            };
+            if let Some((mut receipt, answer)) = summary {
+                receipt.kind = ReceiptKind::CancelledTurn;
+                self.observe_usage(receipt.usage.as_ref());
+                let _ = self.events.send(AgentEvent::CancelledTurn(TimelineSummary {
+                    route_id: self.route.id().to_owned(),
+                    receipt,
+                    answer: answer.into(),
+                }));
+            } else {
+                self.send_unreceipted_failure("turn cancelled");
+            }
+            return true;
+        }
 
         match result {
             Ok((answer, receipt)) => {
@@ -733,24 +798,33 @@ fn wait_for_approval(answers: &Receiver<bool>, shutdown: &AtomicBool) -> bool {
     }
 }
 
-struct ShutdownAwareClient {
+struct WorkerAwareClient {
     inner: Box<dyn ChatClient>,
     shutdown: Arc<AtomicBool>,
+    turn_cancel: Arc<AtomicBool>,
 }
 
-impl ChatClient for ShutdownAwareClient {
+impl ChatClient for WorkerAwareClient {
     fn complete(&self, request: &ChatRequest) -> anyhow::Result<ChatResponse> {
         if self.shutdown.load(Ordering::Acquire) {
             anyhow::bail!("agent worker stopped");
+        }
+        if self.turn_cancel.load(Ordering::Acquire) {
+            anyhow::bail!("turn cancelled");
         }
         self.inner.complete(request)
     }
 }
 
-fn shutdown_aware(client: Box<dyn ChatClient>, shutdown: &Arc<AtomicBool>) -> Box<dyn ChatClient> {
-    Box::new(ShutdownAwareClient {
+fn worker_aware(
+    client: Box<dyn ChatClient>,
+    shutdown: &Arc<AtomicBool>,
+    turn_cancel: &Arc<AtomicBool>,
+) -> Box<dyn ChatClient> {
+    Box::new(WorkerAwareClient {
         inner: client,
         shutdown: Arc::clone(shutdown),
+        turn_cancel: Arc::clone(turn_cancel),
     })
 }
 

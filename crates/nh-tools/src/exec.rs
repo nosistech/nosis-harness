@@ -8,7 +8,7 @@ use anyhow::Context as _;
 use serde_json::json;
 use std::io::Read;
 use std::process::{Child, ChildStderr, ChildStdout, ExitStatus, Stdio};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{atomic::Ordering, mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -154,9 +154,21 @@ pub(super) fn timeout_label(timeout: Duration) -> String {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum TerminationReason {
+    Timeout(Duration),
+    Cancelled,
+}
+
 pub(super) enum Termination {
-    Reaped(ExitStatus),
-    Survived(String),
+    Reaped {
+        _status: ExitStatus,
+        reason: TerminationReason,
+    },
+    Survived {
+        detail: String,
+        reason: TerminationReason,
+    },
 }
 
 pub(super) fn poll_child_reaped(
@@ -167,7 +179,7 @@ pub(super) fn poll_child_reaped(
     loop {
         if let Some(status) = child
             .try_wait()
-            .with_context(|| format!("could not reap timed-out command: {command}"))?
+            .with_context(|| format!("could not reap terminated command: {command}"))?
         {
             return Ok(Some(status));
         }
@@ -182,6 +194,7 @@ pub(super) fn poll_child_reaped(
 pub(super) fn terminate_child_tree(
     child: &mut Child,
     command: &str,
+    reason: TerminationReason,
 ) -> anyhow::Result<Termination> {
     #[cfg(windows)]
     let tree_kill_status = std::process::Command::new("taskkill")
@@ -212,18 +225,27 @@ pub(super) fn terminate_child_tree(
         verification_started
     };
     if let Some(status) = poll_child_reaped(child, command, tree_kill_deadline)? {
-        return Ok(Termination::Reaped(status));
+        return Ok(Termination::Reaped {
+            _status: status,
+            reason,
+        });
     }
     child
         .kill()
-        .with_context(|| format!("could not kill timed-out command: {command}"))?;
+        .with_context(|| format!("could not kill terminated command: {command}"))?;
     if let Some(status) = poll_child_reaped(child, command, verification_deadline)? {
-        return Ok(Termination::Reaped(status));
+        return Ok(Termination::Reaped {
+            _status: status,
+            reason,
+        });
     }
-    Ok(Termination::Survived(format!(
-        "{tree_kill_detail}; child did not reap within {} across tree-kill verification and the direct-kill fallback",
-        timeout_label(KILL_VERIFY_GRACE)
-    )))
+    Ok(Termination::Survived {
+        detail: format!(
+            "{tree_kill_detail}; child did not reap within {} across tree-kill verification and the direct-kill fallback",
+            timeout_label(KILL_VERIFY_GRACE)
+        ),
+        reason,
+    })
 }
 
 impl ExecShell {
@@ -301,8 +323,25 @@ impl ExecShell {
             {
                 break (Some(status), None);
             }
+            if ctx.cancel.load(Ordering::Acquire) {
+                break (
+                    None,
+                    Some(terminate_child_tree(
+                        &mut child,
+                        command,
+                        TerminationReason::Cancelled,
+                    )?),
+                );
+            }
             if Instant::now() >= deadline {
-                break (None, Some(terminate_child_tree(&mut child, command)?));
+                break (
+                    None,
+                    Some(terminate_child_tree(
+                        &mut child,
+                        command,
+                        TerminationReason::Timeout(timeout),
+                    )?),
+                );
             }
             thread::sleep(Duration::from_millis(50));
         };
@@ -313,14 +352,24 @@ impl ExecShell {
         let stderr =
             render_bounded_output(stderr_drain.finish(drain_deadline, drain_grace), "stderr");
         let content = match termination {
-            Some(Termination::Reaped(_status)) => format!(
-                "command timed out after {} - killed\nstdout:\n{stdout}\nstderr:\n{stderr}",
-                timeout_label(timeout)
-            ),
-            Some(Termination::Survived(detail)) => format!(
-                "command timed out after {} - could NOT be killed: {detail}\nstdout:\n{stdout}\nstderr:\n{stderr}",
-                timeout_label(timeout)
-            ),
+            Some(Termination::Reaped { reason, .. }) => match reason {
+                TerminationReason::Timeout(timeout) => format!(
+                    "command timed out after {} - killed\nstdout:\n{stdout}\nstderr:\n{stderr}",
+                    timeout_label(timeout)
+                ),
+                TerminationReason::Cancelled => {
+                    format!("command cancelled - killed\nstdout:\n{stdout}\nstderr:\n{stderr}")
+                }
+            },
+            Some(Termination::Survived { detail, reason }) => match reason {
+                TerminationReason::Timeout(timeout) => format!(
+                    "command timed out after {} - could NOT be killed: {detail}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+                    timeout_label(timeout)
+                ),
+                TerminationReason::Cancelled => format!(
+                    "command cancelled - could NOT be killed: {detail}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+                ),
+            },
             None => {
                 let status = status
                     .ok_or_else(|| anyhow::anyhow!("command completed without an exit status"))?;

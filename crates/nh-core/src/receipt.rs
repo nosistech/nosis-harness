@@ -14,6 +14,20 @@ pub enum Outcome {
     Timeout,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceiptKind {
+    #[default]
+    Task,
+    CancelledTurn,
+}
+
+impl ReceiptKind {
+    fn is_task(&self) -> bool {
+        *self == Self::Task
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FailureClass {
@@ -118,6 +132,8 @@ impl CompactionStats {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Receipt {
+    #[serde(default, skip_serializing_if = "ReceiptKind::is_task")]
+    pub kind: ReceiptKind,
     pub ts_utc: String,
     pub model_id: String,
     pub task: String,
@@ -211,6 +227,7 @@ mod tests {
 
     fn receipt(task: impl Into<String>) -> Receipt {
         Receipt {
+            kind: ReceiptKind::Task,
             ts_utc: "2026-07-22T00:00:00Z".to_string(),
             model_id: "test-model".to_string(),
             task: task.into(),
@@ -322,6 +339,7 @@ mod tests {
         let old = br#"{"ts_utc":"2026-07-22T00:00:00Z","model_id":"test-model","task":"legacy","turns":1,"tool_calls":0,"outcome":"pass","usage":{"prompt_tokens":12,"completion_tokens":4,"cached_tokens":3}}"#;
 
         let parsed: Receipt = serde_json::from_slice(old).unwrap();
+        assert_eq!(parsed.kind, ReceiptKind::Task);
         assert_eq!(
             parsed.usage.as_ref().unwrap().evidence,
             crate::wire::UsageEvidence::Unknown
@@ -332,6 +350,17 @@ mod tests {
             upgraded,
             br#"{"ts_utc":"2026-07-22T00:00:00Z","model_id":"test-model","task":"legacy","turns":1,"tool_calls":0,"outcome":"pass","usage":{"prompt_tokens":12,"completion_tokens":4,"cached_tokens":3,"evidence":"unknown"}}"#
         );
+    }
+
+    #[test]
+    fn cancelled_turn_kind_is_explicit_without_changing_task_bytes() {
+        let task = serde_json::to_value(receipt("task")).unwrap();
+        assert!(task.get("kind").is_none());
+
+        let mut cancelled = receipt("cancelled");
+        cancelled.kind = ReceiptKind::CancelledTurn;
+        let cancelled = serde_json::to_value(cancelled).unwrap();
+        assert_eq!(cancelled["kind"], "cancelled_turn");
     }
 
     #[test]
