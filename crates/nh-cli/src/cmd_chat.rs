@@ -1,4 +1,4 @@
-//! `nh chat` - line REPL with mid-session route switching (CONTRACTS_M1.md §4).
+//! `nh chat` - line REPL with mid-session route switching.
 //! The footer and `/price` lines are the first visible cost HUD: one scannable,
 //! aligned line each. The peak indicator shows the window boundary in the user's
 //! local time ("peak 2x until 22:00"). `/model` and `/provider` keep the session

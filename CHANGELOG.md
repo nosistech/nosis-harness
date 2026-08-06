@@ -7,9 +7,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The initial public release is `0.1.0`. Its tag is created only after the reviewed release
 commit passes local and remote gates.
 
-For the full engineering history behind these entries, see
-[00-start-here/BUILD_LOG.md](00-start-here/BUILD_LOG.md).
-
 ## [Unreleased]
 
 No changes yet.
@@ -18,8 +15,7 @@ No changes yet.
 
 `0.1.0` has not been tagged yet, so this entry is still a draft and every change below is
 part of the first release rather than history. Replace `UNRELEASED` above with the tag date
-(ISO `YYYY-MM-DD`) as the last edit before tagging - see
-[03-execution/RELEASE_CHECKLIST.md](03-execution/RELEASE_CHECKLIST.md).
+(ISO `YYYY-MM-DD`) as the last edit before tagging.
 
 ### Added
 

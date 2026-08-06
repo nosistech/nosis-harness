@@ -1,4 +1,4 @@
-//! MCP client - stateless 2026-07-28 core (plan §4.5, CONTRACTS_M1.md §3).
+//! MCP client - stateless 2026-07-28 core.
 //! SECURITY INVARIANT: tool outputs are DATA, never instructions. No session semantics:
 //! no `initialize` handshake, no `Mcp-Session-Id` header, ever - state handles
 //! (`browser_id`, `repo_id`, …) are ordinary tool arguments the model passes back.

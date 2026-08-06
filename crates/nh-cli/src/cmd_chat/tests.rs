@@ -91,12 +91,12 @@ const TEST_CATALOG: &str = r#"
     output = 0.0
     price_confidence = "reported"
 
-    [routes.opus-delegate]
-    provider = "anthropic"
-    model_id = "opus-delegate"
+    [routes.local-delegate]
+    provider = "local"
+    model_id = "local-delegate"
     base_url = "https://example.invalid"
     wire = "openai"
-    vault_entry = "anthropic"
+    vault_entry = "local"
     class = "delegate"
 
     [routes.unpriced]
@@ -124,7 +124,7 @@ const TEST_CATALOG: &str = r#"
     price_confidence = "confirmed"
 "#;
 
-/// ChatMessage literals live only in nh-core (CONTRACTS_M1.md §5.2) - build via serde.
+/// ChatMessage literals live only in nh-core - build via serde.
 fn assistant_msg(text: &str) -> ChatMessage {
     text_msg("assistant", text)
 }
@@ -574,7 +574,7 @@ fn missing_key_on_switch_keeps_current_route() {
 fn delegate_route_switch_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut s, _calls) = test_session("deepseek-v4-flash", tmp.path());
-    let (_out, err) = drive(&mut s, &["/model opus-delegate"]);
+    let (_out, err) = drive(&mut s, &["/model local-delegate"]);
     assert!(err.contains(DELEGATE_MSG), "got: {err}");
     assert_eq!(s.route.id(), "deepseek-v4-flash");
 }

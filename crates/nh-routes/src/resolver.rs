@@ -269,8 +269,8 @@ impl RouteResolver {
         }
     }
 
-    /// Default route for a provider. Rule (data-driven, documented in
-    /// CONTRACTS_M1.md): the provider's cheapest class="api" route by off-peak
+    /// Default route for a provider. The rule is data-driven:
+    /// the provider's cheapest class="api" route by off-peak
     /// output price, ties broken alphabetically by route id; routes without a
     /// price table are skipped (honest-cost rule: no price, no comparison).
     /// All of one provider's routes share a currency, so raw numbers compare.

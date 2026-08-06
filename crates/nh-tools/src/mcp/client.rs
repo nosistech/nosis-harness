@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 pub(super) const SPEC_DEFAULT: &str = "2026-07-28";
 pub(super) const SPEC_FALLBACK: &str = "2025-11-25";
-/// Pinned default when `tools/list` carries no `result._meta.ttlMs` (CONTRACTS_M1 §3.2).
+/// Pinned default when `tools/list` carries no `result._meta.ttlMs`.
 pub(super) const DEFAULT_TTL_MS: u64 = 60_000;
 pub(super) const MAX_MCP_BODY_BYTES: usize = 4 * 1024 * 1024;
 pub(super) const MAX_TTL_MS: u64 = 24 * 60 * 60 * 1000; // clamp remote cache TTL to 24h

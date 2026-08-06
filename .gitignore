@@ -6,4 +6,39 @@
 *.key
 *.pem
 .env
-.claude/settings.local.json
+.claude/
+.codex/
+
+# Internal working material. These directories stay on the maintainer's disk and
+# must never enter the public repository: they hold build logs, decision records,
+# research, business material, and the agent workflow.
+00-start-here/
+01-product/
+03-execution/
+04-research/
+05-ai-collaboration/
+06-operations/
+07-assets/
+08-decisions-and-risk/
+09-customer-learning/
+10-knowledge-system/
+11-automation/
+12-executive/
+
+# Internal architecture notes. Only ARCHITECTURE_OVERVIEW.md and SECURITY_MODEL.md
+# are public; the negation rules below re-admit exactly those two.
+02-architecture/*
+!02-architecture/ARCHITECTURE_OVERVIEW.md
+!02-architecture/SECURITY_MODEL.md
+
+# Internal specifications and agent instructions at the repository root.
+AGENTS.md
+CLAUDE.md
+CODEX.md
+BRIEF_M2.md
+CONTRACTS_M1.md
+CONTRACTS_M2.md
+CONTRACTS_M3.md
+CONTRACTS_M4.md
+CONTRACTS_M5.md
+NOSIS_HARNESS_Master_Plan.md

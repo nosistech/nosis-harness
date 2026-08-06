@@ -32,7 +32,7 @@ pub const LOCAL_METER_COPY: &str = "Local: no billed tokens; hardware and power 
 /// How a route expresses thinking effort on the wire (plan §3, A.1-A.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThinkingDialect {
-    /// DeepSeek Non/High/Max via a body param (mapping pinned in CONTRACTS_M1.md).
+    /// DeepSeek Non/High/Max via a body param.
     DeepseekNhm,
     /// Kimi K2.6: explicit thinking enable/disable toggle.
     KimiToggle,
