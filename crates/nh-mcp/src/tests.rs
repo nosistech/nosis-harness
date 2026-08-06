@@ -1,6 +1,6 @@
 use crate::fleet_tools::preflight_fleet_run;
 use crate::response::scrub_json;
-use crate::route_tools::{route_cost_at, why_at};
+use crate::route_tools::{route_cost_at, savings_json, why_at};
 use chrono::{TimeZone as _, Utc};
 use std::fs::File;
 use std::io::{Read as _, Write as _};
@@ -237,6 +237,9 @@ fn why_matches_resolver_cost_and_rejection_trace_without_cold_savings_claim() {
     let expected_saved = nh_routes::saved_pct(actual, naive.no_cache);
 
     assert_eq!(result["structuredContent"]["route"]["id"], route.id());
+    assert!(result["structuredContent"]["route"]
+        .get("peak_status")
+        .is_none());
     assert_eq!(
         result["structuredContent"]["cost"]["value"].as_f64(),
         Some(actual)
@@ -261,6 +264,23 @@ fn why_matches_resolver_cost_and_rejection_trace_without_cold_savings_claim() {
         "confirmed"
     );
     assert!(!text.contains("saved"), "{text}");
+}
+
+#[test]
+fn savings_json_without_peak_table_omits_the_peak_key() {
+    let resolver = nh_routes::RouteResolver::from_toml(METER_CATALOG).unwrap();
+    let route = resolver.resolve("cheap").unwrap();
+    let at = Utc.with_ymd_and_hms(2026, 7, 20, 12, 0, 0).unwrap();
+    let quote = route.price_at(at).unwrap();
+    let actual = nh_routes::cost_of(&quote, 1_000, 900, 100).unwrap();
+    let naive = resolver.naive_cost(&route, 1_000, 900, 100, at).unwrap();
+    let saved_pct = nh_routes::saved_pct(actual, naive.no_cache).unwrap();
+
+    let savings = savings_json(&naive, saved_pct);
+
+    assert!(savings.get("peak").is_none(), "got: {savings}");
+    assert!(savings.get("no_cache").is_some(), "got: {savings}");
+    assert!(savings.get("top_tier").is_some(), "got: {savings}");
 }
 
 #[test]
@@ -689,11 +709,17 @@ fn route_resolve_keeps_text_and_adds_structured_route() {
         .as_str()
         .unwrap()
         .contains("route deepseek-v4-flash"));
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(!text.contains("off-peak"), "got: {text}");
+    assert!(!text.contains("· ·"), "got: {text}");
+    assert!(!text.ends_with('·'), "got: {text}");
     assert_eq!(
         result["structuredContent"]["route"]["id"],
         "deepseek-v4-flash"
     );
-    assert!(result["structuredContent"]["route"]["peak_status"].is_string());
+    assert!(result["structuredContent"]["route"]
+        .get("peak_status")
+        .is_none());
     assert_eq!(result["structuredContent"]["would_park_offpeak"], false);
     server.shutdown().unwrap();
 }

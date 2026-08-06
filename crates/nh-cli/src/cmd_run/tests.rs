@@ -1013,6 +1013,28 @@ fn run_meter_distinguishes_absent_cache_measurement_from_measured_zero() {
 }
 
 #[test]
+fn run_counterfactual_without_peak_table_drops_the_segment_cleanly() {
+    let resolver = RouteResolver::from_toml(BUNDLED_CATALOG).unwrap();
+    let route = resolver.resolve("deepseek-v4-flash").unwrap();
+    let usage = Usage {
+        prompt_tokens: 100_000,
+        completion_tokens: 50_000,
+        cached_tokens: Some(90_000),
+        evidence: UsageEvidence::Measured,
+    };
+    let at = Utc.with_ymd_and_hms(2026, 8, 5, 12, 0, 0).unwrap();
+
+    let line = turn_cost_line(&resolver, &route, &usage, at).unwrap();
+
+    assert!(line.contains("   (no-cache "), "got: {line}");
+    assert!(line.contains(" · top-tier "), "got: {line}");
+    assert!(!line.contains("   (peak "), "got: {line}");
+    assert!(!line.contains("( ·"), "got: {line}");
+    assert!(!line.contains("· ·"), "got: {line}");
+    assert!(!line.ends_with(" · )"), "got: {line}");
+}
+
+#[test]
 fn ordinary_progress_and_empty_compaction_keep_the_old_surface_bytes() {
     let resolver = RouteResolver::from_toml(PEAK_CATALOG).unwrap();
     let route = resolver.resolve("peak-route").unwrap();

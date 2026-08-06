@@ -509,16 +509,20 @@ fn print_price(s: &ChatSession, out: &mut dyn Write) {
         let _ = writeln!(out, "{}", scrub_line(&s.scrubber, &line));
         return;
     };
-    let line = format!(
-        "{} | {} | in {} hit / {} miss | out {} | per million tokens | confidence {} | session {}",
-        s.route.id(),
-        s.route.peak_status(now, s.local_offset),
+    let mut segments = vec![s.route.id().to_owned()];
+    if let Some(peak_status) = s.route.peak_status(now, s.local_offset) {
+        segments.push(peak_status);
+    }
+    segments.push(format!(
+        "in {} hit / {} miss",
         money(quote.cache_hit, quote.currency),
-        money(quote.cache_miss, quote.currency),
-        money(quote.output, quote.currency),
-        quote.confidence,
-        session_money(s, now)
-    );
+        money(quote.cache_miss, quote.currency)
+    ));
+    segments.push(format!("out {}", money(quote.output, quote.currency)));
+    segments.push("per million tokens".to_owned());
+    segments.push(format!("confidence {}", quote.confidence));
+    segments.push(format!("session {}", session_money(s, now)));
+    let line = segments.join(" | ");
     let _ = writeln!(out, "{}", scrub_line(&s.scrubber, &line));
 }
 
@@ -543,25 +547,23 @@ fn print_tools(s: &ChatSession, out: &mut dyn Write, err: &mut dyn Write) {
 /// `deepseek-v4-flash | peak 2x until 22:00 | session ¥0.11 | tokens 812 in / 340 out / 512 cached | cache 63% | ctx 41%`.
 fn footer(s: &ChatSession) -> String {
     let now = (s.now)();
-    let mut line = format!(
-        "{} | {} | session {} | {}",
-        s.route.id(),
-        s.route.peak_status(now, s.local_offset),
-        session_money(s, now),
-        s.session_usage.as_ref().map_or_else(
-            || "tokens 0 in / 0 out".to_owned(),
-            |usage| cmd_run::usage_token_summary(Some(usage)),
-        )
-    );
+    let mut segments = vec![s.route.id().to_owned()];
+    if let Some(peak_status) = s.route.peak_status(now, s.local_offset) {
+        segments.push(peak_status);
+    }
+    segments.push(format!("session {}", session_money(s, now)));
+    segments.push(s.session_usage.as_ref().map_or_else(
+        || "tokens 0 in / 0 out".to_owned(),
+        |usage| cmd_run::usage_token_summary(Some(usage)),
+    ));
     let last_request_usage = s.last_request_usage.snapshot();
     if let Some(context) = cmd_run::context_window_summary(&s.route, last_request_usage.as_ref()) {
-        line.push_str(" | ");
-        line.push_str(&context);
+        segments.push(context);
     }
     if s.resumed {
-        line.push_str(" | resumed");
+        segments.push("resumed".to_owned());
     }
-    line
+    segments.join(" | ")
 }
 
 fn unknown_usage() -> Usage {

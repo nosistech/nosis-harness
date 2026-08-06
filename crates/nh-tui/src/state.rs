@@ -695,10 +695,10 @@ impl App {
             line.push_str(" · ");
             line.push_str(compaction);
         }
-        line.push_str(&format!(
-            " · {}",
-            self.route.peak_status(now, self.local_offset)
-        ));
+        if let Some(peak_status) = self.route.peak_status(now, self.local_offset) {
+            line.push_str(" · ");
+            line.push_str(&peak_status);
+        }
         line.push_str(&format!(" · profile {}", self.active_profile));
         if self.resumed {
             line.push_str(" · resumed");

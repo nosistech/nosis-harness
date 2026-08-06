@@ -332,12 +332,19 @@ pub(crate) fn turn_cost_line(
         line.push_str(&format!(" - saved {percent}% vs no-cache"));
     }
     if let Some(costs) = naive {
-        line.push_str(&format!(
-            "   (peak {} · no-cache {} · top-tier {})",
-            money(costs.peak, costs.currency),
-            money(costs.no_cache, costs.currency),
+        let mut counterfactuals = Vec::with_capacity(3);
+        if let Some(peak) = costs.peak {
+            counterfactuals.push(format!("peak {}", money(peak, costs.currency)));
+        }
+        counterfactuals.push(format!(
+            "no-cache {}",
+            money(costs.no_cache, costs.currency)
+        ));
+        counterfactuals.push(format!(
+            "top-tier {}",
             money(costs.top_tier, costs.currency)
         ));
+        line.push_str(&format!("   ({})", counterfactuals.join(" · ")));
     }
     if quote.confidence == PriceConfidence::VerifyLive {
         line.push_str(" · *price verify_live");

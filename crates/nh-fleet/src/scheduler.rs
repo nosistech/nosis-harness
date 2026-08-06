@@ -377,7 +377,9 @@ impl<'a> Scheduler<'a> {
                             self.emit(&format!(
                                 "deferred {} - {}, parked",
                                 task.task_id,
-                                route.peak_status(now, local)
+                                route
+                                    .peak_status(now, local)
+                                    .expect("parked peak route has a status")
                             ));
                         }
                         self.remaining.push_back(task);

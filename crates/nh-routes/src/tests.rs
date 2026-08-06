@@ -480,7 +480,9 @@ fn local_class_parses_for_an_explicit_loopback_route() {
 
     assert_eq!(route.class(), RouteClass::Local);
     assert_eq!(
-        route.peak_status(utc(2026, 7, 29, 0, 0, 0), FixedOffset::east_opt(0).unwrap()),
+        route
+            .peak_status(utc(2026, 7, 29, 0, 0, 0), FixedOffset::east_opt(0).unwrap(),)
+            .unwrap(),
         "local"
     );
 }
@@ -562,18 +564,40 @@ fn peak_status_is_short_local_and_boundary_exact() {
     let route = peak_route();
     let beijing_offset = FixedOffset::east_opt(8 * 3600).unwrap();
     assert_eq!(
-        route.peak_status(beijing(15, 0), beijing_offset),
+        route.peak_status(beijing(15, 0), beijing_offset).unwrap(),
         "peak 2x until 18:00"
     );
     assert_eq!(
-        route.peak_status(beijing(18, 0), beijing_offset),
+        route.peak_status(beijing(18, 0), beijing_offset).unwrap(),
         "off-peak"
     );
     let user_offset = FixedOffset::west_opt(6 * 3600).unwrap();
     assert_eq!(
-        route.peak_status(beijing(10, 30), user_offset),
+        route.peak_status(beijing(10, 30), user_offset).unwrap(),
         "peak 2x until 22:00"
     );
+}
+
+#[test]
+fn shipped_catalog_has_no_peak_qualifiers_or_counterfactuals() {
+    let resolver = resolver();
+    let at = utc(2026, 8, 5, 12, 0, 0);
+    let local = FixedOffset::west_opt(6 * 3600).unwrap();
+
+    // A genuine peak table added to the shipped catalog should fail this test;
+    // update it deliberately after reviewing every rendered money surface.
+    for id in resolver.available() {
+        let route = resolver.resolve(&id).unwrap();
+        assert!(
+            route.peak_status(at, local).is_none(),
+            "shipped route {id} unexpectedly has a peak qualifier"
+        );
+        let naive = resolver.naive_cost(&route, 1_000, 500, 100, at).unwrap();
+        assert!(
+            naive.peak.is_none(),
+            "shipped route {id} unexpectedly has a peak counterfactual"
+        );
+    }
 }
 
 #[test]
@@ -615,7 +639,14 @@ fn mimo_prices_are_confirmed_first_party() {
 fn route_without_price_table_quotes_none() {
     let r = RouteResolver::from_toml(&route_toml("")).unwrap();
     let route = r.resolve("test-model").unwrap();
-    assert!(route.price_at(utc(2026, 7, 15, 12, 0, 0)).is_none());
+    let at = utc(2026, 7, 15, 12, 0, 0);
+    assert!(route.price_at(at).is_none());
+    assert_eq!(
+        route
+            .peak_status(at, FixedOffset::east_opt(0).unwrap())
+            .unwrap(),
+        "no price data"
+    );
 }
 
 #[test]
@@ -723,6 +754,10 @@ fn price_block_without_freshness_key_loads_and_produces_normal_quote() {
 
     assert!(close(actual, 2.2));
     assert!(close(costs.no_cache, 3.2));
+    assert!(route
+        .peak_status(at, FixedOffset::east_opt(0).unwrap())
+        .is_none());
+    assert!(costs.peak.is_none());
     assert_eq!(costs.currency, Currency::Cny);
 }
 

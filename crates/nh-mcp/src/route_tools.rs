@@ -33,13 +33,16 @@ pub(super) fn route_resolve(arguments: &Value, runtime: &Runtime) -> Value {
     };
     let now = Utc::now();
     let local = *Local::now().offset();
-    let mut text = format!(
-        "route {} · {} · {} thinking · {}",
-        route.id(),
-        route.provider(),
-        route.thinking_dialect().as_str(),
-        route.peak_status(now, local)
-    );
+    let peak_status = route.peak_status(now, local);
+    let mut text_segments = vec![
+        format!("route {}", route.id()),
+        route.provider().to_owned(),
+        format!("{} thinking", route.thinking_dialect().as_str()),
+    ];
+    if let Some(peak_status) = &peak_status {
+        text_segments.push(peak_status.clone());
+    }
+    let mut text = text_segments.join(" · ");
     if args.prefer_offpeak == Some(true)
         && route.price_at(now).map(|quote| quote.peak) == Some(true)
     {
@@ -47,13 +50,16 @@ pub(super) fn route_resolve(arguments: &Value, runtime: &Runtime) -> Value {
     }
     let would_park_offpeak = args.prefer_offpeak == Some(true)
         && route.price_at(now).map(|quote| quote.peak) == Some(true);
+    let mut structured_route = json!({
+        "id": route.id(),
+        "provider": route.provider(),
+        "thinking": route.thinking_dialect().as_str()
+    });
+    if let Some(peak_status) = peak_status {
+        structured_route["peak_status"] = json!(peak_status);
+    }
     let structured = json!({
-        "route": {
-            "id": route.id(),
-            "provider": route.provider(),
-            "thinking": route.thinking_dialect().as_str(),
-            "peak_status": route.peak_status(now, local)
-        },
+        "route": structured_route,
         "would_park_offpeak": would_park_offpeak
     });
     tool_result(runtime, &text, structured, false)
@@ -127,13 +133,17 @@ pub(super) fn why_at(arguments: &Value, runtime: &Runtime, at: chrono::DateTime<
         cost["usd_approx"] = json!(usd_approx);
     }
     let local = *Local::now().offset();
+    let peak_status = route.peak_status(at, local);
+    let mut structured_route = json!({
+        "id": route.id(),
+        "provider": route.provider(),
+        "thinking": route.thinking_dialect().as_str()
+    });
+    if let Some(peak_status) = peak_status {
+        structured_route["peak_status"] = json!(peak_status);
+    }
     let mut structured = json!({
-        "route": {
-            "id": route.id(),
-            "provider": route.provider(),
-            "thinking": route.thinking_dialect().as_str(),
-            "peak_status": route.peak_status(at, local)
-        },
+        "route": structured_route,
         "cost": cost,
         "rejected": trace.rejections.iter().map(|rejection| json!({
             "route_id": rejection.route_id,
@@ -141,13 +151,7 @@ pub(super) fn why_at(arguments: &Value, runtime: &Runtime, at: chrono::DateTime<
         })).collect::<Vec<_>>()
     });
     if let (Some(naive), Some(saved_pct)) = (naive, saved_pct) {
-        structured["savings"] = json!({
-            "saved_pct": saved_pct,
-            "no_cache": naive.no_cache,
-            "peak": naive.peak,
-            "top_tier": naive.top_tier,
-            "currency": naive.currency.as_str()
-        });
+        structured["savings"] = savings_json(&naive, saved_pct);
     }
     let text = why_text(
         route.id(),
@@ -158,6 +162,19 @@ pub(super) fn why_at(arguments: &Value, runtime: &Runtime, at: chrono::DateTime<
         trace.rejections.len(),
     );
     tool_result(runtime, &text, structured, false)
+}
+
+pub(super) fn savings_json(naive: &nh_routes::NaiveCost, saved_pct: u8) -> Value {
+    let mut savings = json!({
+        "saved_pct": saved_pct,
+        "no_cache": naive.no_cache,
+        "top_tier": naive.top_tier,
+        "currency": naive.currency.as_str()
+    });
+    if let Some(peak) = naive.peak {
+        savings["peak"] = json!(peak);
+    }
+    savings
 }
 
 pub(super) fn why_text(

@@ -3018,6 +3018,36 @@ fn savings_line_renders_counterfactuals_and_keeps_measured_zero_exact() {
 }
 
 #[test]
+fn no_peak_route_drops_hud_and_naive_segments_cleanly_at_narrow_width() {
+    let app = picker_app();
+    let usage = Usage {
+        prompt_tokens: 100_000,
+        completion_tokens: 50_000,
+        cached_tokens: Some(90_000),
+        evidence: UsageEvidence::Measured,
+    };
+
+    let lines = savings_lines(&app.resolver, &app.route, &usage, fixed_at());
+    assert_eq!(lines.len(), 2, "got: {lines:?}");
+    assert!(
+        lines[1].starts_with("naive: no-cache "),
+        "got: {}",
+        lines[1]
+    );
+    assert!(lines[1].contains(" · top-tier "), "got: {}", lines[1]);
+    assert!(!lines[1].contains("peak"), "got: {}", lines[1]);
+    assert!(!lines[1].contains("· ·"), "got: {}", lines[1]);
+    assert!(!lines[1].ends_with('·'), "got: {}", lines[1]);
+
+    let hud = app.hud_line(fixed_at());
+    assert_eq!(hud, "session $0.00 · no usage yet · profile balanced");
+    assert!(!hud.contains("· ·"), "got: {hud}");
+    let narrow = buffer_text(&render_buffer(&app, 50, 8));
+    assert!(narrow.contains("profile balanced"), "got: {narrow}");
+    assert!(!narrow.contains("off-peak"), "got: {narrow}");
+}
+
+#[test]
 fn local_hud_and_turn_meter_do_not_present_hardware_cost_as_zero() {
     let mut app = picker_app();
     app.route = app.resolver.resolve("f-local").unwrap();

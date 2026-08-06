@@ -33,7 +33,7 @@ pub(super) fn tools_list() -> Value {
         "tools": [
             {
                 "name": "route_resolve",
-                "description": "Resolve one catalog route with current peak status.",
+                "description": "Resolve one catalog route, including peak status when defined.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

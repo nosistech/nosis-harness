@@ -629,6 +629,25 @@ fn price_without_table_says_how_to_add_one() {
 }
 
 #[test]
+fn price_and_footer_without_peak_table_drop_the_segment_cleanly() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut session, _calls) = test_session("kimi-k2.6", tmp.path());
+    let (price, _err) = drive(&mut session, &["/price"]);
+
+    assert!(price.starts_with("kimi-k2.6 | in "), "got: {price}");
+    assert!(!price.contains("off-peak"), "got: {price}");
+    assert!(!price.contains("| |"), "got: {price}");
+    assert!(!price.trim_end().ends_with('|'), "got: {price}");
+
+    let footer = footer(&session);
+    assert!(footer.starts_with("kimi-k2.6 | session "), "got: {footer}");
+    assert!(footer.contains(" | tokens "), "got: {footer}");
+    assert!(!footer.contains("off-peak"), "got: {footer}");
+    assert!(!footer.contains("| |"), "got: {footer}");
+    assert!(!footer.ends_with('|'), "got: {footer}");
+}
+
+#[test]
 fn local_turn_and_price_command_use_the_ratified_meter_copy() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut session, _calls) = test_session("local-test", tmp.path());
@@ -770,7 +789,7 @@ fn session_usage_accumulates_across_turns_and_switches() {
     let (_out, err) = drive(&mut s, &["one", "/model kimi-k2.6", "two"]);
     assert!(
         err.contains(
-            "kimi-k2.6 | off-peak | session <¥0.0001 · <$0.0001* | tokens 24 in / 14 out / 8 cached | cache 33%"
+            "kimi-k2.6 | session <¥0.0001 · <$0.0001* | tokens 24 in / 14 out / 8 cached | cache 33%"
         ),
         "cumulative after switch: {err}"
     );
@@ -1738,19 +1757,22 @@ fn peak_status_second_window_and_multiplier_trim() {
     // Beijing 15:00 - inside 14:00-18:00.
     let now = Utc.with_ymd_and_hms(2026, 7, 15, 7, 0, 0).unwrap();
     assert_eq!(
-        route.peak_status(now, beijing_offset()),
+        route.peak_status(now, beijing_offset()).unwrap(),
         "peak 2x until 18:00"
     );
     // Boundary math: 18:00 itself is off-peak (end exclusive).
     let end = Utc.with_ymd_and_hms(2026, 7, 15, 10, 0, 0).unwrap();
-    assert_eq!(route.peak_status(end, beijing_offset()), "off-peak");
+    assert_eq!(
+        route.peak_status(end, beijing_offset()).unwrap(),
+        "off-peak"
+    );
     let fractional =
         RouteResolver::from_toml(&TEST_CATALOG.replace("multiplier = 2.0", "multiplier = 1.5"))
             .unwrap()
             .resolve("deepseek-v4-flash")
             .unwrap();
     assert_eq!(
-        fractional.peak_status(now, beijing_offset()),
+        fractional.peak_status(now, beijing_offset()).unwrap(),
         "peak 1.5x until 18:00"
     );
 }

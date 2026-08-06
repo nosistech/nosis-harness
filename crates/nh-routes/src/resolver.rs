@@ -126,23 +126,22 @@ impl ResolvedRoute {
         })
     }
 
-    /// Short clock-pricing chip for terminal cost HUDs. Peak boundaries are
-    /// evaluated in the route timezone and displayed in the user's UTC offset.
-    pub fn peak_status(&self, at: DateTime<Utc>, local: FixedOffset) -> String {
+    /// Short clock-pricing chip for terminal cost HUDs. Returns `None` when the
+    /// route has no peak table. Peak boundaries are evaluated in the route
+    /// timezone and displayed in the user's UTC offset.
+    pub fn peak_status(&self, at: DateTime<Utc>, local: FixedOffset) -> Option<String> {
         if self.class == RouteClass::Local {
-            return "local".into();
+            return Some("local".into());
         }
         let Some(quote) = self.price_at(at) else {
-            return "no price data".into();
+            return Some("no price data".into());
         };
+        let peak = self.price.as_ref().and_then(|price| price.peak.as_ref())?;
         if !quote.peak {
-            return "off-peak".into();
-        }
-        let Some(peak) = self.price.as_ref().and_then(|price| price.peak.as_ref()) else {
-            return "peak".into();
+            return Some("off-peak".into());
         };
         let Some(route_offset) = FixedOffset::east_opt(peak.utc_offset_secs) else {
-            return "peak".into();
+            return Some("peak".into());
         };
         let route_local = at.with_timezone(&route_offset);
         let time = route_local.time();
@@ -151,7 +150,7 @@ impl ResolvedRoute {
             .iter()
             .find(|(start, end)| time >= *start && time < *end)
         else {
-            return "peak".into();
+            return Some("peak".into());
         };
         let end = match route_local
             .date_naive()
@@ -159,13 +158,13 @@ impl ResolvedRoute {
             .and_local_timezone(route_offset)
         {
             chrono::LocalResult::Single(end) => end,
-            _ => return "peak".into(),
+            _ => return Some("peak".into()),
         };
-        format!(
+        Some(format!(
             "peak {}x until {}",
             trim_multiplier(peak.multiplier),
             end.with_timezone(&local).format("%H:%M")
-        )
+        ))
     }
 
     /// True when catalog.toml lists `name` in this route's quirks array.
@@ -207,22 +206,26 @@ impl RouteResolver {
         let actual = cost_of(&quote, prompt_tokens, cached_tokens, output_tokens)?;
         let no_cache = cost_of(&quote, prompt_tokens, 0, output_tokens)?;
 
-        let peak = route
-            .price
-            .as_ref()
-            .and_then(|price| {
-                price.peak.as_ref().map(|peak| PriceQuote {
+        let price = route.price.as_ref()?;
+        let peak = match price.peak.as_ref() {
+            Some(peak) => {
+                let peak_quote = PriceQuote {
                     cache_hit: price.cache_hit * peak.multiplier,
                     cache_miss: price.cache_miss * peak.multiplier,
                     output: price.output * peak.multiplier,
                     currency: price.currency,
                     peak: true,
                     confidence: price.confidence,
-                })
-            })
-            .map_or(Some(actual), |peak_quote| {
-                cost_of(&peak_quote, prompt_tokens, cached_tokens, output_tokens)
-            })?;
+                };
+                Some(cost_of(
+                    &peak_quote,
+                    prompt_tokens,
+                    cached_tokens,
+                    output_tokens,
+                )?)
+            }
+            None => None,
+        };
 
         let top_tier_quote = self
             .routes

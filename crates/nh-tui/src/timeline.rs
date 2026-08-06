@@ -521,12 +521,19 @@ pub(super) fn savings_lines(
     }
     let mut lines = vec![headline];
     if let Some(costs) = naive {
-        lines.push(format!(
-            "naive: peak {} · no-cache {} · top-tier {}",
-            money(costs.peak, costs.currency),
-            money(costs.no_cache, costs.currency),
+        let mut counterfactuals = Vec::with_capacity(3);
+        if let Some(peak) = costs.peak {
+            counterfactuals.push(format!("peak {}", money(peak, costs.currency)));
+        }
+        counterfactuals.push(format!(
+            "no-cache {}",
+            money(costs.no_cache, costs.currency)
+        ));
+        counterfactuals.push(format!(
+            "top-tier {}",
             money(costs.top_tier, costs.currency)
         ));
+        lines.push(format!("naive: {}", counterfactuals.join(" · ")));
     }
     if uncertain {
         lines.push("*price verify_live".into());

@@ -106,7 +106,8 @@ pub struct PriceQuote {
 #[derive(Debug, Clone, PartialEq)]
 pub struct NaiveCost {
     pub no_cache: f64,
-    pub peak: f64,
+    /// Cost at the route's peak rate, when the catalog defines one.
+    pub peak: Option<f64>,
     pub top_tier: f64,
     pub currency: Currency,
 }
