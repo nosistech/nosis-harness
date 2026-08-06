@@ -3,6 +3,9 @@ name: CI
 on:
   push:
   pull_request:
+  # Manual trigger. A push event can be lost during a platform incident, and the
+  # release gate needs a green run on the exact commit being tagged.
+  workflow_dispatch:
 
 permissions:
   contents: read
