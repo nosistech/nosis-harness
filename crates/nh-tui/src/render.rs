@@ -22,6 +22,8 @@ use ratatui::{
     Frame,
 };
 
+const BLOCKED_REASON_MAX_CHARS: usize = 32;
+
 pub(super) fn render(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
     let outer = main_block(app);
@@ -98,10 +100,12 @@ pub(super) fn main_block(app: &App) -> Block<'static> {
 }
 
 pub(super) fn render_key_hints(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let hints = safe_line(
-        &app.scrubber,
-        "/ commands   ↑↓ scroll   Ctrl+F search   Enter send   Ctrl+C quit",
-    );
+    let text = if app.budget_reached() {
+        "/ commands   ↑↓ scroll   Ctrl+F search   Ctrl+C quit"
+    } else {
+        "/ commands   ↑↓ scroll   Ctrl+F search   Enter send   Ctrl+C quit"
+    };
+    let hints = safe_line(&app.scrubber, text);
     frame.render_widget(
         Paragraph::new(hints).style(
             Style::default()
@@ -152,8 +156,13 @@ pub(super) fn render_input(frame: &mut Frame<'_>, app: &App, area: Rect) {
         ));
     }
     if app.input.is_empty() {
+        let placeholder = if app.budget_reached() {
+            "budget reached - Ctrl+C to quit"
+        } else {
+            "type a task and press Enter…"
+        };
         spans.push(Span::styled(
-            safe_line(&app.scrubber, "type a task and press Enter…"),
+            safe_line(&app.scrubber, placeholder),
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::DIM),
@@ -621,10 +630,29 @@ pub(super) fn status_chip(
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        Status::Blocked(_) => (
-            "● BLOCKED".into(),
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ),
+        Status::Blocked(reason) => {
+            let reason = reason
+                .split(['\n', '\r'])
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .unwrap_or("");
+            let mut chars = reason.chars();
+            let head: String = chars.by_ref().take(BLOCKED_REASON_MAX_CHARS).collect();
+            let reason = if chars.next().is_some() {
+                format!("{head}…")
+            } else {
+                head
+            };
+            let label = if reason.is_empty() {
+                "● BLOCKED".into()
+            } else {
+                format!("● BLOCKED - {reason}")
+            };
+            (
+                label,
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )
+        }
     }
 }
 

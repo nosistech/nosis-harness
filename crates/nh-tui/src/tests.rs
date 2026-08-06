@@ -399,7 +399,7 @@ fn outer_frame_and_each_status_word_render() {
         (Status::Idle, "○ IDLE"),
         (Status::Working, "● WORKING"),
         (Status::Waiting, "● WAITING ON YOU"),
-        (Status::Blocked("offline".into()), "● BLOCKED"),
+        (Status::Blocked("offline".into()), "● BLOCKED - offline"),
     ];
     for (status, label) in cases {
         let mut app = test_app(None);
@@ -415,6 +415,170 @@ fn outer_frame_and_each_status_word_render() {
         assert!(text.contains("test-route"), "got: {text}");
         assert!(text.contains(label), "got: {text}");
     }
+}
+
+#[test]
+fn blocked_status_chip_renders_budget_reason() {
+    let status = Status::Blocked(BUDGET_REASON.into());
+    let (label, style) = status_chip(&status, None, fixed_at());
+    assert_eq!(label, "● BLOCKED - budget reached");
+    assert_eq!(style.fg, Some(Color::Red));
+    assert!(style.add_modifier.contains(Modifier::BOLD));
+
+    let mut app = test_app(None);
+    app.status = status;
+    let rendered = buffer_text(&render_buffer(&app, 90, 20));
+    assert!(
+        rendered.contains("● BLOCKED - budget reached"),
+        "got: {rendered}"
+    );
+}
+
+#[test]
+fn blocked_status_chip_uses_only_the_first_non_empty_reason_line() {
+    let status = Status::Blocked("\r\n  first line  \rsecond line\nthird line".into());
+    let (label, _) = status_chip(&status, None, fixed_at());
+    assert_eq!(label, "● BLOCKED - first line");
+    assert!(!label.contains('\n'), "got: {label:?}");
+    assert!(!label.contains('\r'), "got: {label:?}");
+
+    let mut app = test_app(None);
+    app.status = status;
+    let rendered = buffer_text(&render_buffer(&app, 90, 20));
+    assert!(
+        rendered.contains("● BLOCKED - first line"),
+        "got: {rendered}"
+    );
+    assert!(!rendered.contains("second line"), "got: {rendered}");
+    assert!(!rendered.contains("third line"), "got: {rendered}");
+}
+
+#[test]
+fn blocked_status_chip_caps_long_reasons_and_appends_ellipsis() {
+    let status = Status::Blocked("x".repeat(40));
+    let (label, _) = status_chip(&status, None, fixed_at());
+    let expected = format!("● BLOCKED - {}…", "x".repeat(32));
+    assert_eq!(label, expected);
+    assert!(label.ends_with('…'));
+
+    let mut app = test_app(None);
+    app.status = status;
+    let rendered = buffer_text(&render_buffer(&app, 120, 20));
+    assert!(rendered.contains(&expected), "got: {rendered}");
+    assert!(!rendered.contains(&"x".repeat(33)), "got: {rendered}");
+}
+
+#[test]
+fn blocked_status_chip_omits_separator_for_blank_reasons() {
+    for reason in ["", "   "] {
+        let status = Status::Blocked(reason.into());
+        let (label, _) = status_chip(&status, None, fixed_at());
+        assert_eq!(label, "● BLOCKED");
+        assert!(!label.ends_with('-'));
+
+        let mut app = test_app(None);
+        app.status = status;
+        let rows = buffer_rows(&render_buffer(&app, 90, 20));
+        assert!(rows[0].contains("● BLOCKED"), "got: {}", rows[0]);
+        assert!(!rows[0].contains("BLOCKED -"), "got: {}", rows[0]);
+    }
+}
+
+#[test]
+fn budget_reached_hint_bar_omits_enter_send() {
+    let app = test_app(Some(0));
+    assert!(app.budget_reached());
+    let rendered = buffer_text(&render_buffer(&app, 90, 20));
+    assert!(
+        rendered.contains("/ commands   ↑↓ scroll   Ctrl+F search   Ctrl+C quit"),
+        "got: {rendered}"
+    );
+    assert!(!rendered.contains("Enter send"), "got: {rendered}");
+}
+
+#[test]
+fn idle_hint_bar_keeps_enter_send() {
+    let app = test_app(None);
+    assert!(!app.budget_reached());
+    let rendered = buffer_text(&render_buffer(&app, 90, 20));
+    assert!(
+        rendered.contains("/ commands   ↑↓ scroll   Ctrl+F search   Enter send   Ctrl+C quit"),
+        "got: {rendered}"
+    );
+}
+
+#[test]
+fn failed_blocked_hint_bar_keeps_enter_send_when_budget_remains() {
+    let mut app = test_app(None);
+    app.status = Status::Working;
+    reduce_agent_event(&mut app, AgentEvent::Failed("offline".into()));
+    assert_eq!(app.status, Status::Blocked("offline".into()));
+    assert!(!app.budget_reached());
+
+    let rendered = buffer_text(&render_buffer(&app, 90, 20));
+    assert!(
+        rendered.contains("/ commands   ↑↓ scroll   Ctrl+F search   Enter send   Ctrl+C quit"),
+        "got: {rendered}"
+    );
+}
+
+#[test]
+fn budget_reached_empty_input_renders_truthful_placeholder() {
+    let app = test_app(Some(0));
+    assert!(app.budget_reached());
+    assert!(app.input.is_empty());
+    let rendered = buffer_text(&render_buffer(&app, 90, 20));
+    assert!(
+        rendered.contains("❯ budget reached - Ctrl+C to quit"),
+        "got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("type a task and press Enter…"),
+        "got: {rendered}"
+    );
+}
+
+#[test]
+fn failed_blocked_empty_input_keeps_normal_placeholder() {
+    let mut app = test_app(None);
+    app.status = Status::Working;
+    reduce_agent_event(&mut app, AgentEvent::Failed("offline".into()));
+    assert_eq!(app.status, Status::Blocked("offline".into()));
+    assert!(!app.budget_reached());
+    assert!(app.input.is_empty());
+
+    let rendered = buffer_text(&render_buffer(&app, 90, 20));
+    assert!(
+        rendered.contains("❯ type a task and press Enter…"),
+        "got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("budget reached - Ctrl+C to quit"),
+        "got: {rendered}"
+    );
+}
+
+#[test]
+fn blocked_reason_stays_on_the_header_at_realistic_width() {
+    let app = test_app(Some(0));
+    let rows = buffer_rows(&render_buffer(&app, 90, 20));
+    assert!(
+        rows[0].contains("● BLOCKED - budget reached"),
+        "got: {}",
+        rows[0]
+    );
+    assert!(
+        rows[0].contains("test-route · effort: none"),
+        "got: {}",
+        rows[0]
+    );
+    assert!(
+        rows.iter()
+            .skip(1)
+            .all(|row| !row.contains("● BLOCKED - budget reached")),
+        "got: {}",
+        rows.join("\n")
+    );
 }
 
 #[test]
