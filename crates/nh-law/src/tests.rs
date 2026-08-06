@@ -648,7 +648,7 @@ fn bundled_and_starter_toml_are_valid_safe_data() {
         .and_then(|section| section.text)
         .expect("bundled constitution");
     assert!(constitution.starts_with("You are a coding agent."));
-    assert!(constitution.contains("THE LAW"));
+    assert!(constitution.contains("verify your work"));
 
     let starter = parse_law(STARTER_LAW_TOML).expect("starter law parses");
     assert!(starter.autonomy.is_none());

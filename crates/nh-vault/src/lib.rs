@@ -1,6 +1,6 @@
 //! nh-vault - OS-native secret storage + output redaction.
 //! SECURITY INVARIANT: no plaintext keys at rest, memory-only injection, zeroized after use.
-//! Spec: 02-architecture/SECURITY_MODEL.md.
+//! Spec: docs/SECURITY_MODEL.md.
 
 use regex::Regex;
 use std::net::IpAddr;

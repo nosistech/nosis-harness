@@ -25,11 +25,8 @@
 11-automation/
 12-executive/
 
-# Internal architecture notes. Only ARCHITECTURE_OVERVIEW.md and SECURITY_MODEL.md
-# are public; the negation rules below re-admit exactly those two.
-02-architecture/*
-!02-architecture/ARCHITECTURE_OVERVIEW.md
-!02-architecture/SECURITY_MODEL.md
+# Internal architecture notes. The two public documents now live in docs/.
+02-architecture/
 
 # Internal specifications and agent instructions at the repository root.
 AGENTS.md

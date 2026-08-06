@@ -71,7 +71,7 @@ fn run_with_resume(
 }
 
 fn pre_screen_line(scrubber: &Scrubber, line: &str) -> String {
-    cmd_run::safe_line(scrubber, line).replace('-', "-")
+    cmd_run::safe_line(scrubber, line)
 }
 
 fn credentialed_providers<V: Vault>(
