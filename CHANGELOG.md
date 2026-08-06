@@ -13,9 +13,16 @@ No changes yet.
 
 ## [0.1.0] - 2026-08-06
 
-This release is a source install. No binaries are attached. Build it with
-`cargo build --release`. The toolchain is pinned in `rust-toolchain.toml`, so `rustup`
-selects the correct version for you.
+This release is a source install. No binaries are attached. One command installs it:
+
+```sh
+cargo install --locked --git https://github.com/nosistech/nosis-harness nh-cli
+```
+
+That builds `nh` and puts it on your `PATH`. It needs Rust 1.96.0 or newer. Note that
+`cargo install` does not read this repo's `rust-toolchain.toml`, so check
+`rustc --version` if the build fails. To build inside a clone instead, run
+`cargo build --release`; there the toolchain pin does apply.
 
 Platform status: Windows is supported. macOS is in testing. Linux builds from source and
 is not yet verified.
