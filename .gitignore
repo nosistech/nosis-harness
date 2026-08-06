@@ -1,9 +1,8 @@
 /target
 **/target/
-.nosis/receipts.jsonl
-.nosis/fleet/
-.nosis/*.log
-.nosis/auth*
+# Runtime artifacts. Ignore the whole directory: session ledgers under .nosis/sessions/
+# carry verbatim prompt and answer text, and an itemised list silently missed them.
+.nosis/
 *.key
 *.pem
 .env
