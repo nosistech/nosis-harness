@@ -11,11 +11,14 @@ commit passes local and remote gates.
 
 No changes yet.
 
-## [0.1.0] - UNRELEASED
+## [0.1.0] - 2026-08-06
 
-`0.1.0` has not been tagged yet, so this entry is still a draft and every change below is
-part of the first release rather than history. Replace `UNRELEASED` above with the tag date
-(ISO `YYYY-MM-DD`) as the last edit before tagging.
+This release is a source install. No binaries are attached. Build it with
+`cargo build --release`. The toolchain is pinned in `rust-toolchain.toml`, so `rustup`
+selects the correct version for you.
+
+Platform status: Windows is supported. macOS is in testing. Linux builds from source and
+is not yet verified.
 
 ### Added
 
