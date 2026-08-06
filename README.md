@@ -28,21 +28,36 @@ This section is for all readers.
   you can delete at any time.
 - **The optional MCP server is off by default.** When you start it, it listens only on your own
   machine and it needs a token.
-- **Not yet tested on Linux or macOS.** See [Platform status](#platform-status) below. We do not
-  claim what we have not tested.
+- **Windows is supported. macOS is in testing. Linux is not yet verified.** See
+  [Platform status](#platform-status) below. We do not claim what we have not tested.
 
 For the technical detail behind each point, read [SECURITY.md](./SECURITY.md) (the security model,
 the audits, and how to report a problem) and [PRIVACY.md](./PRIVACY.md) (what leaves your machine).
 
 ## Install (from source)
 
-Prerequisites: the Rust toolchain, version **1.96.0**. The repo pins it in `rust-toolchain.toml`, so `rustup` selects the right version automatically.
+`nh` is a source install. This release attaches no prebuilt binaries.
+
+Prerequisites: the Rust toolchain, **1.96.0 or newer**. Get it from [rustup.rs](https://rustup.rs).
+
+One command builds `nh` and puts it on your `PATH`:
+
+```sh
+cargo install --locked --git https://github.com/nosistech/nosis-harness nh-cli
+```
+
+The binary lands in `~/.cargo/bin`, which `rustup` already added to your `PATH`. Note that
+`cargo install` uses your default toolchain and does not read this repo's `rust-toolchain.toml`.
+Check `rustc --version` first if the build fails.
+
+To work on the code instead, clone the repo and build in place. Here `rust-toolchain.toml` does
+apply, so `rustup` selects **1.96.0** for you:
 
 ```sh
 cargo build --release
 ```
 
-The binary lands at `target/release/nh` (`target\release\nh.exe` on Windows). Add it to your `PATH`, or copy it somewhere already on it.
+That binary lands at `target/release/nh` (`target\release\nh.exe` on Windows).
 
 ## Quickstart
 
@@ -63,7 +78,8 @@ The binary lands at `target/release/nh` (`target\release\nh.exe` on Windows). Ad
 
 ## Platform status
 
-Windows is built and tested. Linux and macOS paths exist but have not yet been executed on those platforms; this release does not claim them as verified.
+Windows is **supported**: CI is green and it is in daily use. macOS is **in testing**: CI is green,
+but no one has used it day to day. Linux **builds from source and is not yet verified**.
 
 ## Privacy
 
