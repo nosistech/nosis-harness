@@ -186,7 +186,5 @@ is not yet verified.
 - Report vulnerabilities per [SECURITY.md](SECURITY.md) - info@nosistech.com,
   5-business-day response SLA.
 
-<!-- Reference-style version links remain local until the intended public remote exists.
-     Replace them with the repository compare/release URLs before publishing the tag. -->
-[Unreleased]: ./
-[0.1.0]: ./
+[Unreleased]: https://github.com/nosistech/nosis-harness/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/nosistech/nosis-harness/releases/tag/v0.1.0
