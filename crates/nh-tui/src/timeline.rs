@@ -307,6 +307,7 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
                 app.mark_session_cost_incomplete();
             }
             app.usage = Some(usage);
+            app.warn_before_budget();
             if app.budget_reached() {
                 app.set_status(Status::Blocked(BUDGET_REASON.into()), Utc::now());
             }

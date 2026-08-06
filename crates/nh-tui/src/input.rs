@@ -146,8 +146,19 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
         app.open_search();
         return UiAction::None;
     }
+    if key.code == KeyCode::F(1) {
+        app.overlay = Overlay::Help;
+        return UiAction::None;
+    }
     if app.overlay != Overlay::None {
         return reduce_overlay_key(app, key);
+    }
+    if key.code == KeyCode::Char('?')
+        && key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
+        && app.input.is_empty()
+    {
+        app.overlay = Overlay::Help;
+        return UiAction::None;
     }
     if matches!(app.status, Status::Waiting) {
         if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
@@ -158,6 +169,18 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
                 _ => {}
             }
         }
+        return UiAction::None;
+    }
+    if word_delete_key(key) {
+        delete_previous_word(&mut app.input);
+        if app.input.trim().is_empty() {
+            app.pending_send = false;
+        }
+        return UiAction::None;
+    }
+    if line_delete_key(key) {
+        app.input.clear();
+        app.pending_send = false;
         return UiAction::None;
     }
     if matches!(app.status, Status::Working) {
@@ -228,6 +251,39 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
     UiAction::None
 }
 
+fn control_edit_key(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        && key
+            .modifiers
+            .difference(KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+            .is_empty()
+}
+
+fn word_delete_key(key: KeyEvent) -> bool {
+    control_edit_key(key)
+        && matches!(
+            key.code,
+            KeyCode::Backspace | KeyCode::Char('w' | 'W' | 'h' | 'H')
+        )
+}
+
+fn line_delete_key(key: KeyEvent) -> bool {
+    control_edit_key(key) && matches!(key.code, KeyCode::Char('u' | 'U'))
+}
+
+fn delete_previous_word(input: &mut String) {
+    while input.chars().next_back().is_some_and(char::is_whitespace) {
+        input.pop();
+    }
+    while input
+        .chars()
+        .next_back()
+        .is_some_and(|character| !character.is_whitespace())
+    {
+        input.pop();
+    }
+}
+
 pub(super) fn push_input_char(input: &mut String, character: char) -> bool {
     if input.len().saturating_add(character.len_utf8()) > MAX_TASK_BYTES {
         return false;
@@ -293,7 +349,7 @@ pub(super) fn reduce_overlay_key(app: &mut App, key: KeyEvent) -> UiAction {
         app.overlay = Overlay::None;
         return UiAction::None;
     }
-    if matches!(app.overlay, Overlay::TrustDial) {
+    if matches!(app.overlay, Overlay::Help | Overlay::TrustDial) {
         return UiAction::None;
     }
 
@@ -343,6 +399,7 @@ pub(super) fn reduce_overlay_key(app: &mut App, key: KeyEvent) -> UiAction {
         Overlay::None
         | Overlay::Search { .. }
         | Overlay::CommandMenu { .. }
+        | Overlay::Help
         | Overlay::TrustDial
         | Overlay::Timeline { .. }
         | Overlay::Picker { .. } => None,
@@ -436,6 +493,22 @@ pub(super) fn picker_key(
 }
 
 pub(super) fn reduce_command_menu_key(app: &mut App, key: KeyEvent) -> UiAction {
+    if word_delete_key(key) {
+        delete_previous_word(&mut app.input);
+        if app.input.trim().is_empty() {
+            app.pending_send = false;
+            app.overlay = Overlay::None;
+        } else if let Overlay::CommandMenu { selected } = &mut app.overlay {
+            *selected = 0;
+        }
+        return UiAction::None;
+    }
+    if line_delete_key(key) {
+        app.input.clear();
+        app.pending_send = false;
+        app.overlay = Overlay::None;
+        return UiAction::None;
+    }
     match key.code {
         KeyCode::Esc => {
             app.input.clear();

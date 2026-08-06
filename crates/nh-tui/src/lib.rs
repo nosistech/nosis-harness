@@ -1,6 +1,7 @@
 //! M3 TUI: one status, one worker, and small Windows-safe views.
 
 mod input;
+mod keymap;
 mod palette;
 mod render;
 mod session;
@@ -62,10 +63,16 @@ type ConnectFn = Box<
 >;
 
 const EVENT_POLL: Duration = Duration::from_millis(50);
+const TURN_BELL_MIN: Duration = Duration::from_secs(10);
+const BUDGET_WARN_FRACTION: (u64, u64) = (4, 5);
 const BUDGET_REASON: &str = "budget reached";
 const APPROVAL_LEGEND: &str = "[y] yes  [a] always  [n]/[Esc] no";
 const TASKBAR_WAITING: &[u8] = b"\x1b]9;4;4;0\x07";
 const TASKBAR_CLEAR: &[u8] = b"\x1b]9;4;0;0\x07";
+const TITLE_ACTIVE: &[u8] = b"\x1b]0;Nosis Harness\x07";
+const TITLE_IDLE: &[u8] = b"\x1b]0;Nosis Harness - IDLE\x07";
+const TITLE_BLOCKED: &[u8] = b"\x1b]0;Nosis Harness - BLOCKED\x07";
+const TITLE_CLEAR: &[u8] = b"\x1b]0;\x07";
 
 #[cfg(test)]
 mod tests;

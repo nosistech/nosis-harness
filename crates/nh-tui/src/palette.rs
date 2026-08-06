@@ -3,6 +3,35 @@
 use crate::state::{McpState, PaletteAction, PaletteEntry};
 use nh_law::{Autonomy, PolicyView};
 use nh_tools::{builtin_tools, McpAuth, McpServerConfig, McpToolset, McpTrust};
+use ratatui::{buffer::Buffer, style::Color};
+use std::ffi::OsStr;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum ColorMode {
+    #[default]
+    Color,
+    NoColor,
+}
+
+/// Resolve the NO_COLOR convention without consulting process-global state.
+pub(super) fn resolve_color_mode(no_color: Option<&OsStr>) -> ColorMode {
+    if no_color.is_some_and(|value| !value.is_empty()) {
+        ColorMode::NoColor
+    } else {
+        ColorMode::Color
+    }
+}
+
+impl ColorMode {
+    pub(super) fn apply(self, buffer: &mut Buffer) {
+        if self == Self::Color {
+            return;
+        }
+        for cell in &mut buffer.content {
+            cell.set_fg(Color::Reset).set_bg(Color::Reset);
+        }
+    }
+}
 
 /// Project configured MCP servers and discovered tools into immutable palette rows.
 pub fn mcp_palette_entries(configs: &[McpServerConfig], toolset: &McpToolset) -> Vec<PaletteEntry> {

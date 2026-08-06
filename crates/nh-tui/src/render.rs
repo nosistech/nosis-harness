@@ -7,6 +7,7 @@ use transcript::render_transcript;
 pub(super) use transcript::{transcript_scroll_state, wrapped_rows};
 
 use crate::input::command_matches;
+use crate::keymap::{key_hint_line, visible_key_bindings};
 use crate::palette::{filter_palette, trust_dial_lines};
 use crate::session::{effort_name, safe_line};
 use crate::state::{
@@ -23,10 +24,11 @@ use ratatui::{
 };
 
 const BLOCKED_REASON_MAX_CHARS: usize = 32;
+const HEADER_TITLE_GAP: usize = 1;
 
 pub(super) fn render(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
-    let outer = main_block(app);
+    let outer = main_block(app, area.width);
     let inner = outer.inner(area);
     frame.render_widget(Clear, area);
     frame.render_widget(outer, area);
@@ -57,15 +59,21 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &App) {
     render_input(frame, app, regions[3]);
     render_hud(frame, app, regions[4]);
     render_overlay(frame, app);
+    app.color_mode.apply(frame.buffer_mut());
 }
-pub(super) fn main_block(app: &App) -> Block<'static> {
+pub(super) fn main_block(app: &App, width: u16) -> Block<'static> {
     let now = Utc::now();
+    let route_label = safe_line(
+        &app.scrubber,
+        &format!(" {} · effort: {} ", app.route.id(), effort_name(app.effort)),
+    );
+    let blocked_reason_width = blocked_reason_width(width, &route_label);
     let (status, status_style) = match (&app.status, &app.active_tool, &app.active_model) {
         (Status::Working, Some(tool), _) => tool_status_chip(&tool.name, tool.started_at, now),
         (Status::Working, None, Some(request)) => {
             model_status_chip(&request.route, request.started_at, now)
         }
-        _ => status_chip(&app.status, app.working_since, now),
+        _ => status_chip(&app.status, app.working_since, now, blocked_reason_width),
     };
     let left_title = Line::from(vec![
         Span::styled(
@@ -81,14 +89,8 @@ pub(super) fn main_block(app: &App) -> Block<'static> {
         Span::styled(safe_line(&app.scrubber, &status), status_style),
         Span::raw(safe_line(&app.scrubber, " ")),
     ]);
-    let route_title = Line::from(Span::styled(
-        safe_line(
-            &app.scrubber,
-            &format!(" {} · effort: {} ", app.route.id(), effort_name(app.effort)),
-        ),
-        Style::default().fg(Color::Cyan),
-    ))
-    .right_aligned();
+    let route_title =
+        Line::from(Span::styled(route_label, Style::default().fg(Color::Cyan))).right_aligned();
 
     Block::default()
         .borders(Borders::ALL)
@@ -100,12 +102,7 @@ pub(super) fn main_block(app: &App) -> Block<'static> {
 }
 
 pub(super) fn render_key_hints(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let text = if app.budget_reached() {
-        "/ commands   ↑↓ scroll   Ctrl+F search   Ctrl+C quit"
-    } else {
-        "/ commands   ↑↓ scroll   Ctrl+F search   Enter send   Ctrl+C quit"
-    };
-    let hints = safe_line(&app.scrubber, text);
+    let hints = safe_line(&app.scrubber, &key_hint_line(app.budget_reached()));
     frame.render_widget(
         Paragraph::new(hints).style(
             Style::default()
@@ -208,6 +205,7 @@ pub(super) fn render_overlay(frame: &mut Frame<'_>, app: &App) {
         Overlay::CommandMenu { selected } => {
             render_command_menu(frame, app, modal_area(frame.area(), 14), *selected)
         }
+        Overlay::Help => render_help(frame, app, modal_area(frame.area(), 18)),
         Overlay::TrustDial => {
             let desired = u16::try_from(trust_dial_lines(&app.policy_view).len())
                 .unwrap_or(u16::MAX)
@@ -252,6 +250,39 @@ pub(super) fn render_overlay(frame: &mut Frame<'_>, app: &App) {
             rows,
         ),
     }
+}
+
+pub(super) fn render_help(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let body = render_modal_shell(
+        frame,
+        app,
+        area,
+        " Help · read-only ",
+        "Key bindings · Esc close",
+    );
+    let lines: Vec<Line<'static>> = visible_key_bindings(app.budget_reached())
+        .map(|binding| {
+            Line::from(vec![
+                Span::styled(
+                    safe_line(&app.scrubber, &format!("{:<12}", binding.keys)),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    safe_line(
+                        &app.scrubber,
+                        &format!("{}{}", binding.action, binding.detail),
+                    ),
+                    Style::default().fg(Color::White),
+                ),
+            ])
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(Color::White).bg(Color::Black)),
+        body,
+    );
 }
 
 pub(super) fn render_search(
@@ -604,6 +635,7 @@ pub(super) fn status_chip(
     status: &Status,
     working_since: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
+    blocked_reason_width: usize,
 ) -> (String, Style) {
     match status {
         Status::Idle => (
@@ -638,11 +670,12 @@ pub(super) fn status_chip(
                 .unwrap_or("");
             let mut chars = reason.chars();
             let head: String = chars.by_ref().take(BLOCKED_REASON_MAX_CHARS).collect();
-            let reason = if chars.next().is_some() {
+            let capped = if chars.next().is_some() {
                 format!("{head}…")
             } else {
                 head
             };
+            let reason = fit_with_ellipsis(&capped, blocked_reason_width);
             let label = if reason.is_empty() {
                 "● BLOCKED".into()
             } else {
@@ -654,6 +687,38 @@ pub(super) fn status_chip(
             )
         }
     }
+}
+
+fn blocked_reason_width(width: u16, route_label: &str) -> usize {
+    let title_width = usize::from(width.saturating_sub(2));
+    let fixed_left_width = Line::from(" nosis · ● BLOCKED -  ").width();
+    title_width.saturating_sub(
+        fixed_left_width
+            .saturating_add(Line::from(route_label).width())
+            .saturating_add(HEADER_TITLE_GAP),
+    )
+}
+
+fn fit_with_ellipsis(text: &str, max_width: usize) -> String {
+    if Line::from(text).width() <= max_width {
+        return text.to_owned();
+    }
+    let ellipsis = "…";
+    let ellipsis_width = Line::from(ellipsis).width();
+    if max_width < ellipsis_width {
+        return String::new();
+    }
+    let head_width = max_width.saturating_sub(ellipsis_width);
+    let source = text.strip_suffix(ellipsis).unwrap_or(text);
+    let mut head = String::new();
+    for character in source.chars() {
+        head.push(character);
+        if Line::from(head.as_str()).width() > head_width {
+            head.pop();
+            break;
+        }
+    }
+    format!("{head}{ellipsis}")
 }
 
 pub(super) fn tool_status_chip(

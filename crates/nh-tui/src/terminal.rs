@@ -14,7 +14,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 
-use super::TASKBAR_CLEAR;
+use super::{TASKBAR_CLEAR, TITLE_ACTIVE, TITLE_CLEAR};
 
 pub(super) struct PanicAbort(AtomicBool);
 
@@ -30,6 +30,7 @@ struct TerminalState {
     alternate_screen: bool,
     bracketed_paste: bool,
     cursor_hidden: bool,
+    title_set: bool,
 }
 
 #[derive(Clone, Default)]
@@ -69,6 +70,7 @@ impl TerminalStateHandle {
             SetupCommand::EnterScreen => state.alternate_screen = true,
             SetupCommand::EnablePaste => state.bracketed_paste = true,
             SetupCommand::HideCursor => state.cursor_hidden = true,
+            SetupCommand::SetTitle => state.title_set = true,
         });
     }
 
@@ -77,6 +79,7 @@ impl TerminalStateHandle {
             RestoreCommand::DisablePaste => state.bracketed_paste,
             RestoreCommand::ShowCursor => state.cursor_hidden,
             RestoreCommand::LeaveScreen => state.alternate_screen,
+            RestoreCommand::ClearTitle => state.title_set,
         })
     }
 
@@ -85,6 +88,7 @@ impl TerminalStateHandle {
             RestoreCommand::DisablePaste => state.bracketed_paste = false,
             RestoreCommand::ShowCursor => state.cursor_hidden = false,
             RestoreCommand::LeaveScreen => state.alternate_screen = false,
+            RestoreCommand::ClearTitle => state.title_set = false,
         });
     }
 }
@@ -136,6 +140,7 @@ enum SetupCommand {
     EnterScreen,
     EnablePaste,
     HideCursor,
+    SetTitle,
 }
 
 fn run_setup_sequence(mut run: impl FnMut(SetupCommand) -> io::Result<()>) -> io::Result<()> {
@@ -143,6 +148,7 @@ fn run_setup_sequence(mut run: impl FnMut(SetupCommand) -> io::Result<()>) -> io
         SetupCommand::EnterScreen,
         SetupCommand::EnablePaste,
         SetupCommand::HideCursor,
+        SetupCommand::SetTitle,
     ] {
         run(command)?;
     }
@@ -155,6 +161,7 @@ fn write_setup_commands(writer: &mut impl Write, state: &TerminalStateHandle) ->
             SetupCommand::EnterScreen => execute!(writer, EnterAlternateScreen)?,
             SetupCommand::EnablePaste => execute!(writer, EnableBracketedPaste)?,
             SetupCommand::HideCursor => execute!(writer, Hide)?,
+            SetupCommand::SetTitle => writer.write_all(TITLE_ACTIVE)?,
         }
         state.mark_setup(command);
         Ok(())
@@ -166,6 +173,7 @@ enum RestoreCommand {
     DisablePaste,
     ShowCursor,
     LeaveScreen,
+    ClearTitle,
 }
 
 fn retain_first(first: &mut Option<io::Error>, result: io::Result<()>) {
@@ -183,6 +191,7 @@ fn finish_restore(first: Option<io::Error>) -> io::Result<()> {
 fn run_restore_sequence(mut run: impl FnMut(RestoreCommand) -> io::Result<()>) -> io::Result<()> {
     let mut first = None;
     for command in [
+        RestoreCommand::ClearTitle,
         RestoreCommand::DisablePaste,
         RestoreCommand::ShowCursor,
         RestoreCommand::LeaveScreen,
@@ -213,6 +222,7 @@ fn write_restore_commands(writer: &mut impl Write, state: &TerminalStateHandle) 
     retain_first(
         &mut first,
         run_owned_restore_sequence(state, |command| match command {
+            RestoreCommand::ClearTitle => writer.write_all(TITLE_CLEAR),
             RestoreCommand::DisablePaste => execute!(writer, DisableBracketedPaste),
             RestoreCommand::ShowCursor => execute!(writer, Show),
             RestoreCommand::LeaveScreen => execute!(writer, LeaveAlternateScreen),

@@ -1,12 +1,16 @@
 //! Terminal session lifecycle, worker orchestration, and shared UI helpers.
 
 use crate::input::{handle_action, handle_input_event, reduce_agent_event};
+use crate::palette::resolve_color_mode;
 use crate::render::render;
 use crate::state::{AgentEvent, App, Status, TranscriptKind, TuiConfig, UiDiscovery};
 use crate::terminal::{with_terminal_panic_hook, PanicAbort, TerminalGuard, TerminalStateHandle};
 use crate::timeline::record_restored_turn_cost;
 use crate::worker::{spawn_worker, Worker, WorkerConfig, WorkerShutdown, SHUTDOWN_TIMEOUT};
-use crate::{ConnectFn, SharedScrubber, EVENT_POLL, TASKBAR_CLEAR, TASKBAR_WAITING};
+use crate::{
+    ConnectFn, SharedScrubber, EVENT_POLL, TASKBAR_CLEAR, TASKBAR_WAITING, TITLE_BLOCKED,
+    TITLE_IDLE, TURN_BELL_MIN,
+};
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};
 use crossterm::event;
@@ -168,6 +172,7 @@ pub(super) fn run_tui_session(
     let policy_view = law.policy.view();
     let law_constitution = law.constitution.clone();
     let resume_for_app = resume.clone();
+    let color_mode = resolve_color_mode(std::env::var_os("NO_COLOR").as_deref());
     let mut worker = spawn_worker(WorkerConfig {
         route: route.clone(),
         law,
@@ -190,6 +195,7 @@ pub(super) fn run_tui_session(
         UiDiscovery {
             palette_entries,
             credentialed_providers,
+            color_mode,
         },
         (profiles, execution_policy.profile),
     );
@@ -297,9 +303,16 @@ pub(super) fn ui_loop(
                 Ok(agent_event) => {
                     let ring = matches!(agent_event, AgentEvent::Approval(_))
                         && !matches!(app.status, Status::Waiting);
+                    let working_since = app.working_since;
                     let (previous, should_quit) = handle_agent_event(app, worker, agent_event);
-                    emit_taskbar_transition(terminal.backend_mut(), &previous, &app.status)
-                        .context("could not update taskbar status")?;
+                    emit_taskbar_transition(
+                        terminal.backend_mut(),
+                        &previous,
+                        &app.status,
+                        working_since,
+                        Utc::now(),
+                    )
+                    .context("could not update terminal status")?;
                     if ring {
                         ring_bell();
                     }
@@ -324,9 +337,16 @@ pub(super) fn ui_loop(
         }
         let input = event::read().context("could not read terminal input")?;
         let previous = app.status.clone();
+        let working_since = app.working_since;
         let should_quit = handle_input_event(app, worker, input);
-        emit_taskbar_transition(terminal.backend_mut(), &previous, &app.status)
-            .context("could not update taskbar status")?;
+        emit_taskbar_transition(
+            terminal.backend_mut(),
+            &previous,
+            &app.status,
+            working_since,
+            Utc::now(),
+        )
+        .context("could not update terminal status")?;
         if should_quit {
             return Ok(());
         }
@@ -361,14 +381,37 @@ pub(super) fn emit_taskbar_transition(
     writer: &mut impl Write,
     previous: &Status,
     current: &Status,
+    working_since: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
 ) -> io::Result<()> {
+    let mut changed = false;
     if matches!(current, Status::Waiting) && !matches!(previous, Status::Waiting) {
         writer.write_all(TASKBAR_WAITING)?;
-        writer.flush()
+        changed = true;
     } else if matches!(previous, Status::Waiting) && !matches!(current, Status::Waiting) {
         writer.write_all(TASKBAR_CLEAR)?;
-        writer.flush()
-    } else {
-        Ok(())
+        changed = true;
     }
+
+    if matches!(previous, Status::Working) && matches!(current, Status::Idle | Status::Blocked(_)) {
+        writer.write_all(TASKBAR_CLEAR)?;
+        writer.write_all(if matches!(current, Status::Idle) {
+            TITLE_IDLE
+        } else {
+            TITLE_BLOCKED
+        })?;
+        if working_since.is_some_and(|started| {
+            now.signed_duration_since(started)
+                .to_std()
+                .is_ok_and(|elapsed| elapsed >= TURN_BELL_MIN)
+        }) {
+            writer.write_all(b"\x07")?;
+        }
+        changed = true;
+    }
+
+    if changed {
+        writer.flush()?;
+    }
+    Ok(())
 }

@@ -1,5 +1,6 @@
 use super::*;
-use crate::palette::trust_dial_lines;
+use crate::keymap::{key_hint_line, visible_key_bindings};
+use crate::palette::{resolve_color_mode, trust_dial_lines, ColorMode};
 use crate::state::{search_match_lines, Overlay, PickerKind, UiDiscovery};
 use crate::timeline::{timeline_detail_lines, timeline_row};
 use crate::worker::WorkerCommand;
@@ -18,6 +19,7 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
     Terminal,
 };
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -225,6 +227,7 @@ fn test_app(budget: Option<u64>) -> App {
         UiDiscovery {
             palette_entries: Vec::new(),
             credentialed_providers: Vec::new(),
+            color_mode: ColorMode::Color,
         },
         (Profiles::bundled(), "balanced".into()),
     )
@@ -252,6 +255,7 @@ fn meter_app_from(catalog: &str) -> App {
         UiDiscovery {
             palette_entries: Vec::new(),
             credentialed_providers: Vec::new(),
+            color_mode: ColorMode::Color,
         },
         (Profiles::bundled(), "balanced".into()),
     )
@@ -275,6 +279,7 @@ fn picker_app() -> App {
         UiDiscovery {
             palette_entries: Vec::new(),
             credentialed_providers: vec!["alpha".into(), "beta".into()],
+            color_mode: ColorMode::Color,
         },
         (Profiles::bundled(), "balanced".into()),
     )
@@ -394,6 +399,58 @@ fn timeline_event_on(route_id: &str, task: &str, answer: &str) -> AgentEvent {
 }
 
 #[test]
+fn no_color_resolver_follows_non_empty_presence_without_reading_the_environment() {
+    assert_eq!(resolve_color_mode(None), ColorMode::Color);
+    assert_eq!(resolve_color_mode(Some(OsStr::new(""))), ColorMode::Color);
+    assert_eq!(
+        resolve_color_mode(Some(OsStr::new("0"))),
+        ColorMode::NoColor
+    );
+}
+
+#[test]
+fn absent_or_empty_no_color_preserves_rendered_colour() {
+    for value in [None, Some(OsStr::new(""))] {
+        let mut app = test_app(None);
+        app.color_mode = resolve_color_mode(value);
+        let buffer = render_buffer(&app, 90, 20);
+        let (title_x, title_y) = find_ascii_text(&buffer, "nosis");
+        let (hint_x, hint_y) = find_ascii_text(&buffer, "/ commands");
+
+        assert_eq!(buffer[(title_x, title_y)].fg, Color::White);
+        assert!(buffer[(title_x, title_y)].modifier.contains(Modifier::BOLD));
+        assert_eq!(buffer[(hint_x, hint_y)].fg, Color::DarkGray);
+        assert!(buffer[(hint_x, hint_y)].modifier.contains(Modifier::DIM));
+    }
+}
+
+#[test]
+fn no_color_render_suppresses_only_colour_and_keeps_modifiers() {
+    let mut app = test_app(None);
+    app.color_mode = ColorMode::NoColor;
+    let base = render_buffer(&app, 90, 20);
+    let (title_x, title_y) = find_ascii_text(&base, "nosis");
+    let (hint_x, hint_y) = find_ascii_text(&base, "/ commands");
+
+    assert!(base
+        .content
+        .iter()
+        .all(|cell| cell.fg == Color::Reset && cell.bg == Color::Reset));
+    assert!(base[(title_x, title_y)].modifier.contains(Modifier::BOLD));
+    assert!(base[(hint_x, hint_y)].modifier.contains(Modifier::DIM));
+
+    app.status = Status::Working;
+    let (event, _answer) = approval("cargo test --workspace");
+    apply_event(&mut app, event);
+    let waiting = render_buffer(&app, 100, 20);
+    let (approval_x, approval_y) = find_ascii_text(&waiting, "approve:");
+    let approval_cell = &waiting[(approval_x, approval_y)];
+    assert_eq!(approval_cell.fg, Color::Reset);
+    assert_eq!(approval_cell.bg, Color::Reset);
+    assert!(approval_cell.modifier.contains(Modifier::REVERSED));
+}
+
+#[test]
 fn outer_frame_and_each_status_word_render() {
     let cases = [
         (Status::Idle, "○ IDLE"),
@@ -420,7 +477,7 @@ fn outer_frame_and_each_status_word_render() {
 #[test]
 fn blocked_status_chip_renders_budget_reason() {
     let status = Status::Blocked(BUDGET_REASON.into());
-    let (label, style) = status_chip(&status, None, fixed_at());
+    let (label, style) = status_chip(&status, None, fixed_at(), usize::MAX);
     assert_eq!(label, "● BLOCKED - budget reached");
     assert_eq!(style.fg, Some(Color::Red));
     assert!(style.add_modifier.contains(Modifier::BOLD));
@@ -437,7 +494,7 @@ fn blocked_status_chip_renders_budget_reason() {
 #[test]
 fn blocked_status_chip_uses_only_the_first_non_empty_reason_line() {
     let status = Status::Blocked("\r\n  first line  \rsecond line\nthird line".into());
-    let (label, _) = status_chip(&status, None, fixed_at());
+    let (label, _) = status_chip(&status, None, fixed_at(), usize::MAX);
     assert_eq!(label, "● BLOCKED - first line");
     assert!(!label.contains('\n'), "got: {label:?}");
     assert!(!label.contains('\r'), "got: {label:?}");
@@ -456,7 +513,7 @@ fn blocked_status_chip_uses_only_the_first_non_empty_reason_line() {
 #[test]
 fn blocked_status_chip_caps_long_reasons_and_appends_ellipsis() {
     let status = Status::Blocked("x".repeat(40));
-    let (label, _) = status_chip(&status, None, fixed_at());
+    let (label, _) = status_chip(&status, None, fixed_at(), usize::MAX);
     let expected = format!("● BLOCKED - {}…", "x".repeat(32));
     assert_eq!(label, expected);
     assert!(label.ends_with('…'));
@@ -472,7 +529,7 @@ fn blocked_status_chip_caps_long_reasons_and_appends_ellipsis() {
 fn blocked_status_chip_omits_separator_for_blank_reasons() {
     for reason in ["", "   "] {
         let status = Status::Blocked(reason.into());
-        let (label, _) = status_chip(&status, None, fixed_at());
+        let (label, _) = status_chip(&status, None, fixed_at(), usize::MAX);
         assert_eq!(label, "● BLOCKED");
         assert!(!label.ends_with('-'));
 
@@ -505,6 +562,169 @@ fn idle_hint_bar_keeps_enter_send() {
         rendered.contains("/ commands   ↑↓ scroll   Ctrl+F search   Enter send   Ctrl+C quit"),
         "got: {rendered}"
     );
+}
+
+#[test]
+fn help_overlay_and_hint_bar_render_from_the_same_binding_table() {
+    let mut app = test_app(None);
+    let base = buffer_text(&render_buffer(&app, 100, 24));
+    let expected_hint = key_hint_line(false);
+    assert!(base.contains(&expected_hint), "got: {base}");
+
+    assert_eq!(
+        reduce_key(&mut app, code_key(KeyCode::F(1))),
+        UiAction::None
+    );
+    assert_eq!(app.overlay, Overlay::Help);
+    let help = buffer_text(&render_buffer(&app, 100, 24));
+    assert!(help.contains("Help · read-only"), "got: {help}");
+    assert!(help.contains("Key bindings · Esc close"), "got: {help}");
+    for binding in visible_key_bindings(false) {
+        let description = format!("{}{}", binding.action, binding.detail);
+        assert!(
+            help.contains(binding.keys),
+            "missing {:?}: {help}",
+            binding.keys
+        );
+        assert!(
+            help.contains(&description),
+            "missing {description:?}: {help}"
+        );
+    }
+}
+
+#[test]
+fn budget_reached_hides_send_from_both_key_surfaces() {
+    let mut app = test_app(Some(0));
+    let base = buffer_text(&render_buffer(&app, 100, 24));
+    assert!(!base.contains("Enter send"), "got: {base}");
+
+    reduce_key(&mut app, code_key(KeyCode::F(1)));
+    let help = buffer_text(&render_buffer(&app, 100, 24));
+    assert!(!help.contains("Enter"), "got: {help}");
+    assert!(!help.contains("send task"), "got: {help}");
+}
+
+#[test]
+fn question_mark_opens_help_only_for_an_empty_input() {
+    let mut empty = test_app(None);
+    assert_eq!(reduce_key(&mut empty, char_key('?')), UiAction::None);
+    assert_eq!(empty.overlay, Overlay::Help);
+    assert!(empty.input.is_empty());
+    assert_eq!(
+        reduce_key(&mut empty, code_key(KeyCode::Esc)),
+        UiAction::None
+    );
+    assert_eq!(empty.overlay, Overlay::None);
+
+    let mut composing = test_app(None);
+    type_text(&mut composing, "why");
+    assert_eq!(reduce_key(&mut composing, char_key('?')), UiAction::None);
+    assert_eq!(composing.input, "why?");
+    assert_eq!(composing.overlay, Overlay::None);
+}
+
+#[test]
+fn ctrl_w_deletes_trailing_space_then_the_previous_word() {
+    let mut app = test_app(None);
+    app.input = "alpha beta   ".into();
+    app.pending_send = true;
+
+    assert_eq!(reduce_key(&mut app, ctrl_key('w')), UiAction::None);
+    assert_eq!(app.input, "alpha ");
+    assert!(app.pending_send);
+    let rendered = buffer_text(&render_buffer(&app, 90, 20));
+    assert!(rendered.contains("❯ [queued] alpha "), "got: {rendered}");
+    assert!(!rendered.contains("beta"), "got: {rendered}");
+
+    assert_eq!(reduce_key(&mut app, ctrl_key('w')), UiAction::None);
+    assert!(app.input.is_empty());
+    assert!(!app.pending_send);
+}
+
+#[test]
+fn ctrl_word_delete_aliases_match_ctrl_w_but_plain_backspace_does_not() {
+    for key in [
+        KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL),
+        ctrl_key('h'),
+        KeyEvent::new(
+            KeyCode::Char('H'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ),
+    ] {
+        let mut app = test_app(None);
+        app.input = "one two".into();
+        reduce_key(&mut app, key);
+        assert_eq!(app.input, "one ");
+    }
+
+    let mut app = test_app(None);
+    app.input = "one two".into();
+    reduce_key(&mut app, code_key(KeyCode::Backspace));
+    assert_eq!(app.input, "one tw");
+}
+
+#[test]
+fn word_and_line_deletion_work_while_composing_a_queued_task() {
+    let mut app = test_app(None);
+    app.status = Status::Working;
+    type_text(&mut app, "queued words");
+    reduce_key(&mut app, code_key(KeyCode::Enter));
+    assert!(app.pending_send);
+
+    reduce_key(&mut app, ctrl_key('w'));
+    assert_eq!(app.input, "queued ");
+    assert!(app.pending_send);
+    let rendered = buffer_text(&render_buffer(&app, 90, 20));
+    assert!(rendered.contains("[queued] queued "), "got: {rendered}");
+
+    reduce_key(&mut app, ctrl_key('u'));
+    assert!(app.input.is_empty());
+    assert!(!app.pending_send);
+    let rendered = buffer_text(&render_buffer(&app, 90, 20));
+    assert!(!rendered.contains("[queued]"), "got: {rendered}");
+}
+
+#[test]
+fn ctrl_u_clears_the_idle_input_and_pending_marker() {
+    let mut app = test_app(None);
+    app.input = "whole line".into();
+    app.pending_send = true;
+    assert_eq!(reduce_key(&mut app, ctrl_key('u')), UiAction::None);
+    assert!(app.input.is_empty());
+    assert!(!app.pending_send);
+}
+
+#[test]
+fn word_and_line_deletion_stay_live_in_the_slash_command_menu() {
+    let mut app = test_app(None);
+    type_text(&mut app, "/model other-route");
+    assert!(matches!(app.overlay, Overlay::CommandMenu { .. }));
+
+    reduce_key(&mut app, ctrl_key('w'));
+    assert_eq!(app.input, "/model ");
+    assert!(matches!(app.overlay, Overlay::CommandMenu { selected: 0 }));
+
+    reduce_key(&mut app, ctrl_key('u'));
+    assert!(app.input.is_empty());
+    assert!(!app.pending_send);
+    assert_eq!(app.overlay, Overlay::None);
+}
+
+#[test]
+fn f1_opens_read_only_help_without_changing_composed_input() {
+    let mut app = test_app(None);
+    type_text(&mut app, "draft");
+    assert_eq!(
+        reduce_key(&mut app, code_key(KeyCode::F(1))),
+        UiAction::None
+    );
+    assert_eq!(app.overlay, Overlay::Help);
+    assert_eq!(app.input, "draft");
+
+    assert_eq!(reduce_key(&mut app, char_key('x')), UiAction::None);
+    assert_eq!(app.overlay, Overlay::Help);
+    assert_eq!(app.input, "draft");
 }
 
 #[test]
@@ -578,6 +798,28 @@ fn blocked_reason_stays_on_the_header_at_realistic_width() {
             .all(|row| !row.contains("● BLOCKED - budget reached")),
         "got: {}",
         rows.join("\n")
+    );
+}
+
+#[test]
+fn long_blocked_reason_keeps_both_titles_readable_at_width_eighty() {
+    let mut app = test_app(None);
+    app.status = Status::Blocked("x".repeat(100));
+    let rows = buffer_rows(&render_buffer(&app, 80, 20));
+    let header = &rows[0];
+
+    assert!(header.contains("● BLOCKED - "), "got: {header}");
+    assert!(
+        header.contains("test-route · effort: none"),
+        "got: {header}"
+    );
+    let expected_join = format!(
+        "● BLOCKED - {}… ─ test-route · effort: none ",
+        "x".repeat(27)
+    );
+    assert!(
+        header.contains(&expected_join),
+        "titles must remain separated by the border: {header}"
     );
 }
 
@@ -658,6 +900,7 @@ fn modal_frames_clear_transcript_for_every_overlay() {
             modal_area(terminal, 14),
             "Commands",
         ),
+        (Overlay::Help, modal_area(terminal, 18), "Help · read-only"),
         (
             Overlay::TrustDial,
             modal_area(terminal, 8),
@@ -729,6 +972,7 @@ fn every_new_surface_scrubs_literals_and_control_characters() {
         UiDiscovery {
             palette_entries: Vec::new(),
             credentialed_providers: Vec::new(),
+            color_mode: ColorMode::Color,
         },
         (Profiles::bundled(), "balanced".into()),
     );
@@ -1353,7 +1597,7 @@ fn timeline_reducer_scrubs_and_enter_inspects_the_selected_turn() {
 
 #[test]
 fn printable_words_type_freely_without_opening_overlays() {
-    for word in ["list", "trust", "quit", "?", "R"] {
+    for word in ["list", "trust", "quit", "R"] {
         let mut app = test_app(None);
         type_text(&mut app, word);
 
@@ -3190,7 +3434,7 @@ fn heartbeat_formats_two_elapsed_deltas() {
     let now = fixed_at();
     for (seconds, expected) in [(2, "● WORKING · 2s"), (34, "● WORKING · 34s")] {
         let since = now - chrono::Duration::seconds(seconds);
-        let (label, _) = status_chip(&Status::Working, Some(since), now);
+        let (label, _) = status_chip(&Status::Working, Some(since), now, usize::MAX);
         assert_eq!(label, expected);
     }
 }
@@ -3277,11 +3521,66 @@ fn teaching_error_contains_cause_and_next_action() {
 #[test]
 fn taskbar_semaforo_writes_only_on_waiting_transitions() {
     let mut bytes = Vec::new();
-    emit_taskbar_transition(&mut bytes, &Status::Working, &Status::Waiting).unwrap();
-    emit_taskbar_transition(&mut bytes, &Status::Waiting, &Status::Waiting).unwrap();
-    emit_taskbar_transition(&mut bytes, &Status::Waiting, &Status::Working).unwrap();
+    let now = fixed_at();
+    emit_taskbar_transition(&mut bytes, &Status::Working, &Status::Waiting, None, now).unwrap();
+    emit_taskbar_transition(&mut bytes, &Status::Waiting, &Status::Waiting, None, now).unwrap();
+    emit_taskbar_transition(&mut bytes, &Status::Waiting, &Status::Working, None, now).unwrap();
     assert_eq!(&bytes[..TASKBAR_WAITING.len()], TASKBAR_WAITING);
     assert_eq!(&bytes[TASKBAR_WAITING.len()..], TASKBAR_CLEAR);
+}
+
+#[test]
+fn turn_finish_sets_idle_title_without_bell_under_threshold() {
+    let now = fixed_at();
+    let mut bytes = Vec::new();
+    emit_taskbar_transition(
+        &mut bytes,
+        &Status::Working,
+        &Status::Idle,
+        Some(now - chrono::Duration::seconds(9)),
+        now,
+    )
+    .unwrap();
+
+    let mut expected = TASKBAR_CLEAR.to_vec();
+    expected.extend_from_slice(TITLE_IDLE);
+    assert_eq!(bytes, expected);
+}
+
+#[test]
+fn long_turn_finish_sets_blocked_title_and_rings_once() {
+    let now = fixed_at();
+    let mut bytes = Vec::new();
+    emit_taskbar_transition(
+        &mut bytes,
+        &Status::Working,
+        &Status::Blocked("offline".into()),
+        Some(now - chrono::Duration::seconds(10)),
+        now,
+    )
+    .unwrap();
+
+    let mut expected = TASKBAR_CLEAR.to_vec();
+    expected.extend_from_slice(TITLE_BLOCKED);
+    expected.push(b'\x07');
+    assert_eq!(bytes, expected);
+    assert!(!String::from_utf8_lossy(&bytes).contains("offline"));
+}
+
+#[test]
+fn non_finish_transition_emits_no_turn_signal() {
+    let now = fixed_at();
+    let mut bytes = Vec::new();
+    emit_taskbar_transition(
+        &mut bytes,
+        &Status::Idle,
+        &Status::Blocked("offline".into()),
+        Some(now - chrono::Duration::seconds(20)),
+        now,
+    )
+    .unwrap();
+
+    assert!(bytes.is_empty());
 }
 
 #[test]
@@ -3334,6 +3633,132 @@ fn budget_reached_blocks_and_refuses_another_dispatch() {
 }
 
 #[test]
+fn measured_usage_warns_once_when_it_crosses_eighty_percent() {
+    let mut app = test_app(Some(100));
+    apply_event(
+        &mut app,
+        AgentEvent::Usage(Usage {
+            prompt_tokens: 78,
+            completion_tokens: 1,
+            cached_tokens: Some(0),
+            evidence: UsageEvidence::Measured,
+        }),
+    );
+    assert!(!app.budget_warned);
+    assert!(app
+        .transcript
+        .iter()
+        .all(|line| !line.text.starts_with("budget warning:")));
+
+    apply_event(
+        &mut app,
+        AgentEvent::Usage(Usage {
+            prompt_tokens: 79,
+            completion_tokens: 1,
+            cached_tokens: Some(0),
+            evidence: UsageEvidence::Measured,
+        }),
+    );
+    assert!(app.budget_warned);
+    let warning = "budget warning: 80 tokens used of 100 budget - session will stop at the budget";
+    assert_eq!(
+        app.transcript
+            .iter()
+            .filter(|line| line.text == warning)
+            .count(),
+        1
+    );
+    let rendered = buffer_text(&render_buffer(&app, 100, 20));
+    assert!(rendered.contains(warning), "got: {rendered}");
+
+    apply_event(
+        &mut app,
+        AgentEvent::Usage(Usage {
+            prompt_tokens: 88,
+            completion_tokens: 2,
+            cached_tokens: Some(0),
+            evidence: UsageEvidence::Measured,
+        }),
+    );
+    assert_eq!(
+        app.transcript
+            .iter()
+            .filter(|line| line.text.starts_with("budget warning:"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn measured_usage_that_immediately_blocks_does_not_add_an_approach_warning() {
+    let mut app = test_app(Some(100));
+    apply_event(
+        &mut app,
+        AgentEvent::Usage(Usage {
+            prompt_tokens: 100,
+            completion_tokens: 1,
+            cached_tokens: Some(0),
+            evidence: UsageEvidence::Measured,
+        }),
+    );
+
+    assert_eq!(app.status, Status::Blocked(BUDGET_REASON.into()));
+    assert!(!app.budget_warned);
+    let rendered = buffer_text(&render_buffer(&app, 100, 20));
+    assert!(!rendered.contains("budget warning:"), "got: {rendered}");
+}
+
+#[test]
+fn unmeasured_usage_produces_no_budget_warning_line() {
+    for evidence in [UsageEvidence::Partial, UsageEvidence::Unknown] {
+        let mut app = test_app(Some(100));
+        apply_event(
+            &mut app,
+            AgentEvent::Usage(Usage {
+                prompt_tokens: 85,
+                completion_tokens: 0,
+                cached_tokens: None,
+                evidence,
+            }),
+        );
+
+        assert!(!app.budget_warned);
+        assert!(app
+            .transcript
+            .iter()
+            .all(|line| !line.text.starts_with("budget warning:")));
+        let rendered = buffer_text(&render_buffer(&app, 100, 20));
+        assert!(!rendered.contains("budget warning:"), "got: {rendered}");
+    }
+}
+
+#[test]
+fn budget_warning_threshold_rounds_up_for_non_multiple_budgets() {
+    let mut app = test_app(Some(101));
+    apply_event(
+        &mut app,
+        AgentEvent::Usage(Usage {
+            prompt_tokens: 80,
+            completion_tokens: 0,
+            cached_tokens: Some(0),
+            evidence: UsageEvidence::Measured,
+        }),
+    );
+    assert!(!app.budget_warned);
+
+    apply_event(
+        &mut app,
+        AgentEvent::Usage(Usage {
+            prompt_tokens: 81,
+            completion_tokens: 0,
+            cached_tokens: Some(0),
+            evidence: UsageEvidence::Measured,
+        }),
+    );
+    assert!(app.budget_warned);
+}
+
+#[test]
 fn rendered_line_is_redacted_and_has_no_control_characters() {
     let secret = "hunter2-fake-tui-secret";
     let scrubber = Arc::new(RwLock::new(Scrubber::new(vec![secret.into()])));
@@ -3352,6 +3777,7 @@ fn rendered_line_is_redacted_and_has_no_control_characters() {
         UiDiscovery {
             palette_entries: Vec::new(),
             credentialed_providers: Vec::new(),
+            color_mode: ColorMode::Color,
         },
         (Profiles::bundled(), "balanced".into()),
     );
@@ -3390,6 +3816,7 @@ fn rendered_overlay_scrubs_descriptions_and_control_characters() {
                 action: PaletteAction::Describe,
             }],
             credentialed_providers: Vec::new(),
+            color_mode: ColorMode::Color,
         },
         (Profiles::bundled(), "balanced".into()),
     );

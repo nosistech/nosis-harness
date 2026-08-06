@@ -30,6 +30,7 @@ fn terminal_setup_tracks_only_modes_it_enables() {
             SetupCommand::EnterScreen,
             SetupCommand::EnablePaste,
             SetupCommand::HideCursor,
+            SetupCommand::SetTitle,
         ],
         "setup must enable only the modes owned by this TUI"
     );
@@ -53,12 +54,29 @@ fn restore_failure_does_not_suppress_later_commands() {
     assert_eq!(
         commands,
         [
+            RestoreCommand::ClearTitle,
             RestoreCommand::DisablePaste,
             RestoreCommand::ShowCursor,
             RestoreCommand::LeaveScreen,
         ],
         "every later inverse must run after an earlier failure"
     );
+}
+
+#[test]
+fn restoration_clears_a_title_only_after_setup_owned_it() {
+    let state = TerminalStateHandle::default();
+    state.mark_setup(SetupCommand::SetTitle);
+    let mut commands = Vec::new();
+
+    run_owned_restore_sequence(&state, |command| {
+        commands.push(command);
+        Ok(())
+    })
+    .unwrap();
+
+    assert_eq!(commands, [RestoreCommand::ClearTitle]);
+    assert!(!state.owns_restore(RestoreCommand::ClearTitle));
 }
 
 #[test]

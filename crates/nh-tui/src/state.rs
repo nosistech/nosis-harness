@@ -1,10 +1,10 @@
 //! TUI domain state, immutable configuration, and application state transitions.
 
-use crate::palette::{builtin_palette_entries, short_text};
+use crate::palette::{builtin_palette_entries, short_text, ColorMode};
 use crate::render::budget_bar;
 use crate::session::{effort_for, effort_name, safe_line, scrub_full_line};
 use crate::worker::ApprovalRequest;
-use crate::{SharedScrubber, BUDGET_REASON};
+use crate::{SharedScrubber, BUDGET_REASON, BUDGET_WARN_FRACTION};
 use chrono::{DateTime, FixedOffset, Utc};
 use nh_core::agent::CompactionEvent;
 use nh_core::receipt::{CompactionStats, FailureClass, Outcome, Receipt};
@@ -180,6 +180,7 @@ pub(super) enum Overlay {
     CommandMenu {
         selected: usize,
     },
+    Help,
     TrustDial,
     Timeline {
         selected: usize,
@@ -242,6 +243,7 @@ pub struct TuiConfig {
 pub(super) struct UiDiscovery {
     pub(super) palette_entries: Vec<PaletteEntry>,
     pub(super) credentialed_providers: Vec<String>,
+    pub(super) color_mode: ColorMode,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -296,6 +298,8 @@ pub struct App {
     pub(super) input: String,
     pub(super) pending_send: bool,
     pub(super) budget: Option<u64>,
+    pub(super) budget_warned: bool,
+    pub(super) color_mode: ColorMode,
     pub(super) scroll_back: usize,
     pub(super) max_scroll: Cell<usize>,
     pub(super) search_match_scroll: Cell<usize>,
@@ -328,6 +332,7 @@ impl App {
         let UiDiscovery {
             palette_entries: mcp_entries,
             credentialed_providers,
+            color_mode,
         } = discovery;
         let mut palette_entries = builtin_palette_entries();
         palette_entries.extend(mcp_entries);
@@ -357,6 +362,8 @@ impl App {
             input: String::new(),
             pending_send: false,
             budget,
+            budget_warned: false,
+            color_mode,
             scroll_back: 0,
             max_scroll: Cell::new(0),
             search_match_scroll: Cell::new(0),
@@ -443,6 +450,32 @@ impl App {
         self.budget
             .zip(self.used_tokens())
             .is_some_and(|(limit, used)| used >= limit)
+    }
+
+    pub(super) fn warn_before_budget(&mut self) {
+        if self.budget_warned || self.budget_reached() {
+            return;
+        }
+        let Some(usage) = self.usage.as_ref() else {
+            return;
+        };
+        if !usage.evidence.is_measured() {
+            return;
+        }
+        let Some((limit, used)) = self.budget.zip(self.used_tokens()) else {
+            return;
+        };
+        if used < budget_warning_threshold(limit) {
+            return;
+        }
+
+        self.budget_warned = true;
+        self.push_line(
+            &format!(
+                "budget warning: {used} tokens used of {limit} budget - session will stop at the budget"
+            ),
+            TranscriptKind::Progress,
+        );
     }
 
     pub(super) fn dispatch(&mut self) -> Option<String> {
@@ -778,6 +811,13 @@ fn budget_pct(used: u64, limit: u64) -> u64 {
         used.saturating_mul(100).checked_div(limit).unwrap_or(100)
     }
     .min(100)
+}
+
+fn budget_warning_threshold(limit: u64) -> u64 {
+    let (numerator, denominator) = BUDGET_WARN_FRACTION;
+    let whole = limit / denominator * numerator;
+    let remainder = limit % denominator * numerator;
+    whole.saturating_add(remainder.div_ceil(denominator))
 }
 
 impl Drop for App {
