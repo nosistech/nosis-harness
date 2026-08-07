@@ -6,19 +6,25 @@ use crate::session::{effort_for, effort_name, safe_line, scrub_full_line};
 use crate::worker::ApprovalRequest;
 use crate::{SharedScrubber, BUDGET_REASON, BUDGET_WARN_FRACTION};
 use chrono::{DateTime, FixedOffset, Utc};
-use nh_core::agent::CompactionEvent;
+use nh_core::agent::{estimate_message_tokens, CompactionEvent};
 use nh_core::receipt::{CompactionStats, FailureClass, Outcome, Receipt, ReceiptKind};
 use nh_core::session_ledger::RestoredSession;
-use nh_core::wire::{cache_hit_pct, ThinkingEffort, Usage, UsageEvidence};
+use nh_core::wire::{cache_hit_pct, ChatMessage, ThinkingEffort, Usage, UsageEvidence};
 use nh_law::{Law, PolicyView};
 use nh_routes::{
-    format_context_percent, money, money_with_gloss, Currency, PriceConfidence, Profiles,
+    cost_of, format_context_percent, money, money_with_gloss, Currency, PriceConfidence, Profiles,
     ResolvedRoute, RouteClass, RouteResolver,
 };
 use std::cell::Cell;
+use std::collections::{btree_map::Entry, BTreeMap};
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
+
+pub(super) const MIN_TYPICAL_DURATION_SAMPLES: usize = 5;
+pub(super) const PROMPT_ESTIMATE_UNAVAILABLE: u64 = u64::MAX;
 
 /// The single status shown by the semáforo.
 #[derive(Debug, Clone, PartialEq)]
@@ -39,6 +45,7 @@ pub struct TimelineEntry {
     pub task: String,
     pub turns: u32,
     pub tool_calls: u32,
+    pub duration_ms: Option<u64>,
     pub kind: ReceiptKind,
     pub outcome: Outcome,
     pub failure_class: Option<FailureClass>,
@@ -70,6 +77,7 @@ impl TimelineEntry {
             task: short_text(&receipt.task, 120),
             turns: receipt.turns,
             tool_calls: receipt.tool_calls,
+            duration_ms: receipt.duration_ms,
             kind: receipt.kind,
             outcome: receipt.outcome,
             failure_class: receipt.failure_class,
@@ -245,10 +253,12 @@ pub struct TuiConfig {
     pub resume: Option<RestoredSession>,
 }
 
-pub(super) struct UiDiscovery {
+pub(super) struct UiInputs {
     pub(super) palette_entries: Vec<PaletteEntry>,
     pub(super) credentialed_providers: Vec<String>,
     pub(super) color_mode: ColorMode,
+    pub(super) route_timing_history: RouteTimingHistory,
+    pub(super) prompt_base_tokens: Arc<AtomicU64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -285,6 +295,71 @@ pub(super) struct ActiveModel {
     pub(super) started_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Default)]
+pub(super) struct RouteTimingHistory {
+    durations_by_route: BTreeMap<String, Vec<u64>>,
+}
+
+impl RouteTimingHistory {
+    pub(super) fn from_receipts(
+        resolver: &RouteResolver,
+        receipts: impl IntoIterator<Item = Receipt>,
+    ) -> Self {
+        let mut unique_route_by_model = BTreeMap::<String, Option<String>>::new();
+        for route_id in resolver.available() {
+            let Ok(route) = resolver.resolve(&route_id) else {
+                continue;
+            };
+            match unique_route_by_model.entry(route.model_id().to_owned()) {
+                Entry::Vacant(entry) => {
+                    entry.insert(Some(route.id().to_owned()));
+                }
+                Entry::Occupied(mut entry) => {
+                    entry.insert(None);
+                }
+            }
+        }
+
+        let mut history = Self::default();
+        for receipt in receipts {
+            let Some(Some(route_id)) = unique_route_by_model.get(&receipt.model_id) else {
+                continue;
+            };
+            history.record(route_id, &receipt);
+        }
+        history
+    }
+
+    pub(super) fn record(&mut self, route_id: &str, receipt: &Receipt) {
+        if receipt.kind != ReceiptKind::Task || receipt.outcome != Outcome::Pass {
+            return;
+        }
+        let Some(duration_ms) = receipt.duration_ms else {
+            return;
+        };
+        let durations = self
+            .durations_by_route
+            .entry(route_id.to_owned())
+            .or_default();
+        let index = durations.partition_point(|duration| *duration <= duration_ms);
+        durations.insert(index, duration_ms);
+    }
+
+    pub(super) fn typical_for(&self, route_id: &str) -> Option<u64> {
+        let durations = self.durations_by_route.get(route_id)?;
+        if durations.len() < MIN_TYPICAL_DURATION_SAMPLES {
+            return None;
+        }
+        let upper = durations[durations.len() / 2];
+        if durations.len() % 2 == 1 {
+            Some(upper)
+        } else {
+            let lower = durations[durations.len() / 2 - 1];
+            Some(lower.saturating_add(upper.saturating_sub(lower) / 2))
+        }
+    }
+}
+
 /// Unit-testable state for the renderer.
 pub struct App {
     pub(super) status: Status,
@@ -318,6 +393,9 @@ pub struct App {
     pub(super) timeline: Vec<TimelineEntry>,
     pub(super) current_task_compaction: CompactionStats,
     pub(super) last_compaction_hud: Option<String>,
+    pub(super) route_timing_history: RouteTimingHistory,
+    pub(super) typical_duration_ms: Option<u64>,
+    pub(super) prompt_base_tokens: Arc<AtomicU64>,
     pub(super) session_cost: Vec<SessionCost>,
     pub(super) session_cost_incomplete: bool,
     pub(super) session_allow: Vec<String>,
@@ -331,18 +409,21 @@ impl App {
         budget: Option<u64>,
         scrubber: SharedScrubber,
         policy_view: PolicyView,
-        discovery: UiDiscovery,
+        inputs: UiInputs,
         profile_config: (Profiles, String),
     ) -> Self {
         let (profiles, active_profile) = profile_config;
-        let UiDiscovery {
+        let UiInputs {
             palette_entries: mcp_entries,
             credentialed_providers,
             color_mode,
-        } = discovery;
+            route_timing_history,
+            prompt_base_tokens,
+        } = inputs;
         let mut palette_entries = builtin_palette_entries();
         palette_entries.extend(mcp_entries);
         let execution_policy = profiles.effective(&active_profile, &route);
+        let typical_duration_ms = route_timing_history.typical_for(route.id());
         Self {
             status: if budget == Some(0) {
                 Status::Blocked(BUDGET_REASON.into())
@@ -383,6 +464,9 @@ impl App {
             timeline: Vec::new(),
             current_task_compaction: CompactionStats::default(),
             last_compaction_hud: None,
+            route_timing_history,
+            typical_duration_ms,
+            prompt_base_tokens,
             session_cost: Vec::new(),
             session_cost_incomplete: false,
             session_allow: Vec::new(),
@@ -525,6 +609,8 @@ impl App {
         self.effort = effort_for(policy.posture, route.thinking_dialect(), route.wire());
         self.active_profile = policy.profile;
         self.route = route;
+        self.refresh_typical_duration();
+        self.invalidate_prompt_estimate();
         self.push_line(
             &format!(
                 "switched to {} - context kept, cache resets",
@@ -536,6 +622,7 @@ impl App {
 
     pub(super) fn set_effort(&mut self, effort: ThinkingEffort) {
         self.effort = effort;
+        self.invalidate_prompt_estimate();
         self.push_line(
             &format!("reasoning effort set to {}", effort_name(effort)),
             TranscriptKind::Progress,
@@ -597,6 +684,59 @@ impl App {
 
     pub(super) fn mark_session_cost_incomplete(&mut self) {
         self.session_cost_incomplete = true;
+    }
+
+    pub(super) fn record_route_duration(&mut self, route_id: &str, receipt: &Receipt) {
+        let route_matches_receipt = self
+            .resolver
+            .resolve(route_id)
+            .ok()
+            .is_some_and(|route| route.model_id() == receipt.model_id);
+        if !route_matches_receipt {
+            return;
+        }
+        self.route_timing_history.record(route_id, receipt);
+        if route_id == self.route.id() {
+            self.refresh_typical_duration();
+        }
+    }
+
+    fn refresh_typical_duration(&mut self) {
+        self.typical_duration_ms = self.route_timing_history.typical_for(self.route.id());
+    }
+
+    pub(super) fn invalidate_prompt_estimate(&self) {
+        self.prompt_base_tokens
+            .store(PROMPT_ESTIMATE_UNAVAILABLE, Ordering::Release);
+    }
+
+    pub(super) fn prompt_cost_preview(&self, now: DateTime<Utc>) -> Option<String> {
+        if !matches!(self.status, Status::Idle | Status::Blocked(_)) || self.pending_send {
+            return None;
+        }
+        let task = self.input.trim();
+        if task.is_empty() || task.starts_with('/') || self.route.class() != RouteClass::Api {
+            return None;
+        }
+        let base_tokens = self.prompt_base_tokens.load(Ordering::Acquire);
+        if base_tokens == PROMPT_ESTIMATE_UNAVAILABLE {
+            return None;
+        }
+        let message = ChatMessage {
+            role: "user".into(),
+            content: Some(task.to_owned()),
+            parts: None,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        };
+        let prompt_tokens = base_tokens.saturating_add(estimate_message_tokens(&[message], false));
+        let quote = self.route.price_at(now)?;
+        let amount = cost_of(&quote, prompt_tokens, 0, 0)?;
+        let display = money_with_gloss(amount, quote.currency, self.resolver.fx(), now);
+        Some(format!(
+            "prompt ~{display} estimated if uncached; output unknown"
+        ))
     }
 
     pub(super) fn session_money(&self, now: DateTime<Utc>) -> String {
@@ -714,6 +854,10 @@ impl App {
         if let Some(compaction) = &self.last_compaction_hud {
             line.push_str(" · ");
             line.push_str(compaction);
+        }
+        if let Some(preview) = self.prompt_cost_preview(now) {
+            line.push_str(" · ");
+            line.push_str(&preview);
         }
         if let Some(peak_status) = self.route.peak_status(now, self.local_offset) {
             line.push_str(" · ");

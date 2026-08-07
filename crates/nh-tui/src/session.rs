@@ -3,7 +3,9 @@
 use crate::input::{handle_action, handle_input_event, reduce_agent_event};
 use crate::palette::resolve_color_mode;
 use crate::render::render;
-use crate::state::{AgentEvent, App, Status, TranscriptKind, TuiConfig, UiDiscovery};
+use crate::state::{
+    AgentEvent, App, RouteTimingHistory, Status, TranscriptKind, TuiConfig, UiInputs,
+};
 use crate::terminal::{with_terminal_panic_hook, PanicAbort, TerminalGuard, TerminalStateHandle};
 use crate::timeline::record_restored_turn_cost;
 use crate::worker::{spawn_worker, Worker, WorkerConfig, WorkerShutdown, SHUTDOWN_TIMEOUT};
@@ -15,6 +17,7 @@ use anyhow::Context as _;
 use chrono::{DateTime, Utc};
 use crossterm::event;
 use nh_core::credential;
+use nh_core::receipt::{parse_receipt_jsonl, read_receipt_tail};
 use nh_core::session_ledger::{RestoredSession, Surface};
 use nh_core::wire::{resolve_effort, ThinkingEffort};
 use nh_routes::{ResolvedRoute, RouteClass, ThinkingDialect, ThinkingPosture, Wire};
@@ -163,6 +166,15 @@ pub(super) fn run_tui_session(
         credentialed_providers,
         resume,
     } = config;
+    let (route_timing_history, timing_history_unavailable) = match read_receipt_tail(&repo_root)
+        .and_then(|bytes| parse_receipt_jsonl(&bytes, usize::MAX))
+    {
+        Ok(receipts) => (
+            RouteTimingHistory::from_receipts(&resolver, receipts),
+            false,
+        ),
+        Err(_) => (RouteTimingHistory::default(), true),
+    };
     let scrubber = Arc::new(RwLock::new(Scrubber::new(Vec::new())));
     let execution_policy = profiles.effective(&profile, &route);
     let initial = connect(&route, execution_policy.output_cap);
@@ -192,13 +204,21 @@ pub(super) fn run_tui_session(
         budget,
         scrubber,
         policy_view,
-        UiDiscovery {
+        UiInputs {
             palette_entries,
             credentialed_providers,
             color_mode,
+            route_timing_history,
+            prompt_base_tokens: Arc::clone(&worker.prompt_base_tokens),
         },
         (profiles, execution_policy.profile),
     );
+    if timing_history_unavailable {
+        app.push_line(
+            "typical timing unavailable - receipt history could not be read",
+            TranscriptKind::Progress,
+        );
+    }
     if let Some(restored) = &resume_for_app {
         restore_app(&mut app, restored, &law_constitution)?;
     }

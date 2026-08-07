@@ -1,8 +1,11 @@
 use super::*;
 use crate::keymap::{key_hint_line, visible_key_bindings};
 use crate::palette::{resolve_color_mode, trust_dial_lines, ColorMode};
-use crate::state::{search_match_lines, Overlay, PickerKind, UiDiscovery};
-use crate::timeline::{timeline_detail_lines, timeline_row};
+use crate::state::{
+    search_match_lines, Overlay, PickerKind, RouteTimingHistory, UiInputs,
+    MIN_TYPICAL_DURATION_SAMPLES, PROMPT_ESTIMATE_UNAVAILABLE,
+};
+use crate::timeline::{measured_duration, timeline_detail_lines, timeline_row};
 use crate::worker::WorkerCommand;
 use chrono::{DateTime, Utc};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -211,7 +214,19 @@ fn test_route() -> ResolvedRoute {
     test_resolver().resolve("test-route").unwrap()
 }
 
+fn empty_timing_history() -> RouteTimingHistory {
+    RouteTimingHistory::default()
+}
+
+fn unavailable_prompt_estimate() -> Arc<AtomicU64> {
+    Arc::new(AtomicU64::new(PROMPT_ESTIMATE_UNAVAILABLE))
+}
+
 fn test_app(budget: Option<u64>) -> App {
+    test_app_with_timing(budget, empty_timing_history())
+}
+
+fn test_app_with_timing(budget: Option<u64>, route_timing_history: RouteTimingHistory) -> App {
     App::new(
         test_resolver(),
         test_route(),
@@ -224,10 +239,12 @@ fn test_app(budget: Option<u64>) -> App {
             block_paths: Vec::new(),
             block_commands: Vec::new(),
         },
-        UiDiscovery {
+        UiInputs {
             palette_entries: Vec::new(),
             credentialed_providers: Vec::new(),
             color_mode: ColorMode::Color,
+            route_timing_history,
+            prompt_base_tokens: unavailable_prompt_estimate(),
         },
         (Profiles::bundled(), "balanced".into()),
     )
@@ -252,10 +269,12 @@ fn meter_app_from(catalog: &str) -> App {
             block_paths: Vec::new(),
             block_commands: Vec::new(),
         },
-        UiDiscovery {
+        UiInputs {
             palette_entries: Vec::new(),
             credentialed_providers: Vec::new(),
             color_mode: ColorMode::Color,
+            route_timing_history: empty_timing_history(),
+            prompt_base_tokens: unavailable_prompt_estimate(),
         },
         (Profiles::bundled(), "balanced".into()),
     )
@@ -276,10 +295,12 @@ fn picker_app() -> App {
             block_paths: Vec::new(),
             block_commands: Vec::new(),
         },
-        UiDiscovery {
+        UiInputs {
             palette_entries: Vec::new(),
             credentialed_providers: vec!["alpha".into(), "beta".into()],
             color_mode: ColorMode::Color,
+            route_timing_history: empty_timing_history(),
+            prompt_base_tokens: unavailable_prompt_estimate(),
         },
         (Profiles::bundled(), "balanced".into()),
     )
@@ -377,6 +398,19 @@ fn receipt(task: &str, outcome: Outcome, usage: Option<Usage>) -> Receipt {
         compaction: Default::default(),
         effective_profile: None,
     }
+}
+
+fn timed_receipt(
+    model_id: &str,
+    duration_ms: Option<u64>,
+    outcome: Outcome,
+    kind: ReceiptKind,
+) -> Receipt {
+    let mut receipt = receipt("timing sample", outcome, None);
+    receipt.model_id = model_id.into();
+    receipt.duration_ms = duration_ms;
+    receipt.kind = kind;
+    receipt
 }
 
 fn timeline_event(task: &str, answer: &str) -> AgentEvent {
@@ -480,7 +514,7 @@ fn outer_frame_and_each_status_word_render() {
 #[test]
 fn blocked_status_chip_renders_budget_reason() {
     let status = Status::Blocked(BUDGET_REASON.into());
-    let (label, style) = status_chip(&status, None, fixed_at(), usize::MAX);
+    let (label, style) = status_chip(&status, None, fixed_at(), usize::MAX, None);
     assert_eq!(label, "● BLOCKED - budget reached");
     assert_eq!(style.fg, Some(Color::Red));
     assert!(style.add_modifier.contains(Modifier::BOLD));
@@ -497,7 +531,7 @@ fn blocked_status_chip_renders_budget_reason() {
 #[test]
 fn blocked_status_chip_uses_only_the_first_non_empty_reason_line() {
     let status = Status::Blocked("\r\n  first line  \rsecond line\nthird line".into());
-    let (label, _) = status_chip(&status, None, fixed_at(), usize::MAX);
+    let (label, _) = status_chip(&status, None, fixed_at(), usize::MAX, None);
     assert_eq!(label, "● BLOCKED - first line");
     assert!(!label.contains('\n'), "got: {label:?}");
     assert!(!label.contains('\r'), "got: {label:?}");
@@ -516,7 +550,7 @@ fn blocked_status_chip_uses_only_the_first_non_empty_reason_line() {
 #[test]
 fn blocked_status_chip_caps_long_reasons_and_appends_ellipsis() {
     let status = Status::Blocked("x".repeat(40));
-    let (label, _) = status_chip(&status, None, fixed_at(), usize::MAX);
+    let (label, _) = status_chip(&status, None, fixed_at(), usize::MAX, None);
     let expected = format!("● BLOCKED - {}…", "x".repeat(32));
     assert_eq!(label, expected);
     assert!(label.ends_with('…'));
@@ -532,7 +566,7 @@ fn blocked_status_chip_caps_long_reasons_and_appends_ellipsis() {
 fn blocked_status_chip_omits_separator_for_blank_reasons() {
     for reason in ["", "   "] {
         let status = Status::Blocked(reason.into());
-        let (label, _) = status_chip(&status, None, fixed_at(), usize::MAX);
+        let (label, _) = status_chip(&status, None, fixed_at(), usize::MAX, None);
         assert_eq!(label, "● BLOCKED");
         assert!(!label.ends_with('-'));
 
@@ -1019,10 +1053,12 @@ fn every_new_surface_scrubs_literals_and_control_characters() {
             block_paths: vec![format!("{modal_secret}\r\x1b[2K")],
             block_commands: Vec::new(),
         },
-        UiDiscovery {
+        UiInputs {
             palette_entries: Vec::new(),
             credentialed_providers: Vec::new(),
             color_mode: ColorMode::Color,
+            route_timing_history: empty_timing_history(),
+            prompt_base_tokens: unavailable_prompt_estimate(),
         },
         (Profiles::bundled(), "balanced".into()),
     );
@@ -1679,6 +1715,59 @@ fn timeline_entry_projects_receipt_outcome_and_tokens() {
     assert_eq!(entry.tool_calls, 2);
     assert_eq!(entry.answer, "partial answer");
     assert!(!entry.compacted);
+}
+
+#[test]
+fn completed_timeline_row_renders_measured_duration_without_an_estimate_marker() {
+    let mut app = test_app(None);
+    let mut completed = receipt("timed", Outcome::Pass, None);
+    completed.duration_ms = Some(1_234);
+    apply_event(
+        &mut app,
+        AgentEvent::TaskReceipt(TimelineSummary {
+            route_id: "test-route".into(),
+            receipt: completed,
+            answer: "done".into(),
+        }),
+    );
+    app.overlay = Overlay::Timeline {
+        selected: 0,
+        inspecting: true,
+        note: None,
+    };
+
+    let rendered = buffer_text(&render_buffer(&app, 180, 20));
+
+    assert!(rendered.contains("#1  pass  1.234s"), "got: {rendered}");
+    assert!(rendered.contains("duration: 1.234s"), "got: {rendered}");
+    assert!(!rendered.contains("~1.234s"), "got: {rendered}");
+}
+
+#[test]
+fn completed_timeline_row_without_duration_omits_it_instead_of_rendering_zero() {
+    let mut app = test_app(None);
+    apply_event(
+        &mut app,
+        AgentEvent::TaskReceipt(TimelineSummary {
+            route_id: "test-route".into(),
+            receipt: receipt("legacy", Outcome::Pass, None),
+            answer: "done".into(),
+        }),
+    );
+    app.overlay = Overlay::Timeline {
+        selected: 0,
+        inspecting: true,
+        note: None,
+    };
+
+    let rendered = buffer_text(&render_buffer(&app, 180, 20));
+
+    assert!(
+        rendered.contains("#1  pass  usage unreported"),
+        "got: {rendered}"
+    );
+    assert!(!rendered.contains("duration:"), "got: {rendered}");
+    assert!(!rendered.contains("  0s"), "got: {rendered}");
 }
 
 #[test]
@@ -2759,6 +2848,69 @@ fn ctrl_key(character: char) -> KeyEvent {
 }
 
 #[test]
+fn prompt_cost_preview_is_uncached_input_only_and_never_changes_measured_state() {
+    let mut app = meter_app();
+    app.prompt_base_tokens.store(999_995, Ordering::Release);
+    app.input = "task".into();
+    let preview = app.prompt_cost_preview(fixed_at()).unwrap();
+    assert_eq!(
+        preview,
+        "prompt ~¥1.00 (≈$0.14) estimated if uncached; output unknown"
+    );
+    let rendered = buffer_text(&render_buffer(&app, 240, 20));
+    assert!(
+        rendered.contains("estimated if uncached; output unknown"),
+        "got: {rendered}"
+    );
+    assert!(app.session_cost.is_empty());
+    assert!(app.usage.is_none());
+    assert_eq!(app.session_money(fixed_at()), "¥0.00 (≈$0.00)");
+
+    let measured_usage = Usage {
+        prompt_tokens: 100,
+        completion_tokens: 0,
+        cached_tokens: Some(0),
+        evidence: UsageEvidence::Measured,
+    };
+    let mut measured_receipt = receipt("measured", Outcome::Pass, Some(measured_usage));
+    measured_receipt.model_id = "meter-route".into();
+    let root = temp_dir();
+    nh_core::receipt::ReceiptWriter::project(root.clone(), Scrubber::new(Vec::new()))
+        .append(&measured_receipt)
+        .unwrap();
+    let durable = std::fs::read_to_string(root.join(".nosis").join("receipts.jsonl")).unwrap();
+    assert!(!durable.contains("estimate"));
+    apply_event(
+        &mut app,
+        AgentEvent::TaskReceipt(TimelineSummary {
+            route_id: "meter-route".into(),
+            receipt: measured_receipt,
+            answer: "done".into(),
+        }),
+    );
+
+    assert_eq!(app.session_cost.len(), 1);
+    assert!((app.session_cost[0].amount - 0.0001).abs() < f64::EPSILON);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn unpriced_route_renders_no_prompt_cost_preview_or_zero() {
+    let mut app = test_app(None);
+    app.prompt_base_tokens.store(10_000, Ordering::Release);
+    app.input = "task".into();
+
+    assert_eq!(app.prompt_cost_preview(fixed_at()), None);
+    let rendered = buffer_text(&render_buffer(&app, 180, 20));
+    assert!(
+        !rendered.contains("estimated if uncached"),
+        "got: {rendered}"
+    );
+    assert!(!rendered.contains("output unknown"), "got: {rendered}");
+    assert!(!rendered.contains("~$0.00"), "got: {rendered}");
+}
+
+#[test]
 fn cost_hud_omits_cache_before_usage_and_shows_it_after() {
     let mut app = test_app(None);
     let before = app.hud_line(Utc::now());
@@ -3619,11 +3771,152 @@ fn why_and_model_picker_refuse_to_price_partial_prior_usage() {
 }
 
 #[test]
+fn typical_duration_is_absent_below_minimum_without_a_separator() {
+    let mut receipts = (0..MIN_TYPICAL_DURATION_SAMPLES - 1)
+        .map(|index| {
+            timed_receipt(
+                "test-route",
+                Some(10_000 + index as u64 * 1_000),
+                Outcome::Pass,
+                ReceiptKind::Task,
+            )
+        })
+        .collect::<Vec<_>>();
+    receipts.extend(
+        (0..10).map(|_| timed_receipt("other-route", Some(1), Outcome::Pass, ReceiptKind::Task)),
+    );
+    receipts.extend(
+        (0..10).map(|_| timed_receipt("test-route", None, Outcome::Pass, ReceiptKind::Task)),
+    );
+    let mut app = test_app_with_timing(
+        None,
+        RouteTimingHistory::from_receipts(&test_resolver(), receipts),
+    );
+    app.set_status(Status::Working, Utc::now());
+
+    let rendered = buffer_text(&render_buffer(&app, 150, 20));
+
+    assert!(rendered.contains("WORKING"), "got: {rendered}");
+    assert!(!rendered.contains("typically"), "got: {rendered}");
+    assert!(!rendered.contains("s,"), "got: {rendered}");
+}
+
+#[test]
+fn route_typical_uses_passing_timed_samples_and_a_median_on_every_live_surface() {
+    let mut receipts = [10_000, 11_000, 12_000, 13_000, 600_000]
+        .into_iter()
+        .map(|duration_ms| {
+            timed_receipt(
+                "test-route",
+                Some(duration_ms),
+                Outcome::Pass,
+                ReceiptKind::Task,
+            )
+        })
+        .collect::<Vec<_>>();
+    receipts.extend(
+        (0..10).map(|_| timed_receipt("other-route", Some(1), Outcome::Pass, ReceiptKind::Task)),
+    );
+    receipts.extend(
+        (0..10).map(|_| timed_receipt("test-route", None, Outcome::Pass, ReceiptKind::Task)),
+    );
+    receipts.extend(
+        (0..10).map(|_| timed_receipt("test-route", Some(1), Outcome::Fail, ReceiptKind::Task)),
+    );
+    receipts.extend((0..10).map(|_| {
+        timed_receipt(
+            "test-route",
+            Some(1),
+            Outcome::Pass,
+            ReceiptKind::CancelledTurn,
+        )
+    }));
+    let mut app = test_app_with_timing(
+        None,
+        RouteTimingHistory::from_receipts(&test_resolver(), receipts),
+    );
+    assert_eq!(app.typical_duration_ms, Some(12_000));
+    let started_at = Utc::now() - chrono::Duration::seconds(20);
+    app.set_status(Status::Working, started_at);
+
+    let working = buffer_text(&render_buffer(&app, 180, 20));
+    assert!(working.contains(", typically ~12s"), "got: {working}");
+
+    apply_event(
+        &mut app,
+        AgentEvent::ModelStarted {
+            route: "test-route".into(),
+            started_at,
+        },
+    );
+    let model_call = buffer_text(&render_buffer(&app, 180, 20));
+    assert!(
+        model_call.contains("WAITING test-route") && model_call.contains(", typically ~12s"),
+        "got: {model_call}"
+    );
+
+    app.interrupt_turn();
+    let interrupted = buffer_text(&render_buffer(&app, 180, 20));
+    assert!(
+        interrupted.contains("WORKING - interrupted turn")
+            && interrupted.contains(", typically ~12s"),
+        "got: {interrupted}"
+    );
+}
+
+#[test]
+fn route_typical_is_omitted_when_receipts_cannot_distinguish_route_aliases() {
+    let resolver = RouteResolver::from_toml(
+        r#"
+        [routes.alias-a]
+        provider = "test"
+        model_id = "shared-model"
+        base_url = "https://example.invalid"
+        wire = "openai"
+        vault_entry = "test"
+
+        [routes.alias-b]
+        provider = "test"
+        model_id = "shared-model"
+        base_url = "https://example.invalid"
+        wire = "openai"
+        vault_entry = "test"
+        "#,
+    )
+    .unwrap();
+    let route = resolver.resolve("alias-a").unwrap();
+    let receipts = (0..MIN_TYPICAL_DURATION_SAMPLES).map(|index| {
+        timed_receipt(
+            "shared-model",
+            Some(10_000 + index as u64 * 1_000),
+            Outcome::Pass,
+            ReceiptKind::Task,
+        )
+    });
+    let mut history = RouteTimingHistory::from_receipts(&resolver, receipts);
+
+    assert_eq!(history.typical_for(route.id()), None);
+    for duration_ms in [10_000, 11_000, 12_000, 13_000, 14_000] {
+        history.record(
+            route.id(),
+            &timed_receipt(
+                "shared-model",
+                Some(duration_ms),
+                Outcome::Pass,
+                ReceiptKind::Task,
+            ),
+        );
+    }
+    assert_eq!(history.typical_for(route.id()), Some(12_000));
+    assert_eq!(history.typical_for("alias-b"), None);
+}
+
+#[test]
 fn heartbeat_formats_two_elapsed_deltas() {
     let now = fixed_at();
     for (seconds, expected) in [(2, "● WORKING · 2s"), (34, "● WORKING · 34s")] {
         let since = now - chrono::Duration::seconds(seconds);
-        let (label, _) = status_chip(&Status::Working, Some(since), now, usize::MAX);
+        let (label, _) = status_chip(&Status::Working, Some(since), now, usize::MAX, None);
         assert_eq!(label, expected);
     }
 }
@@ -3678,6 +3971,7 @@ fn in_flight_model_event_shows_route_and_factual_elapsed_time_until_finish() {
         "other-route",
         started_at,
         started_at + chrono::Duration::seconds(34),
+        None,
     );
     assert_eq!(label, "● WAITING other-route · 34s");
     assert!(!label.contains('%'));
@@ -3963,10 +4257,12 @@ fn rendered_line_is_redacted_and_has_no_control_characters() {
             block_paths: Vec::new(),
             block_commands: Vec::new(),
         },
-        UiDiscovery {
+        UiInputs {
             palette_entries: Vec::new(),
             credentialed_providers: Vec::new(),
             color_mode: ColorMode::Color,
+            route_timing_history: empty_timing_history(),
+            prompt_base_tokens: unavailable_prompt_estimate(),
         },
         (Profiles::bundled(), "balanced".into()),
     );
@@ -3996,7 +4292,7 @@ fn rendered_overlay_scrubs_descriptions_and_control_characters() {
             block_paths: Vec::new(),
             block_commands: Vec::new(),
         },
-        UiDiscovery {
+        UiInputs {
             palette_entries: vec![PaletteEntry {
                 kind: "tool",
                 name: "secret-tool".into(),
@@ -4006,6 +4302,8 @@ fn rendered_overlay_scrubs_descriptions_and_control_characters() {
             }],
             credentialed_providers: Vec::new(),
             color_mode: ColorMode::Color,
+            route_timing_history: empty_timing_history(),
+            prompt_base_tokens: unavailable_prompt_estimate(),
         },
         (Profiles::bundled(), "balanced".into()),
     );
@@ -4598,11 +4896,17 @@ fn real_worker_and_ledger_replay_mark_a_measured_plus_unmetered_session() {
         "got: {hud}"
     );
     assert!(hud.contains("~12% ~12/100 lower bound"), "got: {hud}");
-    assert_eq!(timeline_row(&app.timeline[1]), "#2  pass  usage unreported");
-    assert_eq!(
-        timeline_detail_lines(&app.timeline[1])[9],
-        "tokens: unavailable - usage unreported"
+    let duration = measured_duration(
+        app.timeline[1]
+            .duration_ms
+            .expect("the real turn should carry its measured duration"),
     );
+    let row = timeline_row(&app.timeline[1]);
+    assert_eq!(row, format!("#2  pass  {duration}  usage unreported"));
+    assert!(!duration.contains('~'));
+    let detail = timeline_detail_lines(&app.timeline[1]);
+    assert!(detail.contains(&format!("duration: {duration}")));
+    assert!(detail.contains(&"tokens: unavailable - usage unreported".into()));
 
     assert_eq!(worker.shutdown(), WorkerShutdown::Clean);
     let sessions = list_sessions(&root).unwrap();

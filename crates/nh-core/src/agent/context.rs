@@ -71,7 +71,7 @@ pub(super) fn estimate_tokens(messages: &[ChatMessage]) -> u64 {
     estimate_message_tokens(messages, true)
 }
 
-fn estimate_message_tokens(messages: &[ChatMessage], preserve_reasoning: bool) -> u64 {
+pub fn estimate_message_tokens(messages: &[ChatMessage], preserve_reasoning: bool) -> u64 {
     messages
         .iter()
         .map(|message| {
@@ -108,7 +108,7 @@ fn estimate_message_tokens(messages: &[ChatMessage], preserve_reasoning: bool) -
 }
 
 /// Policy-aware request estimate including the serialized tool-spec array.
-pub(super) fn estimate_request_tokens(
+pub fn estimate_request_tokens(
     messages: &[ChatMessage],
     tools: &[nh_tools::ToolSpec],
     preserve_reasoning: bool,

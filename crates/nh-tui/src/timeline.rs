@@ -33,8 +33,25 @@ pub(super) fn failure_class_name(class: FailureClass) -> &'static str {
     }
 }
 
+pub(super) fn measured_duration(duration_ms: u64) -> String {
+    if duration_ms < 1_000 {
+        return format!("{duration_ms}ms");
+    }
+    let seconds = duration_ms / 1_000;
+    let milliseconds = duration_ms % 1_000;
+    if milliseconds == 0 {
+        format!("{seconds}s")
+    } else {
+        format!("{seconds}.{milliseconds:03}s")
+    }
+}
+
 pub(super) fn timeline_row(entry: &TimelineEntry) -> String {
     let compacted = if entry.compacted { "  [compact]" } else { "" };
+    let duration = entry
+        .duration_ms
+        .map(|duration_ms| format!("  {}", measured_duration(duration_ms)))
+        .unwrap_or_default();
     let tokens = match (entry.usage.as_ref(), entry.tokens()) {
         (Some(usage), Some((input, output, _))) if usage.evidence == UsageEvidence::Partial => {
             format!("~{input}/~{output} lower bound")
@@ -55,7 +72,7 @@ pub(super) fn timeline_row(entry: &TimelineEntry) -> String {
         (None, _) => "usage unreported".into(),
     };
     format!(
-        "#{}  {}  {tokens}{compacted}",
+        "#{}  {}{duration}  {tokens}{compacted}",
         entry.turn,
         if entry.kind == ReceiptKind::CancelledTurn {
             "cancelled"
@@ -105,10 +122,15 @@ pub(super) fn timeline_detail_lines(entry: &TimelineEntry) -> Vec<String> {
         format!("outcome: {}", outcome_name(entry.outcome)),
         format!("agent turns: {}", entry.turns),
         format!("tool calls: {}", entry.tool_calls),
+    ];
+    if let Some(duration_ms) = entry.duration_ms {
+        lines.push(format!("duration: {}", measured_duration(duration_ms)));
+    }
+    lines.extend([
         format!("failure class: {failure}"),
         tokens,
         format!("compacted: {}", if entry.compacted { "yes" } else { "no" }),
-    ];
+    ]);
     if let Some(detail) = &entry.compaction_detail {
         lines.push(detail.clone());
     }
@@ -374,6 +396,7 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
 }
 
 fn record_timeline_summary(app: &mut App, summary: crate::state::TimelineSummary) {
+    app.record_route_duration(&summary.route_id, &summary.receipt);
     let receipt_route_is_current = summary.route_id == app.route.id();
     let receipt_route = app.resolver.resolve(&summary.route_id).ok();
     let receipt_at = DateTime::parse_from_rfc3339(&summary.receipt.ts_utc)

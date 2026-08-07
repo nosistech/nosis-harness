@@ -4,7 +4,9 @@
 mod context;
 mod tool_repair;
 
-pub use context::{effective_context, PrefixSeal};
+pub use context::{
+    effective_context, estimate_message_tokens, estimate_request_tokens, PrefixSeal,
+};
 
 use crate::receipt::{
     CompactionStats, FailureClass, Outcome, Receipt, ReceiptKind, ReceiptWriter, RepairStats,
@@ -14,8 +16,7 @@ use crate::wire::{
     ThinkingEffort, ToolCallReq, Usage,
 };
 use context::{
-    compact_history, compaction_input_tokens, context_percentage, estimate_request_tokens,
-    plain_msg, COMPACT_AT,
+    compact_history, compaction_input_tokens, context_percentage, plain_msg, COMPACT_AT,
 };
 use nh_tools::{EditMatchTier, Tool, ToolAudit, ToolCtx};
 

@@ -6,6 +6,7 @@ fn worker_around(join: JoinHandle<()>, shutdown: Arc<AtomicBool>) -> Worker {
     Worker {
         commands,
         events,
+        prompt_base_tokens: Arc::new(AtomicU64::new(PROMPT_ESTIMATE_UNAVAILABLE)),
         join: Some(join),
         shutdown,
         turn_cancel: Arc::new(AtomicBool::new(false)),
@@ -91,6 +92,7 @@ fn worker_drop_unblocks_a_parked_approval() {
     let worker = Worker {
         commands,
         events,
+        prompt_base_tokens: Arc::new(AtomicU64::new(PROMPT_ESTIMATE_UNAVAILABLE)),
         join: Some(join),
         shutdown,
         turn_cancel: Arc::new(AtomicBool::new(false)),

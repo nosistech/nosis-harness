@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc::{self, Receiver, RecvTimeoutError, Sender},
     Arc,
 };
@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use chrono::Utc;
-use nh_core::agent::{AgentLoop, AgentRunError, CompactionEvent};
+use nh_core::agent::{estimate_request_tokens, AgentLoop, AgentRunError, CompactionEvent};
 use nh_core::receipt::{ReceiptKind, ReceiptWriter};
 use nh_core::session_ledger::{
     new_session_id, RestoredSession, SessionEvent, SessionLedger, Surface,
@@ -27,6 +27,7 @@ use nh_vault::{SecretRegistry, SecretValue};
 use crate::session::{
     effort_for, identity_constitution, install_literal, safe_line, scrub_full_line,
 };
+use crate::state::PROMPT_ESTIMATE_UNAVAILABLE;
 use crate::{AgentEvent, ConnectFn, SharedScrubber, TimelineSummary};
 
 const APPROVAL_WAIT_POLL: Duration = Duration::from_millis(10);
@@ -194,6 +195,7 @@ pub(super) enum WorkerShutdown {
 pub(super) struct Worker {
     pub(super) commands: Sender<WorkerCommand>,
     pub(super) events: Receiver<AgentEvent>,
+    pub(super) prompt_base_tokens: Arc<AtomicU64>,
     join: Option<JoinHandle<()>>,
     shutdown: Arc<AtomicBool>,
     turn_cancel: Arc<AtomicBool>,
@@ -282,6 +284,8 @@ pub(super) fn spawn_worker(config: WorkerConfig) -> anyhow::Result<Worker> {
     let worker_shutdown = Arc::clone(&shutdown);
     let turn_cancel = Arc::new(AtomicBool::new(false));
     let worker_turn_cancel = Arc::clone(&turn_cancel);
+    let prompt_base_tokens = Arc::new(AtomicU64::new(PROMPT_ESTIMATE_UNAVAILABLE));
+    let worker_prompt_base_tokens = Arc::clone(&prompt_base_tokens);
     let join = thread::Builder::new()
         .name("nh-agent".into())
         .spawn(move || {
@@ -291,12 +295,14 @@ pub(super) fn spawn_worker(config: WorkerConfig) -> anyhow::Result<Worker> {
                 event_tx,
                 worker_shutdown,
                 worker_turn_cancel,
+                worker_prompt_base_tokens,
             )
         })
         .context("could not start the agent worker")?;
     Ok(Worker {
         commands: command_tx,
         events: event_rx,
+        prompt_base_tokens,
         join: Some(join),
         shutdown,
         turn_cancel,
@@ -309,8 +315,9 @@ fn worker_loop(
     events: Sender<AgentEvent>,
     shutdown: Arc<AtomicBool>,
     turn_cancel: Arc<AtomicBool>,
+    prompt_base_tokens: Arc<AtomicU64>,
 ) {
-    WorkerSession::new(config, events, shutdown, turn_cancel).run(commands);
+    WorkerSession::new(config, events, shutdown, turn_cancel, prompt_base_tokens).run(commands);
 }
 
 enum CommandAction {
@@ -335,6 +342,7 @@ struct WorkerSession {
     events: Sender<AgentEvent>,
     shutdown: Arc<AtomicBool>,
     turn_cancel: Arc<AtomicBool>,
+    prompt_base_tokens: Arc<AtomicU64>,
     ledger: SessionLedger,
     ledger_failed: bool,
     ledger_notice_sent: bool,
@@ -347,6 +355,7 @@ impl WorkerSession {
         events: Sender<AgentEvent>,
         shutdown: Arc<AtomicBool>,
         turn_cancel: Arc<AtomicBool>,
+        prompt_base_tokens: Arc<AtomicU64>,
     ) -> Self {
         let WorkerConfig {
             route,
@@ -500,6 +509,7 @@ impl WorkerSession {
             events,
             shutdown,
             turn_cancel,
+            prompt_base_tokens,
             ledger,
             ledger_failed,
             ledger_notice_sent: ledger_failed,
@@ -508,6 +518,7 @@ impl WorkerSession {
     }
 
     fn run(mut self, commands: Receiver<WorkerCommand>) {
+        self.publish_prompt_base_tokens();
         while !self.stopped() {
             let Ok(command) = commands.recv() else {
                 break;
@@ -520,8 +531,9 @@ impl WorkerSession {
                     if !self.run_task(task) {
                         break;
                     }
+                    self.publish_prompt_base_tokens();
                 }
-                CommandAction::Continue => {}
+                CommandAction::Continue => self.publish_prompt_base_tokens(),
                 CommandAction::Stop => break,
             }
         }
@@ -529,6 +541,43 @@ impl WorkerSession {
             ts_utc: session_timestamp(Utc::now()),
         };
         self.append_session_event(&ended);
+    }
+
+    fn publish_prompt_base_tokens(&self) {
+        let estimate = self
+            .estimate_prompt_base_tokens()
+            .unwrap_or(PROMPT_ESTIMATE_UNAVAILABLE);
+        self.prompt_base_tokens.store(estimate, Ordering::Release);
+    }
+
+    fn estimate_prompt_base_tokens(&self) -> Option<u64> {
+        let mut messages = self.history.clone();
+        if messages.is_empty() {
+            messages.push(ChatMessage {
+                role: "system".into(),
+                content: Some(self.agent.constitution.clone()?),
+                parts: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            });
+        }
+        if let Some(context) = &self.pending_route_context {
+            messages.push(context.clone());
+        }
+        let tools = self
+            .agent
+            .tools
+            .iter()
+            .map(|tool| tool.spec())
+            .collect::<Vec<_>>();
+        let preserve_reasoning = self.route.preserve_reasoning()
+            || (self.route.preserve_when_thinking() && self.agent.thinking != ThinkingEffort::None);
+        Some(estimate_request_tokens(
+            &messages,
+            &tools,
+            preserve_reasoning,
+        ))
     }
 
     fn stopped(&self) -> bool {

@@ -71,10 +71,19 @@ pub(super) fn main_block(app: &App, width: u16) -> Block<'static> {
     let blocked_reason_width = blocked_reason_width(width, &route_label, &app.scrubber);
     let (status, status_style) = match (&app.status, &app.active_tool, &app.active_model) {
         (Status::Working, Some(tool), _) => tool_status_chip(&tool.name, tool.started_at, now),
-        (Status::Working, None, Some(request)) => {
-            model_status_chip(&request.route, request.started_at, now)
-        }
-        _ => status_chip(&app.status, app.working_since, now, blocked_reason_width),
+        (Status::Working, None, Some(request)) => model_status_chip(
+            &request.route,
+            app.working_since.unwrap_or(request.started_at),
+            now,
+            app.typical_duration_ms,
+        ),
+        _ => status_chip(
+            &app.status,
+            app.working_since,
+            now,
+            blocked_reason_width,
+            app.typical_duration_ms,
+        ),
     };
     let left_title = left_title(&app.scrubber, &status, status_style);
     let route_title =
@@ -649,7 +658,9 @@ pub(super) fn status_chip(
     working_since: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
     blocked_reason_width: usize,
+    typical_duration_ms: Option<u64>,
 ) -> (String, Style) {
+    let typical = typical_duration_suffix(typical_duration_ms);
     match status {
         Status::Idle => (
             "○ IDLE".into(),
@@ -659,10 +670,10 @@ pub(super) fn status_chip(
         ),
         Status::Working => (
             working_since.map_or_else(
-                || "● WORKING".into(),
+                || format!("● WORKING{typical}"),
                 |since| {
                     let elapsed = now.signed_duration_since(since).num_seconds().max(0);
-                    format!("● WORKING · {elapsed}s")
+                    format!("● WORKING · {elapsed}s{typical}")
                 },
             ),
             Style::default()
@@ -671,10 +682,10 @@ pub(super) fn status_chip(
         ),
         Status::FinishingInterrupted => (
             working_since.map_or_else(
-                || "● WORKING - interrupted turn".into(),
+                || format!("● WORKING - interrupted turn{typical}"),
                 |since| {
                     let elapsed = now.signed_duration_since(since).num_seconds().max(0);
-                    format!("● WORKING - interrupted turn · {elapsed}s")
+                    format!("● WORKING - interrupted turn · {elapsed}s{typical}")
                 },
             ),
             Style::default()
@@ -712,6 +723,18 @@ pub(super) fn status_chip(
             )
         }
     }
+}
+
+fn typical_duration_suffix(duration_ms: Option<u64>) -> String {
+    duration_ms.map_or_else(String::new, |duration_ms| {
+        let duration = if duration_ms < 1_000 {
+            "~<1s".to_owned()
+        } else {
+            let seconds = duration_ms.saturating_add(500) / 1_000;
+            format!("~{seconds}s")
+        };
+        format!(", typically {duration}")
+    })
 }
 
 fn blocked_reason_width(width: u16, route_label: &str, scrubber: &crate::SharedScrubber) -> usize {
@@ -765,10 +788,12 @@ pub(super) fn model_status_chip(
     route: &str,
     started_at: DateTime<Utc>,
     now: DateTime<Utc>,
+    typical_duration_ms: Option<u64>,
 ) -> (String, Style) {
     let elapsed = now.signed_duration_since(started_at).num_seconds().max(0);
+    let typical = typical_duration_suffix(typical_duration_ms);
     (
-        format!("● WAITING {route} · {elapsed}s"),
+        format!("● WAITING {route} · {elapsed}s{typical}"),
         Style::default()
             .fg(Color::Green)
             .add_modifier(Modifier::BOLD),

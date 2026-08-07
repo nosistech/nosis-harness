@@ -1,6 +1,10 @@
 //! Typed receipts (plan §2): why runs fail, not just that they failed.
 
-use anyhow::Context as _;
+use anyhow::{bail, Context as _};
+use std::collections::VecDeque;
+use std::fs::File;
+use std::io::{Read as _, Seek as _, SeekFrom};
+use std::path::Path;
 
 use crate::wire::RetryStats;
 
@@ -158,6 +162,86 @@ pub struct Receipt {
     pub effective_profile: Option<String>,
 }
 
+/// Maximum receipt bytes loaded from the end of the append-only JSONL file.
+pub const MAX_RECEIPT_TAIL_BYTES: usize = 8 * 1024 * 1024;
+
+/// Read a bounded, containment-checked tail of the project receipt file.
+pub fn read_receipt_tail(run_root: &Path) -> anyhow::Result<Vec<u8>> {
+    let Some(nosis_dir) =
+        crate::runtime_path::resolve_contained_dir(run_root, Path::new(".nosis"))?
+    else {
+        return Ok(Vec::new());
+    };
+    let path = nosis_dir.join("receipts.jsonl");
+    crate::runtime_path::reject_symlink_or_special_file(&path, "receipts")?;
+    let mut file = match File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("could not open {}", path.display()))
+        }
+    };
+    let len = file
+        .metadata()
+        .with_context(|| format!("could not inspect {}", path.display()))?
+        .len();
+    let start = len.saturating_sub(MAX_RECEIPT_TAIL_BYTES as u64);
+    let starts_mid_line = if start == 0 {
+        false
+    } else {
+        file.seek(SeekFrom::Start(start - 1))?;
+        let mut previous = [0_u8; 1];
+        file.read_exact(&mut previous)?;
+        previous[0] != b'\n'
+    };
+    file.seek(SeekFrom::Start(start))?;
+
+    let mut bytes = Vec::new();
+    file.take(MAX_RECEIPT_TAIL_BYTES as u64)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("could not read {}", path.display()))?;
+    if starts_mid_line {
+        let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') else {
+            bail!(
+                "recent receipt exceeds the {}-byte safe read window",
+                MAX_RECEIPT_TAIL_BYTES
+            );
+        };
+        bytes.drain(..=newline);
+    }
+    Ok(bytes)
+}
+
+/// Parse complete receipt lines and tolerate one torn final append.
+pub fn parse_receipt_jsonl(bytes: &[u8], limit: usize) -> anyhow::Result<Vec<Receipt>> {
+    let ends_in_newline = bytes.last() == Some(&b'\n');
+    let lines: Vec<&[u8]> = bytes.split(|byte| *byte == b'\n').collect();
+    let last_non_empty = lines
+        .iter()
+        .rposition(|line| !line.iter().all(|byte| byte.is_ascii_whitespace()));
+    let mut receipts = VecDeque::new();
+    for (index, line) in lines.into_iter().enumerate() {
+        if line.iter().all(|byte| byte.is_ascii_whitespace()) {
+            continue;
+        }
+        let receipt: Receipt = match serde_json::from_slice(line) {
+            Ok(receipt) => receipt,
+            Err(_) if !ends_in_newline && Some(index) == last_non_empty => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("receipts line {} is invalid", index + 1));
+            }
+        };
+        if receipts.len() == limit {
+            receipts.pop_front();
+        }
+        if limit > 0 {
+            receipts.push_back(receipt);
+        }
+    }
+    Ok(receipts.into_iter().collect())
+}
+
 /// Appends scrubbed JSONL lines to .nosis/receipts.jsonl (creates dir if missing).
 pub struct ReceiptWriter {
     root: std::path::PathBuf,
@@ -224,7 +308,6 @@ impl ReceiptWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use std::sync::{Arc, Barrier};
 
     fn receipt(task: impl Into<String>) -> Receipt {
@@ -359,6 +442,18 @@ mod tests {
 
         let parsed: Receipt = serde_json::from_str(&serialized).unwrap();
         assert_eq!(parsed.duration_ms, Some(1_234));
+    }
+
+    #[test]
+    fn receipt_jsonl_parser_keeps_recent_complete_receipts_and_drops_a_torn_tail() {
+        let first = serde_json::to_string(&receipt("first")).unwrap();
+        let second = serde_json::to_string(&receipt("second")).unwrap();
+        let bytes = format!("\n{first}\n{second}\n{{\"ts_utc\":");
+
+        let parsed = parse_receipt_jsonl(bytes.as_bytes(), 1).unwrap();
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].task, "second");
     }
 
     #[test]

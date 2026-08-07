@@ -103,6 +103,8 @@ pub(super) fn handle_action(app: &mut App, worker: &mut Worker, action: UiAction
                     app,
                     AgentEvent::Failed("agent stopped - retry the task".into()),
                 );
+            } else {
+                app.invalidate_prompt_estimate();
             }
             false
         }

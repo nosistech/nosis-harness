@@ -29,7 +29,8 @@ use tiny_http::{Method, Request, Server};
 const PREVIEW_NOTICE: &str =
     "nh-mcp preview - local only; do not expose publicly before the MCP final spec (2026-07-28).";
 const MAX_BODY_BYTES: usize = 1024 * 1024;
-const MAX_RECEIPT_TAIL_BYTES: usize = 8 * 1024 * 1024;
+#[cfg(test)]
+const MAX_RECEIPT_TAIL_BYTES: usize = nh_core::receipt::MAX_RECEIPT_TAIL_BYTES;
 const MAX_MCP_FLEET_BUDGET_TOKENS: u64 = 1_000_000;
 const MIN_CALLER_TOKEN_BYTES: usize = 32;
 const MAX_ACTIVE_RUNS: usize = 4;
