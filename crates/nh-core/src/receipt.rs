@@ -139,6 +139,8 @@ pub struct Receipt {
     pub task: String,
     pub turns: u32,
     pub tool_calls: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
     pub outcome: Outcome,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_class: Option<FailureClass>,
@@ -233,6 +235,7 @@ mod tests {
             task: task.into(),
             turns: 1,
             tool_calls: 0,
+            duration_ms: None,
             outcome: Outcome::Pass,
             failure_class: None,
             usage: None,
@@ -332,6 +335,30 @@ mod tests {
         let measured = serde_json::to_value(measured).unwrap();
         assert_eq!(measured["cache_hit_pct"], 0.0);
         assert_eq!(measured["usage"]["cached_tokens"], 0);
+    }
+
+    #[test]
+    fn receipt_without_duration_preserves_legacy_json_shape() {
+        let old = r#"{"ts_utc":"2026-07-22T00:00:00Z","model_id":"test-model","task":"legacy","turns":1,"tool_calls":0,"outcome":"pass"}"#;
+
+        let parsed: Receipt = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.duration_ms, None);
+
+        let serialized = serde_json::to_string(&parsed).unwrap();
+        assert!(!serialized.contains("duration_ms"));
+        assert_eq!(serialized, old);
+    }
+
+    #[test]
+    fn receipt_duration_round_trips_as_whole_milliseconds() {
+        let mut timed = receipt("timed");
+        timed.duration_ms = Some(1_234);
+
+        let serialized = serde_json::to_string(&timed).unwrap();
+        assert!(serialized.contains(r#""duration_ms":1234"#));
+
+        let parsed: Receipt = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(parsed.duration_ms, Some(1_234));
     }
 
     #[test]

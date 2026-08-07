@@ -269,6 +269,7 @@ fn edits_file_passes_and_scrubs_receipt() {
     assert_eq!(receipt.outcome, Outcome::Pass);
     assert_eq!(receipt.turns, 2);
     assert_eq!(receipt.tool_calls, 1);
+    assert!(receipt.duration_ms.is_some());
     let usage = receipt.usage.expect("usage accumulated");
     assert_eq!(usage.prompt_tokens, 30);
     assert_eq!(usage.completion_tokens, 8);
@@ -309,6 +310,7 @@ fn endless_tool_calls_hit_max_turns_and_write_timeout_receipt() {
     assert_eq!(receipt.failure_class, Some(FailureClass::Constraint));
     assert_eq!(receipt.turns, 3);
     assert_eq!(receipt.tool_calls, 3);
+    assert!(receipt.duration_ms.is_some());
     assert!(text.contains("3 turns"));
 
     let lines = receipt_lines(dir.path());
@@ -599,6 +601,8 @@ fn provider_error_writes_fail_receipt_and_returns_err() {
     assert_eq!(lines.len(), 1, "exactly one receipt per run");
     assert!(lines[0].contains(r#""outcome":"fail""#));
     assert!(lines[0].contains(r#""failure_class":"verification""#));
+    let receipt: Receipt = serde_json::from_str(&lines[0]).unwrap();
+    assert!(receipt.duration_ms.is_some());
 }
 
 #[test]

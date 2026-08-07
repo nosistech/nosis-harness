@@ -367,6 +367,7 @@ fn receipt(task: &str, outcome: Outcome, usage: Option<Usage>) -> Receipt {
         task: task.into(),
         turns: 3,
         tool_calls: 2,
+        duration_ms: None,
         outcome,
         failure_class: (outcome != Outcome::Pass).then_some(FailureClass::Constraint),
         usage,
@@ -4490,8 +4491,11 @@ fn worker_error_projects_cores_real_receipt_and_unknown_meter() {
 
     let durable = std::fs::read(root.join(".nosis").join("receipts.jsonl")).unwrap();
     let expected = format!(
-        "{{\"ts_utc\":\"{}\",\"model_id\":\"test-route\",\"task\":\"failing task\",\"turns\":1,\"tool_calls\":0,\"outcome\":\"fail\",\"failure_class\":\"verification\",\"effective_profile\":\"balanced\"}}\n",
-        projected_receipt.ts_utc
+        "{{\"ts_utc\":\"{}\",\"model_id\":\"test-route\",\"task\":\"failing task\",\"turns\":1,\"tool_calls\":0,\"duration_ms\":{},\"outcome\":\"fail\",\"failure_class\":\"verification\",\"effective_profile\":\"balanced\"}}\n",
+        projected_receipt.ts_utc,
+        projected_receipt
+            .duration_ms
+            .expect("a completed turn always records duration_ms")
     );
     assert_eq!(
         durable,

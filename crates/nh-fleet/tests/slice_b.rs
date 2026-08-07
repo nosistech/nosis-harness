@@ -528,6 +528,7 @@ impl SwarmClient for MockSwarm {
             task: format!("{task_id}:{brief}"),
             turns: 1,
             tool_calls: 0,
+            duration_ms: None,
             outcome: Outcome::Pass,
             failure_class: None,
             usage: Some(Usage {
@@ -620,6 +621,7 @@ fn failed_receipt(route_id: &str) -> Receipt {
         task: "execute climb".into(),
         turns: 1,
         tool_calls: 0,
+        duration_ms: None,
         outcome: Outcome::Fail,
         failure_class: Some(FailureClass::Verification),
         usage: Some(Usage {

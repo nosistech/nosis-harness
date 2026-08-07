@@ -154,7 +154,7 @@ impl<'a> Scheduler<'a> {
                 self.emit(&line);
                 Ok(())
             }
-            WorkerEvent::Finished { job, result } => self.handle_finished(job, result),
+            WorkerEvent::Finished { job, result } => self.handle_finished(job, *result),
         }
     }
 

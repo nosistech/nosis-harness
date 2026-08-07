@@ -993,6 +993,7 @@ fn receipt(usage: Option<Usage>) -> Receipt {
         task: "fixture".into(),
         turns: 1,
         tool_calls: 0,
+        duration_ms: None,
         outcome: Outcome::Pass,
         failure_class: None,
         usage,

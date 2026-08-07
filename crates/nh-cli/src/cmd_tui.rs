@@ -52,8 +52,8 @@ fn run_with_resume(
         eprintln!("warning: {}", pre_screen_line(&warning_scrubber, warning));
     }
     let execution_policy = profiles.effective(profile, &route);
-    if let Some(warning) = cmd_run::profile_fallback_warning(profile, &execution_policy.profile) {
-        eprintln!("warning: {}", pre_screen_line(&warning_scrubber, &warning));
+    if let Some(error) = cmd_run::profile_fallback_warning(profile, &execution_policy.profile) {
+        anyhow::bail!("{error}");
     }
     nh_tui::run(TuiConfig {
         resolver,

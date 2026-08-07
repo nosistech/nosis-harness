@@ -93,6 +93,7 @@ fn push_message(
 struct ReceiptFields {
     turns: u32,
     tool_calls: u32,
+    duration_ms: u64,
     outcome: Outcome,
     failure_class: Option<FailureClass>,
     usage: Option<Usage>,
@@ -411,6 +412,7 @@ impl AgentLoop {
         mut appended: Option<&mut Vec<ChatMessage>>,
         latest_cached_tokens: &mut Option<u64>,
     ) -> anyhow::Result<(String, Receipt)> {
+        let turn_started = std::time::Instant::now();
         validate_task(task)?;
         let image_count = parts.as_ref().map_or(0, |parts| {
             parts
@@ -539,6 +541,8 @@ impl AgentLoop {
                         ReceiptFields {
                             turns,
                             tool_calls,
+                            duration_ms: u64::try_from(turn_started.elapsed().as_millis())
+                                .unwrap_or(u64::MAX),
                             outcome: Outcome::Fail,
                             failure_class: Some(FailureClass::Verification),
                             usage: if usage_overflowed {
@@ -631,6 +635,8 @@ impl AgentLoop {
                     ReceiptFields {
                         turns,
                         tool_calls,
+                        duration_ms: u64::try_from(turn_started.elapsed().as_millis())
+                            .unwrap_or(u64::MAX),
                         outcome,
                         failure_class,
                         usage: if usage_overflowed {
@@ -699,6 +705,7 @@ impl AgentLoop {
             ReceiptFields {
                 turns,
                 tool_calls,
+                duration_ms: u64::try_from(turn_started.elapsed().as_millis()).unwrap_or(u64::MAX),
                 outcome: Outcome::Timeout,
                 failure_class: Some(FailureClass::Constraint),
                 usage: if usage_overflowed {
@@ -807,6 +814,7 @@ impl AgentLoop {
         let ReceiptFields {
             turns,
             tool_calls,
+            duration_ms,
             outcome,
             failure_class,
             usage,
@@ -825,6 +833,7 @@ impl AgentLoop {
             task: task.to_string(),
             turns,
             tool_calls,
+            duration_ms: Some(duration_ms),
             outcome,
             failure_class,
             usage,

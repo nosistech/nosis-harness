@@ -233,7 +233,7 @@ pub(super) enum WorkerEvent {
     Progress(String),
     Finished {
         job: PreparedTask,
-        result: Result<Receipt, String>,
+        result: Box<Result<Receipt, String>>,
     },
 }
 
@@ -345,7 +345,7 @@ pub(super) fn worker_loop(
             Err(error) => {
                 let _ = events.send(WorkerEvent::Finished {
                     job,
-                    result: Err(error.to_string()),
+                    result: Box::new(Err(error.to_string())),
                 });
                 continue;
             }
@@ -387,7 +387,13 @@ pub(super) fn worker_loop(
         let result = run_one_task(&runtime, &job, route, &events);
         let _ = stop_tx.send(());
         let _ = heartbeat.join();
-        if events.send(WorkerEvent::Finished { job, result }).is_err() {
+        if events
+            .send(WorkerEvent::Finished {
+                job,
+                result: Box::new(result),
+            })
+            .is_err()
+        {
             return;
         }
     }

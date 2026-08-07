@@ -50,9 +50,8 @@ impl Startup {
         let (profiles, profile_warnings) = Profiles::load(&root);
         print_warnings(&profile_warnings, &warning_scrubber);
         let execution_policy = profiles.effective(profile, &route);
-        if let Some(warning) = cmd_run::profile_fallback_warning(profile, &execution_policy.profile)
-        {
-            print_warnings(&[warning], &warning_scrubber);
+        if let Some(error) = cmd_run::profile_fallback_warning(profile, &execution_policy.profile) {
+            anyhow::bail!("{error}");
         }
         if route.class() == RouteClass::Delegate {
             anyhow::bail!("{DELEGATE_MSG}");

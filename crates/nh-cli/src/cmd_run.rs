@@ -88,11 +88,8 @@ pub(crate) fn effort_for(
 }
 
 pub(crate) fn profile_fallback_warning(requested: &str, effective: &str) -> Option<String> {
-    (requested != effective).then(|| {
-        format!(
-            "unknown profile '{requested}' - using {effective}; run `nh profile` to list choices"
-        )
-    })
+    (requested != effective)
+        .then(|| format!("unknown profile '{requested}'. Run `nh profile` to list choices."))
 }
 
 pub(crate) fn agent_constitution(
@@ -132,8 +129,8 @@ pub fn run(
         eprintln!("warning: {}", safe_line(&warning_scrubber, warning));
     }
     let execution_policy = profiles.effective(profile, &route);
-    if let Some(warning) = profile_fallback_warning(profile, &execution_policy.profile) {
-        eprintln!("warning: {}", safe_line(&warning_scrubber, &warning));
+    if let Some(error) = profile_fallback_warning(profile, &execution_policy.profile) {
+        anyhow::bail!("{error}");
     }
     if route.class() == RouteClass::Delegate {
         anyhow::bail!("{DELEGATE_MSG}");
