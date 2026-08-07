@@ -29,7 +29,7 @@ fn run_with_resume(
 ) -> anyhow::Result<()> {
     let workdir = std::env::current_dir()?;
     let (repo_root, catalog) = cmd_run::find_catalog(&workdir)?;
-    let law = nh_law::load(&repo_root, &LoadOptions { cli_autonomy: None });
+    let law = nh_law::load_checked(&repo_root, &LoadOptions { cli_autonomy: None })?;
     let warning_scrubber = Scrubber::new(Vec::new());
     for warning in &law.warnings {
         eprintln!("warning: {}", pre_screen_line(&warning_scrubber, warning));

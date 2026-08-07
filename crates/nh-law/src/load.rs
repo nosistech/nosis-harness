@@ -11,11 +11,23 @@ use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Copy)]
+enum ParseFailure {
+    Warn,
+    Reject,
+}
+
 /// Load every law source. Missing files are optional; malformed or unreadable files
 /// become warnings and the remaining safe defaults stay active.
 pub fn load(repo_root: &Path, opts: &LoadOptions) -> Law {
     let home = home_dir();
     load_with_home(repo_root, opts, home.as_deref())
+}
+
+/// Load every law source and reject invalid law files.
+pub fn load_checked(repo_root: &Path, opts: &LoadOptions) -> anyhow::Result<Law> {
+    let home = home_dir();
+    load_checked_with_home(repo_root, opts, home.as_deref())
 }
 
 /// Assemble a deterministic constitution with fixed labels, order, and separators.
@@ -50,14 +62,35 @@ pub fn assemble_constitution(sources: &ConstitutionSources) -> String {
 }
 
 pub(super) fn load_with_home(repo_root: &Path, opts: &LoadOptions, home: Option<&Path>) -> Law {
+    load_with_home_mode(repo_root, opts, home, ParseFailure::Warn)
+        .expect("warning mode handles invalid law files")
+}
+
+pub(super) fn load_checked_with_home(
+    repo_root: &Path,
+    opts: &LoadOptions,
+    home: Option<&Path>,
+) -> anyhow::Result<Law> {
+    load_with_home_mode(repo_root, opts, home, ParseFailure::Reject)
+}
+
+fn load_with_home_mode(
+    repo_root: &Path,
+    opts: &LoadOptions,
+    home: Option<&Path>,
+    parse_failure: ParseFailure,
+) -> anyhow::Result<Law> {
     let mut warnings = Vec::new();
 
     let bundled = match parse_law(BUNDLED_LAW) {
         Ok(law) => Some(law),
-        Err(_) => {
-            warnings.push("bundled law is malformed - safe defaults kept".to_owned());
-            None
-        }
+        Err(error) => match parse_failure {
+            ParseFailure::Warn => {
+                warnings.push("bundled law is malformed - safe defaults kept".to_owned());
+                None
+            }
+            ParseFailure::Reject => return Err(invalid_law_error("bundled_law.toml", error)),
+        },
     };
 
     let user = if let Some(home) = home {
@@ -66,7 +99,8 @@ pub(super) fn load_with_home(repo_root: &Path, opts: &LoadOptions, home: Option<
             None,
             "user law",
             &mut warnings,
-        )
+            parse_failure,
+        )?
     } else {
         warnings.push("home directory not found - user law skipped".to_owned());
         None
@@ -78,7 +112,8 @@ pub(super) fn load_with_home(repo_root: &Path, opts: &LoadOptions, home: Option<
         Some(repo_root),
         "repo .nosis/law.toml",
         &mut warnings,
-    );
+        parse_failure,
+    )?;
     if repo.as_ref().is_some_and(repo_tries_to_weaken) {
         warnings.push(REPO_RESTRICTION_WARNING.to_owned());
     }
@@ -113,11 +148,11 @@ pub(super) fn load_with_home(repo_root: &Path, opts: &LoadOptions, home: Option<
         memory,
     };
 
-    Law {
+    Ok(Law {
         constitution: assemble_constitution(&sources),
         policy,
         warnings,
-    }
+    })
 }
 
 pub(super) fn home_dir() -> Option<PathBuf> {
@@ -137,19 +172,25 @@ pub fn user_home_dir() -> Option<PathBuf> {
     home_dir()
 }
 
-pub(super) fn read_optional_law(
+fn read_optional_law(
     path: &Path,
     contain_under: Option<&Path>,
     label: &str,
     warnings: &mut Vec<String>,
-) -> Option<LawFile> {
-    let text = read_guarded_text(path, contain_under, label, warnings)?;
+    parse_failure: ParseFailure,
+) -> anyhow::Result<Option<LawFile>> {
+    let Some(text) = read_guarded_text(path, contain_under, label, warnings) else {
+        return Ok(None);
+    };
     match parse_law(&text) {
-        Ok(law) => Some(law),
-        Err(_) => {
-            warnings.push(format!("could not parse {label} - defaults kept"));
-            None
-        }
+        Ok(law) => Ok(Some(law)),
+        Err(error) => match parse_failure {
+            ParseFailure::Warn => {
+                warnings.push(format!("could not parse {label} - defaults kept"));
+                Ok(None)
+            }
+            ParseFailure::Reject => Err(invalid_law_error(&path.display().to_string(), error)),
+        },
     }
 }
 
@@ -229,6 +270,10 @@ pub(super) fn read_guarded_text(
 
 pub(super) fn parse_law(text: &str) -> anyhow::Result<LawFile> {
     Ok(toml::from_str(text)?)
+}
+
+fn invalid_law_error(source: &str, error: anyhow::Error) -> anyhow::Error {
+    anyhow::anyhow!("invalid law file {source}: {error}")
 }
 
 pub(super) fn constitution_text(law: Option<&LawFile>) -> Option<String> {
@@ -342,6 +387,7 @@ pub(super) fn push_section(sections: &mut Vec<String>, label: &str, content: Opt
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct LawFile {
     pub(super) constitution: Option<ConstitutionSection>,
     pub(super) write: Option<WriteRules>,
@@ -353,11 +399,13 @@ pub(super) struct LawFile {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ConstitutionSection {
     pub(super) text: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct WriteRules {
     pub(super) auto: Option<Vec<String>>,
     pub(super) ask: Option<Vec<String>>,
@@ -365,21 +413,25 @@ pub(super) struct WriteRules {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ReadRules {
     pub(super) block: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct SendRules {
     pub(super) block: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct CredentialRule {
     pub(super) audience: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ExecRules {
     // Parsed for law-file compatibility; execution already asks by default.
     #[serde(rename = "ask")]
@@ -388,6 +440,7 @@ pub(super) struct ExecRules {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct AutonomyRule {
     pub(super) default: Option<String>,
 }

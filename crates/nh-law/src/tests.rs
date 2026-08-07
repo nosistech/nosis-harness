@@ -239,6 +239,26 @@ fn exec_verdict_blocks_first_token_or_whole_command_and_never_allows() {
 }
 
 #[test]
+fn exec_verdict_blocks_second_lf_command() {
+    let policy = policy(Autonomy::Auto, &[], &[], &[], &["rm"]);
+
+    assert!(matches!(
+        policy.exec_verdict("echo ready\nrm -rf build"),
+        Verdict::Block(_)
+    ));
+}
+
+#[test]
+fn exec_verdict_blocks_second_crlf_command() {
+    let policy = policy(Autonomy::Auto, &[], &[], &[], &["rm"]);
+
+    assert!(matches!(
+        policy.exec_verdict("echo ready\r\nrm -rf build"),
+        Verdict::Block(_)
+    ));
+}
+
+#[test]
 fn exec_verdict_unwraps_environment_and_shell_launchers() {
     let policy = policy(Autonomy::Auto, &[], &[], &[], &["rm"]);
     for command in [
@@ -447,6 +467,34 @@ fn malformed_law_is_a_warning_and_keeps_bundled_defaults() {
 }
 
 #[test]
+fn checked_load_rejects_misspelled_key_and_names_key_and_file() {
+    let repo = TempTree::new("unknown-key");
+    let home = TempTree::new("unknown-key-home");
+    let law_path = repo.path().join(".nosis").join("law.toml");
+    repo.write(
+        ".nosis/law.toml",
+        r#"
+[write]
+bolck = ["**/*.env"]
+"#,
+    );
+
+    let error = load_checked_with_home(
+        repo.path(),
+        &LoadOptions { cli_autonomy: None },
+        Some(home.path()),
+    )
+    .expect_err("unknown policy key must fail the load");
+    let message = error.to_string();
+
+    assert!(message.contains("bolck"), "got: {message}");
+    assert!(
+        message.contains(&law_path.display().to_string()),
+        "got: {message}"
+    );
+}
+
+#[test]
 fn user_autonomy_and_auto_paths_apply_but_unknown_value_falls_back_to_ask() {
     let repo = TempTree::new("user-law");
     let home = TempTree::new("user-law-home");
@@ -626,6 +674,10 @@ fn memory_resolving_outside_repo_is_refused() {
 #[test]
 fn bundled_and_starter_toml_are_valid_safe_data() {
     let bundled = parse_law(BUNDLED_LAW).expect("bundled law parses");
+    assert_eq!(
+        bundled.exec.as_ref().and_then(|exec| exec._ask.as_deref()),
+        Some(&[][..])
+    );
     let write = bundled.write.expect("bundled write policy");
     assert_eq!(write.auto, Some(Vec::new()));
     assert_eq!(
@@ -651,6 +703,10 @@ fn bundled_and_starter_toml_are_valid_safe_data() {
     assert!(constitution.contains("verify your work"));
 
     let starter = parse_law(STARTER_LAW_TOML).expect("starter law parses");
+    assert_eq!(
+        starter.exec.as_ref().and_then(|exec| exec._ask.as_deref()),
+        Some(&[][..])
+    );
     assert!(starter.autonomy.is_none());
     assert!(starter.write.and_then(|write| write.auto).is_none());
 }

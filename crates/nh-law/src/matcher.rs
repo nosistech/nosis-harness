@@ -14,7 +14,7 @@ pub(super) fn exec_pattern_matches(pattern: &str, command: &str) -> bool {
     }
 
     command
-        .split(['&', ';', '|'])
+        .split(['&', ';', '|', '\n', '\r'])
         .filter_map(exec_command_fragment)
         .any(|fragment| {
             let tokens: Vec<&str> = fragment.split_whitespace().collect();

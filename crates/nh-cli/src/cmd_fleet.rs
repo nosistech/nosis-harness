@@ -72,7 +72,7 @@ pub fn run_tasks(
 ) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let (root, catalog) = cmd_run::find_catalog(&cwd)?;
-    let law = nh_law::load(&root, &LoadOptions { cli_autonomy: None });
+    let law = nh_law::load_checked(&root, &LoadOptions { cli_autonomy: None })?;
     print_law_warnings(&law.warnings);
     let input = read_task_file(tasks_path)?;
     let task_file: TaskFile = serde_json::from_str(&input)
@@ -108,7 +108,7 @@ pub fn run_tasks(
 pub fn resume_run(run_id: Option<&str>, max_workers: Option<usize>) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let (root, catalog) = cmd_run::find_catalog(&cwd)?;
-    let law = nh_law::load(&root, &LoadOptions { cli_autonomy: None });
+    let law = nh_law::load_checked(&root, &LoadOptions { cli_autonomy: None })?;
     print_law_warnings(&law.warnings);
     let resolver = RouteResolver::from_toml(&catalog)?;
     let report = nh_fleet::resume(

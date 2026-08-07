@@ -348,6 +348,16 @@ fn reopen_test_session(restored: RestoredSession, tmp: &Path) -> (ChatSession, A
     (session, calls)
 }
 
+#[test]
+fn chat_approval_display_preserves_long_command_without_truncating() {
+    let action = format!("exec {}", "x".repeat(700));
+    let scrubber = Arc::new(RwLock::new(Scrubber::new(Vec::new())));
+    let display = scrub_approval_line(&scrubber, &action);
+
+    assert_eq!(display, action);
+    assert!(!display.contains("more chars"));
+}
+
 fn session_cost_snapshot(session: &ChatSession) -> Vec<(Currency, u64, bool, bool)> {
     session
         .session_cost

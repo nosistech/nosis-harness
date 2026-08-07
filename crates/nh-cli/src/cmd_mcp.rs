@@ -5,7 +5,7 @@ use nh_vault::Vault as _;
 pub fn serve(addr: &str, token_entry: Option<&str>) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let (root, catalog) = crate::cmd_run::find_catalog(&cwd)?;
-    let law = nh_law::load(&root, &nh_law::LoadOptions { cli_autonomy: None });
+    let law = nh_law::load_checked(&root, &nh_law::LoadOptions { cli_autonomy: None })?;
     crate::cmd_fleet::print_law_warnings(&law.warnings);
     let token = match token_entry {
         Some(entry) => {

@@ -16,7 +16,9 @@ use nh_routes::{EffectiveExecutionPolicy, Profiles, ResolvedRoute, RouteClass, R
 use nh_tools::{builtin_tools, Access, Tool, ToolCtx};
 use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, SecretRegistry};
 
-use super::{load_mcp, scrub_line, ChatSession, ConnectFn, NotConnected, SharedScrubber};
+use super::{
+    load_mcp, scrub_approval_line, scrub_line, ChatSession, ConnectFn, NotConnected, SharedScrubber,
+};
 use crate::cmd_run::{self, effort_for, DELEGATE_MSG};
 use crate::guard_from;
 use crate::usage_tracker::LastRequestUsage;
@@ -35,7 +37,7 @@ impl Startup {
     fn load(model: &str, profile: &str, resuming: bool) -> anyhow::Result<Self> {
         let cwd = std::env::current_dir()?;
         let (root, catalog) = cmd_run::find_catalog(&cwd)?;
-        let law = nh_law::load(&root, &LoadOptions { cli_autonomy: None });
+        let law = nh_law::load_checked(&root, &LoadOptions { cli_autonomy: None })?;
         let warning_scrubber = Scrubber::new(Vec::new());
         print_warnings(&law.warnings, &warning_scrubber);
 
@@ -153,7 +155,7 @@ where
         ctx: ToolCtx::new(
             cwd,
             Box::new(move |action| {
-                cmd_run::approve_on_stdin(&scrub_line(&approve_scrubber, action))
+                cmd_run::approve_on_stdin(&scrub_approval_line(&approve_scrubber, action))
             }),
         )
         .with_scrubber(registry_scrubber.clone())

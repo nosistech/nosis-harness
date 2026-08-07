@@ -45,6 +45,7 @@ use crate::usage_tracker::LastRequestUsage;
 /// What callers print when a route resolves to a subscription delegate (M4 scope).
 pub(crate) const DELEGATE_MSG: &str = "delegate routes arrive in M4 - pick an api route";
 pub(crate) const MAX_RUN_TURNS: u32 = 100;
+const MAX_APPROVAL_DISPLAY_BYTES: usize = 64 * 1024;
 
 /// `--think` levels; clap renders them as none|low|high|max.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -112,12 +113,12 @@ pub fn run(
     validate_image_count(images.len())?;
     let cwd = std::env::current_dir()?;
     let (root, catalog) = find_catalog(&cwd)?;
-    let law = nh_law::load(
+    let law = nh_law::load_checked(
         &root,
         &LoadOptions {
             cli_autonomy: autonomy_for(autonomy),
         },
-    );
+    )?;
     let warning_scrubber = Scrubber::new(Vec::new());
     for warning in &law.warnings {
         eprintln!("warning: {}", safe_line(&warning_scrubber, warning));
@@ -166,7 +167,7 @@ pub fn run(
         cwd,
         // Model-supplied commands are scrubbed + control-char-escaped before display
         // so the approval gate always shows one faithful line.
-        Box::new(move |action| approve_on_stdin(&safe_line(&approve_scrubber, action))),
+        Box::new(move |action| approve_on_stdin(&approval_line(&approve_scrubber, action))),
     )
     .with_scrubber(session_scrubber.clone())
     .with_guard(Box::new(move |access| match access {
@@ -327,6 +328,10 @@ pub(crate) fn safe_line(scrubber: &Scrubber, text: &str) -> String {
     nh_vault::safe_line(scrubber, text)
 }
 
+pub(crate) fn approval_line(scrubber: &Scrubber, text: &str) -> String {
+    nh_vault::escape_untrusted(&scrubber.scrub(text))
+}
+
 /// Scrub and control-escape each answer line while preserving every newline.
 pub(crate) fn safe_text(scrubber: &Scrubber, text: &str) -> String {
     let mut safe = String::new();
@@ -343,7 +348,7 @@ pub(crate) fn safe_text(scrubber: &Scrubber, text: &str) -> String {
 }
 
 /// Approval gate: one line on stderr, default deny. `display` is the command
-/// already scrubbed and control-char-escaped by the caller (see `safe_line`).
+/// already scrubbed and control-char-escaped by the caller (see `approval_line`).
 pub(crate) fn approve_on_stdin(display: &str) -> bool {
     let stdin = io::stdin();
     let terminal = stdin.is_terminal();
@@ -359,6 +364,13 @@ fn approve_with_io<R: BufRead, W: Write>(
     input: &mut R,
     stderr: &mut W,
 ) -> bool {
+    if display.len() > MAX_APPROVAL_DISPLAY_BYTES {
+        let _ = writeln!(
+            stderr,
+            "  approval refused: command is too large to display in full (maximum {MAX_APPROVAL_DISPLAY_BYTES} bytes)"
+        );
+        return false;
+    }
     if !terminal {
         let _ = writeln!(
             stderr,

@@ -818,6 +818,13 @@ fn scrub_line(scrubber: &SharedScrubber, text: &str) -> String {
     }
 }
 
+fn scrub_approval_line(scrubber: &SharedScrubber, text: &str) -> String {
+    match scrubber.read() {
+        Ok(guard) => cmd_run::approval_line(&guard, text),
+        Err(poisoned) => cmd_run::approval_line(&poisoned.into_inner(), text),
+    }
+}
+
 /// Scrub and control-escape each answer line while preserving newlines.
 fn scrub_text(scrubber: &SharedScrubber, text: &str) -> String {
     match scrubber.read() {

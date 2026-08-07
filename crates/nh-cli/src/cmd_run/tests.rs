@@ -404,6 +404,15 @@ fn safe_line_redacts_key_shapes_and_literals_before_stderr() {
 }
 
 #[test]
+fn run_approval_display_preserves_long_command_without_truncating() {
+    let action = format!("exec {}", "x".repeat(700));
+    let display = approval_line(&Scrubber::new(Vec::new()), &action);
+
+    assert_eq!(display, action);
+    assert!(!display.contains("more chars"));
+}
+
+#[test]
 fn safe_text_neutralizes_terminal_controls_and_preserves_newlines() {
     let scrubber = Scrubber::new(Vec::new());
     let answer = "ordinary\x1b]0;pwned\x07\nnext\x1b[31m\n";
@@ -1279,6 +1288,26 @@ fn terminal_stdin_keeps_the_existing_explicit_yes_path() {
     assert_eq!(
         String::from_utf8(stderr).unwrap(),
         "  approve? echo safe  [y/N] "
+    );
+}
+
+#[test]
+fn command_too_large_to_display_is_refused() {
+    let display = "x".repeat(MAX_APPROVAL_DISPLAY_BYTES + 1);
+    let mut input = std::io::Cursor::new(b"yes\n".to_vec());
+    let mut stderr = Vec::new();
+
+    assert!(!approve_with_io(&display, true, &mut input, &mut stderr));
+    assert_eq!(
+        input.position(),
+        0,
+        "refusal must not consume approval input"
+    );
+    assert_eq!(
+        String::from_utf8(stderr).unwrap(),
+        format!(
+            "  approval refused: command is too large to display in full (maximum {MAX_APPROVAL_DISPLAY_BYTES} bytes)\n"
+        )
     );
 }
 
