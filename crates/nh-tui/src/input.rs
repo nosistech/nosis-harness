@@ -150,7 +150,7 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
         return reduce_ctrl_c(app);
     }
     app.last_ctrl_c = None;
-    if key.code == KeyCode::Esc && matches!(app.status, Status::Working | Status::Waiting) {
+    if key.code == KeyCode::Esc && app.status.esc_interrupts_turn() {
         if let Overlay::Search {
             original_scroll, ..
         } = &app.overlay
@@ -194,14 +194,29 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
         }
         return UiAction::None;
     }
+    if let Some(toward_older) = prompt_history_key(key) {
+        if toward_older {
+            app.recall_previous_prompt();
+        } else {
+            app.recall_next_prompt();
+        }
+        return UiAction::None;
+    }
     if word_delete_key(key) {
+        let original_len = app.input.len();
         delete_previous_word(&mut app.input);
+        if app.input.len() != original_len {
+            app.end_prompt_history_recall();
+        }
         if app.input.trim().is_empty() {
             app.pending_send = false;
         }
         return UiAction::None;
     }
     if line_delete_key(key) {
+        if !app.input.is_empty() {
+            app.end_prompt_history_recall();
+        }
         app.input.clear();
         app.pending_send = false;
         return UiAction::None;
@@ -224,7 +239,9 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
                 app.pending_send = !app.input.trim().is_empty();
             }
             KeyCode::Backspace => {
-                app.input.pop();
+                if app.input.pop().is_some() {
+                    app.end_prompt_history_recall();
+                }
                 if app.input.trim().is_empty() {
                     app.pending_send = false;
                 }
@@ -233,9 +250,10 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
                 if !character.is_control()
                     && !key
                         .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    && push_input_char(&mut app.input, character) =>
             {
-                push_input_char(&mut app.input, character);
+                app.end_prompt_history_recall();
             }
             _ => {}
         }
@@ -248,7 +266,9 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
             }
         }
         KeyCode::Backspace => {
-            app.input.pop();
+            if app.input.pop().is_some() {
+                app.end_prompt_history_recall();
+            }
             if app.input.trim().is_empty() {
                 app.pending_send = false;
             }
@@ -264,7 +284,9 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
                     .modifiers
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
-            push_input_char(&mut app.input, character);
+            if push_input_char(&mut app.input, character) {
+                app.end_prompt_history_recall();
+            }
             if app.input.starts_with('/') {
                 app.overlay = Overlay::CommandMenu { selected: 0 };
             }
@@ -285,6 +307,7 @@ fn reduce_ctrl_c(app: &mut App) -> UiAction {
         return UiAction::Interrupt;
     }
     if !app.input.is_empty() || app.pending_send {
+        app.end_prompt_history_recall();
         app.input.clear();
         app.pending_send = false;
         app.overlay = Overlay::None;
@@ -328,6 +351,17 @@ fn line_delete_key(key: KeyEvent) -> bool {
     control_edit_key(key) && matches!(key.code, KeyCode::Char('u' | 'U'))
 }
 
+fn prompt_history_key(key: KeyEvent) -> Option<bool> {
+    if !control_edit_key(key) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char('p' | 'P') => Some(true),
+        KeyCode::Char('n' | 'N') => Some(false),
+        _ => None,
+    }
+}
+
 fn delete_previous_word(input: &mut String) {
     while input.chars().next_back().is_some_and(char::is_whitespace) {
         input.pop();
@@ -358,6 +392,7 @@ pub(super) fn reduce_paste(app: &mut App, text: &str) -> UiAction {
         return UiAction::None;
     }
 
+    let original_len = app.input.len();
     for character in text.chars().filter_map(|character| match character {
         '\n' | '\r' | '\t' => Some(' '),
         character if character.is_control() => None,
@@ -366,6 +401,9 @@ pub(super) fn reduce_paste(app: &mut App, text: &str) -> UiAction {
         if !push_input_char(&mut app.input, character) {
             break;
         }
+    }
+    if app.input.len() != original_len {
+        app.end_prompt_history_recall();
     }
 
     if working {
@@ -551,7 +589,11 @@ pub(super) fn picker_key(
 
 pub(super) fn reduce_command_menu_key(app: &mut App, key: KeyEvent) -> UiAction {
     if word_delete_key(key) {
+        let original_len = app.input.len();
         delete_previous_word(&mut app.input);
+        if app.input.len() != original_len {
+            app.end_prompt_history_recall();
+        }
         if app.input.trim().is_empty() {
             app.pending_send = false;
             app.overlay = Overlay::None;
@@ -561,6 +603,9 @@ pub(super) fn reduce_command_menu_key(app: &mut App, key: KeyEvent) -> UiAction 
         return UiAction::None;
     }
     if line_delete_key(key) {
+        if !app.input.is_empty() {
+            app.end_prompt_history_recall();
+        }
         app.input.clear();
         app.pending_send = false;
         app.overlay = Overlay::None;
@@ -568,12 +613,17 @@ pub(super) fn reduce_command_menu_key(app: &mut App, key: KeyEvent) -> UiAction 
     }
     match key.code {
         KeyCode::Esc => {
+            if !app.input.is_empty() {
+                app.end_prompt_history_recall();
+            }
             app.input.clear();
             app.pending_send = false;
             app.overlay = Overlay::None;
         }
         KeyCode::Backspace => {
-            app.input.pop();
+            if app.input.pop().is_some() {
+                app.end_prompt_history_recall();
+            }
             if app.input.is_empty() {
                 app.pending_send = false;
                 app.overlay = Overlay::None;
@@ -601,7 +651,9 @@ pub(super) fn reduce_command_menu_key(app: &mut App, key: KeyEvent) -> UiAction 
                     .modifiers
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
-            push_input_char(&mut app.input, character);
+            if push_input_char(&mut app.input, character) {
+                app.end_prompt_history_recall();
+            }
             if let Overlay::CommandMenu { selected } = &mut app.overlay {
                 *selected = 0;
             }
@@ -714,6 +766,7 @@ pub(super) fn activate_palette_entry(app: &mut App, entry: PaletteEntry) -> UiAc
         }
         PaletteAction::Prefill(command) => {
             app.input = command.into();
+            app.end_prompt_history_recall();
             app.overlay = Overlay::CommandMenu { selected: 0 };
             UiAction::None
         }

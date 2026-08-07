@@ -122,7 +122,7 @@ fn left_title(
 pub(super) fn render_key_hints(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let hints = safe_line(
         &app.scrubber,
-        &key_hint_line(app.budget_reached(), matches!(app.status, Status::Working)),
+        &key_hint_line(app.budget_reached(), app.status.esc_interrupts_turn()),
     );
     frame.render_widget(
         Paragraph::new(hints).style(
@@ -205,8 +205,9 @@ pub(super) fn render_input(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 pub(super) fn render_hud(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let hud = fit_with_ellipsis(&app.hud_line(Utc::now()), usize::from(area.width));
     frame.render_widget(
-        Paragraph::new(app.hud_line(Utc::now())).style(Style::default().fg(Color::Gray)),
+        Paragraph::new(hud).style(Style::default().fg(Color::Gray)),
         area,
     );
 }
@@ -282,7 +283,7 @@ pub(super) fn render_help(frame: &mut Frame<'_>, app: &App, area: Rect) {
         "Keys for the current state",
     );
     let lines: Vec<Line<'static>> =
-        visible_key_bindings(app.budget_reached(), matches!(app.status, Status::Working))
+        visible_key_bindings(app.budget_reached(), app.status.esc_interrupts_turn())
             .map(|binding| {
                 Line::from(vec![
                     Span::styled(
@@ -748,7 +749,7 @@ fn blocked_reason_width(width: u16, route_label: &str, scrubber: &crate::SharedS
     )
 }
 
-fn fit_with_ellipsis(text: &str, max_width: usize) -> String {
+pub(super) fn fit_with_ellipsis(text: &str, max_width: usize) -> String {
     if Line::from(text).width() <= max_width {
         return text.to_owned();
     }

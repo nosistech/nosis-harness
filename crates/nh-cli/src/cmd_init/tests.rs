@@ -63,11 +63,12 @@ fn creates_nosis_gitignore_and_catalog_then_is_idempotent() {
     assert!(gi.contains("auth*"));
     let law = fs::read_to_string(tmp.path().join(".nosis").join("law.toml")).unwrap();
     assert_eq!(law, nh_law::STARTER_LAW_TOML);
-    // no .git in the tempdir → exactly four things created, hook skipped silently
-    assert_eq!(lines.len(), 4);
+    // No .git exists, so four files are created and the missing guard is reported.
+    assert_eq!(lines.len(), 5);
+    assert!(lines.iter().any(|line| line == NO_WORK_TREE_WARNING));
 
     let again = init_at(tmp.path()).unwrap();
-    assert_eq!(again, vec!["already set up".to_string()]);
+    assert_eq!(again, vec![NO_WORK_TREE_WARNING.to_string()]);
 }
 
 #[test]
@@ -99,7 +100,7 @@ fn existing_gitignore_is_extended_without_reordering_and_second_init_is_idempote
             .any(|line| line == &format!("added {required} to .nosis/.gitignore")));
     }
 
-    assert_eq!(init_at(tmp.path()).unwrap(), ["already set up"]);
+    assert_eq!(init_at(tmp.path()).unwrap(), [NO_WORK_TREE_WARNING]);
     assert_eq!(
         fs::read_to_string(nosis.join(".gitignore")).unwrap(),
         updated

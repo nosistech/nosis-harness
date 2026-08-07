@@ -32,6 +32,7 @@ const HOOK_WARNING: &str =
     "pre-commit secret guard NOT installed (worktree/custom hooks path) - install manually";
 const EXISTING_HOOK_WARNING: &str =
     "pre-commit secret guard NOT installed (existing hook preserved) - chain it manually";
+const NO_WORK_TREE_WARNING: &str = "pre-commit secret guard NOT installed (not a Git work tree)";
 
 fn pre_commit() -> String {
     let mut hook = String::with_capacity(
@@ -53,8 +54,9 @@ pub fn run() -> anyhow::Result<()> {
 
 /// Create .nosis/, .nosis/.gitignore, starter catalog/law files (when absent),
 /// and (when Git metadata is resolvable) the pre-commit hook.
-/// Returns one confirmation line per thing created; ["already set up"] when nothing was.
-/// Existing files are never overwritten. No Git metadata means there is no hook to install.
+/// Returns one confirmation line per thing created. A Git work tree with no remaining work returns
+/// ["already set up"]. Existing files are never overwritten.
+/// No Git metadata means there is no hook to install.
 pub fn init_at(root: &Path) -> anyhow::Result<Vec<String>> {
     let mut lines = Vec::new();
 
@@ -85,7 +87,7 @@ pub fn init_at(root: &Path) -> anyhow::Result<Vec<String>> {
             "installed Git pre-commit hook (blocks key-shaped strings)",
             &mut lines,
         )?,
-        HooksResolution::NoWorkTree => {}
+        HooksResolution::NoWorkTree => lines.push(NO_WORK_TREE_WARNING.to_string()),
         HooksResolution::Refused => lines.push(HOOK_WARNING.to_string()),
     }
 

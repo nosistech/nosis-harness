@@ -49,6 +49,7 @@ pub(crate) fn command_matches(app: &App) -> Vec<&PaletteEntry> {
 
 pub(super) fn execute_command(app: &mut App) -> UiAction {
     let input = std::mem::take(&mut app.input);
+    app.end_prompt_history_recall();
     app.overlay = Overlay::None;
     let mut parts = input.strip_prefix('/').unwrap_or("").split_whitespace();
     let name = parts.next().unwrap_or("");

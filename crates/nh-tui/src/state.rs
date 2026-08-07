@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 pub(super) const MIN_TYPICAL_DURATION_SAMPLES: usize = 5;
+pub(super) const PROMPT_HISTORY_CAPACITY: usize = 100;
 pub(super) const PROMPT_ESTIMATE_UNAVAILABLE: u64 = u64::MAX;
 
 /// The single status shown by the semáforo.
@@ -34,6 +35,12 @@ pub enum Status {
     FinishingInterrupted,
     Waiting,
     Blocked(String),
+}
+
+impl Status {
+    pub(super) fn esc_interrupts_turn(&self) -> bool {
+        matches!(self, Self::Working | Self::Waiting)
+    }
 }
 
 /// One completed task projected from its receipt and in-memory answer.
@@ -377,6 +384,9 @@ pub struct App {
     pub(super) last_request_usage: Option<Usage>,
     pub(super) input: String,
     pub(super) pending_send: bool,
+    pub(super) prompt_history: Vec<String>,
+    pub(super) prompt_history_index: Option<usize>,
+    pub(super) prompt_history_draft: Option<String>,
     pub(super) last_ctrl_c: Option<Instant>,
     pub(super) budget: Option<u64>,
     pub(super) budget_warned: bool,
@@ -448,6 +458,9 @@ impl App {
             last_request_usage: None,
             input: String::new(),
             pending_send: false,
+            prompt_history: Vec::new(),
+            prompt_history_index: None,
+            prompt_history_draft: None,
             last_ctrl_c: None,
             budget,
             budget_warned: false,
@@ -591,6 +604,7 @@ impl App {
             self.pending_send = false;
             return None;
         }
+        self.remember_prompt(&task);
         self.input.clear();
         self.pending_send = false;
         self.current_task_compaction = CompactionStats::default();
@@ -600,6 +614,58 @@ impl App {
         self.push_line(&task, TranscriptKind::Task);
         self.set_status(Status::Working, Utc::now());
         Some(task)
+    }
+
+    fn remember_prompt(&mut self, prompt: &str) {
+        self.end_prompt_history_recall();
+        if self
+            .prompt_history
+            .last()
+            .is_some_and(|previous| previous == prompt)
+        {
+            return;
+        }
+        if self.prompt_history.len() == PROMPT_HISTORY_CAPACITY {
+            self.prompt_history.remove(0);
+        }
+        self.prompt_history.push(prompt.to_owned());
+    }
+
+    pub(super) fn recall_previous_prompt(&mut self) {
+        if self.prompt_history.is_empty() {
+            return;
+        }
+        let index = self.prompt_history_index.map_or_else(
+            || {
+                self.prompt_history_draft = Some(self.input.clone());
+                self.prompt_history.len() - 1
+            },
+            |index| index.saturating_sub(1),
+        );
+        self.prompt_history_index = Some(index);
+        self.input.clone_from(&self.prompt_history[index]);
+    }
+
+    pub(super) fn recall_next_prompt(&mut self) {
+        let Some(index) = self.prompt_history_index else {
+            return;
+        };
+        if index.saturating_add(1) < self.prompt_history.len() {
+            let next = index + 1;
+            self.prompt_history_index = Some(next);
+            self.input.clone_from(&self.prompt_history[next]);
+            return;
+        }
+        self.prompt_history_index = None;
+        self.input = self.prompt_history_draft.take().unwrap_or_default();
+        if self.input.trim().is_empty() {
+            self.pending_send = false;
+        }
+    }
+
+    pub(super) fn end_prompt_history_recall(&mut self) {
+        self.prompt_history_index = None;
+        self.prompt_history_draft = None;
     }
 
     pub(super) fn switch_route(&mut self, route: ResolvedRoute) {

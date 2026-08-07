@@ -3,7 +3,7 @@ use crate::keymap::{key_hint_line, visible_key_bindings};
 use crate::palette::{resolve_color_mode, trust_dial_lines, ColorMode};
 use crate::state::{
     search_match_lines, Overlay, PickerKind, RouteTimingHistory, UiInputs,
-    MIN_TYPICAL_DURATION_SAMPLES, PROMPT_ESTIMATE_UNAVAILABLE,
+    MIN_TYPICAL_DURATION_SAMPLES, PROMPT_ESTIMATE_UNAVAILABLE, PROMPT_HISTORY_CAPACITY,
 };
 use crate::timeline::{measured_duration, timeline_detail_lines, timeline_row};
 use crate::worker::WorkerCommand;
@@ -312,6 +312,13 @@ fn fixed_at() -> DateTime<Utc> {
         .with_timezone(&Utc)
 }
 
+fn dispatch_test_prompt(app: &mut App, prompt: &str) {
+    app.set_status(Status::Idle, Utc::now());
+    app.input = prompt.to_owned();
+    assert_eq!(app.dispatch().as_deref(), Some(prompt.trim()));
+    app.set_status(Status::Idle, Utc::now());
+}
+
 fn render_buffer(app: &App, width: u16, height: u16) -> ratatui::buffer::Buffer {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -610,6 +617,8 @@ fn help_overlay_and_hint_bar_render_from_the_same_binding_table() {
     let base = buffer_text(&render_buffer(&app, 100, 24));
     let expected_hint = key_hint_line(false, false);
     assert!(base.contains(&expected_hint), "got: {base}");
+    assert!(!base.contains("Ctrl+P"), "got: {base}");
+    assert!(!base.contains("Ctrl+N"), "got: {base}");
 
     assert_eq!(
         reduce_key(&mut app, code_key(KeyCode::F(1))),
@@ -619,6 +628,8 @@ fn help_overlay_and_hint_bar_render_from_the_same_binding_table() {
     let help = buffer_text(&render_buffer(&app, 100, 24));
     assert!(help.contains("Help · read-only"), "got: {help}");
     assert!(help.contains("Keys for the current state"), "got: {help}");
+    assert!(help.contains("Ctrl+P"), "got: {help}");
+    assert!(help.contains("Ctrl+N"), "got: {help}");
     for binding in visible_key_bindings(false, false) {
         let description = format!("{}{}", binding.action, binding.detail);
         assert!(
@@ -634,24 +645,46 @@ fn help_overlay_and_hint_bar_render_from_the_same_binding_table() {
 }
 
 #[test]
-fn working_only_interrupt_binding_reaches_both_key_surfaces() {
-    let idle = test_app(None);
-    let idle_base = buffer_text(&render_buffer(&idle, 120, 24));
-    assert!(!idle_base.contains("Esc interrupt"), "got: {idle_base}");
+fn esc_binding_reaches_both_key_surfaces_only_when_it_can_interrupt() {
+    for status in [Status::Idle, Status::FinishingInterrupted] {
+        let mut app = test_app(None);
+        app.status = status;
+        let base = buffer_text(&render_buffer(&app, 120, 24));
+        assert!(!base.contains("Esc interrupt"), "got: {base}");
+        reduce_key(&mut app, code_key(KeyCode::F(1)));
+        let help = buffer_text(&render_buffer(&app, 120, 24));
+        assert!(!help.contains("Esc         interrupt"), "got: {help}");
+    }
 
-    let mut working = test_app(None);
-    working.status = Status::Working;
-    let working_base = buffer_text(&render_buffer(&working, 120, 24));
-    assert!(
-        working_base.contains("Esc interrupt"),
-        "got: {working_base}"
-    );
-    reduce_key(&mut working, code_key(KeyCode::F(1)));
-    let working_help = buffer_text(&render_buffer(&working, 120, 24));
-    assert!(
-        working_help.contains("interrupt the turn; close overlays; decline approvals"),
-        "got: {working_help}"
-    );
+    for status in [Status::Working, Status::Waiting] {
+        let mut app = test_app(None);
+        app.status = status;
+        let base = buffer_text(&render_buffer(&app, 120, 24));
+        assert!(base.contains("Esc interrupt"), "got: {base}");
+        reduce_key(&mut app, code_key(KeyCode::F(1)));
+        let help = buffer_text(&render_buffer(&app, 120, 24));
+        assert!(
+            help.contains("interrupt the turn; close overlays; decline approvals"),
+            "got: {help}"
+        );
+    }
+}
+
+#[test]
+fn esc_handler_uses_the_same_interrupt_predicate_as_the_key_surfaces() {
+    for status in [
+        Status::Idle,
+        Status::Working,
+        Status::Waiting,
+        Status::FinishingInterrupted,
+        Status::Blocked("done".into()),
+    ] {
+        let expected = status.esc_interrupts_turn();
+        let mut app = test_app(None);
+        app.status = status;
+        let action = reduce_key(&mut app, code_key(KeyCode::Esc));
+        assert_eq!(action == UiAction::Interrupt, expected);
+    }
 }
 
 #[test]
@@ -770,6 +803,112 @@ fn word_and_line_deletion_stay_live_in_the_slash_command_menu() {
     assert!(app.input.is_empty());
     assert!(!app.pending_send);
     assert_eq!(app.overlay, Overlay::None);
+}
+
+#[test]
+fn prompt_history_walks_both_directions_and_restores_the_draft() {
+    let mut app = test_app(None);
+    dispatch_test_prompt(&mut app, "first prompt");
+    dispatch_test_prompt(&mut app, "second prompt");
+    app.input = "draft in progress".into();
+
+    reduce_key(&mut app, ctrl_key('p'));
+    assert_eq!(app.input, "second prompt");
+    reduce_key(&mut app, ctrl_key('p'));
+    assert_eq!(app.input, "first prompt");
+    reduce_key(&mut app, ctrl_key('p'));
+    assert_eq!(app.input, "first prompt");
+    reduce_key(&mut app, ctrl_key('n'));
+    assert_eq!(app.input, "second prompt");
+    reduce_key(&mut app, ctrl_key('n'));
+    assert_eq!(app.input, "draft in progress");
+    reduce_key(&mut app, ctrl_key('n'));
+    assert_eq!(app.input, "draft in progress");
+
+    app.status = Status::Working;
+    app.input = "queued draft".into();
+    reduce_key(&mut app, ctrl_key('p'));
+    assert_eq!(app.input, "second prompt");
+    assert_eq!(app.status, Status::Working);
+    reduce_key(&mut app, ctrl_key('n'));
+    assert_eq!(app.input, "queued draft");
+}
+
+#[test]
+fn prompt_history_skips_empty_and_immediately_duplicate_prompts() {
+    let mut app = test_app(None);
+    app.input = "   ".into();
+    assert_eq!(app.dispatch(), None);
+    assert!(app.prompt_history.is_empty());
+
+    dispatch_test_prompt(&mut app, "repeat this");
+    dispatch_test_prompt(&mut app, "  repeat this  ");
+    dispatch_test_prompt(&mut app, "different prompt");
+
+    assert_eq!(
+        app.prompt_history,
+        ["repeat this".to_owned(), "different prompt".to_owned()]
+    );
+}
+
+#[test]
+fn prompt_history_drops_the_oldest_entry_at_its_session_cap() {
+    let mut app = test_app(None);
+    for index in 0..PROMPT_HISTORY_CAPACITY.saturating_add(3) {
+        dispatch_test_prompt(&mut app, &format!("prompt {index}"));
+    }
+
+    assert_eq!(app.prompt_history.len(), PROMPT_HISTORY_CAPACITY);
+    assert_eq!(
+        app.prompt_history.first().map(String::as_str),
+        Some("prompt 3")
+    );
+    let expected_last = format!("prompt {}", PROMPT_HISTORY_CAPACITY + 2);
+    assert_eq!(
+        app.prompt_history.last().map(String::as_str),
+        Some(expected_last.as_str())
+    );
+}
+
+#[test]
+fn editing_a_recalled_prompt_restarts_the_next_walk_at_the_newest_entry() {
+    let mut app = test_app(None);
+    dispatch_test_prompt(&mut app, "first prompt");
+    dispatch_test_prompt(&mut app, "second prompt");
+    app.input = "draft".into();
+
+    reduce_key(&mut app, ctrl_key('p'));
+    assert_eq!(app.input, "second prompt");
+    reduce_key(&mut app, char_key('x'));
+    assert_eq!(app.input, "second promptx");
+    assert!(app.prompt_history_index.is_none());
+    assert!(app.prompt_history_draft.is_none());
+
+    reduce_key(&mut app, ctrl_key('p'));
+    assert_eq!(app.input, "second prompt");
+    reduce_key(&mut app, ctrl_key('n'));
+    assert_eq!(app.input, "second promptx");
+}
+
+#[test]
+fn prompt_recall_is_inert_during_overlays_and_approvals() {
+    let mut app = test_app(None);
+    dispatch_test_prompt(&mut app, "remembered prompt");
+    app.input = "draft".into();
+    app.overlay = Overlay::Help;
+
+    reduce_key(&mut app, ctrl_key('p'));
+    assert_eq!(app.input, "draft");
+    assert!(app.prompt_history_index.is_none());
+
+    app.overlay = Overlay::None;
+    app.status = Status::Working;
+    let (event, answer) = approval("cargo test --workspace");
+    apply_event(&mut app, event);
+    reduce_key(&mut app, ctrl_key('p'));
+    assert_eq!(app.input, "draft");
+    assert_eq!(answer.try_recv(), Err(TryRecvError::Empty));
+    assert!(app.prompt_history_index.is_none());
 }
 
 #[test]
@@ -1574,7 +1713,9 @@ fn approval_row_names_the_command_and_is_amber_reversed() {
     let (x, y) = find_ascii_text(&buffer, "approve:");
     let cell = &buffer[(x, y)];
     assert!(
-        text.contains("approve: cargo test --workspace   [y] yes  [a] always  [n]/[Esc] no"),
+        text.contains(
+            "approve: cargo test --workspace   [y] yes  [a] always  [n] no  [Esc] no + cancel turn"
+        ),
         "got: {text}"
     );
     assert!(!APPROVAL_LEGEND.contains("interrupt"));
@@ -1594,6 +1735,65 @@ fn approval_row_keeps_the_full_action_and_visible_legend() {
     assert!(line.text.contains(&action));
     assert!(line.text.contains(APPROVAL_LEGEND));
     assert!(!line.text.contains("more chars"));
+}
+
+#[test]
+fn approval_row_at_width_79_elides_the_action_before_the_legend() {
+    let mut app = test_app(None);
+    app.status = Status::Working;
+    let action = format!("exec {}", "x".repeat(700));
+    let (event, _answer) = approval(&action);
+    apply_event(&mut app, event);
+
+    let max_text_width = 79_usize - 2 - 2;
+    let fixed = format!("approve:    {APPROVAL_LEGEND}");
+    let fitted_action = fit_with_ellipsis(
+        &action,
+        max_text_width.saturating_sub(Line::from(fixed).width()),
+    );
+    let expected = format!("approve: {fitted_action}   {APPROVAL_LEGEND}");
+    let rendered = buffer_text(&render_buffer(&app, 79, 20));
+
+    assert!(rendered.contains(&expected), "got: {rendered}");
+    assert!(!rendered.contains(&action), "got: {rendered}");
+}
+
+#[test]
+fn hud_at_width_79_uses_the_shared_ellipsis_fitter_and_wide_hud_is_unchanged() {
+    let mut app = test_app(Some(1_000));
+    let usage = Usage {
+        prompt_tokens: 600,
+        completion_tokens: 200,
+        cached_tokens: Some(300),
+        evidence: UsageEvidence::Measured,
+    };
+    app.usage = Some(usage.clone());
+    app.last_request_usage = Some(usage);
+    let full = app.hud_line(Utc::now());
+    assert!(Line::from(full.as_str()).width() > 77);
+
+    let marker = fit_with_ellipsis("long", 1);
+    let narrow = render_buffer(&app, 79, 20);
+    let narrow_rows = buffer_rows(&narrow);
+    let narrow_y = narrow_rows
+        .iter()
+        .position(|row| row.contains("session"))
+        .unwrap();
+    assert_eq!(
+        narrow[(77, u16::try_from(narrow_y).unwrap())].symbol(),
+        marker
+    );
+
+    let wide = render_buffer(&app, 240, 20);
+    let wide_rows = buffer_rows(&wide);
+    let wide_y = wide_rows
+        .iter()
+        .position(|row| row.contains("session"))
+        .unwrap();
+    let wide_inner = (1..wide.area.width.saturating_sub(1))
+        .map(|x| wide[(x, u16::try_from(wide_y).unwrap())].symbol())
+        .collect::<String>();
+    assert_eq!(wide_inner.trim_end(), full);
 }
 
 #[test]
@@ -2253,6 +2453,7 @@ fn working_state_keeps_all_scroll_keys_live_while_text_remains_editable() {
     app.status = Status::Working;
     app.max_scroll.set(20);
     app.input = "unchanged".into();
+    app.prompt_history.push("remembered prompt".into());
 
     reduce_key(&mut app, code_key(KeyCode::PageUp));
     assert_eq!(app.scroll_back, 5);
@@ -2262,6 +2463,8 @@ fn working_state_keeps_all_scroll_keys_live_while_text_remains_editable() {
     assert_eq!(app.scroll_back, 5);
     reduce_key(&mut app, code_key(KeyCode::PageDown));
     assert_eq!(app.scroll_back, 0);
+    assert_eq!(app.input, "unchanged");
+    assert!(app.prompt_history_index.is_none());
 
     reduce_key(&mut app, char_key('x'));
     assert_eq!(app.input, "unchangedx");
@@ -2293,6 +2496,145 @@ fn wrapped_rows_matches_word_wrap_and_keeps_the_newest_line_reachable() {
         })
         .unwrap();
     assert!(buffer_text(terminal.backend().buffer()).contains("newest"));
+}
+
+#[test]
+fn task_and_answer_wrap_with_a_hanging_indent_at_79_and_a_wider_width() {
+    for width in [79, 111] {
+        for (kind, word) in [
+            (TranscriptKind::Task, "taskword"),
+            (TranscriptKind::Answer, "answerword"),
+        ] {
+            let mut app = test_app(None);
+            app.push_line(&format!("{word} ").repeat(40), kind);
+            let buffer = render_buffer(&app, width, 30);
+            let positions = buffer_rows(&buffer)
+                .into_iter()
+                .filter_map(|row| row.find(word).map(|byte_x| row[..byte_x].chars().count()))
+                .collect::<Vec<_>>();
+
+            assert!(positions.len() >= 3, "width {width}: {positions:?}");
+            assert!(
+                positions.iter().all(|position| *position == 4),
+                "width {width}: {positions:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn speaker_group_separator_renders_blank_after_wrapped_task() {
+    let mut app = test_app(None);
+    app.push_line(
+        &format!("{}wraptail", "taskword ".repeat(10)),
+        TranscriptKind::Task,
+    );
+    app.push_line("answer", TranscriptKind::Answer);
+
+    let width = 32;
+    let buffer = render_buffer(&app, width, 20);
+    let rows = buffer_rows(&buffer);
+    let task_positions = rows
+        .iter()
+        .filter_map(|row| {
+            row.find("taskword")
+                .map(|byte_x| row[..byte_x].chars().count())
+        })
+        .collect::<Vec<_>>();
+    let (_, tail_y) = find_ascii_text(&buffer, "wraptail");
+    let (_, answer_header_y) = find_ascii_text(&buffer, "◆ nosis");
+
+    assert!(task_positions.len() >= 2, "got: {rows:?}");
+    assert!(
+        task_positions.iter().all(|position| *position == 4),
+        "got: {task_positions:?}"
+    );
+    assert_eq!(answer_header_y, tail_y.saturating_add(2));
+    let separator_y = tail_y.saturating_add(1);
+    for x in 1..width.saturating_sub(1) {
+        assert_eq!(
+            buffer[(x, separator_y)].symbol(),
+            " ",
+            "separator cell at x={x}, y={separator_y}"
+        );
+    }
+}
+
+#[test]
+fn speaker_group_separator_survives_as_first_visible_scrolled_row() {
+    let mut app = test_app(None);
+    app.push_line(
+        &format!("{}wraptail", "taskword ".repeat(10)),
+        TranscriptKind::Task,
+    );
+    for answer in ["answer one", "answer two", "answer three"] {
+        app.push_line(answer, TranscriptKind::Answer);
+    }
+    app.scroll_back = 2;
+
+    let width = 32;
+    let buffer = render_buffer(&app, width, 9);
+    let rows = buffer_rows(&buffer);
+    let first_transcript_y = 1_u16;
+    let overflow_marker_x = width.saturating_sub(1).saturating_sub(6);
+
+    assert!(app.max_scroll.get() > app.scroll_back);
+    assert!(rows[usize::from(first_transcript_y)].contains("↑ more"));
+    assert!(rows[usize::from(first_transcript_y.saturating_add(1))].contains("◆ nosis"));
+    for x in 1..overflow_marker_x {
+        assert_eq!(
+            buffer[(x, first_transcript_y)].symbol(),
+            " ",
+            "first visible separator cell at x={x}"
+        );
+    }
+}
+
+#[test]
+fn progress_wraps_under_its_marker() {
+    let mut app = test_app(None);
+    app.push_line(&"progressword ".repeat(40), TranscriptKind::Progress);
+    let buffer = render_buffer(&app, 79, 30);
+    let positions = buffer_rows(&buffer)
+        .into_iter()
+        .filter_map(|row| {
+            row.find("progressword")
+                .map(|byte_x| row[..byte_x].chars().count())
+        })
+        .collect::<Vec<_>>();
+
+    assert!(positions.len() >= 3, "got: {positions:?}");
+    assert!(
+        positions.iter().all(|position| *position == 3),
+        "got: {positions:?}"
+    );
+}
+
+#[test]
+fn selected_search_highlight_keeps_its_byte_range_on_a_wrapped_answer() {
+    let mut app = test_app(None);
+    let wrapped = format!("{}needle {}", "alpha ".repeat(14), "omega ".repeat(24));
+    app.push_line(&wrapped, TranscriptKind::Answer);
+    for index in 0..35 {
+        app.push_line(&format!("newer filler {index}"), TranscriptKind::Progress);
+    }
+    reduce_key(&mut app, ctrl_key('f'));
+    type_text(&mut app, "needle");
+
+    let rendered = render_buffer(&app, 79, 30);
+    let (x, y) = find_ascii_text(&rendered, "needle");
+    assert!(x >= 4);
+    assert!(y < search_modal_area(Rect::new(0, 0, 79, 30)).y);
+    assert!(app.search_match_scroll.get() > 0);
+    for offset in 0..6 {
+        let cell = &rendered[(x.saturating_add(offset), y)];
+        assert_eq!(cell.fg, Color::Cyan);
+        assert!(cell.modifier.contains(Modifier::BOLD | Modifier::REVERSED));
+    }
+
+    reduce_key(&mut app, code_key(KeyCode::Enter));
+    let focused = buffer_text(&render_buffer(&app, 79, 30));
+    assert!(focused.contains("needle"), "got: {focused}");
 }
 
 #[test]

@@ -76,6 +76,22 @@ pub(super) const KEY_BINDINGS: &[KeyBinding] = &[
         working_only: false,
     },
     KeyBinding {
+        keys: "Ctrl+P",
+        action: "recall",
+        detail: " previous prompt",
+        show_in_hint: false,
+        hide_at_budget: false,
+        working_only: false,
+    },
+    KeyBinding {
+        keys: "Ctrl+N",
+        action: "recall",
+        detail: " next prompt or draft",
+        show_in_hint: false,
+        hide_at_budget: false,
+        working_only: false,
+    },
+    KeyBinding {
         keys: "Ctrl+C",
         action: "interrupt / clear / exit",
         detail: " by state; exit needs two presses",
