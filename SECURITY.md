@@ -12,6 +12,8 @@ nosis is in development and is before version 1.0. We apply security fixes to th
 | `main` branch      | Yes            |
 | All older releases | No             |
 
+The current release is `v0.2.0`. It carries the guarded reading of repository-controlled configuration files; `v0.1.0` does not. The Security section of the `0.2.0` entry in `CHANGELOG.md` states what was wrong and what changed.
+
 ## How to Report a Vulnerability
 
 Do not open a public issue for a security problem. Do not put security data in a public discussion or a pull request.
@@ -63,7 +65,7 @@ The MCP preview server binds only to the local address 127.0.0.1. The server mak
 
 ### Audits
 
-Two internal reviews are part of the public record. The first full audit on 2026-07-20 reported no critical findings. A stricter pre-release audit on 2026-07-21 found **2 critical and 14 high** findings. That audit correctly judged that tree not releasable. The current release candidate contains the remediation for each finding. The remediation includes exact-origin credential authorization for C-01. It also includes symlink-rejecting, contained, 64 KiB-bounded constitution reads for C-02. Regression tests cover both. The full audit report is available on request through the security contact in this file. Before a tag, the release process still requires the complete gate and the manual release checks.
+Two internal reviews are part of the public record. The first full audit on 2026-07-20 reported no critical findings. A stricter pre-release audit on 2026-07-21 found **2 critical and 14 high** findings. That audit correctly judged that tree not releasable. Every finding has a remediation on `main`. The remediation includes exact-origin credential authorization for C-01. It also includes symlink-rejecting, contained, size-bounded constitution reads for C-02, which `v0.2.0` extends to every repository-controlled configuration file: project instructions, project memory, the policy file, the profile file, the MCP server file and the route price table. Regression tests cover both. The full audit report is available on request through the security contact in this file. Before a tag, the release process still requires the complete gate and the manual release checks.
 
 ## Scope
 
