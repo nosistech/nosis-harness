@@ -1,6 +1,7 @@
 use super::*;
 use chrono::TimeZone;
 use nh_core::wire::{ChatClient, ChatRequest, ChatResponse, RetryExhausted};
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -36,6 +37,24 @@ fn mcp_config(name: &str, url: &str, trust: McpTrust) -> McpServerConfig {
         default_mode: None,
         trust,
     }
+}
+
+#[cfg(unix)]
+fn symlink_file(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn symlink_file(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(target, link)
+}
+
+fn must_symlink_file(target: &Path, link: &Path) {
+    symlink_file(target, link).unwrap_or_else(|error| {
+        panic!(
+            "symlink creation is required for this security test; enable Windows Developer Mode or run with symlink privilege: {error}"
+        )
+    });
 }
 
 #[test]
@@ -98,6 +117,89 @@ fn byte_identical_user_global_catalog_is_an_explicit_trust_decision() {
 
     assert_eq!(root, project.path());
     assert_eq!(catalog, custom);
+}
+
+#[test]
+fn symlinked_repository_catalog_is_a_hard_error() {
+    let project = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("catalog.toml");
+    fs::write(&target, BUNDLED_CATALOG).unwrap();
+    must_symlink_file(&target, &project.path().join("catalog.toml"));
+
+    let error = find_catalog_with_home(project.path(), None).unwrap_err();
+    let message = error.to_string();
+
+    assert!(
+        message.contains("refused repository catalog.toml"),
+        "got: {message}"
+    );
+    assert!(message.contains("not a regular file"), "got: {message}");
+}
+
+#[test]
+fn symlinked_repo_mcp_is_refused_and_user_config_continues() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::create_dir_all(repo.path().join(".nosis")).unwrap();
+    fs::create_dir_all(home.path().join(".nosis")).unwrap();
+    fs::write(
+        home.path().join(".nosis").join("mcp.toml"),
+        r#"
+        [servers.shared]
+        url = "https://user.example/mcp"
+        trust = "auto"
+        "#,
+    )
+    .unwrap();
+    let target = outside.path().join("mcp.toml");
+    fs::write(
+        &target,
+        r#"
+        [servers.shared]
+        url = "https://outside.example/mcp"
+        trust = "block"
+        "#,
+    )
+    .unwrap();
+    must_symlink_file(&target, &repo.path().join(".nosis").join("mcp.toml"));
+    let law = nh_law::load(repo.path(), &LoadOptions { cli_autonomy: None });
+    let mut warnings = Vec::new();
+
+    let configs =
+        load_and_vet_mcp_configs(repo.path(), Some(home.path()), &law.policy, &mut warnings);
+
+    assert_eq!(configs.len(), 1);
+    assert_eq!(configs[0].name, "shared");
+    assert_eq!(configs[0].trust, McpTrust::Auto);
+    assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+    assert!(warnings[0].contains("repository .nosis/mcp.toml"));
+    assert!(warnings[0].contains("not a regular file"));
+    assert!(warnings[0].contains("continuing without MCP"));
+}
+
+#[test]
+fn oversized_repo_mcp_is_refused_before_parsing() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir_all(repo.path().join(".nosis")).unwrap();
+    fs::write(
+        repo.path().join(".nosis").join("mcp.toml"),
+        " ".repeat(64 * 1024 + 1),
+    )
+    .unwrap();
+    let law = nh_law::load(repo.path(), &LoadOptions { cli_autonomy: None });
+    let mut warnings = Vec::new();
+
+    let configs =
+        load_and_vet_mcp_configs(repo.path(), Some(home.path()), &law.policy, &mut warnings);
+
+    assert!(configs.is_empty());
+    assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+    assert!(warnings[0].contains("repository .nosis/mcp.toml"));
+    assert!(warnings[0].contains("exceeds 65536 bytes"));
+    assert!(warnings[0].contains("continuing without MCP"));
 }
 
 #[test]

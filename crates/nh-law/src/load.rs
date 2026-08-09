@@ -11,6 +11,37 @@ use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::os::unix::fs::OpenOptionsExt as _;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt as _;
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+compile_error!("guarded reads require a verified no-follow open flag for this target");
+
+#[cfg(windows)]
+const NO_FOLLOW_OPEN_FLAG: u32 = 0x0020_0000;
+#[cfg(target_os = "linux")]
+const NO_FOLLOW_OPEN_FLAG: i32 = 0x2_0000;
+#[cfg(target_os = "macos")]
+const NO_FOLLOW_OPEN_FLAG: i32 = 0x0100;
+
+const STAT_REFUSAL: &str = "could not stat";
+const READ_REFUSAL: &str = "could not read";
+const UTF8_REFUSAL: &str = "not valid UTF-8";
+const ZERO_BYTE_REFUSAL: &str = "file was non-empty at stat but returned zero bytes";
+
+/// Result of a bounded, no-follow read of one configuration file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardedRead {
+    /// The complete file contents within the requested byte cap.
+    Text(String),
+    /// The path did not exist when it was inspected.
+    Absent,
+    /// The read was refused for the contained, secret-free reason.
+    Refused(String),
+}
+
 #[derive(Clone, Copy)]
 enum ParseFailure {
     Warn,
@@ -200,72 +231,101 @@ pub(super) fn read_guarded_text(
     label: &str,
     warnings: &mut Vec<String>,
 ) -> Option<String> {
+    match read_guarded(path, contain_under, MAX_CONSTITUTION_BYTES) {
+        GuardedRead::Text(text) => Some(text),
+        GuardedRead::Absent => None,
+        GuardedRead::Refused(reason) => {
+            warnings.push(guarded_warning(label, &reason));
+            None
+        }
+    }
+}
+
+fn guarded_warning(label: &str, reason: &str) -> String {
+    match reason {
+        STAT_REFUSAL => format!("could not stat {label} - source skipped"),
+        READ_REFUSAL => format!("could not read {label} - source skipped"),
+        reason if reason.starts_with("exceeds ") => {
+            format!("refused {label}: {reason} - skipped")
+        }
+        _ => format!("refused {label}: {reason}"),
+    }
+}
+
+/// Read one regular file without following its final path component.
+///
+/// When `contain_under` is present, the resolved path must remain below that
+/// root. The metadata size and the bytes actually read are both capped.
+pub fn read_guarded(path: &Path, contain_under: Option<&Path>, max_bytes: usize) -> GuardedRead {
+    read_guarded_with_before_open(path, contain_under, max_bytes, || {})
+}
+
+pub(super) fn read_guarded_with_before_open(
+    path: &Path,
+    contain_under: Option<&Path>,
+    max_bytes: usize,
+    before_open: impl FnOnce(),
+) -> GuardedRead {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(_) => {
-            warnings.push(format!("could not stat {label} - source skipped"));
-            return None;
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return GuardedRead::Absent,
+        Err(_) => return GuardedRead::Refused(STAT_REFUSAL.to_owned()),
     };
     if metadata.file_type().is_symlink() || !metadata.is_file() {
-        warnings.push(format!(
-            "refused {label}: not a regular file (symlink or special)"
-        ));
-        return None;
+        return GuardedRead::Refused("not a regular file (symlink or special)".to_owned());
     }
 
     if let Some(root) = contain_under {
         let canonical_path = match fs::canonicalize(path) {
             Ok(path) => path,
-            Err(_) => {
-                warnings.push(format!("refused {label}: cannot canonicalize"));
-                return None;
-            }
+            Err(_) => return GuardedRead::Refused("cannot canonicalize".to_owned()),
         };
         let canonical_root = match fs::canonicalize(root) {
             Ok(root) => root,
-            Err(_) => {
-                warnings.push(format!("refused {label}: cannot canonicalize"));
-                return None;
-            }
+            Err(_) => return GuardedRead::Refused("cannot canonicalize".to_owned()),
         };
         if !canonical_path.starts_with(canonical_root) {
-            warnings.push(format!("refused {label}: resolves outside the repository"));
-            return None;
+            return GuardedRead::Refused("resolves outside the repository".to_owned());
         }
     }
 
-    if metadata.len() > MAX_CONSTITUTION_BYTES as u64 {
-        warnings.push(format!(
-            "refused {label}: exceeds {MAX_CONSTITUTION_BYTES} bytes - skipped"
-        ));
-        return None;
+    let max_bytes_u64 = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+    if metadata.len() > max_bytes_u64 {
+        return GuardedRead::Refused(format!("exceeds {max_bytes} bytes"));
     }
 
-    let file = match fs::File::open(path) {
+    before_open();
+    let file = match open_no_follow(path) {
         Ok(file) => file,
-        Err(_) => {
-            warnings.push(format!("could not read {label} - source skipped"));
-            return None;
-        }
+        Err(_) => return GuardedRead::Refused(READ_REFUSAL.to_owned()),
     };
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    let capacity = usize::try_from(metadata.len()).unwrap_or(max_bytes);
+    let mut bytes = Vec::with_capacity(capacity);
     if file
-        .take(MAX_CONSTITUTION_BYTES as u64 + 1)
+        .take(max_bytes_u64.saturating_add(1))
         .read_to_end(&mut bytes)
         .is_err()
     {
-        warnings.push(format!("could not read {label} - source skipped"));
-        return None;
+        return GuardedRead::Refused(READ_REFUSAL.to_owned());
     }
-    if bytes.len() > MAX_CONSTITUTION_BYTES {
-        warnings.push(format!(
-            "refused {label}: exceeds {MAX_CONSTITUTION_BYTES} bytes - skipped"
-        ));
-        return None;
+    if bytes.len() > max_bytes {
+        return GuardedRead::Refused(format!("exceeds {max_bytes} bytes"));
     }
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+    // On Windows, OPEN_REPARSE_POINT opens a swapped-in link itself and a read
+    // returns zero bytes. A prior non-empty stat makes that a refusal, not text.
+    if metadata.len() > 0 && bytes.is_empty() {
+        return GuardedRead::Refused(ZERO_BYTE_REFUSAL.to_owned());
+    }
+    match String::from_utf8(bytes) {
+        Ok(text) => GuardedRead::Text(text),
+        Err(_) => GuardedRead::Refused(UTF8_REFUSAL.to_owned()),
+    }
+}
+
+fn open_no_follow(path: &Path) -> std::io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true).custom_flags(NO_FOLLOW_OPEN_FLAG);
+    options.open(path)
 }
 
 pub(super) fn parse_law(text: &str) -> anyhow::Result<LawFile> {

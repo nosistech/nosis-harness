@@ -50,6 +50,14 @@ fn symlink_file(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::windows::fs::symlink_file(target, link)
 }
 
+fn must_symlink_file(target: &Path, link: &Path) {
+    symlink_file(target, link).unwrap_or_else(|error| {
+        panic!(
+            "symlink creation is required for this security test; enable Windows Developer Mode or run with symlink privilege: {error}"
+        )
+    });
+}
+
 #[cfg(unix)]
 fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, link)
@@ -593,6 +601,66 @@ fn regular_agents_file_inside_repo_loads() {
 
     assert!(law.constitution.contains("regular project instructions"));
     assert!(law.warnings.is_empty(), "warnings: {:?}", law.warnings);
+}
+
+#[test]
+fn no_follow_open_refuses_a_file_swapped_for_an_outside_symlink() {
+    let repo = TempTree::new("no-follow-swap");
+    let outside = TempTree::new("no-follow-swap-outside");
+    let guarded_path = repo.path().join("config.toml");
+    let target_path = outside.path().join("secret.txt");
+    repo.write("config.toml", "inside-marker");
+    outside.write("secret.txt", "outside-no-follow-marker");
+
+    let result = read_guarded_with_before_open(
+        &guarded_path,
+        Some(repo.path()),
+        MAX_CONSTITUTION_BYTES,
+        || {
+            fs::remove_file(&guarded_path).expect("remove guarded file before swap");
+            must_symlink_file(&target_path, &guarded_path);
+        },
+    );
+
+    match result {
+        GuardedRead::Refused(_) => {}
+        GuardedRead::Text(text) => {
+            assert!(!text.contains("outside-no-follow-marker"), "got: {text}");
+            panic!("swapped symlink must be refused");
+        }
+        GuardedRead::Absent => panic!("swapped symlink must not look absent"),
+    }
+}
+
+#[test]
+fn nonempty_stat_with_zero_byte_read_is_refused() {
+    let repo = TempTree::new("zero-after-stat");
+    let guarded_path = repo.path().join("config.toml");
+    repo.write("config.toml", "non-empty");
+
+    let result = read_guarded_with_before_open(
+        &guarded_path,
+        Some(repo.path()),
+        MAX_CONSTITUTION_BYTES,
+        || fs::write(&guarded_path, "").expect("truncate guarded file after stat"),
+    );
+
+    assert_eq!(
+        result,
+        GuardedRead::Refused("file was non-empty at stat but returned zero bytes".to_owned())
+    );
+}
+
+#[test]
+fn guarded_read_refuses_invalid_utf8_instead_of_normalizing_bytes() {
+    let repo = TempTree::new("invalid-utf8");
+    let guarded_path = repo.path().join("config.toml");
+    fs::write(&guarded_path, [0xff]).expect("write invalid UTF-8 test file");
+
+    assert_eq!(
+        read_guarded(&guarded_path, Some(repo.path()), MAX_CONSTITUTION_BYTES),
+        GuardedRead::Refused("not valid UTF-8".to_owned())
+    );
 }
 
 #[test]

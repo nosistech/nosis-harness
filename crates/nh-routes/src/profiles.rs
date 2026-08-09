@@ -5,10 +5,12 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+#[cfg(test)]
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
+use nh_law::{read_guarded, GuardedRead};
 use serde::de::{self, Deserializer};
 use serde::Deserialize;
 
@@ -17,6 +19,7 @@ use crate::ResolvedRoute;
 /// Bundled frugal, balanced, and max-quality profile data.
 pub const BUNDLED_PROFILES: &str = include_str!("bundled_profiles.toml");
 
+const MAX_PROFILES_BYTES: usize = 64 * 1024;
 const REPO_WARNING: &str =
     "repo .nosis/profiles.toml cannot loosen profile '{name}' - clamped to the user setting";
 
@@ -155,6 +158,11 @@ impl Profiles {
     /// Load bundled → user (`~/.nosis`) → repository (`.nosis`) profile data.
     /// Optional unreadable or malformed layers warn and are skipped.
     pub fn load(repo_root: &Path) -> (Self, Vec<String>) {
+        let home = home_dir();
+        Self::load_with_home(repo_root, home.as_deref())
+    }
+
+    fn load_with_home(repo_root: &Path, home: Option<&Path>) -> (Self, Vec<String>) {
         let mut warnings = Vec::new();
         let bundled = match ProfilesLayer::parse(BUNDLED_PROFILES) {
             Ok(layer) => layer,
@@ -163,9 +171,10 @@ impl Profiles {
                 ProfilesLayer::default()
             }
         };
-        let user = match home_dir() {
+        let user = match home {
             Some(home) => read_optional_profiles(
                 &home.join(".nosis").join("profiles.toml"),
+                None,
                 "user profiles",
                 &mut warnings,
             ),
@@ -176,6 +185,7 @@ impl Profiles {
         };
         let repo = read_optional_profiles(
             &repo_root.join(".nosis").join("profiles.toml"),
+            Some(repo_root),
             "repo .nosis/profiles.toml",
             &mut warnings,
         );
@@ -265,14 +275,15 @@ fn home_dir() -> Option<PathBuf> {
 
 fn read_optional_profiles(
     path: &Path,
+    contain_under: Option<&Path>,
     label: &str,
     warnings: &mut Vec<String>,
 ) -> Option<ProfilesLayer> {
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(error) => {
-            warnings.push(format!("could not read {label}: {error} - source skipped"));
+    let text = match read_guarded(path, contain_under, MAX_PROFILES_BYTES) {
+        GuardedRead::Text(text) => text,
+        GuardedRead::Absent => return None,
+        GuardedRead::Refused(reason) => {
+            warnings.push(format!("refused {label}: {reason} - source skipped"));
             return None;
         }
     };

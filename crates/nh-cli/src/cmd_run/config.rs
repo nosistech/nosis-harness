@@ -1,14 +1,14 @@
 //! Trusted catalog discovery and restrict-only MCP configuration assembly.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
+use nh_law::{read_guarded, GuardedRead};
 use nh_tools::{McpAuth, McpServerConfig, McpTrust};
 
 pub(super) const BUNDLED_CATALOG: &str = include_str!("../../../../catalog.toml");
 const MAX_CATALOG_BYTES: usize = 1024 * 1024;
+const MAX_MCP_CONFIG_BYTES: usize = 64 * 1024;
 
 /// Walk up from `start` looking for the project marker `catalog.toml`.
 /// Repository route data is accepted only when it is byte-identical to the
@@ -25,7 +25,7 @@ pub(super) fn find_catalog_with_home(
     for dir in start.ancestors() {
         let candidate = dir.join("catalog.toml");
         if candidate.is_file() {
-            let text = read_catalog_file(&candidate)?;
+            let text = read_catalog_file(&candidate, Some(dir), "repository catalog.toml")?;
             if text == BUNDLED_CATALOG {
                 return Ok((dir.to_path_buf(), text));
             }
@@ -34,7 +34,11 @@ pub(super) fn find_catalog_with_home(
                 let trusted_path = home.join(".nosis").join("catalog.toml");
                 match trusted_path.try_exists() {
                     Ok(true) => {
-                        let trusted = read_catalog_file(&trusted_path)?;
+                        let trusted = read_catalog_file(
+                            &trusted_path,
+                            None,
+                            "user-global ~/.nosis/catalog.toml",
+                        )?;
                         if text == trusted {
                             return Ok((dir.to_path_buf(), trusted));
                         }
@@ -57,21 +61,16 @@ pub(super) fn find_catalog_with_home(
     anyhow::bail!("no catalog.toml found - run `nh init` to create one")
 }
 
-fn read_catalog_file(path: &Path) -> anyhow::Result<String> {
-    let file = fs::File::open(path)
-        .map_err(|error| anyhow::anyhow!("could not read {}: {error}", path.display()))?;
-    let mut bytes = Vec::new();
-    file.take((MAX_CATALOG_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|error| anyhow::anyhow!("could not read {}: {error}", path.display()))?;
-    if bytes.len() > MAX_CATALOG_BYTES {
-        anyhow::bail!(
-            "{} is too large - catalogs are limited to {} bytes",
-            path.display(),
-            MAX_CATALOG_BYTES
-        );
+fn read_catalog_file(
+    path: &Path,
+    contain_under: Option<&Path>,
+    label: &str,
+) -> anyhow::Result<String> {
+    match read_guarded(path, contain_under, MAX_CATALOG_BYTES) {
+        GuardedRead::Text(text) => Ok(text),
+        GuardedRead::Absent => anyhow::bail!("could not read {label}: file disappeared"),
+        GuardedRead::Refused(reason) => anyhow::bail!("refused {label}: {reason}"),
     }
-    String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("{} is not valid UTF-8", path.display()))
 }
 
 /// Assemble the effective MCP server set. User-global `~/.nosis/mcp.toml` is the trust source;
@@ -87,12 +86,14 @@ pub(crate) fn load_and_vet_mcp_configs(
     let user_global = home.map_or_else(Vec::new, |home| {
         read_optional_mcp_config(
             &home.join(".nosis").join("mcp.toml"),
+            None,
             "user-global ~/.nosis/mcp.toml",
             warnings,
         )
     });
     let repo = read_optional_mcp_config(
         &repo_root.join(".nosis").join("mcp.toml"),
+        Some(repo_root),
         "repository .nosis/mcp.toml",
         warnings,
     );
@@ -106,24 +107,16 @@ pub(crate) fn load_and_vet_mcp_configs(
 
 fn read_optional_mcp_config(
     path: &Path,
+    contain_under: Option<&Path>,
     label: &str,
     warnings: &mut Vec<String>,
 ) -> Vec<McpServerConfig> {
-    match path.try_exists() {
-        Ok(false) => return Vec::new(),
-        Ok(true) => {}
-        Err(error) => {
+    let text = match read_guarded(path, contain_under, MAX_MCP_CONFIG_BYTES) {
+        GuardedRead::Text(text) => text,
+        GuardedRead::Absent => return Vec::new(),
+        GuardedRead::Refused(reason) => {
             warnings.push(format!(
-                "could not inspect {label} ({error}) - continuing without MCP from that file"
-            ));
-            return Vec::new();
-        }
-    }
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(error) => {
-            warnings.push(format!(
-                "could not read {label} ({error}) - continuing without MCP from that file"
+                "refused {label}: {reason} - continuing without MCP from that file"
             ));
             return Vec::new();
         }
