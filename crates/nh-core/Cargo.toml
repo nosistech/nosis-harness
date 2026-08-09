@@ -15,9 +15,9 @@ serde_json = { workspace = true, features = ["raw_value"] }
 chrono.workspace = true
 zeroize.workspace = true
 reqwest.workspace = true
-nh-tools = { path = "../nh-tools", version = "0.1.0" }
-nh-vault = { path = "../nh-vault", version = "0.1.0" }
-nh-routes = { path = "../nh-routes", version = "0.1.0" }
+nh-tools = { path = "../nh-tools", version = "0.2.0" }
+nh-vault = { path = "../nh-vault", version = "0.2.0" }
+nh-routes = { path = "../nh-routes", version = "0.2.0" }
 
 [dev-dependencies]
 tempfile.workspace = true

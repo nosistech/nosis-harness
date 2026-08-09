@@ -11,6 +11,78 @@ commit passes local and remote gates.
 
 No changes yet.
 
+## [0.2.0] - 2026-08-09
+
+This release is a source install. No binaries are attached. The install command is unchanged:
+
+```sh
+cargo install --locked --git https://github.com/nosistech/nosis-harness nh-cli
+```
+
+Platform status: Windows is supported. macOS is in testing. Linux builds from source and
+is not yet verified.
+
+### Added
+
+- Interrupt one turn without ending the session. `Esc` cancels the turn in progress. The
+  request already in flight still completes, so the cancelled turn still receives its true
+  measured cost, and the transcript states that the provider may still bill for it.
+- A prompt typed during a cancelled turn stays queued. It is sent only after the abandoned
+  request returns, so it cannot overlap with it.
+- Receipts record how long a turn took, in whole milliseconds. The figure is wall clock for
+  the whole turn, including tool calls, retries and compaction. Older receipts have no
+  duration and still load.
+- The live status compares the current turn against how long the route usually takes, for
+  example `WORKING - 24s, typically ~18s`. The typical figure is a median over your own
+  receipts for that route and needs at least five of them, so it is absent until you have
+  run a route several times.
+- Completed turns and the detail pane show the measured duration.
+- A pre-send preview estimates the prompt cost before you press Enter. It is display only
+  and never reaches a receipt, a usage total or the ledger.
+- Prompt history recall on `Ctrl+P` and `Ctrl+N`. `Up` and `Down` still scroll the
+  transcript and are unchanged.
+
+### Changed
+
+- `Ctrl+C` is now a ladder rather than an immediate quit: it interrupts a running turn,
+  clears a non-empty input, and exits only on two presses within 1500 milliseconds.
+- The approval prompt shows the full command it is about to run. A command that cannot be
+  displayed in full is refused instead of being shown in a shortened form.
+- An unknown `--profile` now exits non-zero from `run`, `chat` and `tui`, before any
+  provider call. It previously warned, substituted a default and spent money.
+- An unknown key in a law file is now a hard error that names the key. It previously parsed
+  without complaint, which left a policy silently absent.
+
+### Fixed
+
+- Wrapped transcript lines keep their hanging indent.
+- The status line no longer clips mid-word at 79 columns.
+- Key hints and the help overlay now appear while an approval is pending, not only while a
+  turn is running.
+- The approval legend no longer labels `[n]` and `[Esc]` as one action. `n` declines one
+  command and the turn continues. `Esc` declines it and cancels the whole turn.
+- `nh init` outside a work tree now reports that it omitted the pre-commit hook, instead of
+  omitting it silently.
+- The policy matcher splits a command on a newline, so the second line of a two-line
+  command is tested as its own fragment.
+- An interrupted shell command reports that it was cancelled instead of reporting a timeout.
+
+### Security
+
+- Every repository-controlled configuration file is read through one guarded reader. The
+  reader inspects the path without following it, refuses anything that is not a regular
+  file, requires the resolved path to stay under the repository root, caps the size, and
+  opens the file with a no-follow flag so that a file swapped for a symlink between the
+  check and the open is refused. This covers project instructions, project memory, the
+  policy file, the profile file, the MCP server file and the route price table.
+- Two of those readers previously had no size limit and none refused a symlink. A
+  repository could commit a symlink and have it followed. Where the resulting file failed
+  to parse, the parser quoted the offending line back into a warning printed on standard
+  error. Such warnings are never added to the model context and are never sent to a
+  provider, but they could reach your terminal and your logs.
+- The no-follow flag is fixed for each supported platform. On a target we have not
+  verified, the build fails rather than falling back to an open that follows links.
+
 ## [0.1.0] - 2026-08-06
 
 This release is a source install. No binaries are attached. One command installs it:
@@ -186,5 +258,6 @@ is not yet verified.
 - Report vulnerabilities per [SECURITY.md](SECURITY.md) - info@nosistech.com,
   5-business-day response SLA.
 
-[Unreleased]: https://github.com/nosistech/nosis-harness/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/nosistech/nosis-harness/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/nosistech/nosis-harness/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/nosistech/nosis-harness/releases/tag/v0.1.0

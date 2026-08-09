@@ -14,8 +14,8 @@ serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 reqwest.workspace = true
-nh-law = { path = "../nh-law", version = "0.1.0" }
-nh-vault = { path = "../nh-vault", version = "0.1.0" }
+nh-law = { path = "../nh-law", version = "0.2.0" }
+nh-vault = { path = "../nh-vault", version = "0.2.0" }
 
 [dev-dependencies]
 tempfile.workspace = true
