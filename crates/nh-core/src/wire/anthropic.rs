@@ -14,7 +14,9 @@ use super::retry::{
     RetryPolicy,
 };
 use super::usage_debug::UsageDebug;
-use super::{ChatClient, ChatMessage, ChatRequest, ChatResponse, RetryStats, ToolCallReq, Usage};
+use super::{
+    ChatClient, ChatMessage, ChatRequest, ChatResponse, ContentPart, RetryStats, ToolCallReq, Usage,
+};
 
 /// Blocking client for `POST {base_url}/v1/messages`.
 pub struct AnthropicMessagesClient {
@@ -187,12 +189,34 @@ pub(super) fn build_body(
                 }));
                 previous_was_user = false;
             }
-            // User and unexpected roles degrade to user text; content is never dropped.
+            // User and unexpected roles degrade to user blocks; declared parts keep their order.
             _ => {
-                let text = message.content.clone().unwrap_or_default();
-                let block = serde_json::json!({ "type": "text", "text": text });
-                push_user_block(&mut messages, previous_was_user, block);
-                previous_was_user = true;
+                let blocks: Vec<serde_json::Value> = match &message.parts {
+                    Some(parts) if !parts.is_empty() => parts
+                        .iter()
+                        .map(|part| match part {
+                            ContentPart::Text { text } => {
+                                serde_json::json!({ "type": "text", "text": text })
+                            }
+                            ContentPart::ImageB64 { media_type, data } => serde_json::json!({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": data,
+                                }
+                            }),
+                        })
+                        .collect(),
+                    _ => vec![serde_json::json!({
+                        "type": "text",
+                        "text": message.content.clone().unwrap_or_default()
+                    })],
+                };
+                for block in blocks {
+                    push_user_block(&mut messages, previous_was_user, block);
+                    previous_was_user = true;
+                }
             }
         }
     }

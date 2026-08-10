@@ -1095,6 +1095,7 @@ fn adapter_result_is_bounded_and_scrubbed_at_the_egress_choke_point() {
 
 #[test]
 fn send_law_block_stops_mcp_egress_before_trust_or_approval() {
+    const LITERAL: &str = "mcp-policy-fixture";
     let mock = start_mock(full_responder);
     let set = mcp_tools(&[config(&mock.url, McpTrust::Auto)], &|_| true);
     let peek = set
@@ -1105,17 +1106,19 @@ fn send_law_block_stops_mcp_egress_before_trust_or_approval() {
     let (ctx, approvals) = approving_ctx(true);
     let seen_targets = Arc::new(Mutex::new(Vec::new()));
     let targets = Arc::clone(&seen_targets);
-    let ctx = ctx.with_guard(Box::new(move |access| match access {
-        crate::Access::Send(target) => {
-            targets.lock().unwrap().push((*target).to_string());
-            crate::Guard::Block("egress denied".into())
-        }
-        _ => crate::Guard::Allow,
-    }));
+    let ctx = ctx
+        .with_guard(Box::new(move |access| match access {
+            crate::Access::Send(target) => {
+                targets.lock().unwrap().push((*target).to_string());
+                crate::Guard::Block(format!("egress denied for {LITERAL}"))
+            }
+            _ => crate::Guard::Allow,
+        }))
+        .with_scrubber(nh_vault::Scrubber::new(vec![LITERAL.to_string()]));
 
     let result = peek.execute(json!({}), &ctx).unwrap();
 
-    assert_eq!(result, "blocked by law: egress denied");
+    assert_eq!(result, "blocked by law: egress denied for [REDACTED]");
     assert_eq!(
         seen_targets.lock().unwrap().as_slice(),
         ["127.0.0.1"],

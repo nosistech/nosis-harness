@@ -1,7 +1,7 @@
 //! Approved shell execution with bounded capture, timeout, and process-tree termination.
 
 use crate::{
-    is_allowed_env_var, str_arg, Access, ExecShell, Guard, Tool, ToolCtx, ToolResultEnvelope,
+    is_allowed_env_var, render_tool_result, str_arg, Access, ExecShell, Guard, Tool, ToolCtx,
     ToolSpec, DRAIN_GRACE, EXEC_TIMEOUT, KILL_VERIFY_GRACE, MAX_TOOL_READ_BYTES, TOOL_BUFFER_BYTES,
 };
 use anyhow::Context as _;
@@ -267,13 +267,13 @@ impl ExecShell {
     ) -> anyhow::Result<String> {
         let command = str_arg(&args, "command")?;
         if let Guard::Block(reason) = (ctx.guard)(&Access::Exec(command)) {
-            return Ok(format!("blocked by law: {reason}"));
+            return Ok(render_tool_result(format!("blocked by law: {reason}"), ctx));
         }
         // SECURITY INVARIANT: this boundary requires explicit approval for every non-blocked exec,
         // regardless of which non-Block verdict the guard returned.
         if !(ctx.approve)(command) {
             // Ok-shaped so the model can read the denial and adapt, not crash the turn.
-            return Ok(format!("user denied: {command}"));
+            return Ok(render_tool_result(format!("user denied: {command}"), ctx));
         }
         #[cfg(windows)]
         let mut cmd = {
@@ -380,6 +380,6 @@ impl ExecShell {
                 format!("exit code: {code}\nstdout:\n{stdout}\nstderr:\n{stderr}")
             }
         };
-        Ok(ToolResultEnvelope::new(content, &ctx.scrubber).render())
+        Ok(render_tool_result(content, ctx))
     }
 }

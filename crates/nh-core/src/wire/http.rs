@@ -79,13 +79,11 @@ pub(super) fn provider_error(status: reqwest::StatusCode, body: &str, key: &str)
     )
 }
 
-/// One-line, truncated body snippet with the API key literal redacted.
+/// One-line, truncated body snippet with credentials redacted.
 pub(super) fn scrub_snippet(body: &str, key: &str) -> String {
-    let scrubbed = if key.is_empty() {
-        body.to_owned()
-    } else {
-        body.replace(key, "[REDACTED]")
-    };
+    // SECURITY INVARIANT: provider errors use the shared shape-aware scrubber
+    // before their body text can reach a user-visible error.
+    let scrubbed = nh_vault::Scrubber::new(vec![key.to_owned()]).scrub(body);
     let scrubbed = scrubbed.split_whitespace().collect::<Vec<_>>().join(" ");
     if scrubbed.is_empty() {
         return "(empty body)".into();

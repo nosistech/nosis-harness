@@ -2,7 +2,7 @@
 
 use super::client::{McpClient, ToolEntry, ARGS_SUMMARY_MAX};
 use super::config::{McpServerConfig, McpTrust};
-use crate::{Tool, ToolCtx, ToolSpec};
+use crate::{render_tool_result, Tool, ToolCtx, ToolSpec};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -78,20 +78,26 @@ impl Tool for McpToolAdapter {
 
     fn execute(&self, args: Value, ctx: &ToolCtx) -> anyhow::Result<String> {
         let Some(host) = nh_vault::host_of(&self.client.config.url) else {
-            return Ok("blocked by law: could not parse the MCP server host".to_string());
+            return Ok(render_tool_result(
+                "blocked by law: could not parse the MCP server host".to_string(),
+                ctx,
+            ));
         };
         let send_asks = match (ctx.guard)(&crate::Access::Send(&host)) {
-            crate::Guard::Block(reason) => return Ok(format!("blocked by law: {reason}")),
+            crate::Guard::Block(reason) => {
+                return Ok(render_tool_result(format!("blocked by law: {reason}"), ctx))
+            }
             crate::Guard::Ask => true,
             crate::Guard::Allow => false,
         };
         let tool = &self.entry.info.name;
         match self.trust {
             McpTrust::Block => {
-                return Ok(
+                return Ok(render_tool_result(
                     "blocked by .nosis/mcp.toml (trust = \"block\") - set trust = \"ask\" to enable"
                         .to_string(),
-                );
+                    ctx,
+                ));
             }
             // Safe because nh-cli only accepts auto trust from user-global config.
             McpTrust::Auto if self.entry.read_only && !send_asks => {}
@@ -100,12 +106,15 @@ impl Tool for McpToolAdapter {
                 let ask = format!("mcp {} {} {}", self.server, tool, args_one_line(&args));
                 if !(ctx.approve)(&ask) {
                     // Ok-shaped so the model can read the denial and adapt.
-                    return Ok(format!("user denied: mcp {} {}", self.server, tool));
+                    return Ok(render_tool_result(
+                        format!("user denied: mcp {} {}", self.server, tool),
+                        ctx,
+                    ));
                 }
             }
         }
         let raw = self.client.call_tool(tool, args)?;
-        Ok(crate::ToolResultEnvelope::new(raw, &ctx.scrubber).render())
+        Ok(render_tool_result(raw, ctx))
     }
 }
 

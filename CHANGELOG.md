@@ -24,6 +24,10 @@ commit passes local and remote gates.
 
 ### Fixed
 
+- Tool refusals and tool failures now redact credentials before the text enters the
+  conversation.
+- Provider error snippets now redact known credential shapes as well as the active provider
+  key.
 - `read_file` now refuses files whose first bytes contain a NUL and tells you to use a
   binary-aware tool.
 - `read_file` now reports when it replaces invalid UTF-8 bytes instead of returning the

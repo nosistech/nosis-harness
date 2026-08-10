@@ -782,11 +782,14 @@ impl AgentLoop {
 
         match tool.execute_with_audit(args, &self.ctx) {
             Ok(execution) => finish_tool_run(execution.output, repair_notes, execution.audit),
-            Err(error) => finish_tool_run(
-                format!("tool '{tool_name}' failed: {error}"),
-                repair_notes,
-                Vec::new(),
-            ),
+            Err(error) => {
+                // SECURITY INVARIANT: tool errors can quote caller-supplied paths or commands.
+                let output = self
+                    .ctx
+                    .scrubber
+                    .scrub(&format!("tool '{tool_name}' failed: {error}"));
+                finish_tool_run(output, repair_notes, Vec::new())
+            }
         }
     }
 

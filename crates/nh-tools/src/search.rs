@@ -1,7 +1,7 @@
 //! Deterministic, bounded repository search without shell execution.
 
 use crate::{
-    relative_path, resolve_in_workdir, str_arg, Access, Guard, Tool, ToolCtx, ToolResultEnvelope,
+    relative_path, render_tool_result, resolve_in_workdir, str_arg, Access, Guard, Tool, ToolCtx,
     ToolSpec, BINARY_SNIFF_BYTES, MAX_TOOL_READ_BYTES,
 };
 use anyhow::{bail, Context as _};
@@ -168,7 +168,7 @@ pub(super) fn glob_files_with_limits(
         stop_footer(walk.stopped)
     );
     matches.push(footer);
-    Ok(ToolResultEnvelope::new(matches.join("\n"), &ctx.scrubber).render())
+    Ok(render_tool_result(matches.join("\n"), ctx))
 }
 
 pub(super) fn grep_files_with_limits(
@@ -242,7 +242,7 @@ pub(super) fn grep_files_with_limits(
         stop_footer(walk.stopped)
     );
     output.push(footer);
-    Ok(ToolResultEnvelope::new(output.join("\n"), &ctx.scrubber).render())
+    Ok(render_tool_result(output.join("\n"), ctx))
 }
 
 fn validate_limits(limits: SearchLimits) -> anyhow::Result<()> {

@@ -1315,6 +1315,30 @@ fn exec_denied_never_runs_and_is_ok_shaped() {
 }
 
 #[test]
+fn exec_denial_scrubs_the_command_before_returning_it() {
+    const LITERAL: &str = "header-value-fixture";
+    let dir = tempfile::tempdir().unwrap();
+    let command = format!("curl -H \"Authorization: Bearer {LITERAL}\" https://example.test");
+    let expected_command = command.clone();
+    let ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(move |seen| {
+            assert_eq!(seen, expected_command);
+            false
+        }),
+    )
+    .with_scrubber(nh_vault::Scrubber::new(vec![LITERAL.to_string()]));
+
+    let result = ExecShell
+        .execute(json!({"command": command}), &ctx)
+        .unwrap();
+
+    assert!(result.starts_with("user denied:"), "got: {result}");
+    assert!(!result.contains(LITERAL), "literal leaked: {result}");
+    assert!(result.contains("Bearer [REDACTED]"), "got: {result}");
+}
+
+#[test]
 fn exec_guard_allow_still_requires_explicit_approval() {
     let dir = tempfile::tempdir().unwrap();
     let approvals = Arc::new(AtomicUsize::new(0));

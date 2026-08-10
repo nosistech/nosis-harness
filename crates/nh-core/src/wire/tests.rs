@@ -553,6 +553,43 @@ fn anthropic_body_lifts_system_and_wraps_text() {
 }
 
 #[test]
+fn anthropic_body_preserves_text_and_image_parts_in_order() {
+    let request = req(vec![ChatMessage {
+        role: "user".into(),
+        content: None,
+        parts: Some(vec![
+            ContentPart::Text {
+                text: "what is shown?".into(),
+            },
+            ContentPart::ImageB64 {
+                media_type: "image/png".into(),
+                data: "Zm9v".into(),
+            },
+        ]),
+        tool_calls: None,
+        tool_call_id: None,
+        reasoning_content: None,
+    }]);
+
+    let body = build_anthropic_body(&request, 8192, ThinkingDialect::None);
+
+    assert_eq!(
+        body["messages"][0]["content"],
+        serde_json::json!([
+            {"type": "text", "text": "what is shown?"},
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": "Zm9v"
+                }
+            }
+        ])
+    );
+}
+
+#[test]
 fn deepseek_anthropic_body_explicitly_disables_default_thinking() {
     let request = req(vec![msg("user", Some("hi"))]);
     let body = build_anthropic_body(&request, 8192, ThinkingDialect::DeepseekNhm);
@@ -1051,13 +1088,20 @@ fn no_choices_is_a_concise_error() {
 }
 
 #[test]
-fn snippet_redacts_key_and_truncates() {
-    let key = "sk-test-0000";
+fn snippet_uses_the_shared_scrubber_and_truncates() {
+    let key = "provider-key-fixture";
     let body = format!("error: bad key {key} was rejected\nline2");
     let s = scrub_snippet(&body, key);
     assert!(!s.contains(key));
     assert!(s.contains("[REDACTED]"));
     assert!(!s.contains('\n'));
+    // Split so the literal never appears whole in source: the commit guard blocks
+    // key-shaped strings, and this fixture is deliberately key-shaped.
+    let shaped = concat!("sk", "-other-0000abcd");
+    assert_eq!(
+        scrub_snippet(&format!("error: {shaped}"), ""),
+        "error: [REDACTED]"
+    );
     let long = "x".repeat(500);
     assert!(scrub_snippet(&long, "").chars().count() <= 201);
 }

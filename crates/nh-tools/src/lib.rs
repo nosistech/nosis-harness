@@ -221,6 +221,12 @@ impl ToolResultEnvelope {
     }
 }
 
+/// SECURITY INVARIANT: tool results pass through the session scrubber before
+/// they can enter the conversation.
+pub(crate) fn render_tool_result(content: String, ctx: &ToolCtx) -> String {
+    ToolResultEnvelope::new(content, &ctx.scrubber).render()
+}
+
 /// Child-process environment allowlist. Names are case-insensitive because
 /// Windows environment variables are case-insensitive.
 fn is_allowed_env_var(name: &str) -> bool {
@@ -509,11 +515,13 @@ impl Tool for ReadFile {
         let path = str_arg(&args, "path")?;
         let (resolved, relative) = resolve_in_workdir(&ctx.workdir, path)?;
         match (ctx.guard)(&Access::Read(&relative)) {
-            Guard::Block(reason) => return Ok(format!("blocked by law: {reason}")),
+            Guard::Block(reason) => {
+                return Ok(render_tool_result(format!("blocked by law: {reason}"), ctx))
+            }
             Guard::Ask => {
                 let action = format!("read {relative}");
                 if !(ctx.approve)(&action) {
-                    return Ok(format!("user denied: {action}"));
+                    return Ok(render_tool_result(format!("user denied: {action}"), ctx));
                 }
             }
             Guard::Allow => {}
@@ -557,7 +565,7 @@ impl Tool for ReadFile {
                 "\n…[input truncated at {MAX_TOOL_READ_BYTES} bytes]"
             ));
         }
-        Ok(ToolResultEnvelope::new(content, &ctx.scrubber).render())
+        Ok(render_tool_result(content, ctx))
     }
 }
 
@@ -615,42 +623,33 @@ impl Tool for WriteFile {
 
         let verdict = creation_guard_verdict(ctx, &relative, actual_relative.as_deref());
         if let Guard::Block(reason) = &verdict {
-            return Ok(
-                ToolResultEnvelope::new(format!("blocked by law: {reason}"), &ctx.scrubber)
-                    .render(),
-            );
+            return Ok(render_tool_result(format!("blocked by law: {reason}"), ctx));
         }
 
         if initially_exists || path_exists_without_following(&destination, path)? {
-            return Ok(ToolResultEnvelope::new(
+            return Ok(render_tool_result(
                 format!("refused: {path} already exists - use edit_file to change it"),
-                &ctx.scrubber,
-            )
-            .render());
+                ctx,
+            ));
         }
         if content.len() > MAX_TOOL_READ_BYTES {
             bail!("content too large to write safely (> {MAX_TOOL_READ_BYTES} bytes)");
         }
         if !parent_is_dir {
-            return Ok(ToolResultEnvelope::new(
+            return Ok(render_tool_result(
                 format!(
                     "refused: parent directory does not exist: {} - create it first",
                     parent_label(&relative)
                 ),
-                &ctx.scrubber,
-            )
-            .render());
+                ctx,
+            ));
         }
         let actual_relative = actual_relative.as_deref().unwrap_or(&relative);
         let destination_label = destination_label(actual_relative, &relative);
         if matches!(verdict, Guard::Ask) {
             let action = format!("create {destination_label}");
             if !(ctx.approve)(&action) {
-                return Ok(ToolResultEnvelope::new(
-                    format!("user denied: {action}"),
-                    &ctx.scrubber,
-                )
-                .render());
+                return Ok(render_tool_result(format!("user denied: {action}"), ctx));
             }
         }
 
@@ -712,11 +711,10 @@ impl Tool for WriteFile {
             Ok(false) => {}
             Ok(true) => {
                 let _ = std::fs::remove_file(&temp_path);
-                return Ok(ToolResultEnvelope::new(
+                return Ok(render_tool_result(
                     format!("refused: {path} already exists - use edit_file to change it"),
-                    &ctx.scrubber,
-                )
-                .render());
+                    ctx,
+                ));
             }
             Err(error) => {
                 let _ = std::fs::remove_file(&temp_path);
@@ -728,19 +726,17 @@ impl Tool for WriteFile {
             if error.kind() == std::io::ErrorKind::AlreadyExists
                 || path_exists_without_following(&destination, path).unwrap_or(false)
             {
-                return Ok(ToolResultEnvelope::new(
+                return Ok(render_tool_result(
                     format!("refused: {path} already exists - use edit_file to change it"),
-                    &ctx.scrubber,
-                )
-                .render());
+                    ctx,
+                ));
             }
             return Err(error).with_context(|| format!("could not create {path}"));
         }
-        Ok(ToolResultEnvelope::new(
+        Ok(render_tool_result(
             format!("created {destination_label} ({} bytes)", content.len()),
-            &ctx.scrubber,
-        )
-        .render())
+            ctx,
+        ))
     }
 }
 
@@ -788,12 +784,18 @@ impl Tool for EditFile {
         let destination_label = destination_label(&relative, path);
         match (ctx.guard)(&Access::Write(&relative)) {
             Guard::Block(reason) => {
-                return Ok(ToolExecution::plain(format!("blocked by law: {reason}")))
+                return Ok(ToolExecution::plain(render_tool_result(
+                    format!("blocked by law: {reason}"),
+                    ctx,
+                )))
             }
             Guard::Ask => {
                 let action = format!("edit {destination_label}");
                 if !(ctx.approve)(&action) {
-                    return Ok(ToolExecution::plain(format!("user denied: {action}")));
+                    return Ok(ToolExecution::plain(render_tool_result(
+                        format!("user denied: {action}"),
+                        ctx,
+                    )));
                 }
             }
             Guard::Allow => {}
@@ -918,7 +920,7 @@ impl Tool for EditFile {
             |tier| format!("edited {destination_label} using {} match", tier.label()),
         );
         Ok(ToolExecution {
-            output,
+            output: render_tool_result(output, ctx),
             audit: tier.into_iter().map(ToolAudit::EditMatch).collect(),
         })
     }

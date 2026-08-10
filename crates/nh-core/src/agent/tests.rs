@@ -1061,6 +1061,50 @@ fn tolerant_edit_tier_is_visible_in_transcript_events_and_receipt() {
         .any(|line| line.contains("edit_file used indentation-flexible match")));
 }
 
+struct ErrorEchoTool;
+
+impl Tool for ErrorEchoTool {
+    fn spec(&self) -> nh_tools::ToolSpec {
+        nh_tools::ToolSpec {
+            name: "error_echo".into(),
+            description: "return a caller-derived test error".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    fn execute(&self, _args: serde_json::Value, _ctx: &ToolCtx) -> anyhow::Result<String> {
+        anyhow::bail!("could not open tool-error-fixture - choose a readable file")
+    }
+}
+
+#[test]
+fn tool_error_is_scrubbed_before_entering_the_conversation() {
+    const LITERAL: &str = "tool-error-fixture";
+    let dir = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = agent_with_receipt_path(
+        dir.path(),
+        dir.path().join("receipts.jsonl"),
+        Box::new(FinalAnswerClient),
+        events,
+    );
+    agent.tools = vec![Box::new(ErrorEchoTool)];
+    agent.ctx = ToolCtx::new(dir.path().to_path_buf(), Box::new(|_| false))
+        .with_scrubber(nh_vault::Scrubber::new(vec![LITERAL.to_string()]));
+
+    let run = agent.run_tool(&ToolCallReq {
+        id: "error-echo".into(),
+        name: "error_echo".into(),
+        arguments: "{}".into(),
+    });
+
+    assert_eq!(
+        run.output,
+        "tool 'error_echo' failed: could not open [REDACTED] - choose a readable file"
+    );
+    assert!(!run.output.contains(LITERAL));
+}
+
 #[test]
 fn shell_alias_uses_the_real_exec_approval_gate() {
     let dir = tempfile::tempdir().unwrap();

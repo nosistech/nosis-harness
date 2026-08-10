@@ -1,3 +1,5 @@
+//! Repairs malformed tool names and argument syntax before tool execution.
+
 use serde_json::Value;
 
 #[derive(Debug)]
