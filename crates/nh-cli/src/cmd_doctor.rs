@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 
+use nh_core::terminal_capability::*;
 use nh_routes::{RouteClass, RouteResolver};
 use nh_vault::{KeyringVault, Scrubber, Vault as _};
 
@@ -56,17 +57,6 @@ enum CatalogStatus {
         location: Option<PathBuf>,
         reason: String,
     },
-}
-
-/// Only Windows has a console code page, so only Windows constructs these.
-/// The type stays available everywhere so the facts struct and its tests do
-/// not need their own platform split.
-#[cfg_attr(not(windows), allow(dead_code))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CodePageStatus {
-    Utf8,
-    Other(u32),
-    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,10 +124,7 @@ fn probe() -> DoctorFacts {
         },
     };
 
-    #[cfg(windows)]
-    let code_page = Some(probe_code_page());
-    #[cfg(not(windows))]
-    let code_page = None;
+    let code_page = cfg!(windows).then(probe_code_page);
 
     DoctorFacts {
         version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -303,29 +290,6 @@ fn probe_location(path: PathBuf) -> LocationStatus {
             reason: error.to_string(),
         },
     }
-}
-
-#[cfg(windows)]
-fn probe_code_page() -> CodePageStatus {
-    let output = match std::process::Command::new("chcp.com").output() {
-        Ok(output) if output.status.success() => output,
-        _ => return CodePageStatus::Unknown,
-    };
-    match trailing_ascii_integer(&output.stdout) {
-        Some(65001) => CodePageStatus::Utf8,
-        Some(value) => CodePageStatus::Other(value),
-        None => CodePageStatus::Unknown,
-    }
-}
-
-#[cfg(windows)]
-fn trailing_ascii_integer(bytes: &[u8]) -> Option<u32> {
-    let end = bytes.iter().rposition(u8::is_ascii_digit)? + 1;
-    let start = bytes[..end]
-        .iter()
-        .rposition(|byte| !byte.is_ascii_digit())
-        .map_or(0, |index| index + 1);
-    std::str::from_utf8(&bytes[start..end]).ok()?.parse().ok()
 }
 
 pub(crate) fn render(facts: &DoctorFacts) -> Vec<String> {

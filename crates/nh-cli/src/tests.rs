@@ -13,6 +13,20 @@ fn parses_doctor() {
 }
 
 #[test]
+fn parses_global_ascii_mode_before_or_after_the_subcommand() {
+    let before = Cli::try_parse_from(["nh", "--ascii", "on", "doctor"]).unwrap();
+    assert_eq!(before.ascii, Some(AsciiArg::On));
+    assert!(matches!(before.cmd, Cmd::Doctor));
+
+    let after = Cli::try_parse_from(["nh", "doctor", "--ascii", "off"]).unwrap();
+    assert_eq!(after.ascii, Some(AsciiArg::Off));
+    assert!(matches!(after.cmd, Cmd::Doctor));
+
+    let default = Cli::try_parse_from(["nh", "doctor"]).unwrap();
+    assert_eq!(default.ascii, None);
+}
+
+#[test]
 fn parses_key_add_with_entry() {
     let cli = Cli::try_parse_from(["nh", "key", "add", "deepseek"]).unwrap();
     match cli.cmd {

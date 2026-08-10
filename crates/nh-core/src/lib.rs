@@ -3,6 +3,7 @@
 
 pub mod credential;
 pub mod runtime_path;
+pub mod terminal_capability;
 
 pub mod agent;
 pub mod receipt;

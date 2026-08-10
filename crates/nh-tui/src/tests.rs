@@ -12,6 +12,7 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use nh_core::agent::{CompactionEvent, MAX_TASK_BYTES};
 use nh_core::receipt::{CompactionStats, ReceiptKind};
 use nh_core::session_ledger::{list_sessions, read_session};
+use nh_core::terminal_capability::TerminalCapability;
 use nh_core::wire::{ChatRequest, ChatResponse};
 use nh_routes::Currency;
 use ratatui::{
@@ -240,6 +241,7 @@ fn test_app_with_timing(budget: Option<u64>, route_timing_history: RouteTimingHi
             block_commands: Vec::new(),
         },
         UiInputs {
+            terminal_capability: TerminalCapability::Unicode,
             palette_entries: Vec::new(),
             credentialed_providers: Vec::new(),
             color_mode: ColorMode::Color,
@@ -270,6 +272,7 @@ fn meter_app_from(catalog: &str) -> App {
             block_commands: Vec::new(),
         },
         UiInputs {
+            terminal_capability: TerminalCapability::Unicode,
             palette_entries: Vec::new(),
             credentialed_providers: Vec::new(),
             color_mode: ColorMode::Color,
@@ -296,6 +299,7 @@ fn picker_app() -> App {
             block_commands: Vec::new(),
         },
         UiInputs {
+            terminal_capability: TerminalCapability::Unicode,
             palette_entries: Vec::new(),
             credentialed_providers: vec!["alpha".into(), "beta".into()],
             color_mode: ColorMode::Color,
@@ -337,6 +341,22 @@ fn buffer_rows(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
 
 fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
     buffer_rows(buffer).join("\n")
+}
+
+fn assert_ascii_frame(buffer: &ratatui::buffer::Buffer, frame_name: &str) {
+    for y in buffer.area.y..buffer.area.bottom() {
+        for x in buffer.area.x..buffer.area.right() {
+            let symbol = buffer[(x, y)].symbol();
+            for character in symbol.chars() {
+                assert!(
+                    character.is_ascii() || character == '\u{2026}',
+                    "{frame_name}: U+{:04X} {:?} at ({x}, {y}) in cell {symbol:?}",
+                    u32::from(character),
+                    character
+                );
+            }
+        }
+    }
 }
 
 fn find_ascii_text(buffer: &ratatui::buffer::Buffer, needle: &str) -> (u16, u16) {
@@ -1169,6 +1189,171 @@ fn modal_frames_clear_transcript_for_every_overlay() {
 }
 
 #[test]
+fn ascii_mode_sweeps_main_transcript_and_every_overlay_frame() {
+    let mut app = test_app(None);
+    app.terminal_capability = TerminalCapability::AsciiFallback;
+
+    let empty = render_buffer(&app, 100, 30);
+    assert_ascii_frame(&empty, "main screen");
+    let empty_text = buffer_text(&empty);
+    assert!(empty_text.contains("o IDLE"), "got: {empty_text}");
+    assert!(empty_text.contains("^v scroll"), "got: {empty_text}");
+    assert_eq!(empty[(0, 0)].symbol(), "+");
+    assert_eq!(empty[(99, 29)].symbol(), "+");
+
+    app.push_line("test task", TranscriptKind::Task);
+    app.push_line("test answer", TranscriptKind::Answer);
+    app.push_line("test progress", TranscriptKind::Progress);
+    apply_event(&mut app, timeline_event("timeline task", "timeline answer"));
+    app.status = Status::Blocked("approval required".into());
+
+    let transcript = render_buffer(&app, 100, 30);
+    assert_ascii_frame(&transcript, "transcript");
+    let transcript_text = buffer_text(&transcript);
+    assert!(transcript_text.contains("> you"), "got: {transcript_text}");
+    assert!(
+        transcript_text.contains("* nosis"),
+        "got: {transcript_text}"
+    );
+    assert!(
+        transcript_text.contains("- test progress"),
+        "got: {transcript_text}"
+    );
+    assert!(
+        transcript_text.contains("! BLOCKED"),
+        "got: {transcript_text}"
+    );
+
+    for index in 0..40 {
+        app.push_line(&format!("overflow line {index}"), TranscriptKind::Progress);
+    }
+    let newest = render_buffer(&app, 100, 30);
+    assert_ascii_frame(&newest, "transcript newest overflow");
+    let newest_text = buffer_text(&newest);
+    assert!(newest_text.contains("^ more"), "got: {newest_text}");
+    app.scroll_back = app.max_scroll.get();
+    let oldest = render_buffer(&app, 100, 30);
+    assert_ascii_frame(&oldest, "transcript oldest overflow");
+    let oldest_text = buffer_text(&oldest);
+    assert!(oldest_text.contains("v more"), "got: {oldest_text}");
+    app.scroll_back = 0;
+
+    let overlays = [
+        (
+            "search overlay",
+            Overlay::Search {
+                query: "test".into(),
+                selected: 0,
+                original_scroll: 0,
+            },
+        ),
+        ("command menu overlay", Overlay::CommandMenu { selected: 0 }),
+        ("help overlay", Overlay::Help),
+        ("trust dial overlay", Overlay::TrustDial),
+        (
+            "timeline overlay",
+            Overlay::Timeline {
+                selected: 0,
+                inspecting: true,
+                note: None,
+            },
+        ),
+        (
+            "palette overlay",
+            Overlay::Palette {
+                filter: String::new(),
+                selected: 0,
+                detail: None,
+            },
+        ),
+        (
+            "picker overlay",
+            Overlay::Picker {
+                kind: PickerKind::Model,
+                selected: 0,
+                rows: Vec::new(),
+            },
+        ),
+    ];
+    for (frame_name, overlay) in overlays {
+        app.overlay = overlay;
+        let buffer = render_buffer(&app, 100, 30);
+        assert_ascii_frame(&buffer, frame_name);
+    }
+
+    let mut picker = picker_app();
+    picker.terminal_capability = TerminalCapability::AsciiFallback;
+    type_text(&mut picker, "/provider");
+    assert_eq!(
+        reduce_key(&mut picker, code_key(KeyCode::Enter)),
+        UiAction::None
+    );
+    let picker_frame = render_buffer(&picker, 100, 30);
+    assert_ascii_frame(&picker_frame, "populated provider picker overlay");
+    let picker_text = buffer_text(&picker_frame);
+    assert!(
+        picker_text.contains("alpha - a-cheap - credential available"),
+        "got: {picker_text}"
+    );
+}
+
+#[test]
+fn unicode_mode_preserves_existing_main_transcript_and_overlay_glyphs() {
+    let mut app = test_app(None);
+    let main = render_buffer(&app, 100, 30);
+    let main_text = buffer_text(&main);
+    assert_eq!(main[(0, 0)].symbol(), "\u{250c}");
+    assert_eq!(main[(99, 29)].symbol(), "\u{2518}");
+    assert!(main_text.contains("\u{25cb} IDLE"), "got: {main_text}");
+    assert!(
+        main_text.contains("\u{2191}\u{2193} scroll"),
+        "got: {main_text}"
+    );
+    assert!(main_text.contains('\u{2500}'), "got: {main_text}");
+
+    app.push_line("test task", TranscriptKind::Task);
+    app.push_line("test answer", TranscriptKind::Answer);
+    app.push_line("test progress", TranscriptKind::Progress);
+    app.status = Status::Blocked("approval required".into());
+    let transcript_text = buffer_text(&render_buffer(&app, 100, 30));
+    assert!(
+        transcript_text.contains("\u{276f} you"),
+        "got: {transcript_text}"
+    );
+    assert!(
+        transcript_text.contains("\u{25c6} nosis"),
+        "got: {transcript_text}"
+    );
+    assert!(
+        transcript_text.contains("\u{b7} test progress"),
+        "got: {transcript_text}"
+    );
+    assert!(
+        transcript_text.contains("\u{25cf} BLOCKED"),
+        "got: {transcript_text}"
+    );
+
+    for index in 0..40 {
+        app.push_line(&format!("overflow line {index}"), TranscriptKind::Progress);
+    }
+    let newest = render_buffer(&app, 100, 30);
+    let newest_text = buffer_text(&newest);
+    assert!(newest_text.contains("\u{2191} more"), "got: {newest_text}");
+    app.scroll_back = app.max_scroll.get();
+    let oldest_text = buffer_text(&render_buffer(&app, 100, 30));
+    assert!(oldest_text.contains("\u{2193} more"), "got: {oldest_text}");
+
+    app.overlay = Overlay::Help;
+    let overlay = render_buffer(&app, 100, 30);
+    assert_plain_modal_ring(&overlay, modal_area(Rect::new(0, 0, 100, 30), 18));
+    let overlay_text = buffer_text(&overlay);
+    assert!(
+        overlay_text.contains("Help \u{b7} read-only"),
+        "got: {overlay_text}"
+    );
+}
+
+#[test]
 fn every_new_surface_scrubs_literals_and_control_characters() {
     let transcript_secret = "fake-key-transcript";
     let modal_secret = "fake-key-modal";
@@ -1193,6 +1378,7 @@ fn every_new_surface_scrubs_literals_and_control_characters() {
             block_commands: Vec::new(),
         },
         UiInputs {
+            terminal_capability: TerminalCapability::Unicode,
             palette_entries: Vec::new(),
             credentialed_providers: Vec::new(),
             color_mode: ColorMode::Color,
@@ -4600,6 +4786,7 @@ fn rendered_line_is_redacted_and_has_no_control_characters() {
             block_commands: Vec::new(),
         },
         UiInputs {
+            terminal_capability: TerminalCapability::Unicode,
             palette_entries: Vec::new(),
             credentialed_providers: Vec::new(),
             color_mode: ColorMode::Color,
@@ -4635,6 +4822,7 @@ fn rendered_overlay_scrubs_descriptions_and_control_characters() {
             block_commands: Vec::new(),
         },
         UiInputs {
+            terminal_capability: TerminalCapability::Unicode,
             palette_entries: vec![PaletteEntry {
                 kind: "tool",
                 name: "secret-tool".into(),

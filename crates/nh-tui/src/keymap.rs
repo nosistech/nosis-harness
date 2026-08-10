@@ -1,5 +1,9 @@
 //! One source of truth for the base-view key hints and contextual help.
 
+use std::borrow::Cow;
+
+use nh_core::terminal_capability::TerminalCapability;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct KeyBinding {
     pub(super) keys: &'static str,
@@ -8,6 +12,12 @@ pub(super) struct KeyBinding {
     show_in_hint: bool,
     hide_at_budget: bool,
     working_only: bool,
+}
+
+impl KeyBinding {
+    pub(super) fn display_keys(self, terminal_capability: TerminalCapability) -> Cow<'static, str> {
+        terminal_capability.render_text(self.keys)
+    }
 }
 
 pub(super) const KEY_BINDINGS: &[KeyBinding] = &[
@@ -135,10 +145,25 @@ pub(super) fn visible_key_bindings(
         .filter(move |binding| working || !binding.working_only)
 }
 
-pub(super) fn key_hint_line(budget_reached: bool, working: bool) -> String {
+pub(super) fn key_hint_line_for(
+    terminal_capability: TerminalCapability,
+    budget_reached: bool,
+    working: bool,
+) -> String {
     visible_key_bindings(budget_reached, working)
         .filter(|binding| binding.show_in_hint)
-        .map(|binding| format!("{} {}", binding.keys, binding.action))
+        .map(|binding| {
+            format!(
+                "{} {}",
+                binding.display_keys(terminal_capability),
+                binding.action
+            )
+        })
         .collect::<Vec<_>>()
         .join("   ")
+}
+
+#[cfg(test)]
+pub(super) fn key_hint_line(budget_reached: bool, working: bool) -> String {
+    key_hint_line_for(TerminalCapability::Unicode, budget_reached, working)
 }

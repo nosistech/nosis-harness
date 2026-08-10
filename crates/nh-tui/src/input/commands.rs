@@ -9,6 +9,10 @@ use nh_routes::{
     cost_of, money_with_gloss, to_usd_approx, Currency, PriceConfidence, ResolvedRoute, RouteClass,
 };
 
+fn terminal_text(app: &App, text: &str) -> String {
+    app.terminal_capability.render_text(text).into_owned()
+}
+
 pub(crate) fn execute_command_menu(app: &mut App) -> UiAction {
     let command_text = app.input.strip_prefix('/').unwrap_or("");
     let typed = command_text.split_whitespace().next().unwrap_or("");
@@ -134,7 +138,10 @@ fn open_provider_picker(app: &mut App) -> UiAction {
             );
             PickerRow {
                 value: provider.clone(),
-                label: format!("{provider} · {default} · credential available"),
+                label: terminal_text(
+                    app,
+                    &format!("{provider} · {default} · credential available"),
+                ),
             }
         })
         .collect::<Vec<_>>();
@@ -157,13 +164,16 @@ fn open_profile_picker(app: &mut App) -> UiAction {
                 .map_or_else(|| "route default".to_owned(), |cap| cap.to_string());
             PickerRow {
                 value: name.to_owned(),
-                label: format!(
-                    "{name} · thinking {} · max output {cap}",
-                    effort_name(effort_for(
-                        policy.posture,
-                        app.route.thinking_dialect(),
-                        app.route.wire(),
-                    ))
+                label: terminal_text(
+                    app,
+                    &format!(
+                        "{name} · thinking {} · max output {cap}",
+                        effort_name(effort_for(
+                            policy.posture,
+                            app.route.thinking_dialect(),
+                            app.route.wire(),
+                        ))
+                    ),
                 ),
             }
         })
@@ -225,7 +235,10 @@ fn model_picker_rows(app: &App) -> Vec<PickerRow> {
             if route.class() == RouteClass::Local {
                 return Some(PickerRow {
                     value: id.clone(),
-                    label: format!("{id} · local · explicit selection only · no billed tokens"),
+                    label: terminal_text(
+                        app,
+                        &format!("{id} · local · explicit selection only · no billed tokens"),
+                    ),
                 });
             }
             let quote = route.price_at(at);
@@ -285,7 +298,7 @@ fn model_picker_rows(app: &App) -> Vec<PickerRow> {
             });
             Some(PickerRow {
                 value: id.clone(),
-                label: format!("{id} · {capability} · {price}{price_state}"),
+                label: terminal_text(app, &format!("{id} · {capability} · {price}{price_state}")),
             })
         })
         .collect()

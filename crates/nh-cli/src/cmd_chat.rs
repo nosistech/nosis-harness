@@ -14,6 +14,7 @@ use chrono::{DateTime, FixedOffset, Utc};
 use nh_core::agent::{AgentLoop, AgentRunError, MAX_TASK_BYTES};
 use nh_core::receipt::Receipt;
 use nh_core::session_ledger::{RestoredSession, RestoredTurn, SessionEvent, SessionLedger};
+use nh_core::terminal_capability::TerminalCapability;
 use nh_core::wire::{
     ensure_image_capable, ChatClient, ChatMessage, ContentPart, Usage, UsageEvidence,
 };
@@ -94,6 +95,7 @@ struct SessionCost {
 
 /// Everything one chat session owns. History and usage survive route switches.
 struct ChatSession {
+    terminal_capability: TerminalCapability,
     resolver: Arc<RouteResolver>,
     route: ResolvedRoute,
     profiles: Profiles,
@@ -138,12 +140,19 @@ struct ChatSession {
 const CHAT_HELP: &str = "commands: /image <path> (PNG or JPEG; max 4 for the next message), \
                          /model <id>, /provider <name>, /price, /tools, /quit";
 
-pub fn run(model: &str, profile: &str) -> anyhow::Result<()> {
-    run_session(startup::open(model, profile)?)
+pub fn run(
+    model: &str,
+    profile: &str,
+    terminal_capability: TerminalCapability,
+) -> anyhow::Result<()> {
+    run_session(startup::open(model, profile, terminal_capability)?)
 }
 
-pub(crate) fn resume(restored: RestoredSession) -> anyhow::Result<()> {
-    run_session(startup::reopen(restored)?)
+pub(crate) fn resume(
+    restored: RestoredSession,
+    terminal_capability: TerminalCapability,
+) -> anyhow::Result<()> {
+    run_session(startup::reopen(restored, terminal_capability)?)
 }
 
 fn run_session(mut session: ChatSession) -> anyhow::Result<()> {
@@ -384,12 +393,12 @@ fn project_turn_meter(
                     .unwrap_or_else(|| "cost unknown".to_owned())
             },
         );
-        let _ = writeln!(err, "{}", scrub_line(&s.scrubber, &line));
+        let _ = writeln!(err, "{}", display_line(s, &line));
     }
     if let Some(line) = receipt.and_then(|receipt| {
         cmd_run::compaction_meter_line(&s.resolver, &route, &receipt.compaction)
     }) {
-        let _ = writeln!(err, "{}", scrub_line(&s.scrubber, &line));
+        let _ = writeln!(err, "{}", display_line(s, &line));
     }
     let _ = writeln!(err, "{}", scrub_line(&s.scrubber, &footer(s)));
 }
@@ -401,8 +410,14 @@ fn refresh_progress_meter(s: &mut ChatSession) {
     let resolver = Arc::clone(&s.resolver);
     let route = s.route.clone();
     let scrubber = Arc::clone(&s.scrubber);
+    let terminal_capability = s.terminal_capability;
     s.agent.on_event = Some(Box::new(move |core_line| {
-        let line = cmd_run::progress_meter_line(&resolver, &route, core_line);
+        let line = cmd_run::terminal_progress_meter_line(
+            terminal_capability,
+            &resolver,
+            &route,
+            core_line,
+        );
         eprintln!("  {}", scrub_line(&scrubber, &line));
     }));
 }
@@ -792,7 +807,7 @@ fn session_money(s: &ChatSession, at: DateTime<Utc>) -> String {
             s.incomplete_cost_turns
         ));
     }
-    display
+    s.terminal_capability.render_text(&display).into_owned()
 }
 
 /// Load MCP tools from repository and user-global config when either exists.
@@ -818,6 +833,11 @@ fn scrub_line(scrubber: &SharedScrubber, text: &str) -> String {
     }
 }
 
+fn display_line(session: &ChatSession, text: &str) -> String {
+    let text = session.terminal_capability.render_text(text);
+    scrub_line(&session.scrubber, &text)
+}
+
 fn scrub_approval_line(scrubber: &SharedScrubber, text: &str) -> String {
     match scrubber.read() {
         Ok(guard) => cmd_run::approval_line(&guard, text),
@@ -834,7 +854,7 @@ fn scrub_text(scrubber: &SharedScrubber, text: &str) -> String {
 }
 
 fn print_err(s: &ChatSession, err: &mut dyn Write, msg: &str) {
-    let _ = writeln!(err, "{}", scrub_line(&s.scrubber, msg));
+    let _ = writeln!(err, "{}", display_line(s, msg));
 }
 
 #[cfg(test)]

@@ -33,8 +33,23 @@ fn guard_from(verdict: nh_law::Verdict) -> nh_tools::Guard {
     version
 )]
 struct Cli {
+    /// Force one-column ASCII fallback glyphs on or off (default: decide from stdout)
+    #[arg(long, global = true, value_enum)]
+    ascii: Option<AsciiArg>,
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum AsciiArg {
+    On,
+    Off,
+}
+
+impl AsciiArg {
+    const fn enabled(self) -> bool {
+        matches!(self, Self::On)
+    }
 }
 
 #[derive(Subcommand)]
@@ -182,6 +197,9 @@ fn parse_max_turns(value: &str) -> Result<u32, String> {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let terminal_capability = nh_core::terminal_capability::TerminalCapability::from_process(
+        cli.ascii.map(AsciiArg::enabled),
+    );
     let result = match cli.cmd {
         Cmd::Init => cmd_init::run(),
         Cmd::Key { action } => match action {
@@ -196,17 +214,30 @@ fn main() -> anyhow::Result<()> {
             autonomy,
             profile,
             image,
-        } => cmd_run::run(&task, &model, max_turns, think, autonomy, &profile, &image),
-        Cmd::Chat { model, profile } => cmd_chat::run(&model, &profile),
+        } => cmd_run::run(
+            &task,
+            &model,
+            cmd_run::RunOptions {
+                max_turns,
+                think,
+                autonomy,
+                profile: &profile,
+                images: &image,
+                terminal_capability,
+            },
+        ),
+        Cmd::Chat { model, profile } => cmd_chat::run(&model, &profile, terminal_capability),
         Cmd::Doctor => cmd_doctor::run(),
-        Cmd::Resume { session_id } => cmd_resume::run(session_id.as_deref()),
-        Cmd::Why { task, model } => cmd_why::run(task.as_deref(), model.as_deref()),
-        Cmd::Profile { model } => cmd_profile::run(&model),
+        Cmd::Resume { session_id } => cmd_resume::run(session_id.as_deref(), terminal_capability),
+        Cmd::Why { task, model } => {
+            cmd_why::run(task.as_deref(), model.as_deref(), terminal_capability)
+        }
+        Cmd::Profile { model } => cmd_profile::run(&model, terminal_capability),
         Cmd::Tui {
             model,
             budget,
             profile,
-        } => cmd_tui::run(&model, budget, &profile),
+        } => cmd_tui::run(&model, budget, &profile, terminal_capability),
         Cmd::Fleet {
             action:
                 FleetAction::Run {
@@ -216,14 +247,21 @@ fn main() -> anyhow::Result<()> {
                     escalate,
                     defer_offpeak,
                 },
-        } => cmd_fleet::run_tasks(&tasks, max_workers, budget, escalate, defer_offpeak),
+        } => cmd_fleet::run_tasks(
+            &tasks,
+            max_workers,
+            budget,
+            escalate,
+            defer_offpeak,
+            terminal_capability,
+        ),
         Cmd::Fleet {
             action:
                 FleetAction::Resume {
                     run_id,
                     max_workers,
                 },
-        } => cmd_fleet::resume_run(run_id.as_deref(), max_workers),
+        } => cmd_fleet::resume_run(run_id.as_deref(), max_workers, terminal_capability),
         Cmd::Mcp {
             action: McpAction::Serve { addr, token_entry },
         } => cmd_mcp::serve(&addr, token_entry.as_deref()),

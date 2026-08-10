@@ -1,6 +1,7 @@
 //! `nh why` - a keyless explanation of the cheapest capable route.
 
 use chrono::{DateTime, Utc};
+use nh_core::terminal_capability::TerminalCapability;
 use nh_routes::{cost_of, money_with_gloss, PriceConfidence, RouteClass, RouteResolver};
 use nh_vault::Scrubber;
 
@@ -8,16 +9,33 @@ use crate::cmd_run;
 
 const OUTPUT_ESTIMATE: u64 = 1_024;
 
-pub fn run(task: Option<&str>, model: Option<&str>) -> anyhow::Result<()> {
+pub fn run(
+    task: Option<&str>,
+    model: Option<&str>,
+    terminal_capability: TerminalCapability,
+) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let (_, catalog) = cmd_run::find_catalog(&cwd)?;
     let resolver = RouteResolver::from_toml(&catalog)?;
-    let lines = render(&resolver, task, model, Utc::now())?;
+    let lines = render_for_terminal(terminal_capability, &resolver, task, model, Utc::now())?;
     let scrubber = Scrubber::new(Vec::new());
     for line in lines {
         println!("{}", cmd_run::safe_line(&scrubber, &line));
     }
     Ok(())
+}
+
+pub(crate) fn render_for_terminal(
+    terminal_capability: TerminalCapability,
+    resolver: &RouteResolver,
+    task: Option<&str>,
+    model: Option<&str>,
+    at: DateTime<Utc>,
+) -> anyhow::Result<Vec<String>> {
+    Ok(render(resolver, task, model, at)?
+        .into_iter()
+        .map(|line| terminal_capability.render_text(&line).into_owned())
+        .collect())
 }
 
 pub(crate) fn render(
@@ -61,7 +79,7 @@ pub(crate) fn render(
                 "  {} this turn (est)",
                 money_with_gloss(estimate, quote.currency, resolver.fx(), at)
             ),
-            None => "  unpriced this turn (est) - cost unavailable".into(),
+            None => "  unpriced this turn (est) - cost unknown".into(),
         };
         if quote.confidence == PriceConfidence::VerifyLive {
             cost.push_str(" · *price verify_live");
@@ -152,6 +170,50 @@ mod tests {
         assert!(lines.iter().any(|line| {
             line == "current route expensive was selected explicitly; cheapest capable is cheap"
         }));
+    }
+
+    #[test]
+    fn terminal_why_render_preserves_unicode_or_uses_fallback_separator() {
+        let catalog = CATALOG.replace(
+            "price_confidence = \"confirmed\"",
+            "price_confidence = \"verify_live\"",
+        );
+        let resolver = RouteResolver::from_toml(&catalog).unwrap();
+        let at = Utc.with_ymd_and_hms(2026, 7, 18, 12, 0, 0).unwrap();
+
+        let unicode = render_for_terminal(
+            TerminalCapability::Unicode,
+            &resolver,
+            Some("explain this route"),
+            None,
+            at,
+        )
+        .unwrap();
+        let ascii = render_for_terminal(
+            TerminalCapability::AsciiFallback,
+            &resolver,
+            Some("explain this route"),
+            None,
+            at,
+        )
+        .unwrap();
+        let unicode_cost = unicode
+            .iter()
+            .find(|line| line.contains("*price verify_live"))
+            .unwrap();
+        let ascii_cost = ascii
+            .iter()
+            .find(|line| line.contains("*price verify_live"))
+            .unwrap();
+
+        assert!(
+            unicode_cost.ends_with("\u{b7} *price verify_live"),
+            "got: {unicode_cost}"
+        );
+        assert!(
+            ascii_cost.ends_with("- *price verify_live"),
+            "got: {ascii_cost}"
+        );
     }
 
     #[test]

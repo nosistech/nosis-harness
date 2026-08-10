@@ -154,6 +154,7 @@ pub(super) fn run_tui_session(
     terminal_state: TerminalStateHandle,
 ) -> anyhow::Result<()> {
     let TuiConfig {
+        terminal_capability,
         resolver,
         model_id: _,
         profiles,
@@ -205,6 +206,7 @@ pub(super) fn run_tui_session(
         scrubber,
         policy_view,
         UiInputs {
+            terminal_capability,
             palette_entries,
             credentialed_providers,
             color_mode,

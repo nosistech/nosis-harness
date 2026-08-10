@@ -298,6 +298,7 @@ fn test_session_from_catalog(
         on_event: None,
     };
     let session = ChatSession {
+        terminal_capability: TerminalCapability::Unicode,
         resolver,
         route,
         profiles,
@@ -938,6 +939,35 @@ fn incomplete_free_session_refuses_instead_of_rendering_zero_dollars() {
         !mixed.contains(&format!("~{}", money(0.0, zero_currency))),
         "got: {mixed}"
     );
+}
+
+#[test]
+fn terminal_chat_money_preserves_unicode_or_uses_fallback_separator() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut session, _) = test_session("deepseek-v4-flash", tmp.path());
+    session.session_cost = vec![
+        SessionCost {
+            currency: Currency::Cny,
+            amount: 0.01,
+            uncertain: false,
+            upper_bound: false,
+        },
+        SessionCost {
+            currency: Currency::Usd,
+            amount: 0.02,
+            uncertain: false,
+            upper_bound: false,
+        },
+    ];
+
+    session.terminal_capability = TerminalCapability::Unicode;
+    let unicode = session_money(&session, off_peak_now());
+    session.terminal_capability = TerminalCapability::AsciiFallback;
+    let ascii = session_money(&session, off_peak_now());
+
+    assert!(unicode.contains(" \u{b7} "), "got: {unicode}");
+    assert!(ascii.contains(" - "), "got: {ascii}");
+    assert!(!ascii.contains('\u{b7}'), "got: {ascii}");
 }
 
 #[test]

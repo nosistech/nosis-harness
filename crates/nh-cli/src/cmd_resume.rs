@@ -6,6 +6,7 @@ use std::path::Path;
 use nh_core::session_ledger::{
     list_sessions, read_session, validate_session_id, RestoredSession, SessionSummary, Surface,
 };
+use nh_core::terminal_capability::TerminalCapability;
 use nh_routes::RouteResolver;
 use nh_vault::Scrubber;
 
@@ -13,7 +14,10 @@ use crate::{cmd_chat, cmd_run, cmd_tui};
 
 const DISPLAY_LIMIT: usize = 10;
 
-pub fn run(session_id: Option<&str>) -> anyhow::Result<()> {
+pub fn run(
+    session_id: Option<&str>,
+    terminal_capability: TerminalCapability,
+) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let (root, catalog) = cmd_run::find_catalog(&cwd)?;
     let Some(session_id) = session_id else {
@@ -25,8 +29,8 @@ pub fn run(session_id: Option<&str>) -> anyhow::Result<()> {
     let resolver = RouteResolver::from_toml(&catalog)?;
     validate_active_route(&resolver, &restored)?;
     match restored.surface {
-        Surface::Chat => cmd_chat::resume(restored),
-        Surface::Tui => cmd_tui::resume(restored),
+        Surface::Chat => cmd_chat::resume(restored, terminal_capability),
+        Surface::Tui => cmd_tui::resume(restored, terminal_capability),
     }
 }
 

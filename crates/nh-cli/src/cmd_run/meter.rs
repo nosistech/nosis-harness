@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use nh_core::agent::CompactionEvent;
 use nh_core::receipt::CompactionStats;
+use nh_core::terminal_capability::TerminalCapability;
 use nh_core::wire::{cache_hit_pct, Usage, UsageEvidence};
 use nh_routes::{
     cache_split_cost_upper_bound, cost_of, format_context_percent, money, money_with_gloss,
@@ -28,6 +29,16 @@ impl<'a> RunUsage<'a> {
             latest_request,
         }
     }
+}
+
+pub(super) fn terminal_meter_lines(
+    terminal_capability: TerminalCapability,
+    lines: Vec<String>,
+) -> Vec<String> {
+    lines
+        .into_iter()
+        .map(|line| terminal_capability.render_text(&line).into_owned())
+        .collect()
 }
 
 pub(super) fn run_meter_lines(
@@ -136,6 +147,17 @@ pub(crate) fn progress_meter_line(
         compaction_time(event.occurred_at_unix_seconds),
     );
     line
+}
+
+pub(crate) fn terminal_progress_meter_line(
+    terminal_capability: TerminalCapability,
+    resolver: &RouteResolver,
+    route: &ResolvedRoute,
+    core_line: &str,
+) -> String {
+    terminal_capability
+        .render_text(&progress_meter_line(resolver, route, core_line))
+        .into_owned()
 }
 
 pub(crate) fn compaction_meter_line(

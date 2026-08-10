@@ -6,6 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context as _;
+use nh_core::terminal_capability::TerminalCapability;
 use nh_fleet::{FleetConfig, Ladder, TaskSpec};
 use nh_law::LoadOptions;
 use nh_routes::RouteResolver;
@@ -69,6 +70,7 @@ pub fn run_tasks(
     budget: Option<u64>,
     escalate: Option<bool>,
     defer_offpeak: Option<bool>,
+    terminal_capability: TerminalCapability,
 ) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let (root, catalog) = cmd_run::find_catalog(&cwd)?;
@@ -96,16 +98,21 @@ pub fn run_tasks(
         escalate_on_partial: false,
         swarm: None,
         run_root: root,
-        on_event: Some(progress_printer()),
+        on_event: Some(progress_printer(terminal_capability)),
     })?;
-    println!(
+    let line = format!(
         "fleet {}: {} done | {} failed | {} gated",
         report.run_id, report.done, report.failed, report.gated
     );
+    println!("{}", render_line(terminal_capability, &line));
     Ok(())
 }
 
-pub fn resume_run(run_id: Option<&str>, max_workers: Option<usize>) -> anyhow::Result<()> {
+pub fn resume_run(
+    run_id: Option<&str>,
+    max_workers: Option<usize>,
+    terminal_capability: TerminalCapability,
+) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let (root, catalog) = cmd_run::find_catalog(&cwd)?;
     let law = nh_law::load_checked(&root, &LoadOptions { cli_autonomy: None })?;
@@ -128,18 +135,26 @@ pub fn resume_run(run_id: Option<&str>, max_workers: Option<usize>) -> anyhow::R
             escalate_on_partial: false,
             swarm: None,
             run_root: root.clone(),
-            on_event: Some(progress_printer()),
+            on_event: Some(progress_printer(terminal_capability)),
         },
     )?;
-    println!(
+    let line = format!(
         "fleet {}: {} done | {} failed | {} gated",
         report.run_id, report.done, report.failed, report.gated
     );
+    println!("{}", render_line(terminal_capability, &line));
     Ok(())
 }
 
-fn progress_printer() -> Arc<dyn Fn(&str) + Send + Sync> {
-    Arc::new(|line| eprintln!("  {line}"))
+fn render_line<'a>(
+    terminal_capability: TerminalCapability,
+    line: &'a str,
+) -> std::borrow::Cow<'a, str> {
+    terminal_capability.render_text(line)
+}
+
+fn progress_printer(terminal_capability: TerminalCapability) -> Arc<dyn Fn(&str) + Send + Sync> {
+    Arc::new(move |line| eprintln!("  {}", render_line(terminal_capability, line)))
 }
 
 pub(crate) fn print_law_warnings(warnings: &[String]) {
@@ -209,5 +224,16 @@ mod tests {
         let error = read_task_file(&path).unwrap_err();
 
         assert!(error.to_string().contains("too large"));
+    }
+
+    #[test]
+    fn fleet_lines_map_the_arrow_only_in_fallback_mode() {
+        let line = "route-a \u{2192} route-b";
+
+        assert_eq!(
+            render_line(TerminalCapability::AsciiFallback, line),
+            "route-a > route-b"
+        );
+        assert_eq!(render_line(TerminalCapability::Unicode, line), line);
     }
 }

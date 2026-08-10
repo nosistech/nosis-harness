@@ -10,6 +10,7 @@ use nh_core::receipt::ReceiptWriter;
 use nh_core::session_ledger::{
     new_session_id, RestoredSession, SessionEvent, SessionLedger, Surface,
 };
+use nh_core::terminal_capability::TerminalCapability;
 use nh_core::wire::ChatClient;
 use nh_law::{Law, LoadOptions, Policy};
 use nh_routes::{EffectiveExecutionPolicy, Profiles, ResolvedRoute, RouteClass, RouteResolver};
@@ -77,15 +78,22 @@ struct InitialConnection {
     connected: bool,
 }
 
-pub(super) fn open(model: &str, profile: &str) -> anyhow::Result<ChatSession> {
-    open_session(model, profile, None)
+pub(super) fn open(
+    model: &str,
+    profile: &str,
+    terminal_capability: TerminalCapability,
+) -> anyhow::Result<ChatSession> {
+    open_session(model, profile, None, terminal_capability)
 }
 
-pub(super) fn reopen(restored: RestoredSession) -> anyhow::Result<ChatSession> {
+pub(super) fn reopen(
+    restored: RestoredSession,
+    terminal_capability: TerminalCapability,
+) -> anyhow::Result<ChatSession> {
     validate_surface(&restored)?;
     let route_id = restored.route_id.clone();
     let profile = restored.profile.clone();
-    open_session(&route_id, &profile, Some(restored))
+    open_session(&route_id, &profile, Some(restored), terminal_capability)
 }
 
 fn validate_surface(restored: &RestoredSession) -> anyhow::Result<()> {
@@ -102,13 +110,14 @@ fn open_session(
     model: &str,
     profile: &str,
     restored: Option<RestoredSession>,
+    terminal_capability: TerminalCapability,
 ) -> anyhow::Result<ChatSession> {
     let startup = Startup::load(model, profile, restored.is_some())?;
     let connect = connector(
         &startup.law.policy,
         startup.resolver.routes_with_modality("image"),
     );
-    open_prepared(startup, restored, connect, chat_tools)
+    open_prepared(startup, restored, connect, chat_tools, terminal_capability)
 }
 
 fn open_prepared<F>(
@@ -116,6 +125,7 @@ fn open_prepared<F>(
     restored: Option<RestoredSession>,
     connect: ConnectFn,
     load_tools: F,
+    terminal_capability: TerminalCapability,
 ) -> anyhow::Result<ChatSession>
 where
     F: FnOnce(&std::path::Path, &Policy, &SharedScrubber) -> (Vec<Box<dyn Tool>>, Vec<String>),
@@ -178,7 +188,8 @@ where
         constitution: Some(current_constitution.clone()),
         context_limit: route.context(),
         on_event: Some(Box::new(move |line| {
-            eprintln!("  {}", scrub_line(&event_scrubber, line));
+            let line = terminal_capability.render_text(line);
+            eprintln!("  {}", scrub_line(&event_scrubber, &line));
         })),
     };
 
@@ -202,6 +213,7 @@ where
             .then(|| super::route_context_message(current_constitution.clone()))
     });
     let mut session = ChatSession {
+        terminal_capability,
         resolver,
         route,
         profiles,
@@ -275,9 +287,13 @@ pub(super) fn reopen_with_test_dependencies(
         profiles,
         execution_policy,
     };
-    open_prepared(startup, Some(restored), connect, |_, _, _| {
-        (builtin_tools(), Vec::new())
-    })
+    open_prepared(
+        startup,
+        Some(restored),
+        connect,
+        |_, _, _| (builtin_tools(), Vec::new()),
+        TerminalCapability::Unicode,
+    )
 }
 
 fn print_warnings(warnings: &[String], scrubber: &Scrubber) {

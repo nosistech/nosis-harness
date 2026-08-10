@@ -7,7 +7,7 @@ mod meter;
 
 pub(crate) use config::{find_catalog, load_and_vet_mcp_configs};
 pub(crate) use meter::{
-    compaction_meter_line, context_window_summary, progress_meter_line, turn_cost_line,
+    compaction_meter_line, context_window_summary, terminal_progress_meter_line, turn_cost_line,
     usage_token_summary,
 };
 
@@ -18,7 +18,7 @@ use config::{
 };
 #[cfg(test)]
 use meter::turn_cost_line_for_run;
-use meter::{run_meter_lines, RunTiming, RunUsage};
+use meter::{run_meter_lines, terminal_meter_lines, RunTiming, RunUsage};
 
 #[cfg(test)]
 use std::fs;
@@ -29,6 +29,7 @@ use chrono::Utc;
 use nh_core::agent::{validate_task, AgentLoop, AgentRunError};
 use nh_core::credential;
 use nh_core::receipt::{Outcome, ReceiptWriter};
+use nh_core::terminal_capability::TerminalCapability;
 #[cfg(test)]
 use nh_core::wire::UsageEvidence;
 use nh_core::wire::{ensure_image_capable, resolve_effort, ContentPart, ThinkingEffort, Usage};
@@ -100,15 +101,24 @@ pub(crate) fn agent_constitution(
     nh_tui::identity_constitution(law_constitution, route)
 }
 
-pub fn run(
-    task: &str,
-    model: &str,
-    max_turns: u32,
-    think: Option<ThinkArg>,
-    autonomy: Option<AutonomyArg>,
-    profile: &str,
-    images: &[String],
-) -> anyhow::Result<()> {
+pub(crate) struct RunOptions<'a> {
+    pub(crate) max_turns: u32,
+    pub(crate) think: Option<ThinkArg>,
+    pub(crate) autonomy: Option<AutonomyArg>,
+    pub(crate) profile: &'a str,
+    pub(crate) images: &'a [String],
+    pub(crate) terminal_capability: TerminalCapability,
+}
+
+pub fn run(task: &str, model: &str, options: RunOptions<'_>) -> anyhow::Result<()> {
+    let RunOptions {
+        max_turns,
+        think,
+        autonomy,
+        profile,
+        images,
+        terminal_capability,
+    } = options;
     validate_task(task)?;
     validate_image_count(images.len())?;
     let cwd = std::env::current_dir()?;
@@ -199,7 +209,12 @@ pub fn run(
         constitution: Some(agent_constitution(&law.constitution, &route)),
         context_limit: route.context(),
         on_event: Some(Box::new(move |line| {
-            let line = progress_meter_line(&event_resolver, &event_route, line);
+            let line = terminal_progress_meter_line(
+                terminal_capability,
+                &event_resolver,
+                &event_route,
+                line,
+            );
             eprintln!("  {}", safe_line(&event_scrubber, &line))
         })),
     };
@@ -230,7 +245,7 @@ pub fn run(
             ) {
                 let stderr = io::stderr();
                 let mut stderr = stderr.lock();
-                for line in meter_lines {
+                for line in terminal_meter_lines(terminal_capability, meter_lines) {
                     writeln!(stderr, "{}", safe_line(&scrubber, &line))?;
                 }
             }
@@ -241,14 +256,17 @@ pub fn run(
         }
     };
 
-    let meter_lines = run_meter_lines(
-        &resolver,
-        &route,
-        RunUsage::new(receipt.usage.as_ref(), context_usage.as_ref()),
-        &receipt.compaction,
-        receipt.turns,
-        receipt.tool_calls,
-        RunTiming { started, ended },
+    let meter_lines = terminal_meter_lines(
+        terminal_capability,
+        run_meter_lines(
+            &resolver,
+            &route,
+            RunUsage::new(receipt.usage.as_ref(), context_usage.as_ref()),
+            &receipt.compaction,
+            receipt.turns,
+            receipt.tool_calls,
+            RunTiming { started, ended },
+        ),
     );
     let stdout = io::stdout();
     let mut stdout = stdout.lock();

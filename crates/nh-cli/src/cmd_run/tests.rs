@@ -1151,7 +1151,7 @@ fn ordinary_progress_and_empty_compaction_keep_the_old_surface_bytes() {
     let route = resolver.resolve("peak-route").unwrap();
 
     assert_eq!(
-        progress_meter_line(&resolver, &route, "calling read_file"),
+        meter::progress_meter_line(&resolver, &route, "calling read_file"),
         "calling read_file"
     );
     assert_eq!(
@@ -1285,6 +1285,36 @@ fn compaction_money_uses_the_existing_verify_live_asterisk_convention() {
 }
 
 #[test]
+fn terminal_run_meter_preserves_unicode_or_uses_fallback_separators() {
+    let catalog = PEAK_CATALOG.replace(
+        "price_confidence = \"confirmed\"",
+        "price_confidence = \"verify_live\"",
+    );
+    let resolver = RouteResolver::from_toml(&catalog).unwrap();
+    let route = resolver.resolve("peak-route").unwrap();
+    let at = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+    let mut compaction = nh_core::receipt::CompactionStats::default();
+    compaction.record_at(8, 1_000, Some(3_000), at.timestamp());
+    let source = vec![compaction_meter_line(&resolver, &route, &compaction).unwrap()];
+
+    let unicode = super::meter::terminal_meter_lines(TerminalCapability::Unicode, source.clone());
+    let ascii =
+        super::meter::terminal_meter_lines(TerminalCapability::AsciiFallback, source.clone());
+
+    assert_eq!(unicode, source);
+    assert!(
+        unicode[0].ends_with("\u{b7} *price verify_live"),
+        "got: {}",
+        unicode[0]
+    );
+    assert!(
+        ascii[0].ends_with("- *price verify_live"),
+        "got: {}",
+        ascii[0]
+    );
+}
+
+#[test]
 fn multiple_compactions_report_facts_but_refuse_one_aggregate_next_call_price() {
     let resolver = RouteResolver::from_toml(PEAK_CATALOG).unwrap();
     let route = resolver.resolve("peak-route").unwrap();
@@ -1334,7 +1364,7 @@ fn live_compaction_parses_the_real_core_event_shape() {
     let at = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
     let event = nh_core::agent::CompactionEvent::new_at(72, 8, 1_000, Some(3_000), at.timestamp());
 
-    let line = progress_meter_line(&resolver, &route, &event.to_string());
+    let line = meter::progress_meter_line(&resolver, &route, &event.to_string());
 
     assert!(
         line.starts_with("context ~72% - compacted 8 earlier messages · ~1000 tokens elided"),

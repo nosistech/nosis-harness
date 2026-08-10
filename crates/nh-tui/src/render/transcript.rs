@@ -15,6 +15,11 @@ use ratatui::{
 };
 use std::collections::VecDeque;
 
+fn display_line(app: &App, text: &str) -> String {
+    let text = app.terminal_capability.render_text(text);
+    safe_line(&app.scrubber, &text)
+}
+
 pub(super) fn render_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) {
     if app.transcript.is_empty() {
         app.max_scroll.set(0);
@@ -207,23 +212,23 @@ pub(super) fn render_empty_state(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
     let lines = vec![
         Line::from(Span::styled(
-            safe_line(&app.scrubber, "Welcome to nosis."),
+            display_line(app, "Welcome to nosis."),
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            safe_line(&app.scrubber, "Type a task and press Enter."),
+            display_line(app, "Type a task and press Enter."),
             Style::default().fg(Color::White),
         )),
         Line::from(Span::styled(
-            safe_line(&app.scrubber, "e.g. \"fix the failing test in this repo\""),
+            display_line(app, "e.g. \"fix the failing test in this repo\""),
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::DIM),
         )),
         Line::from(Span::styled(
-            safe_line(&app.scrubber, "Type / to see everything nosis can do."),
+            display_line(app, "Type / to see everything nosis can do."),
             Style::default().fg(Color::Gray),
         )),
     ];
@@ -274,7 +279,7 @@ pub(super) fn render_overflow_markers(
         .bg(Color::Black)
         .add_modifier(Modifier::DIM);
     if overflow.above {
-        let marker = safe_line(&app.scrubber, "↑ more");
+        let marker = display_line(app, "↑ more");
         frame.render_widget(
             Paragraph::new(marker)
                 .style(style)
@@ -283,7 +288,7 @@ pub(super) fn render_overflow_markers(
         );
     }
     if overflow.below {
-        let marker = safe_line(&app.scrubber, "↓ more");
+        let marker = display_line(app, "↓ more");
         frame.render_widget(
             Paragraph::new(marker)
                 .style(style)
@@ -322,7 +327,7 @@ fn chat_projection(
             TranscriptKind::Task => {
                 if starts_group {
                     rendered.push(ProjectedLine::plain(Line::from(Span::styled(
-                        "❯ you",
+                        display_line(app, "❯ you"),
                         Style::default()
                             .fg(Color::Cyan)
                             .add_modifier(Modifier::BOLD),
@@ -338,7 +343,7 @@ fn chat_projection(
             TranscriptKind::Answer => {
                 if starts_group {
                     rendered.push(ProjectedLine::plain(Line::from(Span::styled(
-                        "◆ nosis",
+                        display_line(app, "◆ nosis"),
                         Style::default()
                             .fg(Color::Green)
                             .add_modifier(Modifier::BOLD),
@@ -357,7 +362,7 @@ fn chat_projection(
                     .fg(Color::DarkGray)
                     .add_modifier(Modifier::DIM);
                 rendered.push(ProjectedLine::hanging(
-                    Span::styled("· ", style),
+                    Span::styled(display_line(app, "· "), style),
                     highlighted_transcript_line("", &item.text, "", style, ranges, selected_range),
                 ));
             }

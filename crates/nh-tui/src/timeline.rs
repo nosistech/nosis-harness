@@ -6,6 +6,7 @@ use crate::{APPROVAL_LEGEND, BUDGET_REASON};
 use chrono::{DateTime, TimeZone, Utc};
 use nh_core::agent::CompactionEvent;
 use nh_core::receipt::{CompactionStats, FailureClass, Outcome, ReceiptKind};
+use nh_core::terminal_capability::TerminalCapability;
 use nh_core::wire::{cache_hit_pct, Usage, UsageEvidence};
 use nh_routes::{
     cache_split_cost_upper_bound, cost_of, money, money_with_gloss, saved_pct, PriceConfidence,
@@ -46,7 +47,15 @@ pub(super) fn measured_duration(duration_ms: u64) -> String {
     }
 }
 
+#[cfg(test)]
 pub(super) fn timeline_row(entry: &TimelineEntry) -> String {
+    timeline_row_for(TerminalCapability::Unicode, entry)
+}
+
+pub(super) fn timeline_row_for(
+    terminal_capability: TerminalCapability,
+    entry: &TimelineEntry,
+) -> String {
     let compacted = if entry.compacted { "  [compact]" } else { "" };
     let duration = entry
         .duration_ms
@@ -71,7 +80,7 @@ pub(super) fn timeline_row(entry: &TimelineEntry) -> String {
         (Some(_), None) => "usage unknown".into(),
         (None, _) => "usage unreported".into(),
     };
-    format!(
+    let line = format!(
         "#{}  {}{duration}  {tokens}{compacted}",
         entry.turn,
         if entry.kind == ReceiptKind::CancelledTurn {
@@ -79,10 +88,19 @@ pub(super) fn timeline_row(entry: &TimelineEntry) -> String {
         } else {
             outcome_name(entry.outcome)
         }
-    )
+    );
+    terminal_capability.render_text(&line).into_owned()
 }
 
+#[cfg(test)]
 pub(super) fn timeline_detail_lines(entry: &TimelineEntry) -> Vec<String> {
+    timeline_detail_lines_for(TerminalCapability::Unicode, entry)
+}
+
+pub(super) fn timeline_detail_lines_for(
+    terminal_capability: TerminalCapability,
+    entry: &TimelineEntry,
+) -> Vec<String> {
     let failure = entry
         .failure_class
         .map(failure_class_name)
@@ -137,6 +155,9 @@ pub(super) fn timeline_detail_lines(entry: &TimelineEntry) -> Vec<String> {
     lines.push(String::new());
     lines.push(format!("answer: {}", entry.answer));
     lines
+        .into_iter()
+        .map(|line| terminal_capability.render_text(&line).into_owned())
+        .collect()
 }
 
 struct CompactionEffect {
@@ -407,7 +428,7 @@ fn record_timeline_summary(app: &mut App, summary: crate::state::TimelineSummary
     } else {
         app.mark_session_cost_incomplete();
         app.push_line(
-            "cost unavailable - receipt route is not in the catalog",
+            "cost unknown - receipt route is not in the catalog",
             TranscriptKind::Progress,
         );
     }
@@ -467,22 +488,22 @@ fn record_route_turn_cost(
         }
     };
     let Some(usage) = usage else {
-        unavailable(app, "cost unavailable - usage unreported");
+        unavailable(app, "cost unknown - usage unreported");
         return;
     };
     match usage.evidence {
         UsageEvidence::Measured => {}
         UsageEvidence::Partial => {
-            unavailable(app, "cost unavailable - usage is a lower bound");
+            unavailable(app, "cost unknown - usage is a lower bound");
             return;
         }
         UsageEvidence::Unknown => {
-            unavailable(app, "cost unavailable - usage unknown");
+            unavailable(app, "cost unknown - usage unknown");
             return;
         }
     }
     let Some(at) = at else {
-        unavailable(app, "cost unavailable - receipt timestamp is invalid");
+        unavailable(app, "cost unknown - receipt timestamp is invalid");
         return;
     };
     let Some(quote) = route.price_at(at) else {
@@ -494,7 +515,7 @@ fn record_route_turn_cost(
         |cached| cost_of(&quote, usage.prompt_tokens, cached, usage.completion_tokens),
     );
     let Some(actual) = actual else {
-        unavailable(app, "cost unpriced - invalid usage");
+        unavailable(app, "cost unpriced - invalid usage; meter incomplete");
         return;
     };
     let uncertain = quote.confidence == PriceConfidence::VerifyLive;
@@ -522,8 +543,8 @@ pub(super) fn savings_lines(
     }
     match usage.evidence {
         UsageEvidence::Measured => {}
-        UsageEvidence::Partial => return vec!["cost unavailable - usage is a lower bound".into()],
-        UsageEvidence::Unknown => return vec!["cost unavailable - usage unknown".into()],
+        UsageEvidence::Partial => return vec!["cost unknown - usage is a lower bound".into()],
+        UsageEvidence::Unknown => return vec!["cost unknown - usage unknown".into()],
     }
     let Some(quote) = route.price_at(at) else {
         return vec!["cost unpriced - no price data".into()];
@@ -533,7 +554,7 @@ pub(super) fn savings_lines(
         |cached| cost_of(&quote, usage.prompt_tokens, cached, usage.completion_tokens),
     );
     let Some(actual) = actual else {
-        return vec!["cost unpriced - invalid usage".into()];
+        return vec!["cost unpriced - invalid usage; meter incomplete".into()];
     };
     let mut paid = money_with_gloss(actual, quote.currency, resolver.fx(), at);
     let uncertain = quote.confidence == PriceConfidence::VerifyLive;

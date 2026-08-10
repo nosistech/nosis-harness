@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use nh_core::session_ledger::RestoredSession;
+use nh_core::terminal_capability::TerminalCapability;
 use nh_law::LoadOptions;
 use nh_routes::{Profiles, RouteResolver};
 use nh_tools::McpToolset;
@@ -11,14 +12,22 @@ use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, Vault};
 
 use crate::cmd_run;
 
-pub fn run(model: &str, budget: Option<u64>, profile: &str) -> anyhow::Result<()> {
-    run_with_resume(model, budget, profile, None)
+pub fn run(
+    model: &str,
+    budget: Option<u64>,
+    profile: &str,
+    terminal_capability: TerminalCapability,
+) -> anyhow::Result<()> {
+    run_with_resume(model, budget, profile, None, terminal_capability)
 }
 
-pub(crate) fn resume(restored: RestoredSession) -> anyhow::Result<()> {
+pub(crate) fn resume(
+    restored: RestoredSession,
+    terminal_capability: TerminalCapability,
+) -> anyhow::Result<()> {
     let model = restored.route_id.clone();
     let profile = restored.profile.clone();
-    run_with_resume(&model, None, &profile, Some(restored))
+    run_with_resume(&model, None, &profile, Some(restored), terminal_capability)
 }
 
 fn run_with_resume(
@@ -26,6 +35,7 @@ fn run_with_resume(
     budget: Option<u64>,
     profile: &str,
     resume: Option<RestoredSession>,
+    terminal_capability: TerminalCapability,
 ) -> anyhow::Result<()> {
     let workdir = std::env::current_dir()?;
     let (repo_root, catalog) = cmd_run::find_catalog(&workdir)?;
@@ -56,6 +66,7 @@ fn run_with_resume(
         anyhow::bail!("{error}");
     }
     nh_tui::run(TuiConfig {
+        terminal_capability,
         resolver,
         model_id: model.to_owned(),
         profiles,

@@ -9,6 +9,7 @@ use chrono::{DateTime, FixedOffset, Utc};
 use nh_core::agent::{estimate_message_tokens, CompactionEvent};
 use nh_core::receipt::{CompactionStats, FailureClass, Outcome, Receipt, ReceiptKind};
 use nh_core::session_ledger::RestoredSession;
+use nh_core::terminal_capability::TerminalCapability;
 use nh_core::wire::{cache_hit_pct, ChatMessage, ThinkingEffort, Usage, UsageEvidence};
 use nh_law::{Law, PolicyView};
 use nh_routes::{
@@ -247,6 +248,7 @@ pub enum AgentEvent {
 
 /// Resolved inputs for one TUI session.
 pub struct TuiConfig {
+    pub terminal_capability: TerminalCapability,
     pub resolver: RouteResolver,
     pub model_id: String,
     pub profiles: Profiles,
@@ -261,6 +263,7 @@ pub struct TuiConfig {
 }
 
 pub(super) struct UiInputs {
+    pub(super) terminal_capability: TerminalCapability,
     pub(super) palette_entries: Vec<PaletteEntry>,
     pub(super) credentialed_providers: Vec<String>,
     pub(super) color_mode: ColorMode,
@@ -369,6 +372,7 @@ impl RouteTimingHistory {
 
 /// Unit-testable state for the renderer.
 pub struct App {
+    pub(super) terminal_capability: TerminalCapability,
     pub(super) status: Status,
     pub(super) working_since: Option<DateTime<Utc>>,
     pub(super) active_model: Option<ActiveModel>,
@@ -424,6 +428,7 @@ impl App {
     ) -> Self {
         let (profiles, active_profile) = profile_config;
         let UiInputs {
+            terminal_capability,
             palette_entries: mcp_entries,
             credentialed_providers,
             color_mode,
@@ -435,6 +440,7 @@ impl App {
         let execution_policy = profiles.effective(&active_profile, &route);
         let typical_duration_ms = route_timing_history.typical_for(route.id());
         Self {
+            terminal_capability,
             status: if budget == Some(0) {
                 Status::Blocked(BUDGET_REASON.into())
             } else {
@@ -488,8 +494,9 @@ impl App {
     }
 
     pub(super) fn push_line(&mut self, text: &str, kind: TranscriptKind) {
+        let text = self.terminal_capability.render_text(text);
         self.transcript.push(TranscriptLine {
-            text: safe_line(&self.scrubber, text),
+            text: safe_line(&self.scrubber, &text),
             kind,
         });
         self.scroll_back = 0;
@@ -507,8 +514,9 @@ impl App {
     }
 
     pub(super) fn push_approval_line(&mut self, text: &str) {
+        let text = self.terminal_capability.render_text(text);
         self.transcript.push(TranscriptLine {
-            text: scrub_full_line(&self.scrubber, text),
+            text: scrub_full_line(&self.scrubber, &text),
             kind: TranscriptKind::Approval,
         });
         self.scroll_back = 0;
@@ -874,11 +882,12 @@ impl App {
                 .collect::<Vec<_>>()
                 .join(" · ")
         };
-        if self.session_cost_incomplete {
+        let display = if self.session_cost_incomplete {
             format!("{display} - subtotal; meter incomplete")
         } else {
             display
-        }
+        };
+        self.terminal_capability.render_text(&display).into_owned()
     }
 
     pub(super) fn hud_line(&self, now: DateTime<Utc>) -> String {
@@ -959,6 +968,7 @@ impl App {
                 line.push_str(" · *price verify_live");
             }
         }
+        let line = self.terminal_capability.render_text(&line);
         safe_line(&self.scrubber, &line)
     }
 }

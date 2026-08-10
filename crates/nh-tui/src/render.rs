@@ -7,17 +7,19 @@ use transcript::render_transcript;
 pub(super) use transcript::{transcript_scroll_state, wrapped_rows};
 
 use crate::input::command_matches;
-use crate::keymap::{key_hint_line, visible_key_bindings};
+use crate::keymap::{key_hint_line_for, visible_key_bindings};
 use crate::palette::{filter_palette, trust_dial_lines};
 use crate::session::{effort_name, safe_line};
 use crate::state::{
     search_match_count, search_match_lines, App, Overlay, PickerKind, PickerRow, Status,
 };
-use crate::timeline::{timeline_detail_lines, timeline_row};
+use crate::timeline::{timeline_detail_lines_for, timeline_row_for};
 use chrono::{DateTime, Utc};
+use nh_core::terminal_capability::TerminalCapability;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols::border,
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph},
     Frame,
@@ -26,6 +28,32 @@ use ratatui::{
 const BLOCKED_REASON_MAX_CHARS: usize = 32;
 const HEADER_TITLE_GAP: usize = 1;
 const BLOCKED_LABEL: &str = "● BLOCKED";
+const ASCII_BORDER_SET: border::Set<'static> = border::Set {
+    top_left: "+",
+    top_right: "+",
+    bottom_left: "+",
+    bottom_right: "+",
+    vertical_left: "|",
+    vertical_right: "|",
+    horizontal_top: "-",
+    horizontal_bottom: "-",
+};
+
+fn display_line(app: &App, text: &str) -> String {
+    let text = app.terminal_capability.render_text(text);
+    safe_line(&app.scrubber, &text)
+}
+
+fn apply_border_set(
+    block: Block<'static>,
+    terminal_capability: TerminalCapability,
+) -> Block<'static> {
+    if terminal_capability.uses_ascii_fallback() {
+        block.border_set(ASCII_BORDER_SET)
+    } else {
+        block.border_type(BorderType::Plain)
+    }
+}
 
 pub(super) fn render(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
@@ -64,11 +92,11 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &App) {
 }
 pub(super) fn main_block(app: &App, width: u16) -> Block<'static> {
     let now = Utc::now();
-    let route_label = safe_line(
-        &app.scrubber,
+    let route_label = display_line(
+        app,
         &format!(" {} · effort: {} ", app.route.id(), effort_name(app.effort)),
     );
-    let blocked_reason_width = blocked_reason_width(width, &route_label, &app.scrubber);
+    let blocked_reason_width = blocked_reason_width(width, &route_label, app);
     let (status, status_style) = match (&app.status, &app.active_tool, &app.active_model) {
         (Status::Working, Some(tool), _) => tool_status_chip(&tool.name, tool.started_at, now),
         (Status::Working, None, Some(request)) => model_status_chip(
@@ -85,44 +113,45 @@ pub(super) fn main_block(app: &App, width: u16) -> Block<'static> {
             app.typical_duration_ms,
         ),
     };
-    let left_title = left_title(&app.scrubber, &status, status_style);
+    let left_title = left_title(app, &status, status_style);
     let route_title =
         Line::from(Span::styled(route_label, Style::default().fg(Color::Cyan))).right_aligned();
 
-    Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .style(Style::default().bg(Color::Black))
-        .title_top(left_title)
-        .title_top(route_title)
+    apply_border_set(
+        Block::default().borders(Borders::ALL),
+        app.terminal_capability,
+    )
+    .border_style(Style::default().fg(Color::DarkGray))
+    .style(Style::default().bg(Color::Black))
+    .title_top(left_title)
+    .title_top(route_title)
 }
 
-fn left_title(
-    scrubber: &crate::SharedScrubber,
-    status: &str,
-    status_style: Style,
-) -> Line<'static> {
+fn left_title(app: &App, status: &str, status_style: Style) -> Line<'static> {
     Line::from(vec![
         Span::styled(
-            safe_line(scrubber, " nosis "),
+            display_line(app, " nosis "),
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            safe_line(scrubber, "· "),
+            display_line(app, "· "),
             Style::default().fg(Color::DarkGray),
         ),
-        Span::styled(safe_line(scrubber, status), status_style),
-        Span::raw(safe_line(scrubber, " ")),
+        Span::styled(display_line(app, status), status_style),
+        Span::raw(display_line(app, " ")),
     ])
 }
 
 pub(super) fn render_key_hints(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let hints = safe_line(
-        &app.scrubber,
-        &key_hint_line(app.budget_reached(), app.status.esc_interrupts_turn()),
+    let hints = display_line(
+        app,
+        &key_hint_line_for(
+            app.terminal_capability,
+            app.budget_reached(),
+            app.status.esc_interrupts_turn(),
+        ),
     );
     frame.render_widget(
         Paragraph::new(hints).style(
@@ -135,7 +164,7 @@ pub(super) fn render_key_hints(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 pub(super) fn render_separator(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let rule = safe_line(&app.scrubber, &"─".repeat(usize::from(area.width)));
+    let rule = display_line(app, &"─".repeat(usize::from(area.width)));
     frame.render_widget(
         Paragraph::new(rule).style(
             Style::default()
@@ -147,18 +176,18 @@ pub(super) fn render_separator(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 pub(super) fn render_input(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let prompt = safe_line(&app.scrubber, "❯ ");
+    let prompt = display_line(app, "❯ ");
     let queued = if app.pending_send {
         let marker = match &app.status {
             Status::Blocked(_) if app.budget_reached() => "[queued - budget reached] ",
             Status::Blocked(_) => "[queued - press Enter] ",
             _ => "[queued] ",
         };
-        safe_line(&app.scrubber, marker)
+        display_line(app, marker)
     } else {
         String::new()
     };
-    let input = safe_line(&app.scrubber, &app.input);
+    let input = display_line(app, &app.input);
     let mut spans = vec![Span::styled(
         prompt.clone(),
         Style::default()
@@ -180,7 +209,7 @@ pub(super) fn render_input(frame: &mut Frame<'_>, app: &App, area: Rect) {
             "type a task and press Enter…"
         };
         spans.push(Span::styled(
-            safe_line(&app.scrubber, placeholder),
+            display_line(app, placeholder),
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::DIM),
@@ -287,16 +316,16 @@ pub(super) fn render_help(frame: &mut Frame<'_>, app: &App, area: Rect) {
             .map(|binding| {
                 Line::from(vec![
                     Span::styled(
-                        safe_line(&app.scrubber, &format!("{:<12}", binding.keys)),
+                        display_line(
+                            app,
+                            &format!("{:<12}", binding.display_keys(app.terminal_capability)),
+                        ),
                         Style::default()
                             .fg(Color::Cyan)
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
-                        safe_line(
-                            &app.scrubber,
-                            &format!("{}{}", binding.action, binding.detail),
-                        ),
+                        display_line(app, &format!("{}{}", binding.action, binding.detail)),
                         Style::default().fg(Color::White),
                     ),
                 ])
@@ -334,8 +363,8 @@ pub(super) fn render_search(
         )
     };
     let lines = vec![
-        Line::from(safe_line(&app.scrubber, &format!("query: {query}"))),
-        Line::from(safe_line(&app.scrubber, &position)),
+        Line::from(display_line(app, &format!("query: {query}"))),
+        Line::from(display_line(app, &position)),
     ];
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().fg(Color::White).bg(Color::Black)),
@@ -353,7 +382,7 @@ pub(super) fn render_trust_dial(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
     let lines: Vec<Line<'static>> = trust_dial_lines(&app.policy_view)
         .into_iter()
-        .map(|line| Line::from(safe_line(&app.scrubber, &line)))
+        .map(|line| Line::from(display_line(app, &line)))
         .collect();
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().fg(Color::White).bg(Color::Black)),
@@ -384,7 +413,7 @@ pub(super) fn render_timeline(
     let start = selected.saturating_add(1).saturating_sub(visible_rows);
     let mut rail = Vec::new();
     if app.timeline.is_empty() {
-        rail.push(Line::from(safe_line(&app.scrubber, "no completed turns")));
+        rail.push(Line::from(display_line(app, "no completed turns")));
     } else {
         rail.extend(
             app.timeline
@@ -394,8 +423,13 @@ pub(super) fn render_timeline(
                 .take(visible_rows)
                 .map(|(index, entry)| {
                     let marker = if index == selected { "❯ " } else { "  " };
-                    let line =
-                        safe_line(&app.scrubber, &format!("{marker}{}", timeline_row(entry)));
+                    let line = display_line(
+                        app,
+                        &format!(
+                            "{marker}{}",
+                            timeline_row_for(app.terminal_capability, entry)
+                        ),
+                    );
                     let style = if index == selected {
                         Style::default()
                             .fg(Color::Yellow)
@@ -411,14 +445,14 @@ pub(super) fn render_timeline(
     let mut detail = Vec::new();
     if let Some(note) = note {
         detail.push(Line::from(Span::styled(
-            safe_line(&app.scrubber, note),
+            display_line(app, note),
             Style::default().fg(Color::DarkGray),
         )));
-        detail.push(Line::from(safe_line(&app.scrubber, "")));
+        detail.push(Line::from(display_line(app, "")));
     }
     if let Some(entry) = app.timeline.get(selected) {
         let raw = if inspecting {
-            timeline_detail_lines(entry)
+            timeline_detail_lines_for(app.terminal_capability, entry)
         } else {
             vec![
                 format!("selected: #{}", entry.turn),
@@ -428,7 +462,7 @@ pub(super) fn render_timeline(
         };
         detail.extend(
             raw.into_iter()
-                .map(|line| Line::from(safe_line(&app.scrubber, &line))),
+                .map(|line| Line::from(display_line(app, &line))),
         );
     }
 
@@ -451,11 +485,11 @@ pub(super) fn render_command_menu(frame: &mut Frame<'_>, app: &App, area: Rect, 
     let start = selected.saturating_add(1).saturating_sub(visible_rows);
     let query = app.input.strip_prefix('/').unwrap_or("");
     let mut lines = vec![
-        Line::from(safe_line(&app.scrubber, &format!("command: /{query}"))),
-        Line::from(safe_line(&app.scrubber, "")),
+        Line::from(display_line(app, &format!("command: /{query}"))),
+        Line::from(display_line(app, "")),
     ];
     if filtered.is_empty() {
-        lines.push(Line::from(safe_line(&app.scrubber, "no matches")));
+        lines.push(Line::from(display_line(app, "no matches")));
     } else {
         lines.extend(
             filtered
@@ -465,7 +499,7 @@ pub(super) fn render_command_menu(frame: &mut Frame<'_>, app: &App, area: Rect, 
                 .take(visible_rows)
                 .map(|(index, entry)| {
                     let marker = if index == selected { "❯ " } else { "  " };
-                    let line = safe_line(&app.scrubber, &format!("{marker}{}", entry.line()));
+                    let line = display_line(app, &format!("{marker}{}", entry.line()));
                     let style = if index == selected {
                         Style::default()
                             .fg(Color::Yellow)
@@ -502,11 +536,11 @@ pub(super) fn render_palette(
     let visible_rows = usize::from(body.height.saturating_sub(2).max(1));
     let start = selected.saturating_add(1).saturating_sub(visible_rows);
     let mut lines = vec![
-        Line::from(safe_line(&app.scrubber, &format!("filter: {filter}"))),
-        Line::from(safe_line(&app.scrubber, "")),
+        Line::from(display_line(app, &format!("filter: {filter}"))),
+        Line::from(display_line(app, "")),
     ];
     if filtered.is_empty() {
-        lines.push(Line::from(safe_line(&app.scrubber, "no matches")));
+        lines.push(Line::from(display_line(app, "no matches")));
     } else {
         lines.extend(
             filtered
@@ -516,7 +550,7 @@ pub(super) fn render_palette(
                 .take(visible_rows)
                 .map(|(index, entry)| {
                     let marker = if index == selected { "❯ " } else { "  " };
-                    let line = safe_line(&app.scrubber, &format!("{marker}{}", entry.line()));
+                    let line = display_line(app, &format!("{marker}{}", entry.line()));
                     let style = if index == selected {
                         Style::default()
                             .fg(Color::Yellow)
@@ -529,8 +563,8 @@ pub(super) fn render_palette(
         );
     }
     if let Some(detail) = detail {
-        lines.push(Line::from(safe_line(
-            &app.scrubber,
+        lines.push(Line::from(display_line(
+            app,
             &format!("selected: {detail}"),
         )));
     }
@@ -559,7 +593,7 @@ pub(super) fn render_picker(
     let selected = selected.min(picker_rows.len().saturating_sub(1));
     let start = selected.saturating_add(1).saturating_sub(visible_rows);
     let lines = if picker_rows.is_empty() {
-        vec![Line::from(safe_line(&app.scrubber, kind.empty_message()))]
+        vec![Line::from(display_line(app, kind.empty_message()))]
     } else {
         picker_rows
             .iter()
@@ -568,7 +602,7 @@ pub(super) fn render_picker(
             .take(visible_rows)
             .map(|(index, row)| {
                 let marker = if index == selected { "❯ " } else { "  " };
-                let line = safe_line(&app.scrubber, &format!("{marker}{}", row.label));
+                let line = display_line(app, &format!("{marker}{}", row.label));
                 let style = if index == selected {
                     Style::default()
                         .fg(Color::Yellow)
@@ -624,18 +658,19 @@ pub(super) fn render_modal_shell(
     help: &str,
 ) -> Rect {
     frame.render_widget(Clear, area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .style(Style::default().fg(Color::White).bg(Color::Black))
-        .padding(Padding::horizontal(1))
-        .title_top(Line::from(Span::styled(
-            safe_line(&app.scrubber, title),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )));
+    let block = apply_border_set(
+        Block::default().borders(Borders::ALL),
+        app.terminal_capability,
+    )
+    .border_style(Style::default().fg(Color::DarkGray))
+    .style(Style::default().fg(Color::White).bg(Color::Black))
+    .padding(Padding::horizontal(1))
+    .title_top(Line::from(Span::styled(
+        display_line(app, title),
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let rows = Layout::default()
@@ -643,7 +678,7 @@ pub(super) fn render_modal_shell(
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(inner);
     frame.render_widget(
-        Paragraph::new(safe_line(&app.scrubber, help)).style(
+        Paragraph::new(display_line(app, help)).style(
             Style::default()
                 .fg(Color::DarkGray)
                 .bg(Color::Black)
@@ -738,10 +773,10 @@ fn typical_duration_suffix(duration_ms: Option<u64>) -> String {
     })
 }
 
-fn blocked_reason_width(width: u16, route_label: &str, scrubber: &crate::SharedScrubber) -> usize {
+fn blocked_reason_width(width: u16, route_label: &str, app: &App) -> usize {
     let title_width = usize::from(width.saturating_sub(2));
     let fixed_left_width =
-        left_title(scrubber, &format!("{BLOCKED_LABEL} - "), Style::default()).width();
+        left_title(app, &format!("{BLOCKED_LABEL} - "), Style::default()).width();
     title_width.saturating_sub(
         fixed_left_width
             .saturating_add(Line::from(route_label).width())
