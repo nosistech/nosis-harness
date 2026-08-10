@@ -1298,6 +1298,84 @@ fn ascii_mode_sweeps_main_transcript_and_every_overlay_frame() {
 }
 
 #[test]
+fn ascii_mode_preserves_model_answer_content() {
+    let mut app = test_app(None);
+    app.terminal_capability = TerminalCapability::AsciiFallback;
+    let answer = "price \u{00a5}100 \u{2248} USD 1";
+
+    apply_event(&mut app, AgentEvent::Answer(answer.into()));
+
+    let displayed = app.transcript.last().unwrap();
+    assert!(displayed.kind == TranscriptKind::Answer);
+    assert_eq!(displayed.text, answer);
+}
+
+#[test]
+fn ascii_mode_preserves_approval_command_bytes() {
+    let mut app = test_app(None);
+    app.terminal_capability = TerminalCapability::AsciiFallback;
+    app.status = Status::Working;
+    let command = "compare \u{00a5}100 \u{2192} result \u{2248} USD 1";
+    let (event, _answer) = approval(command);
+
+    apply_event(&mut app, event);
+
+    let line = &app.transcript.last().unwrap().text;
+    let suffix = format!("   {APPROVAL_LEGEND}");
+    let displayed_command = line
+        .strip_prefix("approve: ")
+        .and_then(|line| line.strip_suffix(&suffix))
+        .unwrap();
+    let pending_command = &app.pending_approval.as_ref().unwrap().prompt;
+    assert_eq!(displayed_command.as_bytes(), pending_command.as_bytes());
+}
+
+#[test]
+fn ascii_mode_preserves_typed_task_content() {
+    let mut app = test_app(None);
+    app.terminal_capability = TerminalCapability::AsciiFallback;
+    let task = "compare \u{00a5}100 \u{2248} USD 1";
+    app.input = task.into();
+
+    assert_eq!(app.dispatch().as_deref(), Some(task));
+
+    let displayed = app.transcript.last().unwrap();
+    assert!(displayed.kind == TranscriptKind::Task);
+    assert_eq!(displayed.text, task);
+}
+
+#[test]
+fn ascii_mode_still_maps_nosis_chrome() {
+    let mut app = test_app(None);
+    app.terminal_capability = TerminalCapability::AsciiFallback;
+
+    app.push_line(
+        "chrome \u{00b7} \u{2192} \u{00a5} \u{2248}",
+        TranscriptKind::Progress,
+    );
+
+    assert_eq!(app.transcript.last().unwrap().text, "chrome - > Y ~");
+}
+
+#[test]
+fn ascii_mode_preserves_auto_approved_command_content() {
+    let mut app = test_app(None);
+    app.terminal_capability = TerminalCapability::AsciiFallback;
+    app.status = Status::Working;
+    let command = "compare \u{00a5}100 \u{2192} result \u{2248} USD 1";
+    app.session_allow.push(command.into());
+    let (event, answer) = approval(command);
+
+    apply_event(&mut app, event);
+
+    assert!(answer.recv().unwrap());
+    assert_eq!(
+        app.transcript.last().unwrap().text,
+        format!("auto-approved (session rule): {command}")
+    );
+}
+
+#[test]
 fn unicode_mode_preserves_existing_main_transcript_and_overlay_glyphs() {
     let mut app = test_app(None);
     let main = render_buffer(&app, 100, 30);

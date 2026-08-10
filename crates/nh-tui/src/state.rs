@@ -495,8 +495,12 @@ impl App {
 
     pub(super) fn push_line(&mut self, text: &str, kind: TranscriptKind) {
         let text = self.terminal_capability.render_text(text);
+        self.push_content_line(&text, kind);
+    }
+
+    pub(super) fn push_content_line(&mut self, text: &str, kind: TranscriptKind) {
         self.transcript.push(TranscriptLine {
-            text: safe_line(&self.scrubber, &text),
+            text: safe_line(&self.scrubber, text),
             kind,
         });
         self.scroll_back = 0;
@@ -506,17 +510,16 @@ impl App {
         let mut saw_line = false;
         for line in text.lines() {
             saw_line = true;
-            self.push_line(&format!("{prefix}{line}"), kind);
+            self.push_content_line(&format!("{prefix}{line}"), kind);
         }
         if !saw_line {
-            self.push_line(prefix, kind);
+            self.push_content_line(prefix, kind);
         }
     }
 
     pub(super) fn push_approval_line(&mut self, text: &str) {
-        let text = self.terminal_capability.render_text(text);
         self.transcript.push(TranscriptLine {
-            text: scrub_full_line(&self.scrubber, &text),
+            text: scrub_full_line(&self.scrubber, text),
             kind: TranscriptKind::Approval,
         });
         self.scroll_back = 0;
@@ -619,7 +622,7 @@ impl App {
         self.last_compaction_hud = None;
         self.active_model = None;
         self.active_tool = None;
-        self.push_line(&task, TranscriptKind::Task);
+        self.push_content_line(&task, TranscriptKind::Task);
         self.set_status(Status::Working, Utc::now());
         Some(task)
     }

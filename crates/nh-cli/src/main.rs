@@ -197,9 +197,9 @@ fn parse_max_turns(value: &str) -> Result<u32, String> {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let terminal_capability = nh_core::terminal_capability::TerminalCapability::from_process(
-        cli.ascii.map(AsciiArg::enabled),
-    );
+    let forced_ascii = cli.ascii.map(AsciiArg::enabled);
+    let terminal_capability =
+        nh_core::terminal_capability::TerminalCapability::from_process(forced_ascii);
     let result = match cli.cmd {
         Cmd::Init => cmd_init::run(),
         Cmd::Key { action } => match action {
@@ -227,7 +227,7 @@ fn main() -> anyhow::Result<()> {
             },
         ),
         Cmd::Chat { model, profile } => cmd_chat::run(&model, &profile, terminal_capability),
-        Cmd::Doctor => cmd_doctor::run(),
+        Cmd::Doctor => cmd_doctor::run(terminal_capability, forced_ascii),
         Cmd::Resume { session_id } => cmd_resume::run(session_id.as_deref(), terminal_capability),
         Cmd::Why { task, model } => {
             cmd_why::run(task.as_deref(), model.as_deref(), terminal_capability)

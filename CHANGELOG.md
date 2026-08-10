@@ -21,9 +21,19 @@ commit passes local and remote gates.
 - `nh doctor` never prints a key value. It reports only whether an entry is stored. If the
   key store itself cannot be reached, it says so, because that is a different problem with a
   different fix.
+- `nh doctor` now reports which display mode is actually in effect, Unicode or ASCII
+  fallback, and whether that mode was forced with `--ascii` or chosen because output is not
+  going to a terminal. It was previously the only command that reported the inputs to that
+  decision without ever reporting the result.
 
 ### Fixed
 
+- Text that nosis did not write is no longer rewritten for ASCII terminals. A model answer,
+  the task you typed, and the command in an approval prompt now keep the characters they
+  were written with. Only nosis's own interface glyphs are replaced when the terminal cannot
+  show them. This matters most in an approval prompt: the command shown to you is the
+  command that will run, so the two must never differ. Credential redaction and control
+  character escaping are unchanged and still apply to all of it.
 - Tool refusals and tool failures now redact credentials before the text enters the
   conversation.
 - Provider error snippets now redact known credential shapes as well as the active provider

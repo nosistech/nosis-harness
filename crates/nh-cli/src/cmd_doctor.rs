@@ -82,6 +82,8 @@ pub(crate) struct DoctorFacts {
     path: PathStatus,
     catalog: CatalogStatus,
     stdout_terminal: bool,
+    terminal_capability: TerminalCapability,
+    forced_ascii: Option<bool>,
     no_color: bool,
     code_page: Option<CodePageStatus>,
     network: Vec<NetworkFact>,
@@ -89,8 +91,11 @@ pub(crate) struct DoctorFacts {
     repository_config: LocationStatus,
 }
 
-pub fn run() -> anyhow::Result<()> {
-    let facts = probe();
+pub fn run(
+    terminal_capability: TerminalCapability,
+    forced_ascii: Option<bool>,
+) -> anyhow::Result<()> {
+    let facts = probe(terminal_capability, forced_ascii);
     let scrubber = Scrubber::new(Vec::new());
     for line in render(&facts) {
         println!("{}", cmd_run::safe_line(&scrubber, &line));
@@ -98,7 +103,7 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn probe() -> DoctorFacts {
+fn probe(terminal_capability: TerminalCapability, forced_ascii: Option<bool>) -> DoctorFacts {
     let binary = match std::env::current_exe() {
         Ok(path) => ProbeValue::Value(path),
         Err(error) => ProbeValue::Unavailable(error.to_string()),
@@ -132,6 +137,8 @@ fn probe() -> DoctorFacts {
         path,
         catalog,
         stdout_terminal: std::io::stdout().is_terminal(),
+        terminal_capability,
+        forced_ascii,
         no_color: std::env::var_os("NO_COLOR").is_some(),
         code_page,
         network: NETWORK_VARS
@@ -349,6 +356,7 @@ pub(crate) fn render(facts: &DoctorFacts) -> Vec<String> {
         "  stdout terminal: {}",
         yes_no(facts.stdout_terminal)
     ));
+    lines.push(display_mode_line(facts));
     lines.push(format!("  NO_COLOR: {}", set_state(facts.no_color)));
     if let Some(code_page) = facts.code_page {
         match code_page {
@@ -449,6 +457,21 @@ fn yes_no(value: bool) -> &'static str {
     }
 }
 
+fn display_mode_line(facts: &DoctorFacts) -> String {
+    let mode = if facts.terminal_capability.uses_ascii_fallback() {
+        "ASCII fallback"
+    } else {
+        "Unicode"
+    };
+    let reason = match facts.forced_ascii {
+        Some(true) => "forced by --ascii on",
+        Some(false) => "forced by --ascii off",
+        None if facts.stdout_terminal => "chosen because stdout is a terminal",
+        None => "chosen because stdout is not a terminal",
+    };
+    format!("  display mode: {mode} ({reason})")
+}
+
 fn set_state(value: bool) -> &'static str {
     if value {
         "set"
@@ -478,6 +501,8 @@ mod tests {
                 }]),
             },
             stdout_terminal: true,
+            terminal_capability: TerminalCapability::Unicode,
+            forced_ascii: None,
             no_color: false,
             code_page: Some(CodePageStatus::Utf8),
             network: NETWORK_VARS
@@ -508,6 +533,7 @@ mod tests {
             "  routes: 4 across 3 providers",
             "  key provider-one: stored (providers: provider-one)",
             "  stdout terminal: yes",
+            "  display mode: Unicode (chosen because stdout is a terminal)",
             "  NO_COLOR: not set",
             "  Windows code page: 65001 (UTF-8)",
             "  HTTP_PROXY: not set",
@@ -547,6 +573,23 @@ mod tests {
         let advice = next_lines(&lines).join("\n");
         assert!(advice.contains("typing `nh` runs C:/stale/nh.exe"));
         assert!(advice.contains("this doctor is C:/current/nh.exe"));
+    }
+
+    #[test]
+    fn render_distinguishes_forced_and_chosen_ascii_fallback() {
+        let mut forced = healthy_facts();
+        forced.terminal_capability = TerminalCapability::AsciiFallback;
+        forced.forced_ascii = Some(true);
+        let forced_report = render(&forced).join("\n");
+        assert!(forced_report.contains("display mode: ASCII fallback (forced by --ascii on)"));
+
+        let mut chosen = healthy_facts();
+        chosen.stdout_terminal = false;
+        chosen.terminal_capability = TerminalCapability::AsciiFallback;
+        chosen.forced_ascii = None;
+        let chosen_report = render(&chosen).join("\n");
+        assert!(chosen_report
+            .contains("display mode: ASCII fallback (chosen because stdout is not a terminal)"));
     }
 
     #[test]

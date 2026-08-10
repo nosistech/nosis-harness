@@ -343,7 +343,7 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
         AgentEvent::Approval(request) => {
             if app.session_allow.contains(&request.prompt) {
                 let _ = request.reply.send(true);
-                app.push_line(
+                app.push_content_line(
                     &format!("auto-approved (session rule): {}", request.prompt),
                     TranscriptKind::Progress,
                 );
