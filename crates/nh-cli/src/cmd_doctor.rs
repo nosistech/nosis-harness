@@ -58,6 +58,10 @@ enum CatalogStatus {
     },
 }
 
+/// Only Windows has a console code page, so only Windows constructs these.
+/// The type stays available everywhere so the facts struct and its tests do
+/// not need their own platform split.
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CodePageStatus {
     Utf8,
@@ -284,12 +288,10 @@ fn environment_is_set(name: &str) -> bool {
     if std::env::var_os(name).is_some() {
         return true;
     }
-    #[cfg(unix)]
-    {
-        return std::env::var_os(name.to_ascii_lowercase()).is_some();
-    }
-    #[cfg(not(unix))]
-    false
+    // Unix tools commonly use the lowercase spelling as well. `cfg!` keeps one
+    // compiled path on every platform, so there is no platform-only branch here
+    // that a single-platform gate run would never check.
+    cfg!(unix) && std::env::var_os(name.to_ascii_lowercase()).is_some()
 }
 
 fn probe_location(path: PathBuf) -> LocationStatus {
