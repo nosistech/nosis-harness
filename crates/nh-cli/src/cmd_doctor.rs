@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use nh_core::terminal_capability::*;
 use nh_routes::{RouteClass, RouteResolver};
-use nh_vault::{KeyringVault, Scrubber, Vault as _};
+use nh_vault::{KeyringVault, Scrubber};
 
 use crate::cmd_run;
 
@@ -248,12 +248,8 @@ fn probe_catalog(cwd: &ProbeValue<PathBuf>) -> CatalogStatus {
 fn probe_keys(entries: BTreeMap<String, BTreeSet<String>>) -> KeyStatus {
     let mut facts = Vec::with_capacity(entries.len());
     for (entry, providers) in entries {
-        let stored = match KeyringVault.get(&entry) {
-            Ok(secret) => {
-                drop(secret);
-                true
-            }
-            Err(error) if key_is_absent(&error, &entry) => false,
+        let stored = match KeyringVault.entry_exists(&entry) {
+            Ok(stored) => stored,
             Err(error) => return KeyStatus::StoreUnavailable(error.to_string()),
         };
         facts.push(KeyFact {
@@ -263,12 +259,6 @@ fn probe_keys(entries: BTreeMap<String, BTreeSet<String>>) -> KeyStatus {
         });
     }
     KeyStatus::Entries(facts)
-}
-
-fn key_is_absent(error: &anyhow::Error, entry: &str) -> bool {
-    error
-        .to_string()
-        .starts_with(&format!("no key stored for \"{entry}\""))
 }
 
 fn environment_is_set(name: &str) -> bool {

@@ -147,25 +147,31 @@ fn sanitize_line_escapes_control_chars_visibly() {
 }
 
 #[test]
-fn sanitize_line_truncates_with_visible_marker() {
-    let display = sanitize_line(&"x".repeat(600));
-    assert!(
-        display.chars().count() < 600,
-        "got len {}",
-        display.chars().count()
-    );
-    assert!(display.contains("(+100 more chars)"), "got: {display}");
-    // Short text passes through untouched.
+fn sanitize_line_strips_invisible_carriers() {
+    let display = sanitize_line("a\u{200b}b\u{200c}c\u{200d}d\u{2060}e\u{feff}f\u{e0001}g");
+
+    assert_eq!(display, "abcdefg");
+}
+
+#[test]
+fn sanitize_line_escapes_bidi_and_preserves_ordinary_text() {
+    let spoofed = "allow\u{202e}deny";
+    let sanitized = sanitize_line(spoofed);
+
+    assert_eq!(sanitized, "allow\\u{202e}deny");
+    assert!(!sanitized.contains('\u{202e}'));
     assert_eq!(sanitize_line("cargo test"), "cargo test");
 }
 
 #[test]
-fn sanitizers_escape_bidi_controls_visibly() {
-    let spoofed = "allow\u{202e}deny";
-    for sanitized in [sanitize_line(spoofed), sanitize_untrusted_text(spoofed)] {
-        assert_eq!(sanitized, "allow\\u{202e}deny");
-        assert!(!sanitized.contains('\u{202e}'));
-    }
+fn sanitize_line_truncates_after_stripping_invisible_carriers() {
+    let input = format!("{}{}", "\u{200b}".repeat(100), "x".repeat(600));
+    let display = sanitize_line(&input);
+
+    assert_eq!(
+        display,
+        format!("{}\u{2026} (+100 more chars)", "x".repeat(500))
+    );
 }
 
 #[test]
@@ -349,6 +355,17 @@ fn env_fallback_both_missing_gives_actionable_error() {
         err.contains("key store said: no key stored for \"test-missing\""),
         "error was: {err}"
     );
+}
+
+#[test]
+fn keyring_entry_exists_reports_a_definitely_absent_entry() {
+    let platform_builder = keyring::default::default_credential_builder();
+    keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+
+    let exists = KeyringVault.entry_exists("nh-vault-test-definitely-absent");
+
+    keyring::set_default_credential_builder(platform_builder);
+    assert!(!exists.expect("mock entry lookup should succeed"));
 }
 
 /// Touches the real OS credential store - run manually with `cargo test -- --ignored`.

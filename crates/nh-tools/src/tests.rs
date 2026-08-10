@@ -397,7 +397,7 @@ fn write_file_lowercase_ask_beats_typed_allow_and_denial_is_ok_shaped() {
 }
 
 #[test]
-fn write_file_approval_names_real_destination_and_requested_directory_alias() {
+fn write_file_labels_name_real_destination_and_requested_directory_alias() {
     let dir = tempfile::tempdir().unwrap();
     let real = dir.path().join("real");
     std::fs::create_dir(&real).unwrap();
@@ -426,7 +426,10 @@ fn write_file_approval_names_real_destination_and_requested_directory_alias() {
         *actions.lock().unwrap(),
         ["create real/new.txt (requested as alias/new.txt)"]
     );
-    assert_eq!(result, "created real/new.txt (5 bytes)");
+    assert_eq!(
+        result,
+        "created real/new.txt (requested as alias/new.txt) (5 bytes)"
+    );
     assert_eq!(
         std::fs::read_to_string(real.join("new.txt")).unwrap(),
         "hello"
@@ -859,6 +862,63 @@ fn read_edit_round_trip() {
             .to_string_lossy()
             .starts_with(".nh-edit-")
     }));
+}
+
+#[test]
+fn edit_file_success_names_canonical_path_and_requested_directory_alias() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::write(real.join("note.txt"), "before").unwrap();
+    if symlink_dir(&real, &dir.path().join("alias")).is_err() {
+        return;
+    }
+    let actions = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let actions_seen = Arc::clone(&actions);
+    let ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(move |action| {
+            actions_seen.lock().unwrap().push(action.to_owned());
+            true
+        }),
+    )
+    .with_guard(Box::new(|access| match access {
+        Access::Write(_) => Guard::Ask,
+        _ => Guard::Allow,
+    }));
+
+    let result = EditFile
+        .execute(
+            json!({"path": "alias/note.txt", "old_string": "before", "new_string": "after"}),
+            &ctx,
+        )
+        .unwrap();
+
+    assert_eq!(
+        *actions.lock().unwrap(),
+        ["edit real/note.txt (requested as alias/note.txt)"]
+    );
+    assert_eq!(result, "edited real/note.txt (requested as alias/note.txt)");
+    assert_eq!(
+        std::fs::read_to_string(real.join("note.txt")).unwrap(),
+        "after"
+    );
+}
+
+#[test]
+fn edit_file_success_omits_requested_clause_for_ordinary_path() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("note.txt"), "before").unwrap();
+
+    let result = EditFile
+        .execute(
+            json!({"path": "note.txt", "old_string": "before", "new_string": "after"}),
+            &ctx_with(dir.path(), true),
+        )
+        .unwrap();
+
+    assert_eq!(result, "edited note.txt");
+    assert!(!result.contains("(requested as"));
 }
 
 #[test]
@@ -1597,8 +1657,14 @@ fn edit_ask_uses_normalized_relative_path_and_denial_is_ok_shaped() {
         )
         .unwrap();
 
-    assert_eq!(result, "user denied: edit note.txt");
-    assert_eq!(*seen.lock().unwrap(), ["edit note.txt"]);
+    assert_eq!(
+        result,
+        "user denied: edit note.txt (requested as nested/../note.txt)"
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        ["edit note.txt (requested as nested/../note.txt)"]
+    );
     assert_eq!(
         std::fs::read_to_string(dir.path().join("note.txt")).unwrap(),
         "before"

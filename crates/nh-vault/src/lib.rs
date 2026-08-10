@@ -30,6 +30,20 @@ pub trait Vault: Send + Sync {
 /// Windows Credential Manager (DPAPI) / macOS Keychain / Linux secret-service via `keyring`.
 pub struct KeyringVault;
 
+impl KeyringVault {
+    /// Report whether a secret is stored, without materializing it.
+    pub fn entry_exists(&self, entry: &str) -> anyhow::Result<bool> {
+        let cred = open_entry(entry)?;
+        match cred.get_attributes() {
+            Ok(_) => Ok(true),
+            Err(keyring::Error::NoEntry) => Ok(false),
+            Err(e) => Err(anyhow::anyhow!(
+                "could not read key \"{entry}\" from the OS key store ({e}) - run `nh key add {entry}` to re-store it"
+            )),
+        }
+    }
+}
+
 impl Vault for KeyringVault {
     fn get(&self, entry: &str) -> anyhow::Result<Zeroizing<String>> {
         let cred = open_entry(entry)?;
@@ -440,18 +454,12 @@ fn is_bidi_control(c: char) -> bool {
         || ('\u{2066}'..='\u{2069}').contains(&c)
 }
 
-/// Render untrusted text as one safe terminal line: control characters (\n, \r,
-/// ESC/ANSI, …) become visible escapes so model output cannot spoof the display,
-/// and very long text truncates with an explicit marker.
+/// Render untrusted text as one safe terminal line: invisible carrier characters
+/// are removed; control and bidirectional-format characters become visible escapes
+/// so model output cannot spoof or reorder the display; and very long text truncates
+/// with an explicit marker.
 pub fn sanitize_line(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for c in text.chars() {
-        if c.is_control() || is_bidi_control(c) {
-            escaped.extend(c.escape_debug());
-        } else {
-            escaped.push(c);
-        }
-    }
+    let escaped = escape_untrusted(text);
     let len = escaped.chars().count();
     if len > MAX_DISPLAY_CHARS {
         let head: String = escaped.chars().take(MAX_DISPLAY_CHARS).collect();

@@ -364,6 +364,14 @@ fn relative_path(root: &Path, path: &Path) -> anyhow::Result<String> {
         .join("/"))
 }
 
+fn destination_label(actual_relative: &str, requested_relative: &str) -> String {
+    if actual_relative == requested_relative {
+        actual_relative.to_owned()
+    } else {
+        format!("{actual_relative} (requested as {requested_relative})")
+    }
+}
+
 fn parent_label(relative: &str) -> String {
     let parent = Path::new(relative)
         .parent()
@@ -610,12 +618,9 @@ impl Tool for WriteFile {
             .render());
         }
         let actual_relative = actual_relative.as_deref().unwrap_or(&relative);
+        let destination_label = destination_label(actual_relative, &relative);
         if matches!(verdict, Guard::Ask) {
-            let action = if actual_relative == relative {
-                format!("create {actual_relative}")
-            } else {
-                format!("create {actual_relative} (requested as {relative})")
-            };
+            let action = format!("create {destination_label}");
             if !(ctx.approve)(&action) {
                 return Ok(ToolResultEnvelope::new(
                     format!("user denied: {action}"),
@@ -708,7 +713,7 @@ impl Tool for WriteFile {
             return Err(error).with_context(|| format!("could not create {path}"));
         }
         Ok(ToolResultEnvelope::new(
-            format!("created {actual_relative} ({} bytes)", content.len()),
+            format!("created {destination_label} ({} bytes)", content.len()),
             &ctx.scrubber,
         )
         .render())
@@ -756,12 +761,13 @@ impl Tool for EditFile {
             bail!("old_string is empty - provide the exact text to replace");
         }
         let (resolved, relative) = resolve_in_workdir(&ctx.workdir, path)?;
+        let destination_label = destination_label(&relative, path);
         match (ctx.guard)(&Access::Write(&relative)) {
             Guard::Block(reason) => {
                 return Ok(ToolExecution::plain(format!("blocked by law: {reason}")))
             }
             Guard::Ask => {
-                let action = format!("edit {relative}");
+                let action = format!("edit {destination_label}");
                 if !(ctx.approve)(&action) {
                     return Ok(ToolExecution::plain(format!("user denied: {action}")));
                 }
@@ -884,8 +890,8 @@ impl Tool for EditFile {
             edit::MatchTier::IndentationFlexible => Some(EditMatchTier::IndentationFlexible),
         };
         let output = tier.map_or_else(
-            || format!("edited {path}"),
-            |tier| format!("edited {path} using {} match", tier.label()),
+            || format!("edited {destination_label}"),
+            |tier| format!("edited {destination_label} using {} match", tier.label()),
         );
         Ok(ToolExecution {
             output,
