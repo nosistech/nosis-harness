@@ -37,6 +37,8 @@ commit passes local and remote gates.
   space on the screen but still change how a line reads. Approval prompts already removed
   them. Other displays used a weaker rule that only made control characters visible. There is
   one rule now, and it is used everywhere.
+- The generated API documentation now lists all nine commands the program ships: `init`,
+  `key`, `run`, `chat`, `doctor`, `why`, `tui`, `fleet` and `mcp`. It listed four.
 
 ## [0.2.0] - 2026-08-09
 

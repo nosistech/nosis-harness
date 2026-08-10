@@ -1,4 +1,4 @@
-//! nh - the Nosis Harness CLI. M0 surface: init / key / run; M1 adds chat.
+//! nh - the Nosis Harness CLI. Commands: init, key, run, chat, doctor, why, tui, fleet, mcp.
 //! UX IS THE PRODUCT: every message short, concrete, actionable. Errors say what to do
 //! next, never stack traces. Approval prompts show the command on one safe line
 //! (scrubbed, control chars escaped), y/N, default deny.

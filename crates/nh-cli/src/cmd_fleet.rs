@@ -179,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn task_file_accepts_locked_slice_a_shape() {
+    fn task_file_accepts_the_full_documented_shape() {
         let file: TaskFile = serde_json::from_str(
             r#"{
                 "tasks":[{"id":"one","task":"do one","model":"route"}],

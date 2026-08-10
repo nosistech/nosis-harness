@@ -155,7 +155,7 @@ fn protected_path_is_blocked_at_auto_end_to_end() {
     std::fs::create_dir(&home_nosis).unwrap();
     std::fs::write(
         home_nosis.join("law.toml"),
-        format!("[credential.m2-slice-c-exit]\naudience = [\"{base_url}\"]\n"),
+        format!("[credential.m2-exit-cred]\naudience = [\"{base_url}\"]\n"),
     )
     .unwrap();
     let nosis = repo.path().join(".nosis");
@@ -170,7 +170,7 @@ provider = "mock"
 model_id = "m2-exit"
 base_url = "{base_url}"
 wire = "openai"
-vault_entry = "m2-slice-c-exit"
+vault_entry = "m2-exit-cred"
 context = 128000
 "#
     );
@@ -181,7 +181,7 @@ context = 128000
         .current_dir(repo.path())
         .env("USERPROFILE", home.path())
         .env("HOME", home.path())
-        .env("NH_M2_SLICE_C_EXIT_KEY", "test-only-value")
+        .env("NH_M2_EXIT_CRED_KEY", "test-only-value")
         .args([
             "run",
             "edit the protected project law",
