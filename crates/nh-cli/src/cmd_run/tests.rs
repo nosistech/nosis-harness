@@ -241,6 +241,21 @@ fn mcp_audience_checks_use_exact_origins() {
 }
 
 #[test]
+fn unparseable_destination_warning_uses_the_canonical_placeholder() {
+    let mut config = mcp_config("broken", "", McpTrust::Ask);
+    config.auth = McpAuth::ApiKey {
+        vault_entry: "service-key".into(),
+    };
+    let mut warnings = Vec::new();
+
+    let kept = filter_mcp_audiences_with(vec![config], &mut warnings, |_| Vec::new());
+
+    assert!(kept.is_empty());
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].ends_with("is not approved for <unparseable destination>"));
+}
+
+#[test]
 fn repo_only_mcp_server_is_dropped() {
     let repo = vec![mcp_config(
         "repo-auto",

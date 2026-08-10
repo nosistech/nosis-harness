@@ -57,6 +57,11 @@ commit passes local and remote gates.
   one rule now, and it is used everywhere.
 - The generated API documentation now lists all nine commands the program ships: `init`,
   `key`, `run`, `chat`, `doctor`, `why`, `tui`, `fleet` and `mcp`. It listed four.
+- The warning that drops an MCP server now always names the destination it refused. If the
+  server's URL could not be parsed, the line stopped after "is not approved for" and named
+  nothing at all, so you were told a destination was rejected without being told which one.
+  It now reads `<unparseable destination>`, the same wording the credential store already
+  used for that case.
 
 ## [0.2.0] - 2026-08-09
 

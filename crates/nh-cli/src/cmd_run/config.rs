@@ -232,7 +232,9 @@ pub(super) fn filter_mcp_audiences_with(
                 warnings.push(format!(
                     "mcp server \"{}\" dropped - credential \"{entry}\" is not approved for {}",
                     config.name,
-                    nh_vault::normalized_host(target).as_deref().unwrap_or("")
+                    nh_vault::normalized_origin(target)
+                        .as_deref()
+                        .unwrap_or("<unparseable destination>")
                 ));
                 None
             } else {

@@ -311,15 +311,21 @@ fn exact_origin(value: &str) -> Result<ExactOrigin, OriginRefusal> {
 }
 
 /// Parse and normalize a credential destination to its exact effective origin
-/// (scheme + host + port) with the same URL parser used by reqwest. Host-only
-/// policy entries remain shorthand for their default HTTPS origin.
-pub fn normalized_host(value: &str) -> Option<String> {
+/// (scheme + host + port) with the same URL parser used by reqwest. Credential
+/// audience policy matches this origin; host-only entries remain shorthand for
+/// their default HTTPS origin. The law's `[send]` policy instead matches the bare
+/// host from [`host_of`]; the two values are deliberately different and must not
+/// be interchanged.
+pub fn normalized_origin(value: &str) -> Option<String> {
     exact_origin(value).ok().map(|origin| origin.to_string())
 }
 
-/// Bare lowercased host of a URL, for policy matching. Accepts scheme-less input
-/// (treated as `https://<value>`). IPv6 hosts come back without brackets. Any scheme
-/// is accepted (this does NOT enforce transport - callers apply their own policy).
+/// Return the bare lowercased host of a URL for the law's `[send]` policy.
+/// Scheme-less input is treated as `https://<value>`, and IPv6 hosts have no
+/// brackets. Any scheme is accepted; callers apply transport policy. Credential
+/// audience policy instead matches the exact origin (scheme + host + port) from
+/// [`normalized_origin`]; the two values are deliberately different and must not
+/// be interchanged.
 pub fn host_of(value: &str) -> Option<String> {
     let value = value.trim();
     if value.is_empty() {
@@ -390,7 +396,7 @@ enum AudienceRefusalKind {
 #[derive(Debug)]
 pub struct AudienceRefused {
     pub entry: String,
-    pub host: String,
+    pub origin: String,
     kind: AudienceRefusalKind,
 }
 
@@ -400,12 +406,12 @@ impl std::fmt::Display for AudienceRefused {
             AudienceRefusalKind::Unapproved => write!(
                 f,
                 "refused: \"{}\" is not approved for {} - add [credential.{}] audience = [\"{}\"] to your user law",
-                self.entry, self.host, self.entry, self.host
+                self.entry, self.origin, self.entry, self.origin
             ),
             AudienceRefusalKind::InsecureTransport => write!(
                 f,
                 "refused: \"{}\" cannot be sent to {} - use https, or plain http only for literal loopback (127.0.0.0/8, [::1], or localhost)",
-                self.entry, self.host
+                self.entry, self.origin
             ),
         }
     }
@@ -426,14 +432,14 @@ pub fn get_scoped<V: Vault>(
         Err(OriginRefusal::Unparseable) => {
             return Err(anyhow::Error::new(AudienceRefused {
                 entry: entry.to_string(),
-                host: "<unparseable destination>".to_string(),
+                origin: "<unparseable destination>".to_string(),
                 kind: AudienceRefusalKind::Unapproved,
             }))
         }
         Err(OriginRefusal::Insecure(origin)) => {
             return Err(anyhow::Error::new(AudienceRefused {
                 entry: entry.to_string(),
-                host: origin.to_string(),
+                origin: origin.to_string(),
                 kind: AudienceRefusalKind::InsecureTransport,
             }))
         }
@@ -441,7 +447,7 @@ pub fn get_scoped<V: Vault>(
     if !audience_allows(requested_destination, approved) {
         return Err(anyhow::Error::new(AudienceRefused {
             entry: entry.to_string(),
-            host: origin.to_string(),
+            origin: origin.to_string(),
             kind: AudienceRefusalKind::Unapproved,
         }));
     }

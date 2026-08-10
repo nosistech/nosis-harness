@@ -220,7 +220,7 @@ fn audience_matching_requires_exact_scheme_and_effective_port() {
         &approved
     ));
     assert_eq!(
-        normalized_host("https://API.DEEPSEEK.COM/anthropic").as_deref(),
+        normalized_origin("https://API.DEEPSEEK.COM/anthropic").as_deref(),
         Some("https://api.deepseek.com:443")
     );
 }
