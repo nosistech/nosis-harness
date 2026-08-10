@@ -952,6 +952,95 @@ fn default_tool_context_still_scrubs_shapes_only() {
 }
 
 #[test]
+fn read_refuses_file_with_nul_prefix_and_names_path() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("binary.bin"), b"text\0payload").unwrap();
+
+    let error = ReadFile
+        .execute(json!({"path": "binary.bin"}), &ctx_with(dir.path(), true))
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!(
+        error,
+        "file looks binary: binary.bin - choose a text file or use a binary-aware tool"
+    );
+}
+
+#[test]
+fn read_preserves_valid_utf8_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let expected = "plain text\ncaf\u{e9}\n\u{4f60}\u{597d}";
+    std::fs::write(dir.path().join("valid.txt"), expected).unwrap();
+
+    let result = ReadFile
+        .execute(json!({"path": "valid.txt"}), &ctx_with(dir.path(), true))
+        .unwrap();
+
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn read_reports_lossy_utf8_decoding() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("latin-1.txt"),
+        vec![b'c', b'a', b'f', 0xff, b'e'],
+    )
+    .unwrap();
+
+    let result = ReadFile
+        .execute(json!({"path": "latin-1.txt"}), &ctx_with(dir.path(), true))
+        .unwrap();
+
+    assert_eq!(
+        result,
+        "caf\u{fffd}e\n\u{2026}[some bytes were not valid UTF-8 and were replaced]"
+    );
+}
+
+#[test]
+fn truncated_valid_utf8_does_not_report_invalid_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut bytes = vec![b'x'; MAX_TOOL_READ_BYTES - 1];
+    bytes.extend_from_slice("\u{e9}".as_bytes());
+    bytes.push(b'z');
+    assert!(std::str::from_utf8(&bytes).is_ok());
+    std::fs::write(dir.path().join("large-utf8.txt"), bytes).unwrap();
+
+    let result = ReadFile
+        .execute(
+            json!({"path": "large-utf8.txt"}),
+            &ctx_with(dir.path(), true),
+        )
+        .unwrap();
+
+    assert!(
+        result.contains("input truncated at 2097152 bytes"),
+        "got: {result}"
+    );
+    assert!(!result.contains("some bytes were not valid UTF-8"));
+    assert!(!result.contains('\u{fffd}'));
+}
+
+#[test]
+fn valid_replacement_character_does_not_report_invalid_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let expected = "before \u{fffd} after";
+    std::fs::write(dir.path().join("replacement.txt"), expected).unwrap();
+
+    let result = ReadFile
+        .execute(
+            json!({"path": "replacement.txt"}),
+            &ctx_with(dir.path(), true),
+        )
+        .unwrap();
+
+    assert_eq!(result, expected);
+    assert!(!result.contains("some bytes were not valid UTF-8"));
+}
+
+#[test]
 fn oversized_read_is_bounded_before_envelope_elision() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(

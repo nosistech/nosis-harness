@@ -24,6 +24,10 @@ commit passes local and remote gates.
 
 ### Fixed
 
+- `read_file` now refuses files whose first bytes contain a NUL and tells you to use a
+  binary-aware tool.
+- `read_file` now reports when it replaces invalid UTF-8 bytes instead of returning the
+  changed text silently.
 - The approval prompt for creating a file now names the path that will actually be written.
   A directory can be a link to another directory, in which case the requested path and the
   written path differ. The prompt, the refusal line and the success line now all name the

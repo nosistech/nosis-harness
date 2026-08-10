@@ -171,6 +171,8 @@ const MAX_IMAGE_BYTES: usize = 3_670_016;
 const MAX_TOOL_RESULT_CHARS: usize = 32_000;
 /// Maximum bytes retained from any one file or child-process stream before elision.
 const MAX_TOOL_READ_BYTES: usize = 2 * 1024 * 1024;
+/// Bytes checked at the start of a file before treating it as text.
+const BINARY_SNIFF_BYTES: u64 = 8 * 1024;
 const TOOL_BUFFER_BYTES: usize = 8 * 1024;
 const EXEC_TIMEOUT: Duration = Duration::from_secs(300);
 // A surviving descendant can hold a captured pipe open forever.
@@ -519,15 +521,37 @@ impl Tool for ReadFile {
         if !resolved.is_file() {
             bail!("file not found: {path} - check the path against the working directory");
         }
-        let file =
+        let mut file =
             std::fs::File::open(&resolved).with_context(|| format!("could not read {path}"))?;
         let mut bytes = Vec::with_capacity(TOOL_BUFFER_BYTES);
-        file.take((MAX_TOOL_READ_BYTES + 1) as u64)
+        (&mut file)
+            .take(BINARY_SNIFF_BYTES)
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("could not read {path}"))?;
+        if bytes.contains(&0) {
+            bail!("file looks binary: {path} - choose a text file or use a binary-aware tool");
+        }
+        file.take((MAX_TOOL_READ_BYTES + 1 - bytes.len()) as u64)
             .read_to_end(&mut bytes)
             .with_context(|| format!("could not read {path}"))?;
         let truncated = bytes.len() > MAX_TOOL_READ_BYTES;
         bytes.truncate(MAX_TOOL_READ_BYTES);
-        let mut content = String::from_utf8_lossy(&bytes).into_owned();
+        let (mut content, replaced_invalid_utf8) = match String::from_utf8(bytes) {
+            Ok(content) => (content, false),
+            Err(error) => {
+                let utf8_error = error.utf8_error();
+                let mut bytes = error.into_bytes();
+                if truncated && utf8_error.error_len().is_none() {
+                    bytes.truncate(utf8_error.valid_up_to());
+                    (String::from_utf8_lossy(&bytes).into_owned(), false)
+                } else {
+                    (String::from_utf8_lossy(&bytes).into_owned(), true)
+                }
+            }
+        };
+        if replaced_invalid_utf8 {
+            content.push_str("\n…[some bytes were not valid UTF-8 and were replaced]");
+        }
         if truncated {
             content.push_str(&format!(
                 "\n…[input truncated at {MAX_TOOL_READ_BYTES} bytes]"

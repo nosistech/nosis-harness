@@ -2,7 +2,7 @@
 
 use crate::{
     relative_path, resolve_in_workdir, str_arg, Access, Guard, Tool, ToolCtx, ToolResultEnvelope,
-    ToolSpec, MAX_TOOL_READ_BYTES,
+    ToolSpec, BINARY_SNIFF_BYTES, MAX_TOOL_READ_BYTES,
 };
 use anyhow::{bail, Context as _};
 use nh_law::glob_matches;
@@ -12,7 +12,6 @@ use std::io::Read as _;
 use std::path::Path;
 
 const DEFAULT_PRUNED_DIRS: [&str; 5] = ["target", "node_modules", ".venv", "dist", "build"];
-const BINARY_SNIFF_BYTES: u64 = 8 * 1024;
 const MAX_SEARCH_LINE_CHARS: usize = 300;
 const MAX_WALK_FILES: usize = 20_000;
 const MAX_SEARCH_MATCHES: usize = 500;

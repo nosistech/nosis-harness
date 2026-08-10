@@ -1,3 +1,6 @@
+//! Deterministic edit matching with exact and normalized tiers that report ambiguity instead of
+//! guessing.
+
 use std::ops::Range;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
