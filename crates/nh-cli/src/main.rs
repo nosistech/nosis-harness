@@ -6,6 +6,7 @@
 use clap::{Parser, Subcommand};
 
 mod cmd_chat;
+mod cmd_doctor;
 mod cmd_fleet;
 mod cmd_init;
 mod cmd_key;
@@ -78,6 +79,8 @@ enum Cmd {
         #[arg(long, default_value = "balanced")]
         profile: String,
     },
+    /// Check the install and print what is wrong and how to fix it
+    Doctor,
     /// Resume an interrupted chat or TUI session
     Resume {
         /// Session id; omit it to list interrupted sessions
@@ -195,6 +198,7 @@ fn main() -> anyhow::Result<()> {
             image,
         } => cmd_run::run(&task, &model, max_turns, think, autonomy, &profile, &image),
         Cmd::Chat { model, profile } => cmd_chat::run(&model, &profile),
+        Cmd::Doctor => cmd_doctor::run(),
         Cmd::Resume { session_id } => cmd_resume::run(session_id.as_deref()),
         Cmd::Why { task, model } => cmd_why::run(task.as_deref(), model.as_deref()),
         Cmd::Profile { model } => cmd_profile::run(&model),

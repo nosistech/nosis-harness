@@ -7,6 +7,12 @@ fn parses_init() {
 }
 
 #[test]
+fn parses_doctor() {
+    let cli = Cli::try_parse_from(["nh", "doctor"]).unwrap();
+    assert!(matches!(cli.cmd, Cmd::Doctor));
+}
+
+#[test]
 fn parses_key_add_with_entry() {
     let cli = Cli::try_parse_from(["nh", "key", "add", "deepseek"]).unwrap();
     match cli.cmd {

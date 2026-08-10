@@ -8,6 +8,16 @@ fn ctx_with(workdir: &Path, approve: bool) -> ToolCtx {
     ToolCtx::new(workdir.to_path_buf(), Box::new(move |_| approve))
 }
 
+#[cfg(unix)]
+fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link)
+}
+
 fn png_bytes() -> Vec<u8> {
     let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
     bytes.extend_from_slice(b"fixture");
@@ -384,6 +394,74 @@ fn write_file_lowercase_ask_beats_typed_allow_and_denial_is_ok_shaped() {
     assert_eq!(result, "user denied: create Notes/New.txt");
     assert_eq!(*actions.lock().unwrap(), ["create Notes/New.txt"]);
     assert!(!dir.path().join("Notes/New.txt").exists());
+}
+
+#[test]
+fn write_file_approval_names_real_destination_and_requested_directory_alias() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    if symlink_dir(&real, &dir.path().join("alias")).is_err() {
+        return;
+    }
+    let actions = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let actions_seen = Arc::clone(&actions);
+    let ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(move |action| {
+            actions_seen.lock().unwrap().push(action.to_owned());
+            true
+        }),
+    )
+    .with_guard(Box::new(|access| match access {
+        Access::Write(_) => Guard::Ask,
+        _ => Guard::Allow,
+    }));
+
+    let result = WriteFile
+        .execute(json!({"path": "alias/new.txt", "content": "hello"}), &ctx)
+        .unwrap();
+
+    assert_eq!(
+        *actions.lock().unwrap(),
+        ["create real/new.txt (requested as alias/new.txt)"]
+    );
+    assert_eq!(result, "created real/new.txt (5 bytes)");
+    assert_eq!(
+        std::fs::read_to_string(real.join("new.txt")).unwrap(),
+        "hello"
+    );
+}
+
+#[test]
+fn write_file_approval_omits_requested_clause_for_real_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("dir")).unwrap();
+    let actions = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let actions_seen = Arc::clone(&actions);
+    let ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(move |action| {
+            actions_seen.lock().unwrap().push(action.to_owned());
+            true
+        }),
+    )
+    .with_guard(Box::new(|access| match access {
+        Access::Write(_) => Guard::Ask,
+        _ => Guard::Allow,
+    }));
+
+    let result = WriteFile
+        .execute(json!({"path": "dir/new.txt", "content": "hello"}), &ctx)
+        .unwrap();
+
+    assert_eq!(*actions.lock().unwrap(), ["create dir/new.txt"]);
+    assert!(!actions.lock().unwrap()[0].contains("requested as"));
+    assert_eq!(result, "created dir/new.txt (5 bytes)");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("dir/new.txt")).unwrap(),
+        "hello"
+    );
 }
 
 #[test]

@@ -609,8 +609,13 @@ impl Tool for WriteFile {
             )
             .render());
         }
+        let actual_relative = actual_relative.as_deref().unwrap_or(&relative);
         if matches!(verdict, Guard::Ask) {
-            let action = format!("create {relative}");
+            let action = if actual_relative == relative {
+                format!("create {actual_relative}")
+            } else {
+                format!("create {actual_relative} (requested as {relative})")
+            };
             if !(ctx.approve)(&action) {
                 return Ok(ToolResultEnvelope::new(
                     format!("user denied: {action}"),
@@ -703,7 +708,7 @@ impl Tool for WriteFile {
             return Err(error).with_context(|| format!("could not create {path}"));
         }
         Ok(ToolResultEnvelope::new(
-            format!("created {path} ({} bytes)", content.len()),
+            format!("created {actual_relative} ({} bytes)", content.len()),
             &ctx.scrubber,
         )
         .render())

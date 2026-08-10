@@ -9,7 +9,26 @@ commit passes local and remote gates.
 
 ## [Unreleased]
 
-No changes yet.
+### Added
+
+- `nh doctor` reports what is set up and what is not, and it needs no API key. It names the
+  running binary, whether `nh` is on `PATH`, whether the `nh` on `PATH` is a different copy,
+  where the route catalog was read from, how many routes and providers are available, which
+  key entries are stored, whether output is going to a terminal, and where configuration
+  lives. On Windows it also reports the console code page. It then prints a short list of
+  only the things that are wrong, and each line states the fix. It exits 0 whenever it can
+  produce a report, because it is a report and not a test.
+- `nh doctor` never prints a key value. It reports only whether an entry is stored. If the
+  key store itself cannot be reached, it says so, because that is a different problem with a
+  different fix.
+
+### Fixed
+
+- The approval prompt for creating a file now names the path that will actually be written.
+  A directory can be a link to another directory, in which case the requested path and the
+  written path differ. The prompt, the refusal line and the success line now all name the
+  written path, and they add the requested path when the two are not the same. Editing a
+  file already behaved this way. Creating a file now matches it.
 
 ## [0.2.0] - 2026-08-09
 
