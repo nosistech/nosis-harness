@@ -113,6 +113,8 @@ fn load_with_home_mode(
 ) -> anyhow::Result<Law> {
     let mut warnings = Vec::new();
 
+    // SECURITY INVARIANT: malformed bundled policy is never treated as valid. Warning mode
+    // omits it and records a warning; checked mode rejects the entire load.
     let bundled = match parse_law(BUNDLED_LAW) {
         Ok(law) => Some(law),
         Err(error) => match parse_failure {
@@ -225,6 +227,8 @@ fn read_optional_law(
     }
 }
 
+/// SECURITY INVARIANT: law loaders admit optional external source text only through
+/// `read_guarded`; refused sources are omitted and recorded as secret-free warnings.
 pub(super) fn read_guarded_text(
     path: &Path,
     contain_under: Option<&Path>,
@@ -266,6 +270,9 @@ pub(super) fn read_guarded_with_before_open(
     max_bytes: usize,
     before_open: impl FnOnce(),
 ) -> GuardedRead {
+    // SECURITY INVARIANT: the pre-open check rejects a symlink final component and every
+    // non-regular file; `open_no_follow` below prevents a substituted final symlink from being
+    // followed.
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return GuardedRead::Absent,
@@ -276,6 +283,8 @@ pub(super) fn read_guarded_with_before_open(
     }
 
     if let Some(root) = contain_under {
+        // SECURITY INVARIANT: this pre-open containment check canonicalizes both operands
+        // and rejects paths that already resolve outside the requested root.
         let canonical_path = match fs::canonicalize(path) {
             Ok(path) => path,
             Err(_) => return GuardedRead::Refused("cannot canonicalize".to_owned()),
@@ -322,6 +331,8 @@ pub(super) fn read_guarded_with_before_open(
     }
 }
 
+/// SECURITY INVARIANT: the target-specific open flag refuses to follow a symlink in the final
+/// path component, including one substituted after metadata and containment checks.
 fn open_no_follow(path: &Path) -> std::io::Result<fs::File> {
     let mut options = fs::OpenOptions::new();
     options.read(true).custom_flags(NO_FOLLOW_OPEN_FLAG);
@@ -375,6 +386,9 @@ pub(super) fn repo_tries_to_weaken(law: &LawFile) -> bool {
         })
 }
 
+/// SECURITY INVARIANT: `load_with_home_mode` derives autonomy without repository input, and this
+/// compiler admits repository law only to ask and block lists. A cloned repository can add
+/// restrictions but cannot remove them or grant itself auto-approval or a credential audience.
 pub(super) fn compile_policy(
     autonomy: Autonomy,
     bundled: Option<&LawFile>,

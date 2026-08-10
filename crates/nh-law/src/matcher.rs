@@ -7,7 +7,8 @@ pub(super) fn first_match<'a>(patterns: &'a [String], value: &str) -> Option<&'a
         .map(String::as_str)
 }
 
-/// Keep the exec first-token/whole-command rule in this one function.
+/// SECURITY INVARIANT: each exec block pattern is checked against the whole command and each
+/// recognized fragment's first and unwrapped command tokens in this one function.
 pub(super) fn exec_pattern_matches(pattern: &str, command: &str) -> bool {
     if glob_matches(pattern, command) {
         return true;
@@ -31,6 +32,9 @@ pub(super) fn exec_command_fragment(fragment: &str) -> Option<&str> {
     (!fragment.is_empty()).then_some(fragment)
 }
 
+/// SECURITY INVARIANT: `exec_pattern_matches` relies on this walk to expose commands behind
+/// environment assignments and recognized `env`, `command`, `nohup`, and shell launchers.
+/// Removing a branch can make a wrapped blocked command miss the guard.
 pub(super) fn command_token<'a>(tokens: &'a [&'a str], depth: usize) -> Option<&'a str> {
     const MAX_WRAPPER_DEPTH: usize = 4;
 

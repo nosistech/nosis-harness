@@ -1,4 +1,6 @@
 //! Compiled immutable session policy and public policy views.
+//! SECURITY INVARIANT: policy verdicts check matching block rules before every weaker outcome;
+//! exec never returns Allow, and send hosts are ASCII-lowercased and stripped of one trailing dot.
 
 use crate::matcher::{exec_pattern_matches, first_match};
 use std::collections::BTreeMap;

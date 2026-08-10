@@ -124,6 +124,8 @@ pub fn serve(config: ServeConfig) -> anyhow::Result<()> {
 }
 
 fn bind(mut config: ServeConfig) -> anyhow::Result<(Server, SocketAddr, Arc<Runtime>)> {
+    // SECURITY INVARIANT: loopback-only is a permanent boundary, not a default; only the exact
+    // IPv4 loopback address may reach the bind operation.
     if config.addr.ip() != IpAddr::V4(Ipv4Addr::LOCALHOST) {
         bail!("nh-mcp only binds 127.0.0.1 - use 127.0.0.1:PORT");
     }
@@ -137,6 +139,8 @@ fn bind(mut config: ServeConfig) -> anyhow::Result<(Server, SocketAddr, Arc<Runt
     config.addr = addr;
     let (token, token_generated) = match config.token.take() {
         Some(caller) => {
+            // SECURITY INVARIANT: caller-supplied bearer tokens shorter than the byte floor are
+            // rejected before runtime construction and request handling.
             if caller.len() < MIN_CALLER_TOKEN_BYTES {
                 bail!("nh-mcp caller token must be at least {MIN_CALLER_TOKEN_BYTES} bytes");
             }
@@ -144,6 +148,9 @@ fn bind(mut config: ServeConfig) -> anyhow::Result<(Server, SocketAddr, Arc<Runt
         }
         None => (mint_token()?, true),
     };
+    // SECURITY INVARIANT: this registry puts the bearer token in Runtime's scrubber before
+    // serving. Response and warning sites enforce redaction; banner_lines intentionally exposes
+    // generated tokens but never caller-supplied tokens.
     let mut token_registry = SecretRegistry::new();
     token_registry.insert(token.clone());
     let scrubber = token_registry.scrubber();
@@ -157,7 +164,8 @@ fn bind(mut config: ServeConfig) -> anyhow::Result<(Server, SocketAddr, Arc<Runt
     Ok((server, addr, Arc::new(runtime)))
 }
 
-/// Loopback preview token from the operating system CSPRNG; not a long-term credential.
+/// SECURITY INVARIANT: generated preview tokens use 32 bytes from the operating system CSPRNG;
+/// they are not long-term credentials.
 fn mint_token() -> anyhow::Result<SecretValue> {
     let mut bytes = [0u8; 32];
     getrandom::getrandom(&mut bytes).map_err(|error| {
@@ -334,6 +342,8 @@ fn authorized(request: &Request, runtime: &Runtime) -> bool {
         .filter(|header| header.field.equiv("Authorization"))
         .any(|header| {
             let provided = header.value.as_str();
+            // SECURITY INVARIANT: equal-length bearer tokens use constant-time comparison; plain
+            // equality could leak matching prefixes through timing differences.
             provided.len() == expected.len()
                 && bool::from(provided.as_bytes().ct_eq(expected.as_bytes()))
         })
