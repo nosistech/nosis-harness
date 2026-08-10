@@ -3934,6 +3934,28 @@ fn savings_line_renders_counterfactuals_and_keeps_measured_zero_exact() {
 }
 
 #[test]
+fn tui_counterfactuals_stay_separate_from_the_inline_meter_shape() {
+    let app = meter_app();
+    let usage = Usage {
+        prompt_tokens: 100_000,
+        completion_tokens: 50_000,
+        cached_tokens: Some(90_000),
+        evidence: UsageEvidence::Measured,
+    };
+
+    let lines = savings_lines(&app.resolver, &app.route, &usage, fixed_at());
+    let counterfactuals = lines[1]
+        .strip_prefix("naive: ")
+        .expect("the TUI keeps counterfactuals on a naive line");
+    let inline_shape = format!("{}   ({counterfactuals})", lines[0]);
+
+    assert_ne!(lines, vec![inline_shape.clone()]);
+    assert!(!lines[0].contains("   ("));
+    assert!(lines[1].starts_with("naive: peak "));
+    assert!(inline_shape.contains("   (peak "));
+}
+
+#[test]
 fn no_peak_route_drops_hud_and_naive_segments_cleanly_at_narrow_width() {
     let app = picker_app();
     let usage = Usage {

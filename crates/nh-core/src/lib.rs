@@ -1,6 +1,7 @@
 //! nh-core - agent turn loop, wire client, receipts.
 //! Every turn writes a scrubbed JSONL receipt to .nosis/receipts.jsonl (append-only).
 
+pub mod cost;
 pub mod credential;
 mod jsonl;
 pub mod runtime_path;

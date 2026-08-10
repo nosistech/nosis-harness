@@ -5,13 +5,13 @@ use crate::state::{AgentEvent, App, Status, TimelineEntry, TranscriptKind};
 use crate::{APPROVAL_LEGEND, BUDGET_REASON};
 use chrono::{DateTime, TimeZone, Utc};
 use nh_core::agent::CompactionEvent;
+use nh_core::cost::{
+    compaction_cost, turn_cost, CompactionCostVerdict, TurnCostVerdict, PRICE_VERIFY_LIVE,
+};
 use nh_core::receipt::{CompactionStats, FailureClass, Outcome, ReceiptKind};
 use nh_core::terminal_capability::TerminalCapability;
 use nh_core::wire::{cache_hit_pct, Usage, UsageEvidence};
-use nh_routes::{
-    cache_split_cost_upper_bound, cost_of, money, money_with_gloss, saved_pct, PriceConfidence,
-    ResolvedRoute, RouteClass, RouteResolver, LOCAL_METER_COPY,
-};
+use nh_routes::{ResolvedRoute, RouteClass, RouteResolver, LOCAL_METER_COPY};
 
 pub(super) fn outcome_name(outcome: Outcome) -> &'static str {
     match outcome {
@@ -170,94 +170,29 @@ fn compaction_effect(
     route: Option<&ResolvedRoute>,
     stats: CompactionStats,
 ) -> CompactionEffect {
-    let unpriced = |reason: &str| CompactionEffect {
-        suffix: reason.to_owned(),
-        hud: format!(
+    let occurred_at = stats
+        .occurred_at_unix_seconds
+        .and_then(|seconds| Utc.timestamp_opt(seconds, 0).single());
+    let cost = compaction_cost(
+        resolver,
+        route,
+        stats.events,
+        stats.estimated_tokens_elided,
+        stats.preceding_cached_tokens,
+        occurred_at,
+    );
+    let suffix = cost.suffix();
+    let hud = match cost {
+        CompactionCostVerdict::NotStated(_) => format!(
             "compact ~{}t · net not stated",
             stats.estimated_tokens_elided
         ),
-    };
-
-    if stats.events != 1 {
-        return unpriced(" · aggregate money not stated - compactions affect separate next calls");
-    }
-    let Some(route) = route else {
-        return unpriced(" · next-call money not stated - no price data");
-    };
-    if route.class() == RouteClass::Local {
-        return unpriced(&format!(
-            " · next-call money not stated - {LOCAL_METER_COPY}"
-        ));
-    }
-    let Some(cached) = stats.preceding_cached_tokens else {
-        return unpriced(
-            " · next-call money not stated - exact preceding-call cached tokens unavailable",
-        );
-    };
-    let Some(retained) = cached.checked_sub(stats.estimated_tokens_elided) else {
-        return unpriced(
-            " · next-call money not stated - measured cache does not cover the elided token estimate",
-        );
-    };
-    let Some(at) = stats
-        .occurred_at_unix_seconds
-        .and_then(|seconds| Utc.timestamp_opt(seconds, 0).single())
-    else {
-        return unpriced(" · next-call money not stated - exact compaction time unavailable");
-    };
-    let Some(quote) = route.price_at(at) else {
-        return unpriced(" · next-call money not stated - no price data");
-    };
-    let Some(saving) = cost_of(
-        &quote,
-        stats.estimated_tokens_elided,
-        stats.estimated_tokens_elided,
-        0,
-    ) else {
-        return unpriced(" · next-call money not stated - invalid compaction facts");
-    };
-    let (Some(cache_miss), Some(cache_hit)) = (
-        cost_of(&quote, retained, 0, 0),
-        cost_of(&quote, retained, retained, 0),
-    ) else {
-        return unpriced(" · next-call money not stated - invalid compaction facts");
-    };
-    if cache_miss < cache_hit {
-        return unpriced(
-            " · next-call money not stated - cache-miss price is below cache-hit price",
-        );
-    }
-
-    let surcharge = cache_miss - cache_hit;
-    let net = saving - surcharge;
-    let is_break_even = net.abs() <= f64::EPSILON * saving.abs().max(surcharge.abs()).max(1.0);
-    let (net_label, net_amount) = if is_break_even {
-        ("net break-even", 0.0)
-    } else if net < 0.0 {
-        ("net loss", -net)
-    } else {
-        ("net saving", net)
-    };
-    let mut net_display = money_with_gloss(net_amount, quote.currency, resolver.fx(), at);
-    let uncertain = quote.confidence == PriceConfidence::VerifyLive;
-    if uncertain {
-        net_display.push('*');
-    }
-    let mut suffix = format!(
-        " · next-call estimate: cache-hit saving ~{} · cache-reset surcharge ~{} · {net_label} ~{net_display}",
-        money(saving, quote.currency),
-        money(surcharge, quote.currency),
-    );
-    if uncertain {
-        suffix.push_str(" · *price verify_live");
-    }
-    CompactionEffect {
-        suffix,
-        hud: format!(
-            "compact ~{}t · next-call {net_label} ~{net_display}",
-            stats.estimated_tokens_elided
+        CompactionCostVerdict::Priced(cost) => format!(
+            "compact ~{}t · next-call {} {}",
+            stats.estimated_tokens_elided, cost.net_label, cost.net_display
         ),
-    }
+    };
+    CompactionEffect { suffix, hud }
 }
 
 fn record_compaction_event(stats: &mut CompactionStats, event: &CompactionEvent) {
@@ -475,136 +410,48 @@ fn record_route_turn_cost(
     at: Option<DateTime<Utc>>,
     show_details: bool,
 ) {
-    if route.class() == RouteClass::Local {
-        if show_details {
-            app.push_line(LOCAL_METER_COPY, TranscriptKind::Progress);
-        }
-        return;
+    let cost = turn_cost(&app.resolver, route, usage, at);
+    match &cost {
+        TurnCostVerdict::Local => {}
+        TurnCostVerdict::NotStated(_) => app.mark_session_cost_incomplete(),
+        TurnCostVerdict::Priced(cost) => app.add_session_cost(
+            cost.currency,
+            cost.amount,
+            cost.uncertain,
+            !cost.cache_split_reported,
+        ),
     }
-    let unavailable = |app: &mut App, reason: &str| {
-        app.mark_session_cost_incomplete();
-        if show_details {
-            app.push_line(reason, TranscriptKind::Progress);
-        }
-    };
-    let Some(usage) = usage else {
-        unavailable(app, "cost unknown - usage unreported");
-        return;
-    };
-    match usage.evidence {
-        UsageEvidence::Measured => {}
-        UsageEvidence::Partial => {
-            unavailable(app, "cost unknown - usage is a lower bound");
-            return;
-        }
-        UsageEvidence::Unknown => {
-            unavailable(app, "cost unknown - usage unknown");
-            return;
-        }
-    }
-    let Some(at) = at else {
-        unavailable(app, "cost unknown - receipt timestamp is invalid");
-        return;
-    };
-    let Some(quote) = route.price_at(at) else {
-        unavailable(app, "cost unpriced - no price data");
-        return;
-    };
-    let actual = usage.cached_tokens.map_or_else(
-        || cache_split_cost_upper_bound(&quote, usage.prompt_tokens, usage.completion_tokens),
-        |cached| cost_of(&quote, usage.prompt_tokens, cached, usage.completion_tokens),
-    );
-    let Some(actual) = actual else {
-        unavailable(app, "cost unpriced - invalid usage; meter incomplete");
-        return;
-    };
-    let uncertain = quote.confidence == PriceConfidence::VerifyLive;
-    app.add_session_cost(
-        quote.currency,
-        actual,
-        uncertain,
-        usage.cached_tokens.is_none(),
-    );
     if show_details {
-        for line in savings_lines(&app.resolver, route, usage, at) {
+        for line in savings_lines_for(&cost) {
             app.push_line(&line, TranscriptKind::Progress);
         }
     }
 }
 
+#[cfg(test)]
 pub(super) fn savings_lines(
     resolver: &RouteResolver,
     route: &ResolvedRoute,
     usage: &Usage,
     at: DateTime<Utc>,
 ) -> Vec<String> {
-    if route.class() == RouteClass::Local {
-        return vec![LOCAL_METER_COPY.to_owned()];
-    }
-    match usage.evidence {
-        UsageEvidence::Measured => {}
-        UsageEvidence::Partial => return vec!["cost unknown - usage is a lower bound".into()],
-        UsageEvidence::Unknown => return vec!["cost unknown - usage unknown".into()],
-    }
-    let Some(quote) = route.price_at(at) else {
-        return vec!["cost unpriced - no price data".into()];
-    };
-    let actual = usage.cached_tokens.map_or_else(
-        || cache_split_cost_upper_bound(&quote, usage.prompt_tokens, usage.completion_tokens),
-        |cached| cost_of(&quote, usage.prompt_tokens, cached, usage.completion_tokens),
-    );
-    let Some(actual) = actual else {
-        return vec!["cost unpriced - invalid usage; meter incomplete".into()];
-    };
-    let mut paid = money_with_gloss(actual, quote.currency, resolver.fx(), at);
-    let uncertain = quote.confidence == PriceConfidence::VerifyLive;
-    if uncertain {
-        paid.push('*');
-    }
-    if usage.cached_tokens.is_none() {
-        let mut lines = vec![format!(
-            "cost at most {paid} - cache split not reported by provider"
-        )];
-        if uncertain {
-            lines.push("*price verify_live".into());
+    let cost = turn_cost(resolver, route, Some(usage), Some(at));
+    savings_lines_for(&cost)
+}
+
+fn savings_lines_for(cost: &TurnCostVerdict) -> Vec<String> {
+    match cost {
+        TurnCostVerdict::Local => vec![LOCAL_METER_COPY.to_owned()],
+        TurnCostVerdict::NotStated(reason) => vec![(*reason).to_owned()],
+        TurnCostVerdict::Priced(cost) => {
+            let mut lines = vec![cost.headline().to_owned()];
+            if !cost.counterfactuals().is_empty() {
+                lines.push(format!("naive: {}", cost.counterfactuals().join(" · ")));
+            }
+            if cost.uncertain {
+                lines.push(PRICE_VERIFY_LIVE.to_owned());
+            }
+            lines
         }
-        return lines;
     }
-    let cached = usage
-        .cached_tokens
-        .expect("cache evidence checked before exact-cost comparison");
-    let mut headline = format!("cost {paid}");
-    let naive = resolver.naive_cost(
-        route,
-        usage.prompt_tokens,
-        cached,
-        usage.completion_tokens,
-        at,
-    );
-    if let Some(percent) = naive
-        .as_ref()
-        .and_then(|costs| saved_pct(actual, costs.no_cache))
-    {
-        headline.push_str(&format!(" - saved {percent}% vs no-cache"));
-    }
-    let mut lines = vec![headline];
-    if let Some(costs) = naive {
-        let mut counterfactuals = Vec::with_capacity(3);
-        if let Some(peak) = costs.peak {
-            counterfactuals.push(format!("peak {}", money(peak, costs.currency)));
-        }
-        counterfactuals.push(format!(
-            "no-cache {}",
-            money(costs.no_cache, costs.currency)
-        ));
-        counterfactuals.push(format!(
-            "top-tier {}",
-            money(costs.top_tier, costs.currency)
-        ));
-        lines.push(format!("naive: {}", counterfactuals.join(" · ")));
-    }
-    if uncertain {
-        lines.push("*price verify_live".into());
-    }
-    lines
 }
