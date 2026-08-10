@@ -8,6 +8,18 @@ fn ctx_with(workdir: &Path, approve: bool) -> ToolCtx {
     ToolCtx::new(workdir.to_path_buf(), Box::new(move |_| approve))
 }
 
+#[test]
+fn policy_guard_keeps_bundled_read_blocks() {
+    let repo = tempfile::tempdir().unwrap();
+    let law = nh_law::load(repo.path(), &nh_law::LoadOptions { cli_autonomy: None });
+    let guard = policy_guard(law.policy);
+
+    assert!(matches!(
+        guard(&Access::Read(".git/config")),
+        Guard::Block(_)
+    ));
+}
+
 #[cfg(unix)]
 fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, link)

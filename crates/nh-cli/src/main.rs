@@ -18,14 +18,6 @@ mod cmd_tui;
 mod cmd_why;
 mod usage_tracker;
 
-fn guard_from(verdict: nh_law::Verdict) -> nh_tools::Guard {
-    match verdict {
-        nh_law::Verdict::Allow => nh_tools::Guard::Allow,
-        nh_law::Verdict::Ask => nh_tools::Guard::Ask,
-        nh_law::Verdict::Block(reason) => nh_tools::Guard::Block(reason),
-    }
-}
-
 #[derive(Parser)]
 #[command(
     name = "nh",

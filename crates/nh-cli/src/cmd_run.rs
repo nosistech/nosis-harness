@@ -35,12 +35,11 @@ use nh_core::wire::UsageEvidence;
 use nh_core::wire::{ensure_image_capable, resolve_effort, ContentPart, ThinkingEffort, Usage};
 use nh_law::{Autonomy, LoadOptions};
 use nh_routes::{RouteClass, RouteResolver, ThinkingDialect, ThinkingPosture, Wire};
-use nh_tools::{builtin_tools, load_image, Access, ToolCtx, MAX_IMAGES_PER_MESSAGE};
+use nh_tools::{builtin_tools, load_image, ToolCtx, MAX_IMAGES_PER_MESSAGE};
 #[cfg(test)]
 use nh_tools::{McpAuth, McpServerConfig, McpTrust};
 use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, SecretRegistry};
 
-use crate::guard_from;
 use crate::usage_tracker::LastRequestUsage;
 
 /// What callers print when a route resolves to a subscription delegate (M4 scope).
@@ -180,12 +179,7 @@ pub fn run(task: &str, model: &str, options: RunOptions<'_>) -> anyhow::Result<(
         Box::new(move |action| approve_on_stdin(&approval_line(&approve_scrubber, action))),
     )
     .with_scrubber(session_scrubber.clone())
-    .with_guard(Box::new(move |access| match access {
-        Access::Read(path) => guard_from(policy.read_verdict(path)),
-        Access::Write(path) => guard_from(policy.write_verdict(path)),
-        Access::Exec(command) => guard_from(policy.exec_verdict(command)),
-        Access::Send(target) => guard_from(policy.send_verdict(target)),
-    }));
+    .with_guard(nh_tools::policy_guard(policy));
     let image_parts = images
         .iter()
         .map(|path| image_part(path, &ctx))

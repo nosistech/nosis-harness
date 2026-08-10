@@ -42,6 +42,23 @@ pub enum Guard {
 /// Consulted before any mutation.
 pub type GuardFn = Box<dyn Fn(&Access) -> Guard + Send + Sync>;
 
+/// Build the policy-backed guard every session installs.
+pub fn policy_guard(policy: nh_law::Policy) -> GuardFn {
+    Box::new(move |access| {
+        let verdict = match access {
+            Access::Read(path) => policy.read_verdict(path),
+            Access::Write(path) => policy.write_verdict(path),
+            Access::Exec(command) => policy.exec_verdict(command),
+            Access::Send(target) => policy.send_verdict(target),
+        };
+        match verdict {
+            nh_law::Verdict::Allow => Guard::Allow,
+            nh_law::Verdict::Ask => Guard::Ask,
+            nh_law::Verdict::Block(reason) => Guard::Block(reason),
+        }
+    })
+}
+
 /// OpenAI-function-shaped tool description, serialized into requests.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolSpec {

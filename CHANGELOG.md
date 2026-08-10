@@ -28,6 +28,11 @@ commit passes local and remote gates.
 
 ### Fixed
 
+- The warning shown when the bundled law cannot be parsed now states what actually happens.
+  It said that safe defaults were kept. The bundled law is omitted instead, so its block
+  lists and credential audiences stop applying, while your own user and command line
+  settings still do. The old wording was most reassuring at the moment it should have been
+  least reassuring.
 - Text that nosis did not write is no longer rewritten for ASCII terminals. A model answer,
   the task you typed, and the command in an approval prompt now keep the characters they
   were written with. Only nosis's own interface glyphs are replaced when the terminal cannot

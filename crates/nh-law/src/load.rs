@@ -119,7 +119,7 @@ fn load_with_home_mode(
         Ok(law) => Some(law),
         Err(error) => match parse_failure {
             ParseFailure::Warn => {
-                warnings.push("bundled law is malformed - safe defaults kept".to_owned());
+                warnings.push("bundled law is malformed - bundled rules omitted".to_owned());
                 None
             }
             ParseFailure::Reject => return Err(invalid_law_error("bundled_law.toml", error)),

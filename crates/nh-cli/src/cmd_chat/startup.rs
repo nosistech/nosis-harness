@@ -14,14 +14,13 @@ use nh_core::terminal_capability::TerminalCapability;
 use nh_core::wire::ChatClient;
 use nh_law::{Law, LoadOptions, Policy};
 use nh_routes::{EffectiveExecutionPolicy, Profiles, ResolvedRoute, RouteClass, RouteResolver};
-use nh_tools::{builtin_tools, Access, Tool, ToolCtx};
+use nh_tools::{builtin_tools, Tool, ToolCtx};
 use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, SecretRegistry};
 
 use super::{
     load_mcp, scrub_approval_line, scrub_line, ChatSession, ConnectFn, NotConnected, SharedScrubber,
 };
 use crate::cmd_run::{self, effort_for, DELEGATE_MSG};
-use crate::guard_from;
 use crate::usage_tracker::LastRequestUsage;
 
 struct Startup {
@@ -169,12 +168,7 @@ where
             }),
         )
         .with_scrubber(registry_scrubber.clone())
-        .with_guard(Box::new(move |access| match access {
-            Access::Read(path) => guard_from(policy.read_verdict(path)),
-            Access::Write(path) => guard_from(policy.write_verdict(path)),
-            Access::Exec(command) => guard_from(policy.exec_verdict(command)),
-            Access::Send(target) => guard_from(policy.send_verdict(target)),
-        })),
+        .with_guard(nh_tools::policy_guard(policy)),
         receipts: ReceiptWriter::project(root.clone(), registry_scrubber.clone()),
         model_id: route.model_id().to_owned(),
         max_turns: 20,

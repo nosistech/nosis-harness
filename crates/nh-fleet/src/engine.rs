@@ -13,7 +13,7 @@ use nh_core::receipt::{FailureClass, Outcome, Receipt, ReceiptWriter};
 use nh_core::wire::{ChatClient, ChatMessage, ThinkingEffort};
 use nh_law::Law;
 use nh_routes::RouteResolver;
-use nh_tools::{builtin_tools, Access, Guard, ToolCtx};
+use nh_tools::{builtin_tools, ToolCtx};
 use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, SecretRegistry};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions, TryLockError};
@@ -425,12 +425,7 @@ pub(super) fn run_one_task(
         }),
     )
     .with_scrubber(runtime.key_literals.scrubber())
-    .with_guard(Box::new(move |access| match access {
-        Access::Read(path) => verdict_to_guard(policy.read_verdict(path)),
-        Access::Write(path) => verdict_to_guard(policy.write_verdict(path)),
-        Access::Exec(command) => verdict_to_guard(policy.exec_verdict(command)),
-        Access::Send(target) => verdict_to_guard(policy.send_verdict(target)),
-    }));
+    .with_guard(nh_tools::policy_guard(policy));
     let progress_events = events.clone();
     let progress_task_id = job.task_id.clone();
     let progress_scrubber = runtime.key_literals.scrubber();
@@ -508,12 +503,4 @@ fn client_for_task(
     )
     .map(|(client, _)| client)
     .map_err(|error| error.to_string())
-}
-
-pub(super) fn verdict_to_guard(verdict: nh_law::Verdict) -> Guard {
-    match verdict {
-        nh_law::Verdict::Allow => Guard::Allow,
-        nh_law::Verdict::Ask => Guard::Ask,
-        nh_law::Verdict::Block(reason) => Guard::Block(reason),
-    }
 }

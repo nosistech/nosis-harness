@@ -17,9 +17,9 @@ use nh_core::session_ledger::{
 use nh_core::wire::{
     ChatClient, ChatMessage, ChatRequest, ChatResponse, ThinkingEffort, Usage, UsageEvidence,
 };
-use nh_law::{Law, Verdict};
+use nh_law::Law;
 use nh_routes::{Profiles, ResolvedRoute};
-use nh_tools::{builtin_tools, Access, Guard, Tool, ToolArgs, ToolCtx, ToolExecution, ToolSpec};
+use nh_tools::{builtin_tools, Tool, ToolArgs, ToolCtx, ToolExecution, ToolSpec};
 #[cfg(test)]
 use nh_vault::Scrubber;
 use nh_vault::{SecretRegistry, SecretValue};
@@ -423,12 +423,7 @@ impl WorkerSession {
         let ctx = ToolCtx::new(workdir, approve)
             .with_scrubber(key_literals.scrubber())
             .with_cancel(Arc::clone(&turn_cancel))
-            .with_guard(Box::new(move |access| match access {
-                Access::Read(path) => verdict_to_guard(policy.read_verdict(path)),
-                Access::Write(path) => verdict_to_guard(policy.write_verdict(path)),
-                Access::Exec(command) => verdict_to_guard(policy.exec_verdict(command)),
-                Access::Send(target) => verdict_to_guard(policy.send_verdict(target)),
-            }));
+            .with_guard(nh_tools::policy_guard(policy));
         let law_constitution = law.constitution;
         let current_constitution = identity_constitution(&law_constitution, &route);
         let agent = AgentLoop {
@@ -930,14 +925,6 @@ fn route_context_message(content: String) -> ChatMessage {
 
 fn session_timestamp(at: chrono::DateTime<Utc>) -> String {
     at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-}
-
-fn verdict_to_guard(verdict: Verdict) -> Guard {
-    match verdict {
-        Verdict::Allow => Guard::Allow,
-        Verdict::Ask => Guard::Ask,
-        Verdict::Block(reason) => Guard::Block(reason),
-    }
 }
 
 #[cfg(test)]
