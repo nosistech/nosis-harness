@@ -29,6 +29,14 @@ commit passes local and remote gates.
   written path differ. The prompt, the refusal line and the success line now all name the
   written path, and they add the requested path when the two are not the same. Editing a
   file already behaved this way. Creating a file now matches it.
+- The lines printed when a file is edited now name the path that was actually written.
+  Editing reported the path you typed. It now reports the written path, and adds the typed
+  path when the two are not the same. Creating a file and editing a file now build this text
+  with the same code, so the two cannot drift apart again.
+- Every display now removes invisible characters from untrusted text. Some characters take no
+  space on the screen but still change how a line reads. Approval prompts already removed
+  them. Other displays used a weaker rule that only made control characters visible. There is
+  one rule now, and it is used everywhere.
 
 ## [0.2.0] - 2026-08-09
 

@@ -31,14 +31,18 @@ in order:
 2. `cargo clippy --locked --workspace --all-targets --release -- -D warnings` - zero warnings, all targets.
 3. `cargo doc --locked --workspace --no-deps` with `RUSTDOCFLAGS=-D warnings` - every public API documents without warnings.
 4. `cargo deny --locked check` - advisories, bans, licenses, and sources.
-5. `cargo test --locked --workspace --release` - the full workspace suite.
+5. `cargo test --locked --workspace --release --no-fail-fast` - the full workspace suite.
+   `--no-fail-fast` matters. Without it cargo stops at the first failing test binary, so one
+   failure hides every failure after it and the reported count is short.
 
 It captures each step's real exit code, prints a per-step summary, and exits non-zero if
-**any** step fails - all five must be green. (On Windows it also kills any running
-`nh.exe` first, which would otherwise lock the target directory and fail the link.)
+**any** step fails - all five must be green. On Windows it first stops any running
+`nh.exe`, which would otherwise lock `target\release\nh.exe` and fail the build.
 
-Not on PowerShell? Run the same five cargo commands above, in the same order, under the
-pinned toolchain.
+**Prefer to run the steps yourself?** Run the same five cargo commands above, in the same
+order, under the pinned toolchain. Do that if you are not on PowerShell, or in any
+environment where running a script that stops processes is not appropriate. The five
+commands are the gate. The script is a convenience that runs them for you.
 
 Format your code with `cargo fmt` - the gate enforces `fmt --check`, it does not reformat
 for you.

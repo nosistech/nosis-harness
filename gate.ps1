@@ -2,25 +2,27 @@
 #
 # Mechanizes the five checks that define "clean" for this workspace:
 #   1. fmt --check   - no formatting drift (the check that would have caught the
-#                      37-hunk fmt backlog before it bit a slice mid-flight).
+#                      37-hunk fmt backlog before it bit a change mid-flight).
 #   2. clippy        - -D warnings, all targets, release.
 #   3. rustdoc       - every public API document builds without warnings.
 #   4. deny          - advisories, bans, licenses, and sources.
-#   5. test          - the full workspace suite, release.
+#   5. test          - the full workspace suite, release, with --no-fail-fast so
+#                      one failing binary cannot hide failures in the rest.
 #
 # GATE RULE: each step's real exit code is captured via $LASTEXITCODE and
 # aggregated - never piped through `tail` (a pipeline's exit code is the last
 # command's, so `| tail` would mask a real failure with tail's 0).
 #
-# GOTCHA: a running nh.exe locks target\debug\nh.exe and fails the link - this
-# script kills it first.
+# GOTCHA: a running nh.exe locks the binary this gate is about to link, which
+# fails the build - this script stops it first. Every step below runs --release,
+# so the path that matters is target\release\nh.exe.
 #
 # A frozen-surface sensor can slot in as another Invoke-GateStep if milestone
 # work resumes; it is not part of the public-release gate.
 
 $ErrorActionPreference = 'Continue'
 
-Write-Host "killing any running nh.exe (locks target\debug\nh.exe)..." -ForegroundColor DarkGray
+Write-Host "stopping any running nh.exe (locks target\release\nh.exe)..." -ForegroundColor DarkGray
 Get-Process nh -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
 $script:steps = @()
@@ -43,7 +45,7 @@ Invoke-GateStep 'rustdoc -D warnings' {
     $env:RUSTDOCFLAGS = $previousRustdocFlags
 }
 Invoke-GateStep 'deny check'        { cargo deny --locked check }
-Invoke-GateStep 'test --release'    { cargo test --locked --workspace --release }
+Invoke-GateStep 'test --release'    { cargo test --locked --workspace --release --no-fail-fast }
 
 Write-Host ""
 Write-Host "===== GATE SUMMARY =====" -ForegroundColor Cyan
