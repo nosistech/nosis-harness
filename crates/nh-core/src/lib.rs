@@ -2,6 +2,7 @@
 //! Every turn writes a scrubbed JSONL receipt to .nosis/receipts.jsonl (append-only).
 
 pub mod credential;
+mod jsonl;
 pub mod runtime_path;
 pub mod terminal_capability;
 

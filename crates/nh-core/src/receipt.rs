@@ -214,24 +214,11 @@ pub fn read_receipt_tail(run_root: &Path) -> anyhow::Result<Vec<u8>> {
 
 /// Parse complete receipt lines and tolerate one torn final append.
 pub fn parse_receipt_jsonl(bytes: &[u8], limit: usize) -> anyhow::Result<Vec<Receipt>> {
-    let ends_in_newline = bytes.last() == Some(&b'\n');
-    let lines: Vec<&[u8]> = bytes.split(|byte| *byte == b'\n').collect();
-    let last_non_empty = lines
-        .iter()
-        .rposition(|line| !line.iter().all(|byte| byte.is_ascii_whitespace()));
+    let (parsed, _) = crate::jsonl::parse_jsonl_records(bytes, |line, error| {
+        anyhow::Error::new(error).context(format!("receipts line {line} is invalid"))
+    })?;
     let mut receipts = VecDeque::new();
-    for (index, line) in lines.into_iter().enumerate() {
-        if line.iter().all(|byte| byte.is_ascii_whitespace()) {
-            continue;
-        }
-        let receipt: Receipt = match serde_json::from_slice(line) {
-            Ok(receipt) => receipt,
-            Err(_) if !ends_in_newline && Some(index) == last_non_empty => continue,
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("receipts line {} is invalid", index + 1));
-            }
-        };
+    for receipt in parsed {
         if receipts.len() == limit {
             receipts.pop_front();
         }
@@ -281,27 +268,10 @@ impl ReceiptWriter {
     }
 
     pub fn append(&self, receipt: &Receipt) -> anyhow::Result<()> {
-        use std::io::Write as _;
         let path = crate::runtime_path::ensure_contained_file(&self.root, &self.path, "receipts")?;
         let line = serde_json::to_string(receipt).context("could not serialize receipt")?;
         let line = self.scrubber.scrub(&line);
-        // read(true): Windows LockFileEx requires read/write DATA access on the
-        // handle; a pure append-only handle (FILE_APPEND_DATA) fails file.lock()
-        // with ACCESS_DENIED. Append semantics are preserved.
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .create(true)
-            .append(true)
-            .open(&path)
-            .with_context(|| format!("could not open {}", path.display()))?;
-        file.lock()
-            .with_context(|| format!("could not lock {}", path.display()))?;
-        writeln!(file, "{line}").with_context(|| format!("could not write {}", path.display()))?;
-        file.flush()
-            .with_context(|| format!("could not flush {}", path.display()))?;
-        file.sync_all()
-            .with_context(|| format!("could not fsync {}", path.display()))?;
-        Ok(())
+        crate::jsonl::append_locked_line(&path, &line)
     }
 }
 

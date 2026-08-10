@@ -1,6 +1,5 @@
 //! Crash-safe, append-only ledgers for interactive chat and TUI sessions.
 
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -163,23 +162,7 @@ impl SessionLedger {
         let path = crate::runtime_path::ensure_contained_file(&self.root, &self.path, "session")?;
         let line = serde_json::to_string(event).context("could not serialize session record")?;
         let line = self.scrubber.scrub(&line);
-        // read(true): Windows LockFileEx requires read/write DATA access on the
-        // handle; a pure append-only handle (FILE_APPEND_DATA) fails file.lock()
-        // with ACCESS_DENIED. Append semantics are preserved.
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .create(true)
-            .append(true)
-            .open(&path)
-            .with_context(|| format!("could not open {}", path.display()))?;
-        file.lock()
-            .with_context(|| format!("could not lock {}", path.display()))?;
-        writeln!(file, "{line}").with_context(|| format!("could not write {}", path.display()))?;
-        file.flush()
-            .with_context(|| format!("could not flush {}", path.display()))?;
-        file.sync_all()
-            .with_context(|| format!("could not fsync {}", path.display()))?;
-        Ok(())
+        crate::jsonl::append_locked_line(&path, &line)
     }
 }
 
@@ -355,28 +338,9 @@ fn event_timestamp(event: &SessionEvent) -> &str {
 }
 
 fn parse_jsonl(bytes: &[u8]) -> anyhow::Result<(Vec<SessionEvent>, bool)> {
-    let ends_in_newline = bytes.last() == Some(&b'\n');
-    let lines = bytes.split(|byte| *byte == b'\n').collect::<Vec<_>>();
-    let last_non_empty = lines
-        .iter()
-        .rposition(|line| !line.iter().all(u8::is_ascii_whitespace));
-    let mut events = Vec::new();
-    let mut dropped_torn_tail = false;
-    for (index, line) in lines.into_iter().enumerate() {
-        if line.iter().all(u8::is_ascii_whitespace) {
-            continue;
-        }
-        match serde_json::from_slice::<SessionEvent>(line) {
-            Ok(event) => events.push(event),
-            Err(_) if Some(index) == last_non_empty && !ends_in_newline => {
-                dropped_torn_tail = true;
-            }
-            Err(error) => {
-                anyhow::bail!("session ledger line {} is invalid: {error}", index + 1)
-            }
-        }
-    }
-    Ok((events, dropped_torn_tail))
+    crate::jsonl::parse_jsonl_records(bytes, |line, error| {
+        anyhow::anyhow!("session ledger line {line} is invalid: {error}")
+    })
 }
 
 #[cfg(test)]

@@ -569,6 +569,39 @@ impl Tool for ReadFile {
     }
 }
 
+/// SECURITY INVARIANT: temporary files are created exclusively in the destination directory.
+fn create_temp_file(
+    parent: &Path,
+    prefix: &str,
+    nonce: u128,
+    path_label: &str,
+) -> anyhow::Result<(PathBuf, std::fs::File)> {
+    let mut attempt = 0_u16;
+    loop {
+        if attempt == 1000 {
+            bail!("could not create temporary file for {path_label}");
+        }
+        let candidate = parent.join(format!(
+            "{prefix}{}-{nonce}-{attempt}.tmp",
+            std::process::id()
+        ));
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&candidate)
+        {
+            Ok(file) => return Ok((candidate, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                attempt += 1;
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("could not create temporary file for {path_label}"))
+            }
+        }
+    }
+}
+
 impl Tool for WriteFile {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
@@ -660,30 +693,8 @@ impl Tool for WriteFile {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let mut attempt = 0_u16;
-        let (temp_path, mut temp_file) = loop {
-            if attempt == 1000 {
-                bail!("could not create temporary file for {path}");
-            }
-            let candidate = destination_parent.join(format!(
-                ".nh-write-{}-{nonce}-{attempt}.tmp",
-                std::process::id()
-            ));
-            match std::fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&candidate)
-            {
-                Ok(file) => break (candidate, file),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    attempt += 1;
-                }
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("could not create temporary file for {path}"))
-                }
-            }
-        };
+        let (temp_path, mut temp_file) =
+            create_temp_file(destination_parent, ".nh-write-", nonce, path)?;
 
         let write_result = (|| -> anyhow::Result<()> {
             use std::io::Write as _;
@@ -853,30 +864,7 @@ impl Tool for EditFile {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let mut attempt = 0_u16;
-        let (temp_path, mut temp_file) = loop {
-            if attempt == 1000 {
-                bail!("could not create temporary file for {path}");
-            }
-            let candidate = parent.join(format!(
-                ".nh-edit-{}-{nonce}-{attempt}.tmp",
-                std::process::id()
-            ));
-            match std::fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&candidate)
-            {
-                Ok(file) => break (candidate, file),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    attempt += 1;
-                }
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("could not create temporary file for {path}"))
-                }
-            }
-        };
+        let (temp_path, mut temp_file) = create_temp_file(parent, ".nh-edit-", nonce, path)?;
 
         let write_result = (|| -> anyhow::Result<()> {
             use std::io::Write as _;

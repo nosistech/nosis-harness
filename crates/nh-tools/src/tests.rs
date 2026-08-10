@@ -266,6 +266,31 @@ fn write_file_creates_a_new_file_without_temp_artifacts() {
 }
 
 #[test]
+fn temporary_file_paths_are_distinct_and_non_collision_errors_surface() {
+    let dir = tempfile::tempdir().unwrap();
+    let (first_path, first_file) =
+        create_temp_file(dir.path(), ".nh-test-", 17, "note.txt").unwrap();
+    let (second_path, second_file) =
+        create_temp_file(dir.path(), ".nh-test-", 17, "note.txt").unwrap();
+    assert_ne!(first_path, second_path);
+    drop((first_file, second_file));
+
+    let not_directory = dir.path().join("not-a-directory");
+    std::fs::write(&not_directory, "unchanged").unwrap();
+    let error = create_temp_file(&not_directory, ".nh-test-", 18, "blocked.txt").unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "could not create temporary file for blocked.txt"
+    );
+    let io_error = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .expect("temporary-file failure must retain its I/O source");
+    assert_ne!(io_error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read_to_string(not_directory).unwrap(), "unchanged");
+}
+
+#[test]
 fn write_file_refuses_existing_file_and_names_edit_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("note.txt");
