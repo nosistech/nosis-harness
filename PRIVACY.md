@@ -35,8 +35,12 @@ their own policies.
 - **Receipts** - the cost/usage ledger - are written locally to `.nosis/receipts.jsonl`
   and are not automatically uploaded by `nh`.
 - **Fleet state** lives under `.nosis/fleet/`.
-- **Retention** is operator-controlled. Receipt and Fleet records are append-only and are
-  not automatically pruned; they grow until the operator deletes them. Other than the
+- **Session transcripts** for `nh chat` and `nh tui` are written locally to
+  `.nosis/sessions/<id>.jsonl` so that an interrupted session can be resumed. They contain
+  the conversation itself, not only its cost. The same redaction is applied before each
+  append. They are not uploaded by `nh`.
+- **Retention** is operator-controlled. Receipt, session and Fleet records are append-only
+  and are not automatically pruned; they grow until the operator deletes them. Other than the
   configuration and Git hook created by an explicit `nh init`, `nh` creates no source-code
   or cache artifacts of its own.
 - **Redaction** is applied to application-controlled terminal, receipt, tool-result, and
@@ -47,8 +51,10 @@ their own policies.
 
 - Run `nh key remove <entry>` to remove an OS-vault entry. If you used
   `NH_<ENTRY>_KEY`, unset it in the environment or CI secret store separately.
-- Delete the repository's `.nosis/receipts.jsonl` and `.nosis/fleet/` to remove local run
-  history. These are ordinary local files; NosisTech has no server-side copy.
+- Delete the repository's `.nosis/receipts.jsonl`, `.nosis/sessions/` and `.nosis/fleet/`
+  to remove local run history and saved conversations. Deleting only `receipts.jsonl`
+  leaves your `nh chat` and `nh tui` transcripts in `.nosis/sessions/`. These are ordinary
+  local files; NosisTech has no server-side copy.
 
 ## The MCP preview
 

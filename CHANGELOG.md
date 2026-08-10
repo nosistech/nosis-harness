@@ -168,8 +168,8 @@ is not yet verified.
   reported as negative rather than hidden. Compaction figures are estimates, are marked with
   a leading `~`, and are never written into recorded usage.
 - Route catalog (`catalog.toml`) for open-weight providers: DeepSeek V4
-  (`deepseek-v4-pro`, `deepseek-v4-flash`, plus Anthropic-wire variants), Kimi
-  (`kimi-k2.7-code`, `kimi-k2.7-code-highspeed`, `kimi-k2.6`), MiMo (`mimo-v2.5-pro`,
+  (`deepseek-v4-pro`, `deepseek-v4-flash`), Kimi
+  (`kimi-k3`, `kimi-k2.7-code`, `kimi-k2.7-code-highspeed`, `kimi-k2.6`), MiMo (`mimo-v2.5-pro`,
   `mimo-v2.5`), and GLM (`glm-5.2`, plus the free rate-limited `glm-4.7-flash`,
   `glm-4.6v-flash`, and `glm-4.5-flash`).
 - Context occupancy on every metered surface. The TUI footer, the `nh run` token line and

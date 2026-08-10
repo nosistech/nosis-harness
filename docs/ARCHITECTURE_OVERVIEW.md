@@ -7,12 +7,12 @@ configured local route for execution. Only `nh-routes::RouteResolver` can mint a
 `ResolvedRoute`; it carries the trusted endpoint, wire protocol, model ID, limits, modality,
 thinking dialect, and catalog price data. Local routes are OpenAI-compatible and loopback-only;
 they are excluded from cheapest-capable advice and cost anchors. The schema can parse delegate
-routes, but no delegate execution backend ships in v0.1.
+routes, but no delegate execution backend ships yet.
 
 ## Main Components
 
-- `nh-cli`: command parsing and the `init`, `key`, `run`, `chat`, `why`, `profile`, `tui`,
-  `fleet`, and loopback `mcp serve` surfaces.
+- `nh-cli`: command parsing and the `init`, `key`, `run`, `chat`, `doctor`, `resume`, `why`,
+  `profile`, `tui`, `fleet`, and loopback `mcp serve` surfaces.
 - `nh-tui`: ratatui frontend, with terminal lifecycle and worker ownership extracted into
   dedicated modules. Its timeline is view/inspect only; snapshot restore is not implemented.
 - `nh-core`: OpenAI/Anthropic wire clients, turn loop, context compaction, receipts, the
@@ -32,8 +32,9 @@ routes, but no delegate execution backend ships in v0.1.
 
 ## Internal Responsibility Boundaries
 
-Crate roots expose the existing public API and retain only top-level orchestration or a small
-shared import boundary. Production responsibilities live in named modules:
+Crate roots expose the existing public API. Most retain only top-level orchestration or a small
+shared import boundary, and production responsibilities live in named modules. `nh-tools` and
+`nh-vault` are stated exceptions, described below:
 
 - `nh-cli`: one command module per user-facing command; `cmd_run::{config,meter}` isolate trusted
   configuration assembly and receipt projection, chat startup is isolated from its REPL, and
@@ -41,8 +42,10 @@ shared import boundary. Production responsibilities live in named modules:
 - `nh-tui`: `input` owns event reduction while `input::commands` owns slash commands; `render`
   owns frame components while `render::transcript` owns projection and wrapping; `session`,
   `state`, `terminal`, `timeline`, and `worker` each retain one lifecycle concern.
-- `nh-core`: `agent`, `credential`, `receipt`, `runtime_path`, and `wire`. `agent::context` owns
-  cache-safe prefix sealing, estimation, and compaction. The wire facade owns shared types and
+- `nh-core`: `agent`, `credential`, `receipt`, `runtime_path`, `session_ledger`, and `wire`.
+  `agent::context` owns cache-safe prefix sealing, estimation, and compaction, and
+  `agent::tool_repair` owns tool-argument parsing and repair. `session_ledger` owns crash-safe,
+  append-only ledgers for interactive chat and TUI sessions. The wire facade owns shared types and
   route-to-client construction; `wire::{http,openai,anthropic}` isolate common HTTP safety limits
   and provider-specific encoding.
 - `nh-routes`: `pricing`, `profiles`, `resolver`, and `route`. `ResolvedRoute` is defined inside
@@ -50,9 +53,11 @@ shared import boundary. Production responsibilities live in named modules:
   `resolver::catalog` owns untrusted TOML parsing and validation.
 - `nh-law`: `load` for layered parsing/compilation, `matcher` for pure matching, and `model` for
   policy types and read-only views.
-- `nh-tools`: `exec` for process execution and `mcp::{adapter,client,config}` for outbound MCP;
-  `mcp::client::oauth` owns token lifetime and refresh state, while the crate root owns the
-  bounded built-in read/edit/tool facade.
+- `nh-tools`: `edit` for indentation-flexible match location, `search` for the glob and grep
+  tools, `exec` for process execution, and `mcp::{adapter,client,config}` for outbound MCP;
+  `mcp::client::oauth` owns token lifetime and refresh state. The crate root is an exception to
+  the rule above: it holds the read, write and edit tool implementations together with the shared
+  workspace containment resolver and the creation guard.
 - `nh-fleet`: `engine` owns workers and durable I/O, `scheduler` owns task state transitions,
   and `ledger`, `model`, and `prepare` own persistence, public types, and validated setup; the
   crate root owns run/resume orchestration.
@@ -75,11 +80,11 @@ shared import boundary. Production responsibilities live in named modules:
 
 ## Deployment Shape
 
-`nh` is a local CLI, not a hosted multi-user service. Public v0.1 is a source-install release.
-Windows is the only platform executed locally so far. CI is configured for Windows, Linux,
-and macOS, but those remote jobs cannot run until the repository has a public remote.
+`nh` is a local CLI, not a hosted multi-user service. The public release is a source install.
+Windows is supported. macOS is in testing. Linux builds from source and is not yet verified.
+Required CI covers Windows, macOS, and a supply-chain check.
 
-There is no OS-level sandbox in v0.1. Containment is policy-level: workspace path checks,
+There is no OS-level sandbox. Containment is policy-level: workspace path checks,
 protected-file holds, exact-origin credential audiences, minimal child environments, explicit
 shell approval, time/output bounds, and verified best-effort process-tree termination. The
 MCP server cannot bind outside `127.0.0.1` and is not a public network service.

@@ -24,19 +24,20 @@ Run the workspace gate before every PR:
 ./gate.ps1
 ```
 
-[`gate.ps1`](gate.ps1) mechanizes the four checks that define "clean" for this workspace,
+[`gate.ps1`](gate.ps1) mechanizes the five checks that define "clean" for this workspace,
 in order:
 
 1. `cargo fmt --all --check` - no formatting drift.
 2. `cargo clippy --locked --workspace --all-targets --release -- -D warnings` - zero warnings, all targets.
-3. `cargo deny --locked check` - advisories, bans, licenses, and sources.
-4. `cargo test --locked --workspace --release` - the full workspace suite.
+3. `cargo doc --locked --workspace --no-deps` with `RUSTDOCFLAGS=-D warnings` - every public API documents without warnings.
+4. `cargo deny --locked check` - advisories, bans, licenses, and sources.
+5. `cargo test --locked --workspace --release` - the full workspace suite.
 
 It captures each step's real exit code, prints a per-step summary, and exits non-zero if
-**any** step fails - all three must be green. (On Windows it also kills any running
+**any** step fails - all five must be green. (On Windows it also kills any running
 `nh.exe` first, which would otherwise lock the target directory and fail the link.)
 
-Not on PowerShell? Run the same four cargo commands above, in the same order, under the
+Not on PowerShell? Run the same five cargo commands above, in the same order, under the
 pinned toolchain.
 
 Format your code with `cargo fmt` - the gate enforces `fmt --check`, it does not reformat
@@ -71,7 +72,7 @@ in flight in a crate, do not edit that crate - coordinate first.
 - Branch from `main`.
 - Keep the diff focused - one concern per PR.
 - Update [CHANGELOG.md](CHANGELOG.md) under `[Unreleased]`.
-- Run [`./gate.ps1`](gate.ps1) and make sure all three steps pass.
+- Run [`./gate.ps1`](gate.ps1) and make sure all five steps pass.
 - **Never commit secrets.** Keys belong in the OS vault (`nh key add`), never in files.
 - Flag security-sensitive changes (vault, approval/guardrail verdicts, tool egress,
   MCP surface) explicitly in the PR description so they get a security-minded review.
