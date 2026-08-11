@@ -63,6 +63,7 @@ That binary lands at `target/release/nh` (`target\release\nh.exe` on Windows).
 
 - `nh init` - scaffold `.nosis/` in the current repo: the receipts dir, a `.gitignore`, a secret-pattern pre-commit hook, and the trusted bundled `catalog.toml`. A changed repository catalog is refused unless the operator has placed an exact reviewed copy at `~/.nosis/catalog.toml`. Existing Git hooks are preserved and reported for manual chaining.
 - `nh doctor` - report what is set up and what is not. It needs no API key. It names the running binary, whether `nh` is on your `PATH`, where the route catalog was read from, how many routes and providers are available, which key entries are stored, and where configuration lives. On Windows it also reports the console code page. It then lists only the things that are wrong, and each line states the fix. It never prints a key value. It exits 0 whenever it can produce a report, because it is a report and not a test.
+- `nh why "review the diff"` - explain the cheapest capable route for a rough token estimate of the task; add `--model <id>` to compare a specific route against it. It needs no API key, and it does not run the task. Prices come from the catalog that ships with the program.
 - `nh key add deepseek` - prompt for your DeepSeek API key and store it in the OS-native vault (never echoed, never written to files). For CI/headless use, the env fallback is `NH_<ENTRY>_KEY` with the entry uppercased - here, `NH_DEEPSEEK_KEY`.
 - `nh key remove deepseek` - remove that entry from the OS-native vault. Environment fallbacks must be unset separately.
 - Local Ollama and llama.cpp routes are user-filled, loopback-only, and selected only through
@@ -70,7 +71,6 @@ That binary lands at `target/release/nh` (`target\release\nh.exe` on Windows).
   [Local models](./docs/LOCAL_MODELS.md) for setup, the Ollama truncation warning, model
   verification, licensing, and hardware sizing.
 - `nh run "fix the failing test" --model deepseek-v4-flash` - run one agent task. Every shell command stops at a y/N approval prompt (default **deny**), and each turn is logged to `.nosis/receipts.jsonl`. Defaults: `--model deepseek-v4-flash`, `--max-turns 20`, `--profile balanced`. Optional: `--think none|low|high|max` (absent = per-route-dialect default: High on always-thinking dialects, None on non-thinking) `--autonomy ask|auto` (absent = the law-file default), and `--image <PATH>` to attach a PNG or JPEG (repeatable, maximum 4) on a route whose catalog entry declares image support.
-- `nh why "review the diff"` - explain the cheapest capable route for a rough token estimate of the task; add `--model <id>` to compare a specific route against it.
 - `nh chat` - interactive session. `/model` and `/provider` switch routes mid-session (history and cumulative usage preserved); `/price` evaluates the catalog price at the current clock time and flags stale data.
 - `nh profile` - list the execution profiles (frugal / balanced / max-quality) and their effective caps for a model.
 - `nh tui` - full-screen terminal UI (`--model <id>`, `--budget <tokens>`, `--profile <p>`).

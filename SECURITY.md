@@ -14,6 +14,10 @@ nosis is in development and is before version 1.0. We apply security fixes to th
 
 The current release is `v0.2.0`. It carries the guarded reading of repository-controlled configuration files; `v0.1.0` does not. The Security section of the `0.2.0` entry in `CHANGELOG.md` states what was wrong and what changed.
 
+### How a C runtime fix reaches you
+
+The Windows build links the C runtime statically. This lets `nh` start on a clean Windows install, where the Visual C++ Redistributable is absent. It also means that Windows Update does not patch the C runtime inside `nh`. A C runtime security fix reaches you only when you install a newer `nh`. The program does not update itself.
+
 ## How to Report a Vulnerability
 
 Do not open a public issue for a security problem. Do not put security data in a public discussion or a pull request.

@@ -28,6 +28,13 @@ commit passes local and remote gates.
 
 ### Fixed
 
+- `nh` now starts on a clean Windows install. The Windows build linked the C runtime
+  dynamically, so it needed the Visual C++ Redistributable, which a fresh Windows machine does
+  not have. The program could not start there, and it could not tell you why, because the
+  failure happened before any of its own code ran. The C runtime is now built into the
+  binary. One consequence travels with the fix and belongs next to it: Windows Update no
+  longer patches that C runtime, so a C runtime security fix reaches you only when you install
+  a newer `nh`. `SECURITY.md` says so under Supported Versions.
 - The warning shown when the bundled law cannot be parsed now states what actually happens.
   It said that safe defaults were kept. The bundled law is omitted instead, so its block
   lists and credential audiences stop applying, while your own user and command line
