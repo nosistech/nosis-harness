@@ -1,5 +1,6 @@
 [package]
 name = "nh-fleet"
+description = "Durable, resumable fleet execution over the agent loop."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -24,5 +25,8 @@ nh-tools = { path = "../nh-tools", version = "0.2.0" }
 nh-vault = { path = "../nh-vault", version = "0.2.0" }
 
 [dev-dependencies]
-nh-fleet = { path = ".", features = ["test-provider"] }
 tempfile.workspace = true
+# This crate depends on itself here so tests/ get the test-provider feature.
+# No version on purpose: path = "." always resolves to this crate, so a version
+# would just be one more line to bump.
+nh-fleet = { path = ".", features = ["test-provider"] }

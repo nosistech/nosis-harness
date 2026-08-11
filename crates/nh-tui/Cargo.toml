@@ -1,5 +1,6 @@
 [package]
 name = "nh-tui"
+description = "Terminal interface with one status line and one worker thread."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

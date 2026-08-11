@@ -1,5 +1,6 @@
 [package]
 name = "nh-core"
+description = "Agent turn loop, wire client, and append-only receipts."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,14 +11,14 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
-chrono.workspace = true
 zeroize.workspace = true
-reqwest.workspace = true
+nh-routes = { path = "../nh-routes", version = "0.2.0" }
 nh-tools = { path = "../nh-tools", version = "0.2.0" }
 nh-vault = { path = "../nh-vault", version = "0.2.0" }
-nh-routes = { path = "../nh-routes", version = "0.2.0" }
 
 [dev-dependencies]
 tempfile.workspace = true
