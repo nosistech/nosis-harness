@@ -1,0 +1,14 @@
+# Windows builds link the C runtime statically.
+#
+# Without this, nh.exe imports VCRUNTIME140.dll. That DLL belongs to the Visual C++
+# Redistributable and is NOT present on a clean Windows install, so a downloaded nh.exe
+# fails to start with a missing-DLL error on those machines. Users are expected to
+# download the binary and run it, so it has to stand on its own.
+#
+# Scoped to the MSVC target deliberately: it must not change how macOS or Linux build.
+#
+# Verified before it landed: the full workspace suite passes identically with and without
+# this setting (890 passed, 0 failed, 1 ignored across 26 binaries), and every DLL the
+# static binary still imports ships with Windows itself.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
