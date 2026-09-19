@@ -318,25 +318,53 @@ fn text_only_route_refuses_image_before_any_http_call_and_lists_live_catalog_rou
 }
 
 #[test]
-fn deepseek_none_and_low_send_explicit_disable_with_route_cap() {
-    for effort in [ThinkingEffort::None, ThinkingEffort::Low] {
+fn deepseek_all_efforts_and_conditional_replay_reach_the_http_wire() {
+    for (effort, toggle, wire_effort, replays_reasoning) in [
+        (ThinkingEffort::None, "disabled", None, false),
+        (ThinkingEffort::Low, "enabled", Some("low"), true),
+        (ThinkingEffort::High, "enabled", Some("high"), true),
+        (ThinkingEffort::Max, "enabled", Some("max"), true),
+    ] {
         let (url, rx) = one_shot_server(200, OPENAI_OK.into());
-        let r = route(
+        let r = route_with_preserve_when(
             &url,
             Wire::OpenAi,
             ThinkingDialect::DeepseekNhm,
             false,
+            true,
             &[],
             Some(384_000),
         );
         let client = client(&r, None);
-        client
-            .complete(&req(vec![msg("user", Some("hi"))], effort))
-            .unwrap();
+        let request = req(
+            vec![ChatMessage {
+                reasoning_content: Some("required chain".into()),
+                tool_calls: Some(vec![ToolCallReq {
+                    id: "c1".into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                }]),
+                ..msg("assistant", None)
+            }],
+            effort,
+        );
+        client.complete(&request).unwrap();
 
         let body = rx.recv().unwrap().body;
-        assert_eq!(body["thinking"]["type"], "disabled", "effort {effort:?}");
-        assert!(body.get("reasoning_effort").is_none());
+        assert_eq!(body["thinking"]["type"], toggle, "effort {effort:?}");
+        assert_eq!(
+            body.get("reasoning_effort")
+                .and_then(serde_json::Value::as_str),
+            wire_effort,
+            "effort {effort:?}"
+        );
+        assert_eq!(
+            body["messages"][0]
+                .get("reasoning_content")
+                .and_then(serde_json::Value::as_str),
+            replays_reasoning.then_some("required chain"),
+            "effort {effort:?}"
+        );
         assert_eq!(body["max_tokens"], 384_000);
     }
 }

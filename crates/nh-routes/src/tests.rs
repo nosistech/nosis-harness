@@ -12,9 +12,17 @@ fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(y, mo, d, h, mi, s).unwrap()
 }
 
+fn shanghai(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
+    FixedOffset::east_opt(8 * 3600)
+        .unwrap()
+        .with_ymd_and_hms(y, mo, d, h, mi, s)
+        .unwrap()
+        .with_timezone(&Utc)
+}
+
 /// Fixed date 2026-07-15, Beijing wall-clock time (UTC+8) expressed as UTC.
 fn beijing(h: u32, mi: u32) -> DateTime<Utc> {
-    utc(2026, 7, 15, h - 8, mi, 0)
+    shanghai(2026, 7, 15, h, mi, 0)
 }
 
 fn peak_route() -> ResolvedRoute {
@@ -286,7 +294,7 @@ fn deepseek_routes_carry_dialect_quirk_and_limits() {
 #[test]
 fn repo_catalog_prices_are_usd_and_comparable() {
     let resolver = resolver();
-    let verified_at = utc(2026, 7, 26, 12, 0, 0);
+    let verified_at = shanghai(2026, 9, 20, 10, 0, 0);
     for id in resolver.available() {
         let route = resolver.resolve(&id).unwrap();
         let quote = route
@@ -300,9 +308,9 @@ fn repo_catalog_prices_are_usd_and_comparable() {
         .unwrap()
         .price_at(verified_at)
         .unwrap();
-    assert!(close(pro.cache_hit, 0.003625));
-    assert!(close(pro.cache_miss, 0.435));
-    assert!(close(pro.output, 0.87));
+    assert!(close(pro.cache_hit, 0.022));
+    assert!(close(pro.cache_miss, 0.66));
+    assert!(close(pro.output, 1.98));
     assert!(!pro.peak);
 
     let flash = resolver
@@ -310,10 +318,27 @@ fn repo_catalog_prices_are_usd_and_comparable() {
         .unwrap()
         .price_at(verified_at)
         .unwrap();
-    assert!(close(flash.cache_hit, 0.0028));
-    assert!(close(flash.cache_miss, 0.14));
-    assert!(close(flash.output, 0.28));
+    assert!(close(flash.cache_hit, 0.003));
+    assert!(close(flash.cache_miss, 0.15));
+    assert!(close(flash.output, 0.60));
     assert!(!flash.peak);
+}
+
+#[test]
+fn deepseek_weekday_peak_prices_double_both_catalog_rates() {
+    let resolver = resolver();
+    let peak_at = shanghai(2026, 9, 21, 10, 0, 0);
+    let cases = [
+        ("deepseek-v4-flash", 0.006, 0.30, 1.20),
+        ("deepseek-v4-pro", 0.044, 1.32, 3.96),
+    ];
+    for (id, cache_hit, cache_miss, output) in cases {
+        let quote = resolver.resolve(id).unwrap().price_at(peak_at).unwrap();
+        assert!(quote.peak, "{id}");
+        assert!(close(quote.cache_hit, cache_hit), "{id}");
+        assert!(close(quote.cache_miss, cache_miss), "{id}");
+        assert!(close(quote.output, output), "{id}");
+    }
 }
 
 #[test]
@@ -518,7 +543,7 @@ fn local_class_is_confined_to_loopback_on_the_openai_wire() {
 // ---------------------------------------------------------------- pricing
 
 #[test]
-fn peak_boundary_math_in_beijing_time() {
+fn legacy_all_days_peak_boundary_math_in_beijing_time() {
     // Peak = Beijing 09:00-12:00 & 14:00-18:00, start inclusive, end exclusive.
     let route = peak_route();
     let cases = [
@@ -535,6 +560,102 @@ fn peak_boundary_math_in_beijing_time() {
         let quote = route.price_at(beijing(h, m)).expect("priced route");
         assert_eq!(quote.peak, want_peak, "Beijing {h:02}:{m:02}");
     }
+}
+
+#[test]
+fn omitted_peak_weekdays_keep_the_legacy_all_days_behavior() {
+    let route = peak_route();
+    for at in [
+        shanghai(2026, 9, 19, 10, 0, 0),
+        shanghai(2026, 9, 20, 15, 0, 0),
+    ] {
+        assert!(route.price_at(at).unwrap().peak, "{at}");
+    }
+}
+
+#[test]
+fn deepseek_weekday_peak_boundaries_are_exact() {
+    let resolver = resolver();
+    let cases = [
+        (8, 59, 59, false),
+        (9, 0, 0, true),
+        (11, 59, 59, true),
+        (12, 0, 0, false),
+        (13, 59, 59, false),
+        (14, 0, 0, true),
+        (17, 59, 59, true),
+        (18, 0, 0, false),
+    ];
+    for id in ["deepseek-v4-flash", "deepseek-v4-pro"] {
+        let route = resolver.resolve(id).unwrap();
+        for (hour, minute, second, expected) in cases {
+            let at = shanghai(2026, 9, 21, hour, minute, second);
+            assert_eq!(route.price_at(at).unwrap().peak, expected, "{id} at {at}");
+        }
+    }
+}
+
+#[test]
+fn deepseek_week_schedule_and_peak_status_agree() {
+    let resolver = resolver();
+    let route_offset = FixedOffset::east_opt(8 * 3600).unwrap();
+    let days = [
+        (21, true),
+        (22, true),
+        (23, true),
+        (24, true),
+        (25, true),
+        (26, false),
+        (27, false),
+    ];
+    let windows = [(10, "peak 2x until 12:00"), (15, "peak 2x until 18:00")];
+    for id in ["deepseek-v4-flash", "deepseek-v4-pro"] {
+        let route = resolver.resolve(id).unwrap();
+        for (day, weekday) in days {
+            for (hour, peak_status) in windows {
+                let at = shanghai(2026, 9, day, hour, 0, 0);
+                assert_eq!(route.price_at(at).unwrap().peak, weekday, "{id} at {at}");
+                assert_eq!(
+                    route.peak_status(at, route_offset).as_deref(),
+                    Some(if weekday { peak_status } else { "off-peak" }),
+                    "{id} at {at}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn peak_weekday_uses_the_route_local_date_across_utc_midnight() {
+    let catalog = r#"
+        [routes.local-date]
+        provider = "test"
+        model_id = "local-date"
+        base_url = "https://example.invalid"
+        wire = "openai"
+        vault_entry = "test"
+        [routes.local-date.price]
+        currency = "USD"
+        unit = "per_million_tokens"
+        cache_hit = 1.0
+        cache_miss = 1.0
+        output = 1.0
+        price_confidence = "confirmed"
+        [routes.local-date.price.peak]
+        multiplier = 2.0
+        timezone = "Asia/Shanghai"
+        weekdays = ["Mon"]
+        windows = ["00:00-02:00"]
+    "#;
+    let route = RouteResolver::from_toml(catalog)
+        .unwrap()
+        .resolve("local-date")
+        .unwrap();
+
+    assert!(!route.price_at(utc(2026, 9, 20, 15, 59, 59)).unwrap().peak);
+    assert!(route.price_at(utc(2026, 9, 20, 16, 0, 0)).unwrap().peak);
+    assert!(route.price_at(utc(2026, 9, 20, 17, 59, 59)).unwrap().peak);
+    assert!(!route.price_at(utc(2026, 9, 20, 18, 0, 0)).unwrap().peak);
 }
 
 #[test]
@@ -579,24 +700,21 @@ fn peak_status_is_short_local_and_boundary_exact() {
 }
 
 #[test]
-fn shipped_catalog_has_no_peak_qualifiers_or_counterfactuals() {
+fn shipped_peak_qualifiers_and_counterfactuals_are_scoped_to_deepseek() {
     let resolver = resolver();
-    let at = utc(2026, 8, 5, 12, 0, 0);
+    let at = shanghai(2026, 9, 21, 20, 0, 0);
     let local = FixedOffset::west_opt(6 * 3600).unwrap();
 
-    // A genuine peak table added to the shipped catalog should fail this test;
-    // update it deliberately after reviewing every rendered money surface.
     for id in resolver.available() {
         let route = resolver.resolve(&id).unwrap();
-        assert!(
-            route.peak_status(at, local).is_none(),
-            "shipped route {id} unexpectedly has a peak qualifier"
-        );
         let naive = resolver.naive_cost(&route, 1_000, 500, 100, at).unwrap();
-        assert!(
-            naive.peak.is_none(),
-            "shipped route {id} unexpectedly has a peak counterfactual"
-        );
+        if matches!(id.as_str(), "deepseek-v4-flash" | "deepseek-v4-pro") {
+            assert_eq!(route.peak_status(at, local).as_deref(), Some("off-peak"));
+            assert!(naive.peak.is_some(), "{id}");
+        } else {
+            assert!(route.peak_status(at, local).is_none(), "{id}");
+            assert!(naive.peak.is_none(), "{id}");
+        }
     }
 }
 
@@ -1463,6 +1581,12 @@ fn bad_peak_tables_are_rejected() {
         "#
         ))
     };
+    let peak_with_weekdays = |weekdays: &str| {
+        peak("2.0", "Asia/Shanghai", "09:00-12:00").replace(
+            "windows = [\"09:00-12:00\"]",
+            &format!("weekdays = {weekdays}\n            windows = [\"09:00-12:00\"]"),
+        )
+    };
     // Unknown timezone.
     let msg = RouteResolver::from_toml(&peak("2.0", "Mars/Olympus", "09:00-12:00"))
         .err()
@@ -1491,6 +1615,25 @@ fn bad_peak_tables_are_rejected() {
         .expect("must fail")
         .to_string();
     assert!(msg.contains("multiplier"), "got: {msg}");
+    // Explicit weekdays must name at least one unique supported day.
+    let msg = RouteResolver::from_toml(&peak_with_weekdays("[]"))
+        .err()
+        .expect("must fail")
+        .to_string();
+    assert!(msg.contains("weekdays must not be empty"), "got: {msg}");
+    let msg = RouteResolver::from_toml(&peak_with_weekdays("[\"Funday\"]"))
+        .err()
+        .expect("must fail")
+        .to_string();
+    assert!(msg.contains("Funday") && msg.contains("Mon"), "got: {msg}");
+    let msg = RouteResolver::from_toml(&peak_with_weekdays("[\"Mon\", \"Mon\"]"))
+        .err()
+        .expect("must fail")
+        .to_string();
+    assert!(
+        msg.contains("duplicate") && msg.contains("Mon"),
+        "got: {msg}"
+    );
 }
 
 #[test]

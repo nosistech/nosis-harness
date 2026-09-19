@@ -419,7 +419,7 @@ fn yes_parsing_defaults_to_deny() {
 fn think_flag_resolves_within_route_capability() {
     let cases = [
         (ThinkArg::None, ThinkingEffort::None),
-        (ThinkArg::Low, ThinkingEffort::None),
+        (ThinkArg::Low, ThinkingEffort::Low),
         (ThinkArg::High, ThinkingEffort::High),
         (ThinkArg::Max, ThinkingEffort::Max),
     ];
@@ -1141,7 +1141,8 @@ fn run_meter_distinguishes_absent_cache_measurement_from_measured_zero() {
 #[test]
 fn run_counterfactual_without_peak_table_drops_the_segment_cleanly() {
     let resolver = RouteResolver::from_toml(BUNDLED_CATALOG).unwrap();
-    let route = resolver.resolve("deepseek-v4-flash").unwrap();
+    let route = resolver.resolve("kimi-k2.6").unwrap();
+    assert!(route.price().unwrap().peak.is_none());
     let usage = Usage {
         prompt_tokens: 100_000,
         completion_tokens: 50_000,

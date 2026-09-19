@@ -1,0 +1,132 @@
+name: Package Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Packaging safety mode
+        required: true
+        default: preview
+        type: choice
+        options:
+          - preview
+          - release-candidate
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Windows x64 (${{ inputs.mode }})
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@191af2e1955bbe165f9bbacff2d2438002dff4d4 # 1.96.0
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+      - name: Prepare Windows package
+        shell: pwsh
+        env:
+          PACKAGE_MODE: ${{ inputs.mode }}
+        run: .\scripts\package-windows.ps1 -Mode $env:PACKAGE_MODE
+      - name: Smoke-test packaged bytes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $metadataJson = @(& cargo metadata --locked --offline --no-deps --format-version 1)
+          if ($LASTEXITCODE -ne 0) {
+            throw "cargo metadata failed with exit code $LASTEXITCODE."
+          }
+          $metadata = ($metadataJson -join [Environment]::NewLine) | ConvertFrom-Json
+          $cliPackages = @($metadata.packages | Where-Object { $_.name -eq "nh-cli" })
+          if ($cliPackages.Count -ne 1) {
+            throw "Expected exactly one nh-cli package."
+          }
+          $expectedVersion = [string]$cliPackages[0].version
+
+          $archives = @(Get-ChildItem -LiteralPath .\target\dist -Recurse -File `
+            -Filter "nh-$expectedVersion-windows-x64.zip")
+          if ($archives.Count -ne 1) {
+            throw "Expected exactly one Windows package ZIP; found $($archives.Count)."
+          }
+          $archive = $archives[0]
+          $packageDir = $archive.Directory.FullName
+          $looseExe = Join-Path $packageDir "nh.exe"
+          $checksumsPath = Join-Path $packageDir "SHA256SUMS"
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($archive.FullName)
+          try {
+            $actualEntries = @($zip.Entries | ForEach-Object { $_.FullName } | Sort-Object)
+          } finally {
+            $zip.Dispose()
+          }
+          $expectedEntries = @("LICENSE", "START_HERE.md", "nh.exe") | Sort-Object
+          if (@(Compare-Object $expectedEntries $actualEntries).Count -ne 0) {
+            throw "The package ZIP does not contain exactly LICENSE, START_HERE.md, and nh.exe."
+          }
+
+          $expectedChecksums = @(
+            "$((Get-FileHash -LiteralPath $looseExe -Algorithm SHA256).Hash.ToUpperInvariant())  nh.exe"
+            "$((Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash.ToUpperInvariant())  $($archive.Name)"
+          )
+          $actualChecksums = @(Get-Content -LiteralPath $checksumsPath | Where-Object { $_.Length -gt 0 })
+          if (($actualChecksums -join "`n") -cne ($expectedChecksums -join "`n")) {
+            throw "SHA256SUMS does not match the packaged executable and ZIP."
+          }
+
+          $smokeDir = Join-Path $env:RUNNER_TEMP ("nosis-package-smoke-" + [guid]::NewGuid().ToString("N"))
+          New-Item -ItemType Directory -Path $smokeDir | Out-Null
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $smokeDir
+          foreach ($name in $expectedEntries) {
+            $loosePath = Join-Path $packageDir $name
+            $extractedPath = Join-Path $smokeDir $name
+            if (-not (Test-Path -LiteralPath $extractedPath -PathType Leaf)) {
+              throw "Extracted package is missing $name."
+            }
+            if ((Get-FileHash -LiteralPath $loosePath -Algorithm SHA256).Hash -ne
+                (Get-FileHash -LiteralPath $extractedPath -Algorithm SHA256).Hash) {
+              throw "Extracted $name differs from the packaged loose file."
+            }
+          }
+
+          $smokeExe = Join-Path $smokeDir "nh.exe"
+          Push-Location $smokeDir
+          try {
+            $versionOutput = @(& $smokeExe --version)
+            if ($LASTEXITCODE -ne 0) {
+              throw "Packaged nh.exe --version failed with exit code $LASTEXITCODE."
+            }
+            $reportedVersion = ($versionOutput -join [Environment]::NewLine).Trim()
+            if ($reportedVersion -ne "nh $expectedVersion") {
+              throw "Packaged binary reported '$reportedVersion'; expected 'nh $expectedVersion'."
+            }
+
+            & $smokeExe doctor
+            if ($LASTEXITCODE -ne 0) {
+              throw "Packaged nh.exe doctor failed with exit code $LASTEXITCODE."
+            }
+            & $smokeExe init
+            if ($LASTEXITCODE -ne 0) {
+              throw "Packaged nh.exe init failed with exit code $LASTEXITCODE."
+            }
+            & $smokeExe why "review the diff"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Packaged nh.exe why failed with exit code $LASTEXITCODE."
+            }
+          } finally {
+            Pop-Location
+          }
+      - name: Upload package for review
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nosis-harness-windows-${{ inputs.mode }}-${{ github.sha }}
+          path: target/dist
+          if-no-files-found: error
+          retention-days: 14

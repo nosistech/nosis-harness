@@ -275,9 +275,7 @@ fn reasoning_to_send(
 
 fn thinking_is_active(dialect: ThinkingDialect, effort: ThinkingEffort) -> bool {
     match dialect {
-        ThinkingDialect::DeepseekNhm => {
-            matches!(effort, ThinkingEffort::High | ThinkingEffort::Max)
-        }
+        ThinkingDialect::DeepseekNhm => effort != ThinkingEffort::None,
         ThinkingDialect::GlmHm | ThinkingDialect::KimiToggle => effort != ThinkingEffort::None,
         ThinkingDialect::AlwaysThinking | ThinkingDialect::AlwaysThinkingEffort => true,
         ThinkingDialect::None => false,
@@ -288,14 +286,20 @@ fn thinking_is_active(dialect: ThinkingDialect, effort: ThinkingEffort) -> bool 
 fn apply_thinking(body: &mut serde_json::Value, policy: OpenAiPolicy, effort: ThinkingEffort) {
     match policy.dialect {
         ThinkingDialect::DeepseekNhm => match effort {
-            ThinkingEffort::None | ThinkingEffort::Low => {
+            ThinkingEffort::None => {
                 // [VERIFY-LIVE §7] DeepSeek explicit non-thinking wire shape.
                 body["thinking"] = serde_json::json!({ "type": "disabled" });
             }
+            ThinkingEffort::Low => {
+                body["thinking"] = serde_json::json!({ "type": "enabled" });
+                body["reasoning_effort"] = serde_json::Value::String("low".into());
+            }
             ThinkingEffort::High => {
+                body["thinking"] = serde_json::json!({ "type": "enabled" });
                 body["reasoning_effort"] = serde_json::Value::String("high".into());
             }
             ThinkingEffort::Max => {
+                body["thinking"] = serde_json::json!({ "type": "enabled" });
                 body["reasoning_effort"] = serde_json::Value::String("max".into());
             }
         },

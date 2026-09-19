@@ -278,18 +278,23 @@ fn image_parts_emit_exact_openai_data_uri_shape_and_keep_tools() {
 
 #[test]
 fn deepseek_dialect_maps_every_effort_tier() {
-    for effort in [ThinkingEffort::None, ThinkingEffort::Low] {
+    {
         let mut request = req(vec![msg("user", Some("hi"))]);
-        request.thinking = effort;
+        request.thinking = ThinkingEffort::None;
         let body = build_body(&request, policy(ThinkingDialect::DeepseekNhm, false, false));
-        assert_eq!(body["thinking"]["type"], "disabled", "effort {effort:?}");
+        assert_eq!(body["thinking"]["type"], "disabled");
         assert!(body.get("reasoning_effort").is_none());
     }
 
-    for (effort, expected) in [(ThinkingEffort::High, "high"), (ThinkingEffort::Max, "max")] {
+    for (effort, expected) in [
+        (ThinkingEffort::Low, "low"),
+        (ThinkingEffort::High, "high"),
+        (ThinkingEffort::Max, "max"),
+    ] {
         let mut request = req(vec![msg("user", Some("hi"))]);
         request.thinking = effort;
         let body = build_body(&request, policy(ThinkingDialect::DeepseekNhm, false, false));
+        assert_eq!(body["thinking"]["type"], "enabled", "effort {effort:?}");
         assert_eq!(body["reasoning_effort"], expected, "effort {effort:?}");
     }
 }
@@ -305,7 +310,7 @@ fn deepseek_replays_reasoning_only_while_thinking_is_active() {
     }];
 
     let mut request = req(history.clone());
-    request.thinking = ThinkingEffort::High;
+    request.thinking = ThinkingEffort::Low;
     let active = build_body(&request, conditional);
     assert_eq!(active["messages"][0]["reasoning_content"], "required chain");
 
@@ -1203,20 +1208,23 @@ fn explicit_effort_wins_but_stays_route_legal() {
 }
 
 #[test]
-fn deepseek_explicit_low_resolves_to_the_disabled_wire_tier() {
-    let resolved = resolve_effort(
-        Some(ThinkingEffort::Low),
-        ThinkingPosture::Ceiling,
-        ThinkingDialect::DeepseekNhm,
-        Wire::OpenAi,
-    );
-    assert_eq!(resolved, ThinkingEffort::None);
-
-    let mut request = req(vec![msg("user", Some("hi"))]);
-    request.thinking = resolved;
-    let body = build_body(&request, policy(ThinkingDialect::DeepseekNhm, false, false));
-    assert_eq!(body["thinking"]["type"], "disabled");
-    assert!(body.get("reasoning_effort").is_none());
+fn deepseek_explicit_efforts_keep_all_four_normalized_tiers() {
+    for effort in [
+        ThinkingEffort::None,
+        ThinkingEffort::Low,
+        ThinkingEffort::High,
+        ThinkingEffort::Max,
+    ] {
+        assert_eq!(
+            resolve_effort(
+                Some(effort),
+                ThinkingPosture::Ceiling,
+                ThinkingDialect::DeepseekNhm,
+                Wire::OpenAi,
+            ),
+            effort
+        );
+    }
 }
 
 #[test]

@@ -34,16 +34,46 @@ This section is for all readers.
 For the technical detail behind each point, read [SECURITY.md](./SECURITY.md) (the security model,
 the audits, and how to report a problem) and [PRIVACY.md](./PRIVACY.md) (what leaves your machine).
 
-## Install (from source)
+## Install on Windows
 
-`nh` is a source install. This release attaches no prebuilt binaries.
+Download the [Windows x64 ZIP](https://github.com/nosistech/nosis-harness/releases/download/v0.2.1/nh-0.2.1-windows-x64.zip)
+from the [v0.2.1 release](https://github.com/nosistech/nosis-harness/releases/tag/v0.2.1).
+It includes `nh.exe`, the license, and a short setup guide. A standalone
+[`nh.exe`](https://github.com/nosistech/nosis-harness/releases/download/v0.2.1/nh.exe)
+is also available. No Rust toolchain or Visual C++ Redistributable is needed.
 
-Prerequisites: the Rust toolchain, **1.96.0 or newer**. Get it from [rustup.rs](https://rustup.rs).
+The executable is unsigned. Windows may show **Windows protected your PC** and
+**Unknown publisher**. Before running it, check that the download came from this
+repository and compare its SHA-256 with
+[`SHA256SUMS`](https://github.com/nosistech/nosis-harness/releases/download/v0.2.1/SHA256SUMS):
 
-One command builds `nh` and puts it on your `PATH`:
+```powershell
+Get-FileHash -Algorithm SHA256 .\nh-0.2.1-windows-x64.zip
+```
+
+The checksum detects changed bytes; it is not a publisher signature. After checking
+the download, **More info**, then **Run anyway** proceeds past that Windows warning.
+Do not disable Windows protection if your organization's policy blocks the program.
+
+Extract the ZIP, open a terminal in its folder, and run:
+
+```powershell
+.\nh.exe doctor
+```
+
+This needs no API key and explains the remaining setup. To use `nh` from any project,
+add the folder containing `nh.exe` to your **user** PATH and open a new terminal.
+You can also call it by its full path. See the [Windows quickstart](docs/WINDOWS_QUICKSTART.md).
+
+**WinGet:** the package is being prepared for catalog review. It is not available
+through `winget install` yet. Use the download above until the listing is accepted.
+
+### Build from source
+
+For source installation, use Rust **1.96.0 or newer** from [rustup.rs](https://rustup.rs):
 
 ```sh
-cargo install --locked --git https://github.com/nosistech/nosis-harness nh-cli
+cargo install --locked --git https://github.com/nosistech/nosis-harness --tag v0.2.1 nh-cli
 ```
 
 The binary lands in `~/.cargo/bin`, which `rustup` already added to your `PATH`. Note that

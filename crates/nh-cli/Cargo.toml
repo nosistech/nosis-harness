@@ -21,15 +21,15 @@ rpassword.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 zeroize.workspace = true
-nh-core = { path = "../nh-core", version = "0.2.0" }
-nh-fleet = { path = "../nh-fleet", version = "0.2.0" }
-nh-law = { path = "../nh-law", version = "0.2.0" }
-nh-mcp = { path = "../nh-mcp", version = "0.2.0" }
-nh-routes = { path = "../nh-routes", version = "0.2.0" }
-nh-tools = { path = "../nh-tools", version = "0.2.0" }
-nh-tui = { path = "../nh-tui", version = "0.2.0" }
-nh-vault = { path = "../nh-vault", version = "0.2.0" }
+nh-core = { path = "../nh-core", version = "0.2.1" }
+nh-fleet = { path = "../nh-fleet", version = "0.2.1" }
+nh-law = { path = "../nh-law", version = "0.2.1" }
+nh-mcp = { path = "../nh-mcp", version = "0.2.1" }
+nh-routes = { path = "../nh-routes", version = "0.2.1" }
+nh-tools = { path = "../nh-tools", version = "0.2.1" }
+nh-tui = { path = "../nh-tui", version = "0.2.1" }
+nh-vault = { path = "../nh-vault", version = "0.2.1" }
 
 [dev-dependencies]
 tempfile.workspace = true
-nh-fleet = { path = "../nh-fleet", version = "0.2.0", features = ["test-provider"] }
+nh-fleet = { path = "../nh-fleet", version = "0.2.1", features = ["test-provider"] }

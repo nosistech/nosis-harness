@@ -710,16 +710,23 @@ fn route_resolve_keeps_text_and_adds_structured_route() {
         .unwrap()
         .contains("route deepseek-v4-flash"));
     let text = result["content"][0]["text"].as_str().unwrap();
-    assert!(!text.contains("off-peak"), "got: {text}");
     assert!(!text.contains("· ·"), "got: {text}");
     assert!(!text.ends_with('·'), "got: {text}");
     assert_eq!(
         result["structuredContent"]["route"]["id"],
         "deepseek-v4-flash"
     );
-    assert!(result["structuredContent"]["route"]
-        .get("peak_status")
-        .is_none());
+    let peak_status = result["structuredContent"]["route"]["peak_status"]
+        .as_str()
+        .expect("DeepSeek route must expose its current peak status");
+    assert!(
+        peak_status == "off-peak" || peak_status.starts_with("peak 2x until "),
+        "got: {peak_status}"
+    );
+    assert!(
+        text.split(" · ").any(|segment| segment == peak_status),
+        "text and structured peak status differ: {text} / {peak_status}"
+    );
     assert_eq!(result["structuredContent"]["would_park_offpeak"], false);
     server.shutdown().unwrap();
 }

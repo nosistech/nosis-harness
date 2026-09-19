@@ -1,6 +1,6 @@
 //! Clock-aware route pricing, currency conversion, and stable money display.
 
-use chrono::{DateTime, FixedOffset, NaiveDate, NaiveTime, Utc};
+use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveTime, Utc, Weekday};
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,7 +57,8 @@ pub struct Fx {
 }
 
 /// Peak-pricing windows in a fixed-offset timezone (Asia/Shanghai = UTC+8, no DST).
-/// Window start is inclusive, end exclusive, local to that timezone.
+/// Weekdays and windows are local to that timezone. Window start is inclusive
+/// and end is exclusive.
 #[derive(Debug, Clone)]
 pub struct PeakWindows {
     pub multiplier: f64,
@@ -65,6 +66,7 @@ pub struct PeakWindows {
     pub timezone: String,
     /// Fixed UTC offset in seconds, resolved at parse time.
     pub utc_offset_secs: i32,
+    pub weekdays: Vec<Weekday>,
     pub windows: Vec<(NaiveTime, NaiveTime)>,
 }
 
@@ -73,10 +75,14 @@ impl PeakWindows {
         let Some(offset) = FixedOffset::east_opt(self.utc_offset_secs) else {
             return false;
         };
-        let local = at.with_timezone(&offset).time();
+        let local = at.with_timezone(&offset);
+        if !self.weekdays.contains(&local.weekday()) {
+            return false;
+        }
+        let time = local.time();
         self.windows
             .iter()
-            .any(|(start, end)| local >= *start && local < *end)
+            .any(|(start, end)| time >= *start && time < *end)
     }
 }
 

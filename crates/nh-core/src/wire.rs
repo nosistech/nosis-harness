@@ -84,11 +84,7 @@ pub fn resolve_effort(
     }
     if let Some(effort) = explicit {
         return match dialect {
-            ThinkingDialect::DeepseekNhm => match effort {
-                ThinkingEffort::Low => ThinkingEffort::None,
-                _ => effort,
-            },
-            ThinkingDialect::KimiToggle => effort,
+            ThinkingDialect::DeepseekNhm | ThinkingDialect::KimiToggle => effort,
             ThinkingDialect::AlwaysThinking => ThinkingEffort::High,
             ThinkingDialect::AlwaysThinkingEffort => match effort {
                 ThinkingEffort::None | ThinkingEffort::Low => ThinkingEffort::Low,

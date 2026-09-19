@@ -5,7 +5,7 @@ use crate::pricing::{Currency, Fx, PeakWindows, PriceConfidence, RoutePrice};
 use crate::route::{RouteClass, ThinkingDialect, Wire};
 use crate::{is_banned, replacement_for};
 use anyhow::anyhow;
-use chrono::{NaiveDate, NaiveTime};
+use chrono::{NaiveDate, NaiveTime, Weekday};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -80,6 +80,8 @@ struct RawFx {
 struct RawPeak {
     multiplier: f64,
     timezone: String,
+    #[serde(default)]
+    weekdays: Option<Vec<String>>,
     windows: Vec<String>,
 }
 
@@ -268,6 +270,18 @@ fn parse_peak(id: &str, raw: RawPeak) -> anyhow::Result<PeakWindows> {
     if raw.windows.is_empty() {
         return Err(anyhow!("route '{id}': peak windows must not be empty"));
     }
+    let weekdays = match raw.weekdays {
+        Some(values) => parse_weekdays(id, &values)?,
+        None => vec![
+            Weekday::Mon,
+            Weekday::Tue,
+            Weekday::Wed,
+            Weekday::Thu,
+            Weekday::Fri,
+            Weekday::Sat,
+            Weekday::Sun,
+        ],
+    };
     let mut windows = Vec::with_capacity(raw.windows.len());
     for w in &raw.windows {
         windows.push(parse_window(id, w)?);
@@ -276,8 +290,39 @@ fn parse_peak(id: &str, raw: RawPeak) -> anyhow::Result<PeakWindows> {
         multiplier: raw.multiplier,
         timezone: raw.timezone,
         utc_offset_secs,
+        weekdays,
         windows,
     })
+}
+
+fn parse_weekdays(id: &str, values: &[String]) -> anyhow::Result<Vec<Weekday>> {
+    if values.is_empty() {
+        return Err(anyhow!("route '{id}': peak weekdays must not be empty"));
+    }
+    let mut weekdays = Vec::with_capacity(values.len());
+    for value in values {
+        let weekday = match value.as_str() {
+            "Mon" => Weekday::Mon,
+            "Tue" => Weekday::Tue,
+            "Wed" => Weekday::Wed,
+            "Thu" => Weekday::Thu,
+            "Fri" => Weekday::Fri,
+            "Sat" => Weekday::Sat,
+            "Sun" => Weekday::Sun,
+            other => {
+                return Err(anyhow!(
+                    "route '{id}': bad peak weekday '{other}' - use Mon, Tue, Wed, Thu, Fri, Sat, or Sun"
+                ))
+            }
+        };
+        if weekdays.contains(&weekday) {
+            return Err(anyhow!(
+                "route '{id}': duplicate peak weekday '{value}' - list each weekday once"
+            ));
+        }
+        weekdays.push(weekday);
+    }
+    Ok(weekdays)
 }
 
 fn parse_window(id: &str, s: &str) -> anyhow::Result<(NaiveTime, NaiveTime)> {

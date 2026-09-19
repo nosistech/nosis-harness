@@ -1,5 +1,5 @@
 # Nosis Harness route catalog - DATA, not code (AGENTS.md hard rule).
-# Prices and capabilities verified against first-party provider docs on 2026-07-26.
+# Provider verification dates and sources are recorded beside each section.
 #
 # Schema, per route:
 #   class               "api" (direct, token-metered) | "local" (explicit loopback route) |
@@ -16,13 +16,13 @@
 #                       cache_hit / cache_miss / output (per M tokens) ·
 #                       price_confidence "confirmed"|"reported"|"verify_live"
 #   [routes.<id>.price.peak]  multiplier · timezone (fixed offset, no DST) ·
+#                       optional weekdays ["Mon", ..., "Sun"] (all days when omitted) ·
 #                       windows ["HH:MM-HH:MM", ...] local to that timezone,
 #                       start inclusive, end exclusive.
 
 # ------------------------------------------------------------------ DeepSeek (plan B.1)
-# USD rates, limits, and the OpenAI-wire URL re-confirmed 2026-07-26 on
-# api-docs.deepseek.com/quick_start/pricing. That page no longer publishes the old
-# 2x peak schedule, so no peak multiplier is applied.
+# USD rates, limits, the OpenAI-wire URL, and the weekday 2x schedule were
+# re-confirmed 2026-09-18 on api-docs.deepseek.com/quick_start/pricing.
 
 [routes.deepseek-v4-pro]
 provider = "deepseek"
@@ -42,10 +42,16 @@ quirks = ["empty-reasoning-content-on-tool-replay"]
 [routes.deepseek-v4-pro.price]
 currency = "USD"
 unit = "per_million_tokens"
-cache_hit = 0.003625
-cache_miss = 0.435
-output = 0.87
+cache_hit = 0.022
+cache_miss = 0.66
+output = 1.98
 price_confidence = "confirmed"
+
+[routes.deepseek-v4-pro.price.peak]
+multiplier = 2.0
+timezone = "Asia/Shanghai"
+weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+windows = ["09:00-12:00", "14:00-18:00"]
 
 [routes.deepseek-v4-flash]
 provider = "deepseek"
@@ -65,10 +71,16 @@ quirks = ["empty-reasoning-content-on-tool-replay"]
 [routes.deepseek-v4-flash.price]
 currency = "USD"
 unit = "per_million_tokens"
-cache_hit = 0.0028
-cache_miss = 0.14
-output = 0.28
+cache_hit = 0.003
+cache_miss = 0.15
+output = 0.60
 price_confidence = "confirmed"
+
+[routes.deepseek-v4-flash.price.peak]
+multiplier = 2.0
+timezone = "Asia/Shanghai"
+weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+windows = ["09:00-12:00", "14:00-18:00"]
 
 # ------------------------------------------------------------------ Kimi / Moonshot (plan B.2)
 # K2.7 protocol nuances are adapter-enforced: always-thinking (never send a mode

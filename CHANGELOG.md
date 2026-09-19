@@ -9,8 +9,20 @@ commit passes local and remote gates.
 
 ## [Unreleased]
 
+No changes yet.
+
+## [0.2.1] - 2026-09-18
+
+### Security
+
+- Update rustls to 0.23.45 to fix TLS handshake encryption-level validation
+  ([RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285.html)).
+
 ### Added
 
+- Windows x64 portable executable and ZIP with SHA-256 checksums and a getting-started
+  guide. A manual GitHub Actions workflow builds and checks the package. WinGet manifests
+  are provided for catalog review; the WinGet listing is not available yet.
 - `nh doctor` reports what is set up and what is not, and it needs no API key. It names the
   running binary, whether `nh` is on `PATH`, whether the `nh` on `PATH` is a different copy,
   where the route catalog was read from, how many routes and providers are available, which
@@ -28,6 +40,11 @@ commit passes local and remote gates.
 
 ### Fixed
 
+- DeepSeek cost estimates use the current Flash and Pro rates and apply peak pricing only
+  during the provider's weekday peak windows. Weekends stay off-peak. Catalog peak tables
+  can select weekdays; tables without a weekday selection keep their existing daily behavior.
+- DeepSeek `--think low` enables low-effort reasoning and preserves the reasoning needed for
+  tool replay. It previously disabled thinking. `--think none` still disables thinking.
 - `nh` now starts on a clean Windows install. The Windows build linked the C runtime
   dynamically, so it needed the Visual C++ Redistributable, which a fresh Windows machine does
   not have. The program could not start there, and it could not tell you why, because the
@@ -322,6 +339,7 @@ is not yet verified.
 - Report vulnerabilities per [SECURITY.md](SECURITY.md) - info@nosistech.com,
   5-business-day response SLA.
 
-[Unreleased]: https://github.com/nosistech/nosis-harness/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/nosistech/nosis-harness/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/nosistech/nosis-harness/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/nosistech/nosis-harness/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/nosistech/nosis-harness/releases/tag/v0.1.0
