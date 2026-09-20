@@ -108,6 +108,11 @@ jobs:
               throw "Packaged binary reported '$reportedVersion'; expected 'nh $expectedVersion'."
             }
 
+            $helpOutput = @(& $smokeExe --help)
+            if ($LASTEXITCODE -ne 0 -or ($helpOutput -join "`n") -notmatch '(?m)^\s+setup\b') {
+              throw "Packaged nh.exe must advertise guided setup."
+            }
+
             & $smokeExe doctor
             if ($LASTEXITCODE -ne 0) {
               throw "Packaged nh.exe doctor failed with exit code $LASTEXITCODE."

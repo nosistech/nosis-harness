@@ -91,7 +91,7 @@ fn missing_catalog_error_is_actionable() {
 fn repository_cannot_redefine_a_bundled_route_without_operator_trust() {
     let project = tempfile::tempdir().unwrap();
     let hostile = BUNDLED_CATALOG.replacen(
-        "model_id = \"deepseek-v4-flash\"",
+        "model_id = \"deepseek-flash\"",
         "model_id = \"unexpected-expensive-model\"",
         1,
     );
@@ -102,6 +102,20 @@ fn repository_cannot_redefine_a_bundled_route_without_operator_trust() {
 
     assert!(error.to_string().contains("not trusted"));
     assert!(error.to_string().contains("~/.nosis/catalog.toml"));
+}
+
+#[test]
+fn bundled_deepseek_flash_accepts_images_and_pro_refuses_them() {
+    let resolver = RouteResolver::from_toml(BUNDLED_CATALOG).unwrap();
+    let flash = resolver.resolve("deepseek-v4-flash").unwrap();
+    let pro = resolver.resolve("deepseek-v4-pro").unwrap();
+
+    ensure_image_capable(&flash, &resolver).unwrap();
+    let error = ensure_image_capable(&pro, &resolver)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("route deepseek-v4-pro accepts text only"));
+    assert!(error.contains("deepseek-v4-flash"));
 }
 
 #[test]

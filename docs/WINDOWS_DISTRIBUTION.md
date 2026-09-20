@@ -101,10 +101,10 @@ The intended user command, **not available yet**, is:
 winget install --id Nosistech.NosisHarness --exact --source winget --scope user
 ```
 
-Open a fresh terminal afterward, run `nh doctor`, and follow its setup guidance.
+Open a fresh terminal in the project folder afterward and run `nh setup`.
 Subsequent catalog releases use `winget upgrade --id Nosistech.NosisHarness --exact
 --source winget`; removal uses `winget uninstall --id Nosistech.NosisHarness --exact`.
 Removal leaves project receipts and separately stored credentials intact.
 
-The first binary is unsigned. Checksums detect changed bytes; they do not replace
+The Windows binary is unsigned. Checksums detect changed bytes; they do not replace
 code signing or guarantee that a compromised release account published safe bytes.

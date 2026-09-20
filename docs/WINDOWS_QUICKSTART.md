@@ -5,7 +5,7 @@ Visual Studio, or the Visual C++ Redistributable to run it.
 
 ## Check the download
 
-This initial package is unsigned. Windows may show **Windows protected your PC**
+This package is unsigned. Windows may show **Windows protected your PC**
 and **Unknown publisher**. Verify the download came from the official
 [nosistech/nosis-harness releases](https://github.com/nosistech/nosis-harness/releases)
 and compare its SHA-256 with the accompanying `SHA256SUMS` before choosing
@@ -42,34 +42,26 @@ For shorter commands from any folder, add the folder containing `nh.exe` to your
 **user** PATH through Windows' **Edit environment variables for your account**
 dialog, then open a new terminal. A WinGet installation manages this for you.
 
-From the project folder, once `nh` is on PATH:
+For v0.2.2 or later, start the guided setup from your project folder:
 
 ```powershell
-nh init
+& 'C:\Users\you\Apps\Nosis\nh.exe' setup
 ```
 
-This creates local configuration, receipts folders, and a secret-pattern Git hook.
-Existing Git hooks are preserved. Try a route explanation without a key:
+Use your actual executable path. If `nh` is on PATH, just run `nh setup` or `nh`.
+The guide confirms the folder, checks the installation, and lets you choose a cloud
+model. It offers a free price preview, secure key entry, and an optional chat.
+Existing configuration and keys are preserved; missing ignore entries may be added.
+Press Enter to decline a yes/no question, or type `cancel` to stop.
 
-```powershell
-nh why "review the diff"
-```
+You need an API key from your chosen provider to send model requests. Enter it only
+at the hidden prompt; it is stored in Windows Credential Manager. Do not put it in
+the command line, a task message, or a file. Provider calls may incur charges.
+The program asks before executing shell commands.
 
-This explains a route and estimated cost without calling a model or changing files.
-Then store a provider key securely:
+Setup prints commands for returning to the selected model. For the full walkthrough,
+see the [guided setup guide](https://github.com/nosistech/nosis-harness/blob/v0.2.2/docs/GETTING_STARTED.md).
 
-```powershell
-nh key add deepseek
-```
-
-Enter the key at the hidden prompt; do not put it in the command line or a file.
-It is stored in Windows Credential Manager. Start a session with:
-
-```powershell
-nh chat
-```
-
-Provider calls may incur charges. The program asks before executing shell commands.
 Run `nh --help` for commands. For a local model instead of a cloud API, follow
 the [local models guide](https://github.com/nosistech/nosis-harness/blob/main/docs/LOCAL_MODELS.md).
 
@@ -82,3 +74,8 @@ Use `nh key remove deepseek` before deleting the executable if you also want to
 remove that saved key. See the
 [privacy guide](https://github.com/nosistech/nosis-harness/blob/main/PRIVACY.md)
 for configuration, receipts, and session locations.
+
+If setup reports an untrusted catalog after an upgrade, it has preserved your older
+project catalog. Back it up outside the project before intentionally replacing it
+with the new bundled catalog; the guided setup guide explains the steps. Never trust
+a changed catalog without reviewing its provider destinations.

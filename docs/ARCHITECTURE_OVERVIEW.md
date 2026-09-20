@@ -11,7 +11,7 @@ routes, but no delegate execution backend ships yet.
 
 ## Main Components
 
-- `nh-cli`: command parsing and the `init`, `key`, `run`, `chat`, `doctor`, `resume`, `why`,
+- `nh-cli`: command parsing and the `setup`, `init`, `key`, `run`, `chat`, `doctor`, `resume`, `why`,
   `profile`, `tui`, `fleet`, and loopback `mcp serve` surfaces.
 - `nh-tui`: ratatui frontend, with terminal lifecycle and worker ownership extracted into
   dedicated modules. Its timeline is view/inspect only; snapshot restore is not implemented.
@@ -84,6 +84,7 @@ shared import boundary, and production responsibilities live in named modules. `
 executable and ZIP with checksums. Source installation remains available. The WinGet
 [package submission](https://github.com/microsoft/winget-pkgs/pull/438174) is awaiting catalog
 approval and is not available through WinGet yet.
+Version 0.2.2 adds an in-terminal setup guide and DeepSeek Flash image input.
 Windows is supported. macOS is in testing. Linux builds from source and is not yet verified.
 Required CI covers Windows, macOS, and a supply-chain check.
 

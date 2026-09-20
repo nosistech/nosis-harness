@@ -239,10 +239,11 @@ fn resolves_route_with_openai_wire() {
     assert_eq!(route.id(), "deepseek-v4-flash");
     assert_eq!(route.wire(), Wire::OpenAi);
     assert_eq!(route.provider(), "deepseek");
-    assert_eq!(route.model_id(), "deepseek-v4-flash");
+    assert_eq!(route.model_id(), "deepseek-flash");
     assert_eq!(route.base_url(), "https://api.deepseek.com");
     assert_eq!(route.vault_entry(), "deepseek");
     assert_eq!(route.class(), RouteClass::Api);
+    assert_eq!(route.modality(), vec!["text", "image"]);
 }
 
 #[test]
@@ -289,6 +290,18 @@ fn deepseek_routes_carry_dialect_quirk_and_limits() {
     assert_eq!(route.context(), Some(1_000_000));
     assert_eq!(route.max_out(), Some(384_000));
     assert_eq!(route.modality(), vec!["text"]);
+
+    let flash = resolver.resolve("deepseek-v4-flash").unwrap();
+    assert_eq!(flash.context(), Some(1_000_000));
+    assert_eq!(flash.max_out(), Some(384_000));
+    assert_eq!(flash.modality(), vec!["text", "image"]);
+}
+
+#[test]
+fn shipped_image_routes_include_flash_but_not_pro() {
+    let routes = resolver().routes_with_modality("image");
+    assert!(routes.contains(&"deepseek-v4-flash".to_owned()));
+    assert!(!routes.contains(&"deepseek-v4-pro".to_owned()));
 }
 
 #[test]

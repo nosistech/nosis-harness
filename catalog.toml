@@ -22,7 +22,9 @@
 
 # ------------------------------------------------------------------ DeepSeek (plan B.1)
 # USD rates, limits, the OpenAI-wire URL, and the weekday 2x schedule were
-# re-confirmed 2026-09-18 on api-docs.deepseek.com/quick_start/pricing.
+# re-confirmed 2026-09-18 on api-docs.deepseek.com/quick_start/pricing. Flash's
+# canonical model id and image input, plus Pro's text-only status, were
+# re-confirmed 2026-09-20 in the provider updates and vision guides.
 
 [routes.deepseek-v4-pro]
 provider = "deepseek"
@@ -55,12 +57,12 @@ windows = ["09:00-12:00", "14:00-18:00"]
 
 [routes.deepseek-v4-flash]
 provider = "deepseek"
-model_id = "deepseek-v4-flash"
+model_id = "deepseek-flash"
 base_url = "https://api.deepseek.com"
 wire = "openai"
 vault_entry = "deepseek"
 class = "api"
-modality = ["text"]
+modality = ["text", "image"]
 context = 1000000
 max_out = 384000
 thinking_dialect = "deepseek-nhm"

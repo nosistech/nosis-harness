@@ -11,6 +11,18 @@ commit passes local and remote gates.
 
 No changes yet.
 
+## [0.2.2] - 2026-09-20
+
+### Added
+
+- `nh setup` guides interactive users through project confirmation, model selection,
+  a no-key preview, secure key entry, and an optional chat with the selected model.
+  Running `nh` without arguments opens the same guide. Existing configuration and keys
+  are preserved. Piped input cannot authorize setup.
+- DeepSeek Flash image input through `--image` and chat's `/image`. The existing
+  `deepseek-v4-flash` route now sends the current provider model ID `deepseek-flash`.
+  PNG/JPEG limits and read approvals still apply. DeepSeek Pro remains text-only.
+
 ## [0.2.1] - 2026-09-20
 
 ### Security
@@ -339,7 +351,8 @@ is not yet verified.
 - Report vulnerabilities per [SECURITY.md](SECURITY.md) - info@nosistech.com,
   5-business-day response SLA.
 
-[Unreleased]: https://github.com/nosistech/nosis-harness/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/nosistech/nosis-harness/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/nosistech/nosis-harness/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/nosistech/nosis-harness/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/nosistech/nosis-harness/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/nosistech/nosis-harness/releases/tag/v0.1.0

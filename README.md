@@ -36,19 +36,19 @@ the audits, and how to report a problem) and [PRIVACY.md](./PRIVACY.md) (what le
 
 ## Install on Windows
 
-Download the [Windows x64 ZIP](https://github.com/nosistech/nosis-harness/releases/download/v0.2.1/nh-0.2.1-windows-x64.zip)
-from the [v0.2.1 release](https://github.com/nosistech/nosis-harness/releases/tag/v0.2.1).
+Download the [Windows x64 ZIP](https://github.com/nosistech/nosis-harness/releases/download/v0.2.2/nh-0.2.2-windows-x64.zip)
+from the [v0.2.2 release](https://github.com/nosistech/nosis-harness/releases/tag/v0.2.2).
 It includes `nh.exe`, the license, and a short setup guide. A standalone
-[`nh.exe`](https://github.com/nosistech/nosis-harness/releases/download/v0.2.1/nh.exe)
+[`nh.exe`](https://github.com/nosistech/nosis-harness/releases/download/v0.2.2/nh.exe)
 is also available. No Rust toolchain or Visual C++ Redistributable is needed.
 
 The executable is unsigned. Windows may show **Windows protected your PC** and
 **Unknown publisher**. Before running it, check that the download came from this
 repository and compare its SHA-256 with
-[`SHA256SUMS`](https://github.com/nosistech/nosis-harness/releases/download/v0.2.1/SHA256SUMS):
+[`SHA256SUMS`](https://github.com/nosistech/nosis-harness/releases/download/v0.2.2/SHA256SUMS):
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\nh-0.2.1-windows-x64.zip
+Get-FileHash -Algorithm SHA256 .\nh-0.2.2-windows-x64.zip
 ```
 
 The checksum detects changed bytes; it is not a publisher signature. After checking
@@ -74,7 +74,7 @@ Use the download above until the listing is accepted.
 For source installation, use Rust **1.96.0 or newer** from [rustup.rs](https://rustup.rs):
 
 ```sh
-cargo install --locked --git https://github.com/nosistech/nosis-harness --tag v0.2.1 nh-cli
+cargo install --locked --git https://github.com/nosistech/nosis-harness --tag v0.2.2 nh-cli
 ```
 
 The binary lands in `~/.cargo/bin`, which `rustup` already added to your `PATH`. Note that
@@ -91,6 +91,12 @@ cargo build --release
 That binary lands at `target/release/nh` (`target\release\nh.exe` on Windows).
 
 ## Quickstart
+
+Run [`nh setup`](docs/GETTING_STARTED.md) from your project folder for a guided path
+through project setup, model selection, a free preview, and secure key entry.
+Running `nh` without arguments opens the same guide. Version 0.2.2 also enables
+[DeepSeek Flash image input](docs/IMAGES.md) through the existing attachment commands.
+The individual commands below remain available.
 
 - `nh init` - scaffold `.nosis/` in the current repo: the receipts dir, a `.gitignore`, a secret-pattern pre-commit hook, and the trusted bundled `catalog.toml`. A changed repository catalog is refused unless the operator has placed an exact reviewed copy at `~/.nosis/catalog.toml`. Existing Git hooks are preserved and reported for manual chaining.
 - `nh doctor` - report what is set up and what is not. It needs no API key. It names the running binary, whether `nh` is on your `PATH`, where the route catalog was read from, how many routes and providers are available, which key entries are stored, and where configuration lives. On Windows it also reports the console code page. It then lists only the things that are wrong, and each line states the fix. It never prints a key value. It exits 0 whenever it can produce a report, because it is a report and not a test.

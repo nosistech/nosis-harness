@@ -9,7 +9,7 @@ use std::sync::mpsc;
 
 use nh_core::credential;
 use nh_core::wire::{
-    ChatClient, ChatMessage, ChatRequest, ContentPart, ThinkingEffort, ToolCallReq,
+    ChatClient, ChatMessage, ChatRequest, ContentPart, ThinkingEffort, ToolCallReq, UsageEvidence,
 };
 use nh_routes::{Profiles, ResolvedRoute, RouteResolver, ThinkingDialect, Wire};
 use nh_vault::Vault;
@@ -17,6 +17,7 @@ use zeroize::Zeroizing;
 
 /// Obviously fake test secret (never a real key shape in use).
 const FAKE_SECRET: &str = "sk-test-00000000";
+const BUNDLED_CATALOG: &str = include_str!("../../../catalog.toml");
 
 struct Captured {
     path: String,
@@ -196,6 +197,37 @@ fn req(messages: Vec<ChatMessage>, thinking: ThinkingEffort) -> ChatRequest {
     }
 }
 
+fn image_req(model: &str) -> ChatRequest {
+    ChatRequest {
+        model: model.to_owned(),
+        messages: vec![ChatMessage {
+            role: "user".into(),
+            content: None,
+            parts: Some(vec![
+                ContentPart::Text {
+                    text: "describe this image".into(),
+                },
+                ContentPart::ImageB64 {
+                    media_type: "image/png".into(),
+                    data: "Zm9v".into(),
+                },
+            ]),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }],
+        tools: vec![],
+        thinking: ThinkingEffort::None,
+    }
+}
+
+fn bundled_deepseek_resolver(base_url: &str) -> RouteResolver {
+    let local = format!("base_url = \"{base_url}\"");
+    let catalog = BUNDLED_CATALOG.replace("base_url = \"https://api.deepseek.com\"", &local);
+    assert_ne!(catalog, BUNDLED_CATALOG);
+    RouteResolver::from_toml(&catalog).unwrap()
+}
+
 const OPENAI_OK: &str = r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1}}"#;
 const ANTHROPIC_OK: &str = r#"{"content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":9,"output_tokens":4,"cache_read_input_tokens":2}}"#;
 
@@ -247,31 +279,12 @@ fn factory_openai_wire_posts_chat_completions_with_route_policy() {
 }
 
 #[test]
-fn text_only_route_refuses_image_before_any_http_call_and_lists_live_catalog_routes() {
+fn bundled_deepseek_pro_refuses_image_before_any_http_call() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
-    let resolver = RouteResolver::from_toml(&format!(
-        r#"
-        [routes.text-route]
-        provider = "mock"
-        model_id = "text-model"
-        base_url = "{base_url}"
-        wire = "openai"
-        vault_entry = "mock"
-        modality = ["text"]
-
-        [routes.image-route]
-        provider = "mock"
-        model_id = "image-model"
-        base_url = "{base_url}"
-        wire = "openai"
-        vault_entry = "mock"
-        modality = ["text", "image"]
-        "#
-    ))
-    .unwrap();
-    let route = resolver.resolve("text-route").unwrap();
+    let resolver = bundled_deepseek_resolver(&base_url);
+    let route = resolver.resolve("deepseek-v4-pro").unwrap();
     let client = credential::connect_with_catalog(
         &TestVault,
         &route,
@@ -281,39 +294,87 @@ fn text_only_route_refuses_image_before_any_http_call_and_lists_live_catalog_rou
     )
     .unwrap()
     .0;
-    let request = req(
-        vec![ChatMessage {
-            role: "user".into(),
-            content: None,
-            parts: Some(vec![
-                ContentPart::Text {
-                    text: "describe it".into(),
-                },
-                ContentPart::ImageB64 {
-                    media_type: "image/png".into(),
-                    data: "Zm9v".into(),
-                },
-            ]),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        }],
-        ThinkingEffort::None,
-    );
+    let request = image_req(route.model_id());
 
     let error = client.complete(&request).unwrap_err().to_string();
 
-    assert_eq!(
-        error,
-        "route text-route accepts text only - it cannot read images. \
-         Image-capable routes: image-route. Switch with /model <id> or --model <id>."
+    assert!(
+        error.contains("route deepseek-v4-pro accepts text only - it cannot read images"),
+        "got: {error}"
     );
+    assert!(error.contains("deepseek-v4-flash"), "got: {error}");
     assert!(
         matches!(
             listener.accept(),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
         ),
         "capability refusal must happen before opening a socket"
+    );
+}
+
+#[test]
+fn bundled_deepseek_flash_sends_canonical_model_and_image_with_reported_usage() {
+    let response = r#"{
+        "choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+        "usage":{"prompt_tokens":11,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":3}}
+    }"#;
+    let (base_url, captured) = one_shot_server(200, response.into());
+    let resolver = bundled_deepseek_resolver(&base_url);
+    let route = resolver.resolve("deepseek-v4-flash").unwrap();
+    let client = credential::connect_with_catalog(
+        &TestVault,
+        &route,
+        &[route.base_url().to_owned()],
+        None,
+        &resolver,
+    )
+    .unwrap()
+    .0;
+
+    let response = client.complete(&image_req(route.model_id())).unwrap();
+
+    let usage = response.usage.expect("provider reported usage");
+    assert_eq!(usage.prompt_tokens, 11);
+    assert_eq!(usage.completion_tokens, 5);
+    assert_eq!(usage.cached_tokens, Some(3));
+    assert_eq!(usage.evidence, UsageEvidence::Measured);
+    let captured = captured.recv().unwrap();
+    assert_eq!(captured.body["model"], "deepseek-flash");
+    assert_eq!(
+        captured.body["messages"][0]["content"],
+        serde_json::json!([
+            {"type": "text", "text": "describe this image"},
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,Zm9v"}
+            }
+        ])
+    );
+}
+
+#[test]
+fn bundled_deepseek_flash_does_not_guess_usage_for_an_image() {
+    let response =
+        r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#;
+    let (base_url, captured) = one_shot_server(200, response.into());
+    let resolver = bundled_deepseek_resolver(&base_url);
+    let route = resolver.resolve("deepseek-v4-flash").unwrap();
+    let client = credential::connect_with_catalog(
+        &TestVault,
+        &route,
+        &[route.base_url().to_owned()],
+        None,
+        &resolver,
+    )
+    .unwrap()
+    .0;
+
+    let response = client.complete(&image_req(route.model_id())).unwrap();
+
+    assert!(response.usage.is_none());
+    assert_eq!(
+        captured.recv().unwrap().body["messages"][0]["content"][1]["type"],
+        "image_url"
     );
 }
 

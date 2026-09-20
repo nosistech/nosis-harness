@@ -22,13 +22,14 @@ const TEST_CATALOG: &str = r#"
 
     [routes.deepseek-v4-flash]
     provider = "deepseek"
-    model_id = "deepseek-v4-flash"
+    model_id = "deepseek-flash"
     base_url = "https://example.invalid"
     wire = "openai"
     vault_entry = "deepseek"
     thinking_dialect = "deepseek-nhm"
     context = 1000
     max_out = 64000
+    modality = ["text", "image"]
 
     [routes.deepseek-v4-flash.price]
     currency = "CNY"
@@ -578,7 +579,7 @@ fn missing_key_on_switch_keeps_current_route() {
     );
     assert!(!out.contains("switched"), "got: {out}");
     assert_eq!(s.route.id(), "deepseek-v4-flash");
-    assert_eq!(s.agent.model_id, "deepseek-v4-flash");
+    assert_eq!(s.agent.model_id, "deepseek-flash");
 }
 
 #[test]
@@ -1524,7 +1525,7 @@ fn image_attaches_to_next_message_and_accepts_spaces_in_path() {
         b"\x89PNG\r\n\x1a\nfixture",
     )
     .unwrap();
-    let (mut s, calls) = test_session("kimi-k2.6", tmp.path());
+    let (mut s, calls) = test_session("deepseek-v4-flash", tmp.path());
 
     let (out, err) = drive(
         &mut s,
@@ -1557,7 +1558,7 @@ fn image_attaches_to_next_message_and_accepts_spaces_in_path() {
 fn image_on_text_only_route_fails_before_read_or_model_call_and_teaches_switch() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("screen.png"), b"\x89PNG\r\n\x1a\nfixture").unwrap();
-    let (mut s, calls) = test_session("deepseek-v4-flash", tmp.path());
+    let (mut s, calls) = test_session("glm-4.5-flash", tmp.path());
 
     let (out, err) = drive(&mut s, &["/image screen.png"]);
 
@@ -1565,11 +1566,11 @@ fn image_on_text_only_route_fails_before_read_or_model_call_and_teaches_switch()
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert!(s.pending_images.is_empty());
     assert!(
-        err.contains("route deepseek-v4-flash accepts text only - it cannot read images."),
+        err.contains("route glm-4.5-flash accepts text only - it cannot read images."),
         "got: {err}"
     );
     assert!(
-        err.contains("Image-capable routes: kimi-k2.6."),
+        err.contains("Image-capable routes: deepseek-v4-flash, kimi-k2.6."),
         "got: {err}"
     );
     assert!(

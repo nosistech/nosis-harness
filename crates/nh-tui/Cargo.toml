@@ -14,8 +14,8 @@ anyhow.workspace = true
 chrono.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
-nh-core = { path = "../nh-core", version = "0.2.1" }
-nh-law = { path = "../nh-law", version = "0.2.1" }
-nh-routes = { path = "../nh-routes", version = "0.2.1" }
-nh-tools = { path = "../nh-tools", version = "0.2.1" }
-nh-vault = { path = "../nh-vault", version = "0.2.1" }
+nh-core = { path = "../nh-core", version = "0.2.2" }
+nh-law = { path = "../nh-law", version = "0.2.2" }
+nh-routes = { path = "../nh-routes", version = "0.2.2" }
+nh-tools = { path = "../nh-tools", version = "0.2.2" }
+nh-vault = { path = "../nh-vault", version = "0.2.2" }

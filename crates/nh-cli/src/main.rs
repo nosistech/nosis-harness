@@ -1,4 +1,4 @@
-//! nh - the Nosis Harness CLI. Commands: init, key, run, chat, doctor, why, tui, fleet, mcp.
+//! nh - the Nosis Harness CLI. Run `nh setup` for guided first use or `nh --help` for commands.
 //! UX IS THE PRODUCT: every message short, concrete, actionable. Errors say what to do
 //! next, never stack traces. Approval prompts show the command on one safe line
 //! (scrubbed, control chars escaped), y/N, default deny.
@@ -14,6 +14,7 @@ mod cmd_mcp;
 mod cmd_profile;
 mod cmd_resume;
 mod cmd_run;
+mod cmd_setup;
 mod cmd_tui;
 mod cmd_why;
 mod usage_tracker;
@@ -46,6 +47,8 @@ impl AsciiArg {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Set up this project, choose a model, and optionally start chat
+    Setup,
     /// Set up .nosis/ in this repo (receipts dir, .gitignore, secret-pattern pre-commit hook)
     Init,
     /// Manage API keys in the OS-native vault (never echoed, never stored in files)
@@ -188,11 +191,22 @@ fn parse_max_turns(value: &str) -> Result<u32, String> {
 }
 
 fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    let result = if std::env::args_os().nth(1).is_none() {
+        let terminal_capability =
+            nh_core::terminal_capability::TerminalCapability::from_process(None);
+        cmd_setup::run(terminal_capability, None)
+    } else {
+        dispatch(Cli::parse())
+    };
+    finish(result)
+}
+
+fn dispatch(cli: Cli) -> anyhow::Result<()> {
     let forced_ascii = cli.ascii.map(AsciiArg::enabled);
     let terminal_capability =
         nh_core::terminal_capability::TerminalCapability::from_process(forced_ascii);
-    let result = match cli.cmd {
+    match cli.cmd {
+        Cmd::Setup => cmd_setup::run(terminal_capability, forced_ascii),
         Cmd::Init => cmd_init::run(),
         Cmd::Key { action } => match action {
             KeyAction::Add { entry } => cmd_key::add(&entry),
@@ -257,7 +271,10 @@ fn main() -> anyhow::Result<()> {
         Cmd::Mcp {
             action: McpAction::Serve { addr, token_entry },
         } => cmd_mcp::serve(&addr, token_entry.as_deref()),
-    };
+    }
+}
+
+fn finish(result: anyhow::Result<()>) -> anyhow::Result<()> {
     // UX: one friendly line, what to do next, exit 1. Never a debug dump.
     // Every output path passes the Scrubber - this final line included (key
     // literals are scrubbed at the source; this catches key shapes).

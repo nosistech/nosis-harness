@@ -1,6 +1,21 @@
 use super::*;
 
 #[test]
+fn parses_setup() {
+    let cli = Cli::try_parse_from(["nh", "setup"]).unwrap();
+    assert!(matches!(cli.cmd, Cmd::Setup));
+}
+
+#[test]
+fn top_level_help_discovers_guided_setup() {
+    use clap::CommandFactory as _;
+
+    let help = Cli::command().render_long_help().to_string();
+    assert!(help.contains("setup"), "got: {help}");
+    assert!(help.contains("choose a model"), "got: {help}");
+}
+
+#[test]
 fn parses_init() {
     let cli = Cli::try_parse_from(["nh", "init"]).unwrap();
     assert!(matches!(cli.cmd, Cmd::Init));
