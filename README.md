@@ -65,8 +65,9 @@ This needs no API key and explains the remaining setup. To use `nh` from any pro
 add the folder containing `nh.exe` to your **user** PATH and open a new terminal.
 You can also call it by its full path. See the [Windows quickstart](docs/WINDOWS_QUICKSTART.md).
 
-**WinGet:** the package is being prepared for catalog review. It is not available
-through `winget install` yet. Use the download above until the listing is accepted.
+**WinGet:** the [package submission](https://github.com/microsoft/winget-pkgs/pull/438174)
+is awaiting catalog approval. It is not available through `winget install` yet.
+Use the download above until the listing is accepted.
 
 ### Build from source
 

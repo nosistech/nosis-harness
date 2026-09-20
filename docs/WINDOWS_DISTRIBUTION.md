@@ -6,7 +6,8 @@ will manage the command's PATH entry for a per-user installation.
 
 **Availability:** Windows binaries are distributed through
 [GitHub Releases](https://github.com/nosistech/nosis-harness/releases). The WinGet
-listing is pending catalog review. These tools prepare artifacts for review. They do not publish a
+listing is pending [catalog approval](https://github.com/microsoft/winget-pkgs/pull/438174).
+These tools prepare artifacts for review. They do not publish a
 release, submit a package, install anything, or change PATH.
 
 ## Build a local preview

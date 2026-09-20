@@ -81,8 +81,9 @@ shared import boundary, and production responsibilities live in named modules. `
 ## Deployment Shape
 
 `nh` is a local CLI, not a hosted multi-user service. Windows releases include a portable
-executable and ZIP with checksums. Source installation remains available. The WinGet package
-is being prepared for catalog review and is not available through WinGet yet.
+executable and ZIP with checksums. Source installation remains available. The WinGet
+[package submission](https://github.com/microsoft/winget-pkgs/pull/438174) is awaiting catalog
+approval and is not available through WinGet yet.
 Windows is supported. macOS is in testing. Linux builds from source and is not yet verified.
 Required CI covers Windows, macOS, and a supply-chain check.
 
