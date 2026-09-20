@@ -11,7 +11,7 @@ commit passes local and remote gates.
 
 No changes yet.
 
-## [0.2.1] - 2026-09-18
+## [0.2.1] - 2026-09-20
 
 ### Security
 

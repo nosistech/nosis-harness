@@ -29,6 +29,39 @@ function Write-Utf8NoBom {
     )
 }
 
+function Find-Dumpbin {
+    $OnPath = Get-Command dumpbin.exe -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -ne $OnPath) {
+        return $OnPath.Source
+    }
+
+    $ProgramFilesX86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
+    if ([string]::IsNullOrEmpty($ProgramFilesX86)) {
+        throw "dumpbin.exe is not on PATH and ProgramFiles(x86) is unavailable."
+    }
+    $VswherePath = Join-Path $ProgramFilesX86 "Microsoft Visual Studio\Installer\vswhere.exe"
+    if (-not (Test-Path -LiteralPath $VswherePath -PathType Leaf)) {
+        throw "dumpbin.exe is not on PATH and Visual Studio Installer's vswhere.exe was not found."
+    }
+
+    $Found = @(& $VswherePath -latest -products "*" `
+        -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+        -find "VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe")
+    if ($LASTEXITCODE -ne 0) {
+        throw "vswhere failed while locating dumpbin.exe with exit code $LASTEXITCODE."
+    }
+    $Candidates = @(
+        $Found |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) }
+    )
+    if ($Candidates.Count -eq 0) {
+        throw "Visual Studio C++ tools are installed, but dumpbin.exe could not be found."
+    }
+    return [System.IO.Path]::GetFullPath(($Candidates | Select-Object -First 1))
+}
+
 if ($env:OS -ne "Windows_NT") {
     throw "Windows packaging must run on Windows."
 }
@@ -170,6 +203,34 @@ try {
         throw "The built binary reported '$ReportedVersion'; expected 'nh $Version'."
     }
 
+    $DumpbinPath = Find-Dumpbin
+    $DumpbinOutput = @(& $DumpbinPath /NOLOGO /DEPENDENTS $BuiltBinary)
+    if ($LASTEXITCODE -ne 0) {
+        throw "dumpbin /DEPENDENTS failed with exit code $LASTEXITCODE."
+    }
+    $PeImports = @(
+        $DumpbinOutput |
+            ForEach-Object {
+                [regex]::Matches(
+                    [string]$_,
+                    '(?i)(?<![a-z0-9_.-])(?<dll>[a-z0-9_.-]+\.dll)(?![a-z0-9_.-])'
+                ) | ForEach-Object { $_.Groups["dll"].Value.ToLowerInvariant() }
+            } |
+            Sort-Object -Unique
+    )
+    if ($PeImports.Count -eq 0) {
+        throw "dumpbin /DEPENDENTS returned no parseable DLL imports for nh.exe."
+    }
+    $ForbiddenImports = @(
+        $PeImports | Where-Object {
+            $_ -match '^(?:vcruntime140.*|msvcp140.*|msvcr[0-9]+.*|ucrtbase|api-ms-win-crt-.*)\.dll$'
+        }
+    )
+    if ($ForbiddenImports.Count -gt 0) {
+        throw "nh.exe dynamically imports a C runtime DLL: $($ForbiddenImports -join ', ')."
+    }
+    $StaticCrtVerified = $true
+
     $PostBuildCommitOutput = @(& git rev-parse --verify HEAD)
     if ($LASTEXITCODE -ne 0) {
         throw "Unable to recheck the source commit after building."
@@ -293,16 +354,48 @@ ManifestType: defaultLocale
 ManifestVersion: $ManifestVersion
 "@
 
+    $BuildEnvironment = if ($env:GITHUB_ACTIONS -eq "true") {
+        "github-actions"
+    } else {
+        "local"
+    }
+    $CiMetadata = $null
+    if ($BuildEnvironment -eq "github-actions") {
+        $CiMetadata = [ordered]@{}
+        $CiFields = [ordered]@{
+            run_id       = $env:GITHUB_RUN_ID
+            run_attempt  = $env:GITHUB_RUN_ATTEMPT
+            sha          = $env:GITHUB_SHA
+            workflow_ref = $env:GITHUB_WORKFLOW_REF
+        }
+        foreach ($Field in $CiFields.GetEnumerator()) {
+            if (-not [string]::IsNullOrEmpty([string]$Field.Value)) {
+                $CiMetadata[$Field.Key] = [string]$Field.Value
+            }
+        }
+        $ImageParts = @(
+            @($env:ImageOS, $env:ImageVersion) |
+                Where-Object { -not [string]::IsNullOrEmpty([string]$_) }
+        )
+        if ($ImageParts.Count -gt 0) {
+            $CiMetadata["image"] = $ImageParts -join "@"
+        }
+    }
+
     $Provenance = [ordered]@{
         format_version       = 1
         mode                 = $Mode
         publication_state    = "not-published"
+        build_environment    = $BuildEnvironment
+        ci                   = $CiMetadata
         version              = $Version
         target               = $TargetTriple
         source_commit        = $SourceCommit
         source_dirty         = $SourceDirty
         source_tag           = $SourceTag
-        static_crt           = $true
+        static_crt           = $StaticCrtVerified
+        pe_inspector         = "dumpbin /DEPENDENTS"
+        pe_imports           = $PeImports
         archive              = $ArchiveName
         archive_sha256       = $ArchiveHash
         binary_sha256        = $BinaryHash
