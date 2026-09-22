@@ -1,6 +1,7 @@
 use crate::fleet_tools::preflight_fleet_run;
 use crate::response::scrub_json;
 use crate::route_tools::{route_cost_at, savings_json, why_at};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{TimeZone as _, Utc};
 use std::fs::File;
 use std::io::{Read as _, Write as _};
@@ -110,6 +111,16 @@ fn response_value(response: &str) -> Value {
     serde_json::from_str(body).expect("HTTP response body is JSON")
 }
 
+struct RawHttpRequest<'a> {
+    method: &'a str,
+    path: &'a str,
+    host: &'a str,
+    origin: Option<&'a str>,
+    token: Option<&'a str>,
+    extra_headers: &'a str,
+    body: &'a str,
+}
+
 #[test]
 fn banner_never_prints_a_caller_supplied_token() {
     let root = tempfile::tempdir().unwrap();
@@ -161,8 +172,46 @@ fn raw_post(
     token: Option<&str>,
     body: &Value,
 ) -> String {
-    let body = body.to_string();
-    raw_request(addr, "POST", "/mcp", host, origin, token, &body)
+    let body = modernized_body(body, "2026-07-28");
+    let method = body["method"].as_str().unwrap_or("");
+    let mut protocol_headers = format!(
+        "Accept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2026-07-28\r\nMcp-Method: {method}\r\n"
+    );
+    if method == "tools/call" {
+        if let Some(name) = body["params"]["name"].as_str() {
+            protocol_headers.push_str(&format!("Mcp-Name: {name}\r\n"));
+        }
+    }
+    raw_request_with_headers(
+        addr,
+        RawHttpRequest {
+            method: "POST",
+            path: "/mcp",
+            host,
+            origin,
+            token,
+            extra_headers: &protocol_headers,
+            body: &body.to_string(),
+        },
+    )
+}
+
+fn modernized_body(body: &Value, version: &str) -> Value {
+    let mut body = body.clone();
+    if let Some(params) = body.get_mut("params").and_then(Value::as_object_mut) {
+        params.insert(
+            "_meta".into(),
+            json!({
+                "io.modelcontextprotocol/protocolVersion": version,
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "nh-mcp-tests",
+                    "version": env!("CARGO_PKG_VERSION")
+                },
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }),
+        );
+    }
+    body
 }
 
 fn raw_request(
@@ -174,8 +223,32 @@ fn raw_request(
     token: Option<&str>,
     body: &str,
 ) -> String {
+    raw_request_with_headers(
+        addr,
+        RawHttpRequest {
+            method,
+            path,
+            host,
+            origin,
+            token,
+            extra_headers: "",
+            body,
+        },
+    )
+}
+
+fn raw_request_with_headers(addr: SocketAddr, request: RawHttpRequest<'_>) -> String {
+    let RawHttpRequest {
+        method,
+        path,
+        host,
+        origin,
+        token,
+        extra_headers,
+        body,
+    } = request;
     let mut headers = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{extra_headers}",
         body.len()
     );
     if let Some(origin) = origin {
@@ -920,6 +993,187 @@ fn exact_routes_accept_only_well_known_get_and_mcp_post() {
 }
 
 #[test]
+fn modern_server_discovery_and_rpc_boundaries_are_explicit() {
+    let (_root, server) = test_server();
+    let addr = server.addr();
+    let host = addr.to_string();
+    let token = server.token().to_string();
+
+    let discover = raw_post(
+        addr,
+        &host,
+        None,
+        Some(&token),
+        &json!({
+            "jsonrpc": "2.0",
+            "id": "discover-1",
+            "method": "server/discover",
+            "params": {}
+        }),
+    );
+    let discover_body = response_value(&discover);
+    assert!(discover.starts_with("HTTP/1.1 200"), "{discover}");
+    assert_eq!(discover_body["id"], "discover-1");
+    assert_eq!(discover_body["result"]["resultType"], "complete");
+    assert_eq!(
+        discover_body["result"]["supportedVersions"],
+        json!(["2026-07-28"])
+    );
+    assert_eq!(
+        discover_body["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "nh-mcp"
+    );
+
+    let unknown = raw_post(
+        addr,
+        &host,
+        None,
+        Some(&token),
+        &json!({
+            "jsonrpc": "2.0",
+            "id": u64::MAX,
+            "method": "unknown/method",
+            "params": {}
+        }),
+    );
+    let unknown_body = response_value(&unknown);
+    assert!(unknown.starts_with("HTTP/1.1 404"), "{unknown}");
+    assert_eq!(unknown_body["id"], json!(u64::MAX));
+    assert_eq!(unknown_body["error"]["code"], -32601);
+
+    let wrong_http_method = raw_request(addr, "GET", "/mcp", &host, None, Some(&token), "");
+    assert!(
+        wrong_http_method.starts_with("HTTP/1.1 405"),
+        "{wrong_http_method}"
+    );
+
+    let tool_name = "t\u{f8}\u{f8}l";
+    let encoded_name = STANDARD.encode(tool_name.as_bytes());
+    let call = modernized_body(&tools_call(tool_name, json!({})), "2026-07-28");
+    let headers = format!(
+        "Accept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2026-07-28\r\nMcp-Method: tools/call\r\nMcp-Name: =?base64?{encoded_name}?=\r\n"
+    );
+    let encoded_call = raw_request_with_headers(
+        addr,
+        RawHttpRequest {
+            method: "POST",
+            path: "/mcp",
+            host: &host,
+            origin: None,
+            token: Some(&token),
+            extra_headers: &headers,
+            body: &call.to_string(),
+        },
+    );
+    assert!(encoded_call.starts_with("HTTP/1.1 200"), "{encoded_call}");
+    assert_eq!(
+        response_value(&encoded_call)["result"]["resultType"],
+        "complete"
+    );
+
+    server.shutdown().unwrap();
+}
+
+#[test]
+fn invalid_modern_envelopes_are_rejected_before_fleet_dispatch() {
+    let (root, server) = test_server();
+    let addr = server.addr();
+    let host = addr.to_string();
+    let token = server.token().to_string();
+    let call = modernized_body(
+        &tools_call(
+            "fleet_run",
+            json!({ "tasks": [{ "task": "must not dispatch" }], "budget": 100 }),
+        ),
+        "2026-07-28",
+    );
+
+    let missing_headers = raw_request(
+        addr,
+        "POST",
+        "/mcp",
+        &host,
+        None,
+        Some(&token),
+        &call.to_string(),
+    );
+    let duplicate_headers = raw_request_with_headers(
+        addr,
+        RawHttpRequest {
+            method: "POST",
+            path: "/mcp",
+            host: &host,
+            origin: None,
+            token: Some(&token),
+            extra_headers: "MCP-Protocol-Version: 2026-07-28\r\nMCP-Protocol-Version: 2026-07-28\r\nMcp-Method: tools/call\r\nMcp-Name: fleet_run\r\n",
+            body: &call.to_string(),
+        },
+    );
+    let mismatched_method = raw_request_with_headers(
+        addr,
+        RawHttpRequest {
+            method: "POST",
+            path: "/mcp",
+            host: &host,
+            origin: None,
+            token: Some(&token),
+            extra_headers: "MCP-Protocol-Version: 2026-07-28\r\nMcp-Method: tools/list\r\nMcp-Name: fleet_run\r\n",
+            body: &call.to_string(),
+        },
+    );
+    for response in [&missing_headers, &duplicate_headers, &mismatched_method] {
+        assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+        assert_eq!(response_value(response)["error"]["code"], -32020);
+    }
+
+    let old_version = modernized_body(
+        &json!({"jsonrpc":"2.0","id":"old","method":"tools/list","params":{}}),
+        "2025-11-25",
+    );
+    let unsupported = raw_request_with_headers(
+        addr,
+        RawHttpRequest {
+            method: "POST",
+            path: "/mcp",
+            host: &host,
+            origin: None,
+            token: Some(&token),
+            extra_headers: "MCP-Protocol-Version: 2025-11-25\r\nMcp-Method: tools/list\r\n",
+            body: &old_version.to_string(),
+        },
+    );
+    let unsupported_body = response_value(&unsupported);
+    assert_eq!(unsupported_body["error"]["code"], -32022);
+    assert_eq!(
+        unsupported_body["error"]["data"],
+        json!({"supported": ["2026-07-28"], "requested": "2025-11-25"})
+    );
+
+    let fractional_id = modernized_body(
+        &json!({"jsonrpc":"2.0","id":1.5,"method":"tools/list","params":{}}),
+        "2026-07-28",
+    );
+    let malformed = raw_request_with_headers(
+        addr,
+        RawHttpRequest {
+            method: "POST",
+            path: "/mcp",
+            host: &host,
+            origin: None,
+            token: Some(&token),
+            extra_headers: "MCP-Protocol-Version: 2026-07-28\r\nMcp-Method: tools/list\r\n",
+            body: &fractional_id.to_string(),
+        },
+    );
+    let malformed_body = response_value(&malformed);
+    assert_eq!(malformed_body["error"]["code"], -32600);
+    assert!(malformed_body.get("id").is_none(), "{malformed_body}");
+
+    assert!(!root.path().join(".nosis").join("fleet").exists());
+    server.shutdown().unwrap();
+}
+
+#[test]
 fn oversized_request_body_is_rejected_with_413() {
     let (_root, server) = test_server();
     let addr = server.addr();
@@ -931,6 +1185,8 @@ fn oversized_request_body_is_rejected_with_413() {
 
     assert!(response.starts_with("HTTP/1.1 413"), "{response}");
     assert!(response.contains("request too large"), "{response}");
+    assert_eq!(response_value(&response)["error"]["code"], -32600);
+    assert!(response_value(&response).get("id").is_none());
     server.shutdown().unwrap();
 }
 

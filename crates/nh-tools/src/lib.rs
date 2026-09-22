@@ -7,7 +7,7 @@ use serde_json::json;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
 use std::time::Duration;
 
 mod edit;
@@ -16,7 +16,10 @@ pub mod mcp;
 mod search;
 
 #[cfg(test)]
-use exec::{render_bounded_output, spawn_drain, BoundedOutput, DrainCompletion, DrainOutcome};
+use exec::{
+    render_bounded_output, spawn_drain, terminate_child_tree_with, BoundedOutput, DrainCompletion,
+    DrainOutcome, Termination, TerminationReason,
+};
 
 pub use mcp::{
     load_mcp_config, mcp_tools, McpAuth, McpClient, McpServerConfig, McpToolInfo, McpToolset,
@@ -242,6 +245,12 @@ impl ToolResultEnvelope {
 /// they can enter the conversation.
 pub(crate) fn render_tool_result(content: String, ctx: &ToolCtx) -> String {
     ToolResultEnvelope::new(content, &ctx.scrubber).render()
+}
+
+pub(crate) fn cancelled_before(action: &str, ctx: &ToolCtx) -> Option<String> {
+    ctx.cancel
+        .load(Ordering::Acquire)
+        .then(|| render_tool_result(format!("turn cancelled before {action}"), ctx))
 }
 
 /// Child-process environment allowlist. Names are case-insensitive because
@@ -593,6 +602,25 @@ fn create_temp_file(
     nonce: u128,
     path_label: &str,
 ) -> anyhow::Result<(PathBuf, std::fs::File)> {
+    create_temp_file_with_privacy(parent, prefix, nonce, path_label, false)
+}
+
+fn create_edit_temp_file(
+    parent: &Path,
+    prefix: &str,
+    nonce: u128,
+    path_label: &str,
+) -> anyhow::Result<(PathBuf, std::fs::File)> {
+    create_temp_file_with_privacy(parent, prefix, nonce, path_label, true)
+}
+
+fn create_temp_file_with_privacy(
+    parent: &Path,
+    prefix: &str,
+    nonce: u128,
+    path_label: &str,
+    private_on_unix: bool,
+) -> anyhow::Result<(PathBuf, std::fs::File)> {
     let mut attempt = 0_u16;
     loop {
         if attempt == 1000 {
@@ -602,11 +630,16 @@ fn create_temp_file(
             "{prefix}{}-{nonce}-{attempt}.tmp",
             std::process::id()
         ));
-        match std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&candidate)
-        {
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        if private_on_unix {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        #[cfg(not(unix))]
+        let _ = private_on_unix;
+        match options.open(&candidate) {
             Ok(file) => return Ok((candidate, file)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 attempt += 1;
@@ -617,6 +650,198 @@ fn create_temp_file(
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreatePublication {
+    Published,
+    DestinationExists,
+}
+
+fn remove_staged_file(temp_path: &Path, path_label: &str) -> anyhow::Result<()> {
+    match std::fs::remove_file(temp_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => bail!("could not clean temporary file for {path_label}: {error}"),
+    }
+}
+
+/// Publish a synced sibling staging file without ever replacing `destination`.
+///
+/// `before_publish` exists only so tests can place a competing file at the exact
+/// publication boundary. Production passes a no-op closure.
+fn publish_create_only_with(
+    temp_path: &Path,
+    destination: &Path,
+    path_label: &str,
+    before_publish: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<CreatePublication> {
+    if let Err(error) = before_publish() {
+        return match remove_staged_file(temp_path, path_label) {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(anyhow::anyhow!("{error}; additionally, {cleanup}")),
+        };
+    }
+
+    match std::fs::hard_link(temp_path, destination) {
+        Ok(()) => {
+            if let Err(cleanup) = remove_staged_file(temp_path, path_label) {
+                bail!("created {path_label}, but temporary-file cleanup failed: {cleanup}");
+            }
+            Ok(CreatePublication::Published)
+        }
+        Err(error) => {
+            let destination_exists = error.kind() == std::io::ErrorKind::AlreadyExists
+                || std::fs::symlink_metadata(destination).is_ok();
+            let cleanup = remove_staged_file(temp_path, path_label);
+            if destination_exists {
+                return match cleanup {
+                    Ok(()) => Ok(CreatePublication::DestinationExists),
+                    Err(cleanup) => Err(anyhow::anyhow!(
+                        "refused: {path_label} already exists; additionally, {cleanup}"
+                    )),
+                };
+            }
+            let failure = anyhow::anyhow!(
+                "could not atomically create {path_label} without replacing an existing path: {error} - check permissions, free space, and filesystem hard-link support"
+            );
+            match cleanup {
+                Ok(()) => Err(failure),
+                Err(cleanup) => Err(anyhow::anyhow!("{failure}; additionally, {cleanup}")),
+            }
+        }
+    }
+}
+
+fn publish_create_only(
+    temp_path: &Path,
+    destination: &Path,
+    path_label: &str,
+) -> anyhow::Result<CreatePublication> {
+    publish_create_only_with(temp_path, destination, path_label, || Ok(()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditPublication {
+    Published,
+    Conflict,
+    Cancelled,
+}
+
+fn edit_target_still_matches(
+    destination: &Path,
+    expected: &[u8],
+    expected_metadata: &std::fs::Metadata,
+    path_label: &str,
+) -> anyhow::Result<bool> {
+    let current_metadata = match std::fs::symlink_metadata(destination) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("could not recheck {path_label} before editing"))
+        }
+    };
+    if !current_metadata.file_type().is_file()
+        || current_metadata.len() != expected_metadata.len()
+        || current_metadata.permissions().readonly() != expected_metadata.permissions().readonly()
+    {
+        return Ok(false);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if current_metadata.permissions().mode() != expected_metadata.permissions().mode() {
+            return Ok(false);
+        }
+    }
+    if let (Ok(expected_modified), Ok(current_modified)) =
+        (expected_metadata.modified(), current_metadata.modified())
+    {
+        if current_modified != expected_modified {
+            return Ok(false);
+        }
+    }
+
+    let mut current = Vec::with_capacity(expected.len().min(TOOL_BUFFER_BYTES));
+    std::fs::File::open(destination)
+        .with_context(|| format!("could not recheck {path_label} before editing"))?
+        .take((MAX_TOOL_READ_BYTES + 1) as u64)
+        .read_to_end(&mut current)
+        .with_context(|| format!("could not recheck {path_label} before editing"))?;
+    Ok(current.len() <= MAX_TOOL_READ_BYTES && current == expected)
+}
+
+/// Best-effort edit conflict detection. The comparison catches cooperative edits
+/// before publication, but an external writer can still race the final rename.
+fn publish_edit_with(
+    temp_path: &Path,
+    destination: &Path,
+    expected: &[u8],
+    expected_metadata: &std::fs::Metadata,
+    path_label: &str,
+    before_check: impl FnOnce() -> anyhow::Result<()>,
+    cancelled_after_check: impl FnOnce() -> bool,
+) -> anyhow::Result<EditPublication> {
+    if let Err(error) = before_check() {
+        return match remove_staged_file(temp_path, path_label) {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(anyhow::anyhow!("{error}; additionally, {cleanup}")),
+        };
+    }
+    let unchanged =
+        match edit_target_still_matches(destination, expected, expected_metadata, path_label) {
+            Ok(unchanged) => unchanged,
+            Err(error) => {
+                return match remove_staged_file(temp_path, path_label) {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(anyhow::anyhow!("{error}; additionally, {cleanup}")),
+                };
+            }
+        };
+    if !unchanged {
+        return match remove_staged_file(temp_path, path_label) {
+            Ok(()) => Ok(EditPublication::Conflict),
+            Err(cleanup) => Err(anyhow::anyhow!(
+                "refused: {path_label} changed since it was read; additionally, {cleanup}"
+            )),
+        };
+    }
+    if cancelled_after_check() {
+        return match remove_staged_file(temp_path, path_label) {
+            Ok(()) => Ok(EditPublication::Cancelled),
+            Err(cleanup) => Err(anyhow::anyhow!(
+                "turn cancelled before file edit; additionally, {cleanup}"
+            )),
+        };
+    }
+    if let Err(error) = std::fs::rename(temp_path, destination) {
+        let failure = anyhow::anyhow!("could not replace {path_label}: {error}");
+        return match remove_staged_file(temp_path, path_label) {
+            Ok(()) => Err(failure),
+            Err(cleanup) => Err(anyhow::anyhow!("{failure}; additionally, {cleanup}")),
+        };
+    }
+    Ok(EditPublication::Published)
+}
+
+fn publish_edit(
+    temp_path: &Path,
+    destination: &Path,
+    expected: &[u8],
+    expected_metadata: &std::fs::Metadata,
+    path_label: &str,
+    cancelled_after_check: impl FnOnce() -> bool,
+) -> anyhow::Result<EditPublication> {
+    publish_edit_with(
+        temp_path,
+        destination,
+        expected,
+        expected_metadata,
+        path_label,
+        || Ok(()),
+        cancelled_after_check,
+    )
 }
 
 impl Tool for WriteFile {
@@ -644,6 +869,9 @@ impl Tool for WriteFile {
     fn execute(&self, args: serde_json::Value, ctx: &ToolCtx) -> anyhow::Result<String> {
         let path = str_arg(&args, "path")?;
         let content = str_arg(&args, "content")?;
+        if let Some(cancelled) = cancelled_before("file creation", ctx) {
+            return Ok(cancelled);
+        }
         let (resolved, relative) = resolve_in_workdir(&ctx.workdir, path)?;
         let parent = resolved.parent().ok_or_else(|| {
             anyhow::anyhow!("could not write {path}: file has no parent directory")
@@ -702,6 +930,9 @@ impl Tool for WriteFile {
                 return Ok(render_tool_result(format!("user denied: {action}"), ctx));
             }
         }
+        if let Some(cancelled) = cancelled_before("file creation", ctx) {
+            return Ok(cancelled);
+        }
 
         let destination_parent = destination.parent().ok_or_else(|| {
             anyhow::anyhow!("could not write {path}: file has no parent directory")
@@ -734,32 +965,18 @@ impl Tool for WriteFile {
             let _ = std::fs::remove_file(&temp_path);
             return Err(error);
         }
-
-        match path_exists_without_following(&destination, path) {
-            Ok(false) => {}
-            Ok(true) => {
-                let _ = std::fs::remove_file(&temp_path);
-                return Ok(render_tool_result(
-                    format!("refused: {path} already exists - use edit_file to change it"),
-                    ctx,
-                ));
-            }
-            Err(error) => {
-                let _ = std::fs::remove_file(&temp_path);
-                return Err(error);
-            }
-        }
-        if let Err(error) = std::fs::rename(&temp_path, &destination) {
+        if let Some(cancelled) = cancelled_before("file creation", ctx) {
             let _ = std::fs::remove_file(&temp_path);
-            if error.kind() == std::io::ErrorKind::AlreadyExists
-                || path_exists_without_following(&destination, path).unwrap_or(false)
-            {
-                return Ok(render_tool_result(
-                    format!("refused: {path} already exists - use edit_file to change it"),
-                    ctx,
-                ));
-            }
-            return Err(error).with_context(|| format!("could not create {path}"));
+            return Ok(cancelled);
+        }
+
+        if publish_create_only(&temp_path, &destination, path)?
+            == CreatePublication::DestinationExists
+        {
+            return Ok(render_tool_result(
+                format!("refused: {path} already exists - use edit_file to change it"),
+                ctx,
+            ));
         }
         Ok(render_tool_result(
             format!("created {destination_label} ({} bytes)", content.len()),
@@ -805,6 +1022,9 @@ impl Tool for EditFile {
         let path = str_arg(&args, "path")?;
         let old = str_arg(&args, "old_string")?;
         let new = str_arg(&args, "new_string")?;
+        if let Some(cancelled) = cancelled_before("file edit", ctx) {
+            return Ok(ToolExecution::plain(cancelled));
+        }
         if old.is_empty() {
             bail!("old_string is empty - provide the exact text to replace");
         }
@@ -827,6 +1047,9 @@ impl Tool for EditFile {
                 }
             }
             Guard::Allow => {}
+        }
+        if let Some(cancelled) = cancelled_before("file edit", ctx) {
+            return Ok(ToolExecution::plain(cancelled));
         }
         if !resolved.is_file() {
             bail!("file not found: {path} - check the path against the working directory");
@@ -881,14 +1104,11 @@ impl Tool for EditFile {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let (temp_path, mut temp_file) = create_temp_file(parent, ".nh-edit-", nonce, path)?;
+        let (temp_path, mut temp_file) = create_edit_temp_file(parent, ".nh-edit-", nonce, path)?;
 
         let write_result = (|| -> anyhow::Result<()> {
             use std::io::Write as _;
 
-            temp_file
-                .write_all(edited.as_bytes())
-                .with_context(|| format!("could not write {path}"))?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt as _;
@@ -898,6 +1118,9 @@ impl Tool for EditFile {
                     ))
                     .with_context(|| format!("could not preserve permissions for {path}"))?;
             }
+            temp_file
+                .write_all(edited.as_bytes())
+                .with_context(|| format!("could not write {path}"))?;
             temp_file
                 .flush()
                 .with_context(|| format!("could not flush temporary file for {path}"))?;
@@ -911,9 +1134,33 @@ impl Tool for EditFile {
             let _ = std::fs::remove_file(&temp_path);
             return Err(error);
         }
-        if let Err(error) = std::fs::rename(&temp_path, &resolved) {
+        if let Some(cancelled) = cancelled_before("file edit", ctx) {
             let _ = std::fs::remove_file(&temp_path);
-            return Err(error).with_context(|| format!("could not replace {path}"));
+            return Ok(ToolExecution::plain(cancelled));
+        }
+        match publish_edit(
+            &temp_path,
+            &resolved,
+            content.as_bytes(),
+            &metadata,
+            path,
+            || ctx.cancel.load(Ordering::Acquire),
+        )? {
+            EditPublication::Published => {}
+            EditPublication::Conflict => {
+                return Ok(ToolExecution::plain(render_tool_result(
+                format!(
+                    "refused: {path} changed since it was read - retry edit_file with current content"
+                ),
+                ctx,
+            )))
+            }
+            EditPublication::Cancelled => {
+                return Ok(ToolExecution::plain(render_tool_result(
+                    "turn cancelled before file edit".into(),
+                    ctx,
+                )))
+            }
         }
         let tier = match matched.tier {
             edit::MatchTier::Exact => None,

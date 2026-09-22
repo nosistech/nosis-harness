@@ -15,4 +15,4 @@ chrono.workspace = true
 serde.workspace = true
 toml.workspace = true
 url.workspace = true
-nh-law = { path = "../nh-law", version = "0.2.2" }
+nh-law = { path = "../nh-law", version = "0.3.0-rc.1" }

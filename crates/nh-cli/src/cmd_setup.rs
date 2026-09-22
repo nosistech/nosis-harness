@@ -8,7 +8,7 @@ use nh_core::terminal_capability::TerminalCapability;
 use nh_routes::{RouteClass, RouteResolver};
 use nh_vault::{KeyringVault, Scrubber};
 
-use crate::{cmd_chat, cmd_doctor, cmd_init, cmd_key, cmd_run, cmd_why};
+use crate::{cmd_chat, cmd_doctor, cmd_init, cmd_key, cmd_run, cmd_why, model_preference};
 
 const MAX_PROMPT_BYTES: usize = 256;
 
@@ -43,6 +43,7 @@ trait SetupActions {
     fn doctor(&mut self) -> anyhow::Result<()>;
     fn routes(&mut self, root: &Path) -> anyhow::Result<Vec<SetupRoute>>;
     fn preview(&mut self, route: &str) -> anyhow::Result<()>;
+    fn save_model(&mut self, route: &str) -> anyhow::Result<()>;
     fn key_exists(&mut self, entry: &str) -> anyhow::Result<bool>;
     fn add_key(&mut self, entry: &str) -> anyhow::Result<()>;
     fn chat(&mut self, route: &str) -> anyhow::Result<()>;
@@ -126,6 +127,10 @@ impl SetupActions for SystemActions {
         cmd_why::run(None, Some(route), self.terminal_capability)
     }
 
+    fn save_model(&mut self, route: &str) -> anyhow::Result<()> {
+        model_preference::save(route).map(|_| ())
+    }
+
     fn key_exists(&mut self, entry: &str) -> anyhow::Result<bool> {
         KeyringVault.entry_exists(entry)
     }
@@ -135,7 +140,7 @@ impl SetupActions for SystemActions {
     }
 
     fn chat(&mut self, route: &str) -> anyhow::Result<()> {
-        cmd_chat::run(route, "balanced", self.terminal_capability)
+        cmd_chat::run(Some(route), "balanced", self.terminal_capability)
     }
 }
 
@@ -256,7 +261,20 @@ fn guide(
     };
 
     ui.line(&format!("Selected model: {}", selected.id))?;
-    ui.line("This choice is not saved as a default.")?;
+    match ask_yes_no(
+        ui,
+        "Save this user-wide default for run, chat, tui, and profile in all projects? [y/N] ",
+    )? {
+        Answer::Yes => {
+            actions.save_model(&selected.id)?;
+            ui.line("Saved as your operator default. Explicit --model still wins.")?;
+        }
+        Answer::No => ui.line("This choice will be used only for this setup session.")?,
+        Answer::Cancel => {
+            stop_after_init(ui)?;
+            return Ok(());
+        }
+    }
     ui.line("This preview compares prices. Your selected model stays the same.")?;
     match ask_yes_no(
         ui,
@@ -553,6 +571,11 @@ mod tests {
             Ok(())
         }
 
+        fn save_model(&mut self, route: &str) -> anyhow::Result<()> {
+            self.calls.push(format!("save-model:{route}"));
+            Ok(())
+        }
+
         fn key_exists(&mut self, entry: &str) -> anyhow::Result<bool> {
             self.calls.push(format!("key-exists:{entry}"));
             Ok(self.key_present)
@@ -601,7 +624,7 @@ mod tests {
 
     #[test]
     fn selected_route_reaches_preview_and_chat_while_existing_key_is_preserved() {
-        let mut ui = TestUi::with_lines(&["y", "2", "y", "y"]);
+        let mut ui = TestUi::with_lines(&["y", "2", "n", "y", "y"]);
         let mut actions = TestActions::new(true);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
@@ -623,8 +646,34 @@ mod tests {
     }
 
     #[test]
+    fn selected_model_is_saved_only_after_explicit_opt_in() {
+        let mut ui = TestUi::with_lines(&["y", "2", "y", "n", "n"]);
+        let mut actions = TestActions::new(true);
+
+        guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
+
+        assert!(actions
+            .calls
+            .contains(&"save-model:second-route".to_owned()));
+        assert!(!actions.calls.iter().any(|call| call.starts_with("preview")));
+        assert!(!actions.calls.iter().any(|call| call.starts_with("chat")));
+        assert!(ui.output.contains("Explicit --model still wins"));
+    }
+
+    #[test]
+    fn eof_at_save_prompt_stops_before_optional_actions() {
+        let mut ui = TestUi::with_lines(&["y", "1"]);
+        let mut actions = TestActions::new(false);
+
+        guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
+
+        assert_eq!(actions.calls, ["init", "doctor", "routes"]);
+        assert!(ui.output.contains("Setup stopped"));
+    }
+
+    #[test]
     fn no_key_path_stays_offline_and_prints_portable_next_commands() {
-        let mut ui = TestUi::with_lines(&["y", "1", "y", "n", "n"]);
+        let mut ui = TestUi::with_lines(&["y", "1", "n", "y", "n", "n"]);
         let mut actions = TestActions::new(false);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
@@ -653,7 +702,7 @@ mod tests {
 
     #[test]
     fn eof_at_optional_preview_stops_before_key_or_chat() {
-        let mut ui = TestUi::with_lines(&["y", "1"]);
+        let mut ui = TestUi::with_lines(&["y", "1", "n"]);
         let mut actions = TestActions::new(false);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
@@ -676,7 +725,7 @@ mod tests {
 
     #[test]
     fn oversized_preview_answer_stops_before_key_or_chat() {
-        let mut ui = TestUi::with_lines(&["y", "1"]);
+        let mut ui = TestUi::with_lines(&["y", "1", "n"]);
         ui.input.push_back(PromptInput::TooLong);
         let mut actions = TestActions::new(false);
 
@@ -688,7 +737,7 @@ mod tests {
 
     #[test]
     fn eof_at_key_prompt_stops_before_key_or_chat() {
-        let mut ui = TestUi::with_lines(&["y", "1", "n"]);
+        let mut ui = TestUi::with_lines(&["y", "1", "n", "n"]);
         let mut actions = TestActions::new(false);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
@@ -703,7 +752,7 @@ mod tests {
 
     #[test]
     fn eof_at_chat_prompt_stops_without_starting_chat() {
-        let mut ui = TestUi::with_lines(&["y", "1", "n"]);
+        let mut ui = TestUi::with_lines(&["y", "1", "n", "n"]);
         let mut actions = TestActions::new(true);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
@@ -717,7 +766,7 @@ mod tests {
 
     #[test]
     fn key_prompt_calls_existing_hidden_key_path_only_after_yes() {
-        let mut ui = TestUi::with_lines(&["y", "1", "n", "y", "n"]);
+        let mut ui = TestUi::with_lines(&["y", "1", "n", "n", "y", "n"]);
         let mut actions = TestActions::new(false);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
@@ -750,7 +799,7 @@ mod tests {
 
     #[test]
     fn unsafe_vault_entry_never_reaches_key_actions() {
-        let mut ui = TestUi::with_lines(&["y", "1", "n"]);
+        let mut ui = TestUi::with_lines(&["y", "1", "n", "n"]);
         let mut actions = TestActions::new(false);
         actions.routes[0].vault_entry = "unsafe\nentry".to_owned();
 

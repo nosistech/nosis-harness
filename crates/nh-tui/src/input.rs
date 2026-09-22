@@ -194,6 +194,12 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
         }
         return UiAction::None;
     }
+    if newline_key(key) {
+        if insert_composer_char(app, '\n') {
+            app.end_prompt_history_recall();
+        }
+        return UiAction::None;
+    }
     if let Some(toward_older) = prompt_history_key(key) {
         if toward_older {
             app.recall_previous_prompt();
@@ -203,9 +209,7 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
         return UiAction::None;
     }
     if word_delete_key(key) {
-        let original_len = app.input.len();
-        delete_previous_word(&mut app.input);
-        if app.input.len() != original_len {
+        if delete_previous_word(app) {
             app.end_prompt_history_recall();
         }
         if app.input.trim().is_empty() {
@@ -217,8 +221,11 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
         if !app.input.is_empty() {
             app.end_prompt_history_recall();
         }
-        app.input.clear();
+        app.clear_input();
         app.pending_send = false;
+        return UiAction::None;
+    }
+    if reduce_composer_navigation(app, key) {
         return UiAction::None;
     }
     if matches!(app.status, Status::Working | Status::FinishingInterrupted) {
@@ -239,7 +246,7 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
                 app.pending_send = !app.input.trim().is_empty();
             }
             KeyCode::Backspace => {
-                if app.input.pop().is_some() {
+                if delete_before_cursor(app) {
                     app.end_prompt_history_recall();
                 }
                 if app.input.trim().is_empty() {
@@ -251,7 +258,7 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
                     && !key
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                    && push_input_char(&mut app.input, character) =>
+                    && insert_composer_char(app, character) =>
             {
                 app.end_prompt_history_recall();
             }
@@ -266,7 +273,7 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
             }
         }
         KeyCode::Backspace => {
-            if app.input.pop().is_some() {
+            if delete_before_cursor(app) {
                 app.end_prompt_history_recall();
             }
             if app.input.trim().is_empty() {
@@ -284,7 +291,7 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
                     .modifiers
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
-            if push_input_char(&mut app.input, character) {
+            if insert_composer_char(app, character) {
                 app.end_prompt_history_recall();
             }
             if app.input.starts_with('/') {
@@ -308,7 +315,7 @@ fn reduce_ctrl_c(app: &mut App) -> UiAction {
     }
     if !app.input.is_empty() || app.pending_send {
         app.end_prompt_history_recall();
-        app.input.clear();
+        app.clear_input();
         app.pending_send = false;
         app.overlay = Overlay::None;
         app.last_ctrl_c = None;
@@ -362,17 +369,181 @@ fn prompt_history_key(key: KeyEvent) -> Option<bool> {
     }
 }
 
-fn delete_previous_word(input: &mut String) {
-    while input.chars().next_back().is_some_and(char::is_whitespace) {
-        input.pop();
-    }
-    while input
-        .chars()
+fn newline_key(key: KeyEvent) -> bool {
+    (key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT))
+        || (matches!(key.code, KeyCode::Char('j' | 'J'))
+            && key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
+fn previous_boundary(input: &str, index: usize) -> Option<usize> {
+    input[..index]
+        .char_indices()
         .next_back()
-        .is_some_and(|character| !character.is_whitespace())
-    {
-        input.pop();
+        .map(|(index, _)| index)
+}
+
+fn next_boundary(input: &str, index: usize) -> Option<usize> {
+    input[index..]
+        .chars()
+        .next()
+        .map(|character| index + character.len_utf8())
+}
+
+fn insert_composer_char(app: &mut App, character: char) -> bool {
+    if app.input.len().saturating_add(character.len_utf8()) > MAX_TASK_BYTES {
+        return false;
     }
+    let cursor = app.input_cursor_index();
+    app.input.insert(cursor, character);
+    app.set_input_cursor(cursor + character.len_utf8());
+    true
+}
+
+fn delete_before_cursor(app: &mut App) -> bool {
+    let cursor = app.input_cursor_index();
+    let Some(previous) = previous_boundary(&app.input, cursor) else {
+        return false;
+    };
+    app.input.drain(previous..cursor);
+    app.set_input_cursor(previous);
+    true
+}
+
+fn delete_at_cursor(app: &mut App) -> bool {
+    let cursor = app.input_cursor_index();
+    let Some(next) = next_boundary(&app.input, cursor) else {
+        return false;
+    };
+    app.input.drain(cursor..next);
+    app.set_input_cursor(cursor);
+    true
+}
+
+fn delete_previous_word(app: &mut App) -> bool {
+    let cursor = app.input_cursor_index();
+    let mut start = cursor;
+    while let Some(previous) = previous_boundary(&app.input, start) {
+        let character = app.input[previous..start]
+            .chars()
+            .next()
+            .expect("one character boundary");
+        if !character.is_whitespace() {
+            break;
+        }
+        start = previous;
+    }
+    while let Some(previous) = previous_boundary(&app.input, start) {
+        let character = app.input[previous..start]
+            .chars()
+            .next()
+            .expect("one character boundary");
+        if character.is_whitespace() {
+            break;
+        }
+        start = previous;
+    }
+    if start == cursor {
+        return false;
+    }
+    app.input.drain(start..cursor);
+    app.set_input_cursor(start);
+    true
+}
+
+fn reduce_composer_navigation(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Left if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
+            let cursor = app.input_cursor_index();
+            if let Some(previous) = previous_boundary(&app.input, cursor) {
+                app.set_input_cursor(previous);
+            }
+            true
+        }
+        KeyCode::Right if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
+            let cursor = app.input_cursor_index();
+            if let Some(next) = next_boundary(&app.input, cursor) {
+                app.set_input_cursor(next);
+            }
+            true
+        }
+        KeyCode::Home if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
+            if app.input.is_empty() {
+                return false;
+            }
+            let cursor = app.input_cursor_index();
+            let start = app.input[..cursor].rfind('\n').map_or(0, |index| index + 1);
+            app.set_input_cursor(start);
+            true
+        }
+        KeyCode::End if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
+            if app.input.is_empty() {
+                return false;
+            }
+            let cursor = app.input_cursor_index();
+            let end = app.input[cursor..]
+                .find('\n')
+                .map_or(app.input.len(), |index| cursor + index);
+            app.set_input_cursor(end);
+            true
+        }
+        KeyCode::Delete if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
+            if delete_at_cursor(app) {
+                app.end_prompt_history_recall();
+                if app.input.trim().is_empty() {
+                    app.pending_send = false;
+                }
+            }
+            true
+        }
+        KeyCode::Up
+            if app.input.contains('\n')
+                && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() =>
+        {
+            move_cursor_line(app, true);
+            true
+        }
+        KeyCode::Down
+            if app.input.contains('\n')
+                && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() =>
+        {
+            move_cursor_line(app, false);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn move_cursor_line(app: &mut App, upward: bool) {
+    let cursor = app.input_cursor_index();
+    let current_start = app.input[..cursor].rfind('\n').map_or(0, |index| index + 1);
+    let current_end = app.input[cursor..]
+        .find('\n')
+        .map_or(app.input.len(), |index| cursor + index);
+    let column = app.input[current_start..cursor].chars().count();
+    let (target_start, target_end) = if upward {
+        if current_start == 0 {
+            return;
+        }
+        let target_end = current_start - 1;
+        let target_start = app.input[..target_end]
+            .rfind('\n')
+            .map_or(0, |index| index + 1);
+        (target_start, target_end)
+    } else {
+        if current_end == app.input.len() {
+            return;
+        }
+        let target_start = current_end + 1;
+        let target_end = app.input[target_start..]
+            .find('\n')
+            .map_or(app.input.len(), |index| target_start + index);
+        (target_start, target_end)
+    };
+    let offset = app.input[target_start..target_end]
+        .char_indices()
+        .nth(column)
+        .map_or(target_end - target_start, |(index, _)| index);
+    app.set_input_cursor(target_start + offset);
 }
 
 pub(super) fn push_input_char(input: &mut String, character: char) -> bool {
@@ -392,17 +563,26 @@ pub(super) fn reduce_paste(app: &mut App, text: &str) -> UiAction {
         return UiAction::None;
     }
 
-    let original_len = app.input.len();
-    for character in text.chars().filter_map(|character| match character {
-        '\n' | '\r' | '\t' => Some(' '),
-        character if character.is_control() => None,
-        character => Some(character),
-    }) {
-        if !push_input_char(&mut app.input, character) {
+    let original = app.input.clone();
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        let character = match character {
+            '\r' => {
+                if characters.peek() == Some(&'\n') {
+                    characters.next();
+                }
+                '\n'
+            }
+            '\n' => '\n',
+            '\t' => ' ',
+            character if character.is_control() => continue,
+            character => character,
+        };
+        if !insert_composer_char(app, character) {
             break;
         }
     }
-    if app.input.len() != original_len {
+    if app.input != original {
         app.end_prompt_history_recall();
     }
 
@@ -588,10 +768,11 @@ pub(super) fn picker_key(
 }
 
 pub(super) fn reduce_command_menu_key(app: &mut App, key: KeyEvent) -> UiAction {
+    if newline_key(key) {
+        return UiAction::None;
+    }
     if word_delete_key(key) {
-        let original_len = app.input.len();
-        delete_previous_word(&mut app.input);
-        if app.input.len() != original_len {
+        if delete_previous_word(app) {
             app.end_prompt_history_recall();
         }
         if app.input.trim().is_empty() {
@@ -606,7 +787,7 @@ pub(super) fn reduce_command_menu_key(app: &mut App, key: KeyEvent) -> UiAction 
         if !app.input.is_empty() {
             app.end_prompt_history_recall();
         }
-        app.input.clear();
+        app.clear_input();
         app.pending_send = false;
         app.overlay = Overlay::None;
         return UiAction::None;
@@ -616,12 +797,12 @@ pub(super) fn reduce_command_menu_key(app: &mut App, key: KeyEvent) -> UiAction 
             if !app.input.is_empty() {
                 app.end_prompt_history_recall();
             }
-            app.input.clear();
+            app.clear_input();
             app.pending_send = false;
             app.overlay = Overlay::None;
         }
         KeyCode::Backspace => {
-            if app.input.pop().is_some() {
+            if delete_before_cursor(app) {
                 app.end_prompt_history_recall();
             }
             if app.input.is_empty() {
@@ -644,6 +825,12 @@ pub(super) fn reduce_command_menu_key(app: &mut App, key: KeyEvent) -> UiAction 
                 }
             }
         }
+        KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End | KeyCode::Delete => {
+            reduce_composer_navigation(app, key);
+            if let Overlay::CommandMenu { selected } = &mut app.overlay {
+                *selected = 0;
+            }
+        }
         KeyCode::Enter => return execute_command_menu(app),
         KeyCode::Char(character)
             if !character.is_control()
@@ -651,7 +838,7 @@ pub(super) fn reduce_command_menu_key(app: &mut App, key: KeyEvent) -> UiAction 
                     .modifiers
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
-            if push_input_char(&mut app.input, character) {
+            if insert_composer_char(app, character) {
                 app.end_prompt_history_recall();
             }
             if let Overlay::CommandMenu { selected } = &mut app.overlay {
@@ -765,7 +952,7 @@ pub(super) fn activate_palette_entry(app: &mut App, entry: PaletteEntry) -> UiAc
             UiAction::None
         }
         PaletteAction::Prefill(command) => {
-            app.input = command.into();
+            app.replace_input(command.into());
             app.end_prompt_history_recall();
             app.overlay = Overlay::CommandMenu { selected: 0 };
             UiAction::None

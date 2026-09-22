@@ -17,14 +17,43 @@ pub(super) fn business_card() -> Value {
 }
 
 pub(super) fn rpc_success(id: Value, result: Value) -> Value {
+    let result = match result {
+        Value::Object(mut result) => {
+            result.insert("resultType".into(), Value::String("complete".into()));
+            Value::Object(result)
+        }
+        value => json!({ "resultType": "complete", "value": value }),
+    };
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }
 
 pub(super) fn rpc_error(id: Value, code: i64, message: &str) -> Value {
-    json!({
+    let mut response = json!({
         "jsonrpc": "2.0",
-        "id": id,
         "error": { "code": code, "message": message }
+    });
+    if !id.is_null() {
+        response["id"] = id;
+    }
+    response
+}
+
+pub(super) fn rpc_error_data(id: Value, code: i64, message: &str, data: Value) -> Value {
+    let mut response = rpc_error(id, code, message);
+    response["error"]["data"] = data;
+    response
+}
+
+pub(super) fn server_discover() -> Value {
+    json!({
+        "supportedVersions": ["2026-07-28"],
+        "capabilities": { "tools": {} },
+        "_meta": {
+            "io.modelcontextprotocol/serverInfo": {
+                "name": "nh-mcp",
+                "version": env!("CARGO_PKG_VERSION")
+            }
+        }
     })
 }
 

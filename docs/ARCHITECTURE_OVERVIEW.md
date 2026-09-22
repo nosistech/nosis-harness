@@ -8,6 +8,8 @@ configured local route for execution. Only `nh-routes::RouteResolver` can mint a
 thinking dialect, and catalog price data. Local routes are OpenAI-compatible and loopback-only;
 they are excluded from cheapest-capable advice and cost anchors. The schema can parse delegate
 routes, but no delegate execution backend ships yet.
+Loopback describes the endpoint, not where that server performs inference. Local-route billing
+and execution location are not inferred from the address.
 
 ## Main Components
 
@@ -55,13 +57,15 @@ shared import boundary, and production responsibilities live in named modules. `
   policy types and read-only views.
 - `nh-tools`: `edit` for indentation-flexible match location, `search` for the glob and grep
   tools, `exec` for process execution, and `mcp::{adapter,client,config}` for outbound MCP;
-  `mcp::client::oauth` owns token lifetime and refresh state. The crate root is an exception to
+  `mcp::client::oauth` owns token lifetime and refresh state; `mcp::client::response` validates
+  correlated JSON and bounded SSE replies. The crate root is an exception to
   the rule above: it holds the read, write and edit tool implementations together with the shared
   workspace containment resolver and the creation guard.
 - `nh-fleet`: `engine` owns workers and durable I/O, `scheduler` owns task state transitions,
   and `ledger`, `model`, and `prepare` own persistence, public types, and validated setup; the
   crate root owns run/resume orchestration.
-- `nh-mcp`: `protocol`, `route_tools`, `receipts`, `fleet_tools`, and `response`; the crate root
+- `nh-mcp`: `protocol`, `route_tools`, `receipts`, `fleet_tools`, and `response`; `request`
+  validates the modern envelope and matching transport headers before dispatch. The crate root
   owns authenticated loopback transport and shutdown.
 - `nh-vault`: one cohesive production module for the OS key store, secret ownership, audience
   checks, and scrubber; its test suite is isolated from production code.
@@ -90,5 +94,7 @@ Required CI covers Windows, macOS, and a supply-chain check.
 
 There is no OS-level sandbox. Containment is policy-level: workspace path checks,
 protected-file holds, exact-origin credential audiences, minimal child environments, explicit
-shell approval, time/output bounds, and verified best-effort process-tree termination. The
+shell approval, time/output bounds, and best-effort process-tree termination with explicit
+incomplete-cleanup reporting. Cancellation blocks new tool actions once observed, but does not
+undo completed changes or immediately abort an in-flight provider request. The
 MCP server cannot bind outside `127.0.0.1` and is not a public network service.

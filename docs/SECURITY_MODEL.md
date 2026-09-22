@@ -30,6 +30,53 @@ Permissions:
   requires a bounded positive token budget, and accepts at most 256 tasks per run.
 - MCP Apps and the MCP Tasks extension are not implemented.
 
+## Cancellation, retries and budgets
+
+- Cancellation is checked after a provider response, before each tool, and again before
+  file mutations, shell launch or an MCP tool request. A response that arrives after
+  cancellation cannot authorize another tool action. Work already completed is not rolled back.
+- An in-flight provider request can still finish after cancellation. Its reported usage is
+  retained because the provider may bill it. The answer is retained in the conversation,
+  with cancelled results for tool calls that were skipped. Cancellation does not promise an immediate
+  network abort or a refund.
+- The first provider attempt retains its 600-second timeout for long reasoning requests.
+  Later attempts share the remainder of a 45-second window measured from the start of the
+  call. A slow first attempt can exhaust that window without being cut short by it.
+- Retry waits do not shorten a valid provider `Retry-After` delay. If the wait cannot fit in
+  the remaining retry window, the call stops. Request timeouts and incomplete response bodies
+  are not retried because their billing outcome may be unknown.
+- The TUI token budget is an observed-usage stop for new tasks. The active task can exceed
+  it. A budgeted session stops new dispatch when usage is unknown or incomplete. It is not
+  a guaranteed token ceiling or a monetary cap.
+- New TUI sessions save whether a budget was set and preserve that choice on resume. Older
+  TUI ledgers without this setting cannot be resumed; start a new session and choose a budget.
+  An incomplete final record makes restored usage uncertain. A crash can lose in-flight
+  usage before any record is written, so saved totals are not a provider billing statement.
+- Process termination is best effort. If process-tree termination fails but the shell exits,
+  the result warns that descendants may survive. Reaping the shell alone does not prove that
+  all child processes stopped.
+
+## File publication and concurrent changes
+
+`write_file` stages and syncs the complete content, then publishes it without replacing an
+existing destination. If another process creates that destination first, its file is preserved.
+The filesystem must support hard links; otherwise creation stops with an error. On Windows,
+use an NTFS project directory. There is no fallback to an operation that can overwrite a file.
+
+`edit_file` compares the current content and metadata with the file it read before publishing
+its replacement. A detected change stops the edit so you can read the current file and retry.
+This is a best-effort conflict check: another writer can still change the file between that
+check and replacement. Avoid editing the same file simultaneously in different programs.
+Edits replace the file with staged content. Ordinary Unix read/write/execute permissions are
+preserved; special mode bits are not guaranteed. The replacement does not preserve arbitrary
+filesystem metadata: Windows explicit access-control entries and alternate data
+streams are not copied to the replacement.
+
+Path checks are not an operating-system sandbox. A process able to replace parent directories,
+symlinks, or junctions can race path-based operations. Handle-relative protection against those
+races is not implemented. File syncing also does not guarantee recovery from every power loss
+or storage failure.
+
 ## Secrets
 
 Where secrets live:

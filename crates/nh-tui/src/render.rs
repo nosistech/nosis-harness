@@ -27,6 +27,7 @@ use ratatui::{
 
 const BLOCKED_REASON_MAX_CHARS: usize = 32;
 const HEADER_TITLE_GAP: usize = 1;
+const MAX_COMPOSER_ROWS: u16 = 5;
 const BLOCKED_LABEL: &str = "● BLOCKED";
 const ASCII_BORDER_SET: border::Set<'static> = border::Set {
     top_left: "+",
@@ -61,13 +62,17 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &App) {
     let inner = outer.inner(area);
     frame.render_widget(Clear, area);
     frame.render_widget(outer, area);
+    let composer_height = u16::try_from(app.input.split('\n').count())
+        .unwrap_or(u16::MAX)
+        .clamp(1, MAX_COMPOSER_ROWS)
+        .min(inner.height.saturating_sub(4).max(1));
     let regions = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),
             Constraint::Length(1),
             Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(composer_height),
             Constraint::Length(1),
         ])
         .split(inner);
@@ -149,7 +154,7 @@ pub(super) fn render_key_hints(frame: &mut Frame<'_>, app: &App, area: Rect) {
         app,
         &key_hint_line_for(
             app.terminal_capability,
-            app.budget_reached(),
+            app.budget_blocks_dispatch(),
             app.status.esc_interrupts_turn(),
         ),
     );
@@ -178,58 +183,97 @@ pub(super) fn render_separator(frame: &mut Frame<'_>, app: &App, area: Rect) {
 pub(super) fn render_input(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let prompt = display_line(app, "❯ ");
     let queued = if app.pending_send {
-        let marker = match &app.status {
-            Status::Blocked(_) if app.budget_reached() => "[queued - budget reached] ",
-            Status::Blocked(_) => "[queued - press Enter] ",
-            _ => "[queued] ",
+        let marker = match (&app.status, app.budget_block_reason()) {
+            (Status::Blocked(_), Some(reason)) => format!("[queued - {reason}] "),
+            (Status::Blocked(_), None) => "[queued - press Enter] ".to_owned(),
+            (_, _) => "[queued] ".to_owned(),
         };
-        display_line(app, marker)
+        display_line(app, &marker)
     } else {
         String::new()
     };
-    let input = display_line(app, &app.input);
-    let mut spans = vec![Span::styled(
-        prompt.clone(),
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )];
-    if app.pending_send {
-        spans.push(Span::styled(
-            queued.clone(),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    if app.input.is_empty() {
-        let placeholder = if app.budget_reached() {
-            "budget reached - press Ctrl+C twice to exit"
+    let cursor = app.input_cursor_index();
+    let cursor_line = app.input[..cursor]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count();
+    let line_start = app.input[..cursor].rfind('\n').map_or(0, |index| index + 1);
+    let visible_rows = usize::from(area.height.max(1));
+    let first_line = cursor_line.saturating_add(1).saturating_sub(visible_rows);
+    let mut lines = Vec::new();
+    for (line_index, input) in app
+        .input
+        .split('\n')
+        .enumerate()
+        .skip(first_line)
+        .take(visible_rows)
+    {
+        let first = line_index == 0;
+        let mut spans = if first {
+            vec![Span::styled(
+                prompt.clone(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )]
         } else {
-            "type a task and press Enter…"
+            vec![Span::raw("  ")]
         };
-        spans.push(Span::styled(
-            display_line(app, placeholder),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
-        ));
-    } else {
-        spans.push(Span::styled(
-            input.clone(),
-            Style::default().fg(Color::White),
-        ));
+        if first && app.pending_send {
+            spans.push(Span::styled(
+                queued.clone(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        if first && app.input.is_empty() {
+            let placeholder = if let Some(reason) = app.budget_block_reason() {
+                format!("{reason} - press Ctrl+C twice to exit")
+            } else {
+                "type a task and press Enter…".to_owned()
+            };
+            spans.push(Span::styled(
+                display_line(app, &placeholder),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
+            ));
+        } else {
+            spans.push(Span::styled(
+                display_line(app, input),
+                Style::default().fg(Color::White),
+            ));
+        }
+        lines.push(Line::from(spans));
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+
+    let cursor_prefix = if cursor_line == 0 {
+        format!("{prompt}{queued}")
+    } else {
+        "  ".to_owned()
+    };
+    let cursor_text = display_line(app, &app.input[line_start..cursor]);
+    let cursor_width = Line::from(format!("{cursor_prefix}{cursor_text}")).width();
+    let available_width = usize::from(area.width.saturating_sub(1));
+    let horizontal_scroll = cursor_width.saturating_sub(available_width);
+    frame.render_widget(
+        Paragraph::new(lines).scroll((0, u16::try_from(horizontal_scroll).unwrap_or(u16::MAX))),
+        area,
+    );
 
     if app.overlay == Overlay::None && area.width > 0 && area.height > 0 {
-        let cursor_width = Line::from(format!("{prompt}{queued}{input}")).width();
         let cursor_x = area.x.saturating_add(
-            u16::try_from(cursor_width)
+            u16::try_from(cursor_width.saturating_sub(horizontal_scroll))
                 .unwrap_or(u16::MAX)
                 .min(area.width.saturating_sub(1)),
         );
-        frame.set_cursor_position((cursor_x, area.y));
+        let cursor_y = area.y.saturating_add(
+            u16::try_from(cursor_line.saturating_sub(first_line))
+                .unwrap_or(u16::MAX)
+                .min(area.height.saturating_sub(1)),
+        );
+        frame.set_cursor_position((cursor_x, cursor_y));
     }
 }
 
@@ -256,7 +300,7 @@ pub(super) fn render_overlay(frame: &mut Frame<'_>, app: &App) {
         Overlay::CommandMenu { selected } => {
             render_command_menu(frame, app, modal_area(frame.area(), 14), *selected)
         }
-        Overlay::Help => render_help(frame, app, modal_area(frame.area(), 18)),
+        Overlay::Help => render_help(frame, app, modal_area(frame.area(), 22)),
         Overlay::TrustDial => {
             let desired = u16::try_from(trust_dial_lines(&app.policy_view).len())
                 .unwrap_or(u16::MAX)
@@ -311,26 +355,28 @@ pub(super) fn render_help(frame: &mut Frame<'_>, app: &App, area: Rect) {
         " Help · read-only ",
         "Keys for the current state",
     );
-    let lines: Vec<Line<'static>> =
-        visible_key_bindings(app.budget_reached(), app.status.esc_interrupts_turn())
-            .map(|binding| {
-                Line::from(vec![
-                    Span::styled(
-                        display_line(
-                            app,
-                            &format!("{:<12}", binding.display_keys(app.terminal_capability)),
-                        ),
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        display_line(app, &format!("{}{}", binding.action, binding.detail)),
-                        Style::default().fg(Color::White),
-                    ),
-                ])
-            })
-            .collect();
+    let lines: Vec<Line<'static>> = visible_key_bindings(
+        app.budget_blocks_dispatch(),
+        app.status.esc_interrupts_turn(),
+    )
+    .map(|binding| {
+        Line::from(vec![
+            Span::styled(
+                display_line(
+                    app,
+                    &format!("{:<18} ", binding.display_keys(app.terminal_capability)),
+                ),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                display_line(app, &format!("{}{}", binding.action, binding.detail)),
+                Style::default().fg(Color::White),
+            ),
+        ])
+    })
+    .collect();
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().fg(Color::White).bg(Color::Black)),
         body,
@@ -631,7 +677,7 @@ pub(super) fn modal_area(area: Rect, desired_height: u16) -> Rect {
     } else {
         area.height
     };
-    let height = desired_height.clamp(6, 20).min(max_height);
+    let height = desired_height.clamp(6, 22).min(max_height);
     Rect::new(
         area.x.saturating_add(area.width.saturating_sub(width) / 2),
         area.y

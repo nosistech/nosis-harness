@@ -40,7 +40,7 @@ use nh_tools::{builtin_tools, load_image, ToolCtx, MAX_IMAGES_PER_MESSAGE};
 use nh_tools::{McpAuth, McpServerConfig, McpTrust};
 use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, SecretRegistry};
 
-use crate::usage_tracker::LastRequestUsage;
+use crate::{model_preference, usage_tracker::LastRequestUsage};
 
 /// What callers print when a route resolves to a subscription delegate (M4 scope).
 pub(crate) const DELEGATE_MSG: &str = "delegate routes arrive in M4 - pick an api route";
@@ -109,7 +109,7 @@ pub(crate) struct RunOptions<'a> {
     pub(crate) terminal_capability: TerminalCapability,
 }
 
-pub fn run(task: &str, model: &str, options: RunOptions<'_>) -> anyhow::Result<()> {
+pub fn run(task: &str, model: Option<&str>, options: RunOptions<'_>) -> anyhow::Result<()> {
     let RunOptions {
         max_turns,
         think,
@@ -133,7 +133,8 @@ pub fn run(task: &str, model: &str, options: RunOptions<'_>) -> anyhow::Result<(
         eprintln!("warning: {}", safe_line(&warning_scrubber, warning));
     }
     let resolver = Arc::new(RouteResolver::from_toml(&catalog)?);
-    let route = resolver.resolve(model)?;
+    let model = model_preference::selected_model(model, &resolver)?;
+    let route = resolver.resolve(&model)?;
     let (profiles, profile_warnings) = nh_routes::Profiles::load(&root);
     for warning in &profile_warnings {
         eprintln!("warning: {}", safe_line(&warning_scrubber, warning));

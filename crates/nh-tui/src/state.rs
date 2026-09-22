@@ -387,6 +387,9 @@ pub struct App {
     pub(super) usage: Option<Usage>,
     pub(super) last_request_usage: Option<Usage>,
     pub(super) input: String,
+    /// None represents the end of the current input. This keeps direct test and
+    /// restore assignments compatible while supporting byte-safe cursor edits.
+    pub(super) input_cursor: Option<usize>,
     pub(super) pending_send: bool,
     pub(super) prompt_history: Vec<String>,
     pub(super) prompt_history_index: Option<usize>,
@@ -463,6 +466,7 @@ impl App {
             usage: None,
             last_request_usage: None,
             input: String::new(),
+            input_cursor: None,
             pending_send: false,
             prompt_history: Vec::new(),
             prompt_history_index: None,
@@ -576,6 +580,28 @@ impl App {
             .is_some_and(|(limit, used)| used >= limit)
     }
 
+    pub(super) fn budget_usage_unavailable(&self) -> bool {
+        self.budget.is_some()
+            && self
+                .usage
+                .as_ref()
+                .is_some_and(|usage| !usage.evidence.is_measured())
+    }
+
+    pub(super) fn budget_block_reason(&self) -> Option<&'static str> {
+        if self.budget_usage_unavailable() {
+            Some(crate::BUDGET_USAGE_UNAVAILABLE_REASON)
+        } else if self.budget_reached() {
+            Some(crate::BUDGET_REASON)
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn budget_blocks_dispatch(&self) -> bool {
+        self.budget_block_reason().is_some()
+    }
+
     pub(super) fn warn_before_budget(&mut self) {
         if self.budget_warned || self.budget_reached() {
             return;
@@ -596,7 +622,7 @@ impl App {
         self.budget_warned = true;
         self.push_line(
             &format!(
-                "budget warning: {used} tokens used of {limit} budget - session will stop at the budget"
+                "budget warning: {used} observed tokens of {limit}; new tasks stop when observed usage reaches the budget"
             ),
             TranscriptKind::Progress,
         );
@@ -606,7 +632,7 @@ impl App {
         if matches!(
             self.status,
             Status::Working | Status::FinishingInterrupted | Status::Waiting
-        ) || self.budget_reached()
+        ) || self.budget_blocks_dispatch()
         {
             return None;
         }
@@ -617,12 +643,13 @@ impl App {
         }
         self.remember_prompt(&task);
         self.input.clear();
+        self.input_cursor = None;
         self.pending_send = false;
         self.current_task_compaction = CompactionStats::default();
         self.last_compaction_hud = None;
         self.active_model = None;
         self.active_tool = None;
-        self.push_content_line(&task, TranscriptKind::Task);
+        self.push_text("", &task, TranscriptKind::Task);
         self.set_status(Status::Working, Utc::now());
         Some(task)
     }
@@ -655,6 +682,7 @@ impl App {
         );
         self.prompt_history_index = Some(index);
         self.input.clone_from(&self.prompt_history[index]);
+        self.input_cursor = None;
     }
 
     pub(super) fn recall_next_prompt(&mut self) {
@@ -665,10 +693,12 @@ impl App {
             let next = index + 1;
             self.prompt_history_index = Some(next);
             self.input.clone_from(&self.prompt_history[next]);
+            self.input_cursor = None;
             return;
         }
         self.prompt_history_index = None;
         self.input = self.prompt_history_draft.take().unwrap_or_default();
+        self.input_cursor = None;
         if self.input.trim().is_empty() {
             self.pending_send = false;
         }
@@ -677,6 +707,27 @@ impl App {
     pub(super) fn end_prompt_history_recall(&mut self) {
         self.prompt_history_index = None;
         self.prompt_history_draft = None;
+    }
+
+    pub(super) fn input_cursor_index(&self) -> usize {
+        self.input_cursor
+            .filter(|index| *index <= self.input.len() && self.input.is_char_boundary(*index))
+            .unwrap_or(self.input.len())
+    }
+
+    pub(super) fn set_input_cursor(&mut self, index: usize) {
+        debug_assert!(index <= self.input.len() && self.input.is_char_boundary(index));
+        self.input_cursor = (index < self.input.len()).then_some(index);
+    }
+
+    pub(super) fn clear_input(&mut self) {
+        self.input.clear();
+        self.input_cursor = None;
+    }
+
+    pub(super) fn replace_input(&mut self, input: String) {
+        self.input = input;
+        self.input_cursor = None;
     }
 
     pub(super) fn switch_route(&mut self, route: ResolvedRoute) {
@@ -829,7 +880,7 @@ impl App {
         }
         let display = if self.session_cost.is_empty() {
             if self.route.class() == RouteClass::Local {
-                "no billed tokens".into()
+                "billing unknown".into()
             } else {
                 self.route.price_at(now).map_or_else(
                     || "-".into(),

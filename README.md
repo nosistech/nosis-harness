@@ -92,11 +92,18 @@ That binary lands at `target/release/nh` (`target\release\nh.exe` on Windows).
 
 ## Quickstart
 
+New to terminal agents? Follow [three small tasks](docs/TUTORIALS.md), starting with
+a no-key preview. The [terminal guide](docs/TERMINAL_GUIDE.md) explains controls and
+change review; the [command reference](docs/CLI_REFERENCE.md) lists full help.
+The tutorials and terminal guide label v0.3.0-rc.1 candidate features that are not in the download above.
+
 Run [`nh setup`](docs/GETTING_STARTED.md) from your project folder for a guided path
 through project setup, model selection, a free preview, and secure key entry.
 Running `nh` without arguments opens the same guide. Version 0.2.2 also enables
 [DeepSeek Flash image input](docs/IMAGES.md) through the existing attachment commands.
-The individual commands below remain available.
+The command overview below describes the v0.3.0-rc.1 source candidate, including
+its budget, cancellation and resume corrections. The v0.2.2 download above does
+not include those corrections. See the changelog for version differences.
 
 - `nh init` - scaffold `.nosis/` in the current repo: the receipts dir, a `.gitignore`, a secret-pattern pre-commit hook, and the trusted bundled `catalog.toml`. A changed repository catalog is refused unless the operator has placed an exact reviewed copy at `~/.nosis/catalog.toml`. Existing Git hooks are preserved and reported for manual chaining.
 - `nh doctor` - report what is set up and what is not. It needs no API key. It names the running binary, whether `nh` is on your `PATH`, where the route catalog was read from, how many routes and providers are available, which key entries are stored, and where configuration lives. On Windows it also reports the console code page. It then lists only the things that are wrong, and each line states the fix. It never prints a key value. It exits 0 whenever it can produce a report, because it is a report and not a test.
@@ -109,11 +116,21 @@ The individual commands below remain available.
   verification, licensing, and hardware sizing.
 - `nh run "fix the failing test" --model deepseek-v4-flash` - run one agent task. Every shell command stops at a y/N approval prompt (default **deny**), and each turn is logged to `.nosis/receipts.jsonl`. Defaults: `--model deepseek-v4-flash`, `--max-turns 20`, `--profile balanced`. Optional: `--think none|low|high|max` (absent = per-route-dialect default: High on always-thinking dialects, None on non-thinking) `--autonomy ask|auto` (absent = the law-file default), and `--image <PATH>` to attach a PNG or JPEG (repeatable, maximum 4) on a route whose catalog entry declares image support.
 - `nh chat` - interactive session. `/model` and `/provider` switch routes mid-session (history and cumulative usage preserved); `/price` evaluates the catalog price at the current clock time and flags stale data.
+- **v0.3.0-rc.1 candidate source:** `nh model set <id>`, `show`, and `clear` manage an
+  opt-in user-wide model choice. For `run`, `chat`, `tui`, and `profile`, a saved
+  choice replaces the built-in default above; explicit `--model` always wins.
+  `nh catalog migrate` offers a reviewed upgrade for recognized older bundled
+  catalogs and retains a backup. See [guided setup](docs/GETTING_STARTED.md).
 - `nh profile` - list the execution profiles (frugal / balanced / max-quality) and their effective caps for a model.
 - `nh tui` - full-screen terminal UI (`--model <id>`, `--budget <tokens>`, `--profile <p>`).
+  The token budget stops new tasks after reported usage reaches it, or when usage becomes
+  unknown or incomplete. The active task can finish above the limit. This is not a spending cap.
 - `nh resume` - resume an interrupted chat or TUI session. Pass a session id, or omit it to list the interrupted sessions.
+  New TUI sessions retain their original budget. Older TUI sessions without a saved budget
+  setting require starting a new session with an explicit choice of limit.
 - `nh fleet run tasks.json` - run independent tasks in a durable, resumable worker fleet (`--max-workers <n>`, required `--budget <tokens>` unless `budget_tokens` is in the file, `--escalate`, `--defer-offpeak`). The observed-token budget stops new dispatch after completed receipts reach it; already-running calls can finish. Off-peak deferral activates only for a trusted route whose catalog entry currently defines peak windows. `nh fleet resume` picks up the latest incomplete run.
 - `nh mcp serve` - **PREVIEW**: serve the local MCP endpoint (default `--addr 127.0.0.1:8765`), loopback-only and bearer-token guarded (`--token-entry <entry>`). Tools: `why`, `route_cost`, and `receipts` (the metered-routing surface, with structured output), alongside `route_resolve`, budget-required `fleet_run`, and `fleet_status`. Do **not** expose it on a public interface - this is not a restriction that lapses on a date.
+  See the [MCP preview guide](./docs/MCP_PREVIEW.md) for compatibility, setup boundaries, and connection errors.
 
 ## Platform status
 
@@ -123,6 +140,11 @@ but no one has used it day to day. Linux **builds from source and is not yet ver
 ## Privacy
 
 `nh` has no Nosis-operated telemetry, analytics, beacons, or crash reporting. Model requests go directly to the provider route you select; approved MCP calls and shell commands can create additional network traffic. Receipts are local by default. Exact boundaries and deletion steps are in [PRIVACY.md](./PRIVACY.md).
+
+A local model endpoint can forward requests to a cloud service. Its address alone does not
+prove that inference stays on your computer or that it is free. See the
+[local-model guide](./docs/LOCAL_MODELS.md) and the
+[cancellation and retry limits](./docs/SECURITY_MODEL.md#cancellation-retries-and-budgets).
 
 ## Runtime files
 

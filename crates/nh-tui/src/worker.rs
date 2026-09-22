@@ -12,7 +12,7 @@ use chrono::Utc;
 use nh_core::agent::{estimate_request_tokens, AgentLoop, AgentRunError, CompactionEvent};
 use nh_core::receipt::{ReceiptKind, ReceiptWriter};
 use nh_core::session_ledger::{
-    new_session_id, RestoredSession, SessionEvent, SessionLedger, Surface,
+    new_session_id, RestoredSession, SessionBudget, SessionEvent, SessionLedger, Surface,
 };
 use nh_core::wire::{
     ChatClient, ChatMessage, ChatRequest, ChatResponse, ThinkingEffort, Usage, UsageEvidence,
@@ -268,6 +268,7 @@ pub(super) struct WorkerConfig {
     pub(super) route: ResolvedRoute,
     pub(super) profiles: Profiles,
     pub(super) active_profile: String,
+    pub(super) budget: Option<u64>,
     pub(super) law: Law,
     pub(super) repo_root: PathBuf,
     pub(super) workdir: PathBuf,
@@ -361,6 +362,7 @@ impl WorkerSession {
             route,
             profiles,
             mut active_profile,
+            budget,
             law,
             repo_root,
             workdir,
@@ -469,6 +471,9 @@ impl WorkerSession {
             for turn in &saved.turns {
                 add_usage(&mut session_usage, turn.usage.as_ref());
             }
+            if saved.dropped_torn_tail {
+                add_usage(&mut session_usage, None);
+            }
         }
         let lifecycle = resume.as_ref().map_or_else(
             || SessionEvent::Started {
@@ -478,6 +483,7 @@ impl WorkerSession {
                 model_id: route.model_id().to_owned(),
                 profile: active_profile.clone(),
                 created_utc: session_timestamp(Utc::now()),
+                budget: Some(SessionBudget::from_token_limit(budget)),
             },
             |_| SessionEvent::Resumed {
                 ts_utc: session_timestamp(Utc::now()),
@@ -821,7 +827,8 @@ impl WorkerSession {
         }
     }
 
-    fn send_unreceipted_failure(&self, error: &str) {
+    fn send_unreceipted_failure(&mut self, error: &str) {
+        self.observe_usage(None);
         let reason = safe_line(&self.scrubber, error);
         let _ = self.events.send(AgentEvent::Failed(format!(
             "{reason} - receipt unavailable"

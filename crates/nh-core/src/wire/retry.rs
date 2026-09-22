@@ -1,7 +1,9 @@
 //! Pure retry policy, accounting, and loop control.
 
 use std::fmt;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use chrono::{DateTime, Utc};
 
 use super::{RetryStats, Usage, UsageEvidence};
 
@@ -38,6 +40,7 @@ impl RetryPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AttemptOutcome {
     TransportFailure { timed_out: bool },
+    IncompleteResponse,
     HttpStatus(u16),
 }
 
@@ -48,6 +51,7 @@ pub(super) enum AttemptOutcome {
 pub(super) fn is_retryable(outcome: AttemptOutcome) -> bool {
     match outcome {
         AttemptOutcome::TransportFailure { timed_out } => !timed_out,
+        AttemptOutcome::IncompleteResponse => false,
         AttemptOutcome::HttpStatus(status) => matches!(status, 429 | 500 | 502 | 503 | 504),
     }
 }
@@ -59,8 +63,14 @@ pub(super) enum AttemptResult<T> {
         retry_after: Option<Duration>,
         detail: String,
         usage: Option<Usage>,
-        elapsed: Duration,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct AttemptContext {
+    /// `None` preserves the provider client's intentional first-call timeout.
+    /// Retry attempts receive the remaining retry-window duration.
+    pub(super) timeout: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -117,10 +127,19 @@ fn elapsed_label(elapsed: Duration) -> String {
     }
 }
 
-/// Parse only the delta-seconds form from Retry-After. HTTP dates and
-/// malformed values are deliberately ignored.
-pub(super) fn parse_retry_after(value: &str) -> Option<Duration> {
-    value.trim().parse::<u64>().ok().map(Duration::from_secs)
+/// Parse delta-seconds or an IMF-fixdate from Retry-After.
+pub(super) fn parse_retry_after(value: &str, now: DateTime<Utc>) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let retry_at = DateTime::parse_from_rfc2822(value)
+        .ok()?
+        .with_timezone(&Utc);
+    match retry_at.signed_duration_since(now).to_std() {
+        Ok(delay) => Some(delay),
+        Err(_) => Some(Duration::ZERO),
+    }
 }
 
 /// Compute one jittered delay. `retry_index` is zero for the first retry.
@@ -138,22 +157,24 @@ pub(super) fn next_delay(
         return None;
     }
 
-    let computed = retry_after.unwrap_or_else(|| {
-        let multiplier = 1_u32.checked_shl(retry_index).unwrap_or(u32::MAX);
-        policy.base.checked_mul(multiplier).unwrap_or(Duration::MAX)
-    });
-    let computed = computed.min(policy.max_delay);
+    let multiplier = 1_u32.checked_shl(retry_index).unwrap_or(u32::MAX);
+    let computed = policy
+        .base
+        .checked_mul(multiplier)
+        .unwrap_or(Duration::MAX)
+        .min(policy.max_delay);
     let nanos = computed.as_nanos();
     let minimum = nanos / 2;
     let span = nanos - minimum;
     let jittered_nanos =
         minimum + span.saturating_mul(u128::from(jitter_nanos)) / u128::from(JITTER_SCALE);
-    let jittered = duration_from_nanos(jittered_nanos);
+    let backoff = duration_from_nanos(jittered_nanos);
+    let delay = retry_after.map_or(backoff, |server_floor| server_floor.max(backoff));
 
     elapsed
-        .checked_add(jittered)
-        .filter(|total| *total <= policy.total_budget)
-        .map(|_| jittered)
+        .checked_add(delay)
+        .filter(|total| *total < policy.total_budget)
+        .map(|_| delay)
 }
 
 fn duration_from_nanos(nanos: u128) -> Duration {
@@ -168,10 +189,21 @@ pub(super) fn run_with_retry<T>(
     policy: RetryPolicy,
     sleep: &dyn Fn(Duration),
     jitter_nanos: &dyn Fn() -> u32,
-    mut attempt: impl FnMut(u32) -> AttemptResult<T>,
+    attempt: impl FnMut(AttemptContext) -> AttemptResult<T>,
+) -> Result<RetryOutput<T>, RetryExhausted> {
+    let started = Instant::now();
+    run_with_retry_clock(policy, sleep, jitter_nanos, &|| started.elapsed(), attempt)
+}
+
+fn run_with_retry_clock<T>(
+    policy: RetryPolicy,
+    sleep: &dyn Fn(Duration),
+    jitter_nanos: &dyn Fn() -> u32,
+    elapsed_now: &dyn Fn() -> Duration,
+    mut attempt: impl FnMut(AttemptContext) -> AttemptResult<T>,
 ) -> Result<RetryOutput<T>, RetryExhausted> {
     let mut attempts = 0_u32;
-    let mut elapsed = Duration::ZERO;
+    let mut next_timeout = None;
     let mut stats = RetryStats::default();
     let mut salvaged_usage = None;
     let mut usage_overflowed = false;
@@ -179,7 +211,12 @@ pub(super) fn run_with_retry<T>(
 
     loop {
         attempts = attempts.saturating_add(1);
-        match attempt(attempts) {
+        if attempts > 1 {
+            stats.retries = stats.retries.saturating_add(1);
+        }
+        match attempt(AttemptContext {
+            timeout: next_timeout,
+        }) {
             AttemptResult::Success(value) => {
                 if !usage_overflowed && saw_unreported_usage && salvaged_usage.is_none() {
                     salvaged_usage = Some(Usage {
@@ -205,9 +242,8 @@ pub(super) fn run_with_retry<T>(
                 retry_after,
                 detail,
                 usage,
-                elapsed: attempt_elapsed,
             } => {
-                elapsed = elapsed.saturating_add(attempt_elapsed);
+                let elapsed = elapsed_now();
                 if outcome == AttemptOutcome::HttpStatus(429) {
                     stats.rate_limited = stats.rate_limited.saturating_add(1);
                 }
@@ -256,8 +292,34 @@ pub(super) fn run_with_retry<T>(
                     });
                 };
                 sleep(delay);
-                elapsed = elapsed.saturating_add(delay);
-                stats.retries = stats.retries.saturating_add(1);
+                let elapsed_after_sleep = elapsed_now();
+                let Some(remaining) = policy.total_budget.checked_sub(elapsed_after_sleep) else {
+                    return Err(RetryExhausted {
+                        stats,
+                        usage: if usage_overflowed {
+                            None
+                        } else {
+                            salvaged_usage
+                        },
+                        last_failure: detail,
+                        attempts,
+                        elapsed: elapsed_after_sleep,
+                    });
+                };
+                if remaining.is_zero() {
+                    return Err(RetryExhausted {
+                        stats,
+                        usage: if usage_overflowed {
+                            None
+                        } else {
+                            salvaged_usage
+                        },
+                        last_failure: detail,
+                        attempts,
+                        elapsed: elapsed_after_sleep,
+                    });
+                }
+                next_timeout = Some(remaining);
             }
         }
     }
@@ -292,14 +354,14 @@ pub(super) fn combine_usage(first: Option<Usage>, second: Option<Usage>) -> Opti
 mod tests {
     use super::*;
     use crate::wire::UsageEvidence;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     fn zero_policy(max_attempts: u32) -> RetryPolicy {
         RetryPolicy {
             max_attempts,
             base: Duration::ZERO,
             max_delay: Duration::ZERO,
-            total_budget: Duration::ZERO,
+            total_budget: Duration::from_secs(1),
         }
     }
 
@@ -309,7 +371,6 @@ mod tests {
             retry_after: None,
             detail: format!("{outcome:?}"),
             usage,
-            elapsed: Duration::ZERO,
         }
     }
 
@@ -318,6 +379,7 @@ mod tests {
         let cases = [
             (AttemptOutcome::TransportFailure { timed_out: false }, true),
             (AttemptOutcome::TransportFailure { timed_out: true }, false),
+            (AttemptOutcome::IncompleteResponse, false),
             (AttemptOutcome::HttpStatus(429), true),
             (AttemptOutcome::HttpStatus(500), true),
             (AttemptOutcome::HttpStatus(502), true),
@@ -364,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn retry_after_is_honored_and_clamped() {
+    fn retry_after_is_a_floor_over_backoff_and_must_fit_the_window() {
         let policy = RetryPolicy::DEFAULT;
         assert_eq!(
             next_delay(
@@ -374,7 +436,7 @@ mod tests {
                 Duration::ZERO,
                 JITTER_SCALE / 2
             ),
-            Some(Duration::from_millis(5_250))
+            Some(Duration::from_secs(7))
         );
         assert_eq!(
             next_delay(
@@ -384,16 +446,36 @@ mod tests {
                 Duration::ZERO,
                 JITTER_SCALE / 2
             ),
-            Some(Duration::from_secs(15))
+            None
+        );
+        assert_eq!(
+            next_delay(
+                policy,
+                0,
+                Some(Duration::ZERO),
+                Duration::ZERO,
+                JITTER_SCALE / 2
+            ),
+            Some(Duration::from_millis(1_500))
         );
     }
 
     #[test]
-    fn malformed_and_http_date_retry_after_are_ignored() {
-        assert_eq!(parse_retry_after("17"), Some(Duration::from_secs(17)));
-        assert_eq!(parse_retry_after(" 3 "), Some(Duration::from_secs(3)));
-        assert_eq!(parse_retry_after("later"), None);
-        assert_eq!(parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT"), None);
+    fn retry_after_accepts_delta_seconds_and_http_dates() {
+        let now = DateTime::parse_from_rfc3339("2026-09-20T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(parse_retry_after("17", now), Some(Duration::from_secs(17)));
+        assert_eq!(parse_retry_after(" 3 ", now), Some(Duration::from_secs(3)));
+        assert_eq!(
+            parse_retry_after("Sun, 20 Sep 2026 12:00:19 GMT", now),
+            Some(Duration::from_secs(19))
+        );
+        assert_eq!(
+            parse_retry_after("Sun, 20 Sep 2026 11:59:59 GMT", now),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(parse_retry_after("later", now), None);
     }
 
     #[test]
@@ -587,7 +669,7 @@ mod tests {
             }
         );
         assert!(error.usage.is_none());
-        assert!(error.to_string().contains("4 attempts over 0s"));
+        assert!(error.to_string().contains("4 attempts over "));
     }
 
     #[test]
@@ -604,6 +686,72 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(*attempts.borrow(), 1);
+        assert_eq!(error.stats.retries, 0);
+    }
+
+    #[test]
+    fn retry_attempt_timeout_is_the_remaining_window_after_elapsed_and_sleep() {
+        let elapsed = Cell::new(Duration::ZERO);
+        let contexts = RefCell::new(Vec::new());
+        let attempts = Cell::new(0_u32);
+        let error = run_with_retry_clock(
+            RetryPolicy::DEFAULT,
+            &|delay| elapsed.set(elapsed.get().saturating_add(delay)),
+            &|| 0,
+            &|| elapsed.get(),
+            |context| {
+                contexts.borrow_mut().push(context);
+                attempts.set(attempts.get() + 1);
+                if attempts.get() == 1 {
+                    elapsed.set(Duration::from_secs(10));
+                    AttemptResult::Failure {
+                        outcome: AttemptOutcome::HttpStatus(503),
+                        retry_after: Some(Duration::from_secs(5)),
+                        detail: "busy".into(),
+                        usage: None,
+                    }
+                } else {
+                    elapsed.set(elapsed.get().saturating_add(context.timeout.unwrap()));
+                    failure(AttemptOutcome::TransportFailure { timed_out: true }, None)
+                }
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            *contexts.borrow(),
+            [
+                AttemptContext { timeout: None },
+                AttemptContext {
+                    timeout: Some(Duration::from_secs(30)),
+                },
+            ]
+        );
+        assert_eq!(error.attempts, 2);
+        assert_eq!(error.stats.retries, 1);
+        assert_eq!(error.elapsed, Duration::from_secs(45));
+    }
+
+    #[test]
+    fn slow_first_attempt_keeps_its_own_timeout_but_gets_no_retry() {
+        let elapsed = Cell::new(Duration::ZERO);
+        let attempts = Cell::new(0_u32);
+        let error = run_with_retry_clock(
+            RetryPolicy::DEFAULT,
+            &|_| panic!("expired retry window must not sleep"),
+            &|| 0,
+            &|| elapsed.get(),
+            |context| {
+                attempts.set(attempts.get() + 1);
+                assert_eq!(context.timeout, None);
+                elapsed.set(Duration::from_secs(46));
+                failure(AttemptOutcome::HttpStatus(503), None)
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(error.elapsed, Duration::from_secs(46));
         assert_eq!(error.stats.retries, 0);
     }
 }

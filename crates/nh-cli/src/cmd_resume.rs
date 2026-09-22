@@ -126,7 +126,7 @@ fn validate_active_route(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nh_core::session_ledger::{SessionEvent, SessionLedger};
+    use nh_core::session_ledger::{SessionBudget, SessionEvent, SessionLedger};
 
     const ROUTES: &str = r#"
         [routes.present]
@@ -145,6 +145,7 @@ mod tests {
             model_id: model_id.to_owned(),
             profile: "balanced".to_owned(),
             created_utc: "2026-07-31T12:00:00Z".to_owned(),
+            budget: Some(SessionBudget::Unlimited),
         }
     }
 

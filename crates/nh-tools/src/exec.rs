@@ -1,8 +1,9 @@
 //! Approved shell execution with bounded capture, timeout, and process-tree termination.
 
 use crate::{
-    is_allowed_env_var, render_tool_result, str_arg, Access, ExecShell, Guard, Tool, ToolCtx,
-    ToolSpec, DRAIN_GRACE, EXEC_TIMEOUT, KILL_VERIFY_GRACE, MAX_TOOL_READ_BYTES, TOOL_BUFFER_BYTES,
+    cancelled_before, is_allowed_env_var, render_tool_result, str_arg, Access, ExecShell, Guard,
+    Tool, ToolCtx, ToolSpec, DRAIN_GRACE, EXEC_TIMEOUT, KILL_VERIFY_GRACE, MAX_TOOL_READ_BYTES,
+    TOOL_BUFFER_BYTES,
 };
 use anyhow::Context as _;
 use serde_json::json;
@@ -165,7 +166,7 @@ pub(super) enum Termination {
         _status: ExitStatus,
         reason: TerminationReason,
     },
-    Survived {
+    Incomplete {
         detail: String,
         reason: TerminationReason,
     },
@@ -196,16 +197,20 @@ pub(super) fn terminate_child_tree(
     command: &str,
     reason: TerminationReason,
 ) -> anyhow::Result<Termination> {
+    terminate_child_tree_with(child, command, reason, system_tree_kill)
+}
+
+fn system_tree_kill(pid: u32) -> (bool, String) {
     #[cfg(windows)]
     let tree_kill_status = std::process::Command::new("taskkill")
-        .args(["/PID", &child.id().to_string(), "/T", "/F"])
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
     #[cfg(unix)]
     let tree_kill_status = std::process::Command::new("kill")
-        .args(["-KILL", &format!("-{}", child.id())])
+        .args(["-KILL", &format!("-{pid}")])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -216,6 +221,16 @@ pub(super) fn terminate_child_tree(
         Ok(status) => format!("tree-kill non-success exit status: {status}"),
         Err(error) => format!("tree-kill failed to start: {error}"),
     };
+    (tree_kill_succeeded, tree_kill_detail)
+}
+
+pub(super) fn terminate_child_tree_with(
+    child: &mut Child,
+    command: &str,
+    reason: TerminationReason,
+    tree_kill: impl FnOnce(u32) -> (bool, String),
+) -> anyhow::Result<Termination> {
+    let (tree_kill_succeeded, tree_kill_detail) = tree_kill(child.id());
 
     let verification_started = Instant::now();
     let verification_deadline = verification_started + KILL_VERIFY_GRACE;
@@ -225,27 +240,52 @@ pub(super) fn terminate_child_tree(
         verification_started
     };
     if let Some(status) = poll_child_reaped(child, command, tree_kill_deadline)? {
-        return Ok(Termination::Reaped {
-            _status: status,
+        return Ok(reaped_termination(
+            status,
             reason,
-        });
+            tree_kill_succeeded,
+            &tree_kill_detail,
+        ));
     }
     child
         .kill()
         .with_context(|| format!("could not kill terminated command: {command}"))?;
     if let Some(status) = poll_child_reaped(child, command, verification_deadline)? {
-        return Ok(Termination::Reaped {
-            _status: status,
+        return Ok(reaped_termination(
+            status,
             reason,
-        });
+            tree_kill_succeeded,
+            &tree_kill_detail,
+        ));
     }
-    Ok(Termination::Survived {
+    Ok(Termination::Incomplete {
         detail: format!(
             "{tree_kill_detail}; child did not reap within {} across tree-kill verification and the direct-kill fallback",
             timeout_label(KILL_VERIFY_GRACE)
         ),
         reason,
     })
+}
+
+fn reaped_termination(
+    status: ExitStatus,
+    reason: TerminationReason,
+    tree_kill_succeeded: bool,
+    tree_kill_detail: &str,
+) -> Termination {
+    if tree_kill_succeeded {
+        Termination::Reaped {
+            _status: status,
+            reason,
+        }
+    } else {
+        Termination::Incomplete {
+            detail: format!(
+                "{tree_kill_detail}; direct child reaped, but descendant termination was not verified"
+            ),
+            reason,
+        }
+    }
 }
 
 impl ExecShell {
@@ -266,6 +306,9 @@ impl ExecShell {
         drain_grace: Duration,
     ) -> anyhow::Result<String> {
         let command = str_arg(&args, "command")?;
+        if let Some(cancelled) = cancelled_before("command execution", ctx) {
+            return Ok(cancelled);
+        }
         if let Guard::Block(reason) = (ctx.guard)(&Access::Exec(command)) {
             return Ok(render_tool_result(format!("blocked by law: {reason}"), ctx));
         }
@@ -274,6 +317,9 @@ impl ExecShell {
         if !(ctx.approve)(command) {
             // Ok-shaped so the model can read the denial and adapt, not crash the turn.
             return Ok(render_tool_result(format!("user denied: {command}"), ctx));
+        }
+        if let Some(cancelled) = cancelled_before("command execution", ctx) {
+            return Ok(cancelled);
         }
         #[cfg(windows)]
         let mut cmd = {
@@ -361,13 +407,13 @@ impl ExecShell {
                     format!("command cancelled - killed\nstdout:\n{stdout}\nstderr:\n{stderr}")
                 }
             },
-            Some(Termination::Survived { detail, reason }) => match reason {
+            Some(Termination::Incomplete { detail, reason }) => match reason {
                 TerminationReason::Timeout(timeout) => format!(
-                    "command timed out after {} - could NOT be killed: {detail}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+                    "command timed out after {} - termination incomplete: {detail}\nstdout:\n{stdout}\nstderr:\n{stderr}",
                     timeout_label(timeout)
                 ),
                 TerminationReason::Cancelled => format!(
-                    "command cancelled - could NOT be killed: {detail}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+                    "command cancelled - termination incomplete: {detail}\nstdout:\n{stdout}\nstderr:\n{stderr}"
                 ),
             },
             None => {

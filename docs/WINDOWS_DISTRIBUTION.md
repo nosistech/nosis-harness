@@ -31,8 +31,8 @@ The output contains:
 - `nh-<version>-windows-x64.zip` containing only `nh.exe`, `LICENSE`, and
   `START_HERE.md` (the [Windows quickstart](WINDOWS_QUICKSTART.md)).
 - `SHA256SUMS` for the executable and ZIP.
-- `provenance.json` recording the source revision, working-tree status, target,
-  version, and packaging mode.
+- `provenance.json`, unsigned packaging metadata recording the source revision,
+  working-tree status, target, version, and packaging mode. It is not an attestation.
 - Three WinGet manifests under `winget`, using the ZIP's actual SHA-256.
 
 Preview artifacts and their manifests are marked **not for release**. Their
@@ -66,11 +66,22 @@ This mode refuses a dirty tree or a tag that does not resolve to the current com
 Its output goes under `target\dist\release-candidate\<version>`. Both modes refuse
 an existing output directory; neither deletes prior builds.
 
-The manual **Package Windows** GitHub Actions workflow runs the same script and
-uploads artifacts with read-only repository permissions. Select the intended tag
-and `release-candidate` mode for a candidate. It does not publish a GitHub Release.
+The manual **Package Windows** GitHub Actions workflow runs the same script. Select
+the intended tag and `release-candidate` mode for a candidate. It requires successful
+Windows, macOS and supply-chain jobs in the newest eligible CI run on that exact
+commit; Linux remains non-blocking under the platform policy. Missing, failed,
+skipped or unfinished required jobs stop candidate preparation. Preview builds do
+not receive an attestation. The workflow does not publish a GitHub Release.
 Downloading an Actions artifact is a maintainer review path, not the public user
 installation path.
+
+After the package passes its smoke tests, a separate job downloads those same
+bytes and creates a GitHub build attestation for the executable and ZIP. Only that
+job receives OIDC and attestation-write permissions; repository contents stay
+read-only. It verifies both artifacts against the repository, workflow, source tag
+and commit, and retains the verification bundle as a separate Actions artifact.
+See [release verification](RELEASE_VERIFICATION.md). This workflow change must pass
+CI before it can be described as a verified release capability.
 
 ## Make installation available
 
@@ -82,7 +93,7 @@ After release approval:
    and its binary matches the standalone executable and checksums.
 2. Attach the verified executable, ZIP, `SHA256SUMS`, `LICENSE`, and quickstart to
    the matching GitHub Release. Use the exact ZIP filename from the manifests.
-   Publish the provenance record alongside them. Upload the same bytes that were
+   Publish the provenance record and attestation bundle alongside them. Upload the same bytes that were
    validated; rebuilding requires new checksums and manifests.
 3. Update README's installation section and `docs/ARCHITECTURE_OVERVIEW.md` together
    with the first binary release. Link actual assets, describe the unsigned Windows

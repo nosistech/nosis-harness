@@ -9,7 +9,47 @@ commit passes local and remote gates.
 
 ## [Unreleased]
 
-No changes yet.
+## [0.3.0-rc.1] - 2026-09-22
+
+### Added
+
+- Explicit `nh catalog migrate` for recognized older bundled catalogs, with a
+  destination/change preview, default-no confirmation and a retained versioned
+  backup. Custom catalogs are refused. Migration is not crash-atomic.
+- Opt-in remembered model selection in user configuration through setup or
+  `nh model set/show/clear`. Explicit `--model` wins; an invalid saved choice
+  fails rather than silently switching providers.
+- Multiline full-screen input with paste review, cursor editing and explicit
+  newline shortcuts. Enter sends; pasting alone does not send.
+- Three practice walkthroughs, terminal controls and an executable-generated
+  command reference checked in Windows CI.
+- Release candidates require successful exact-commit Windows, macOS and supply-chain
+  checks. A separate job prepares and verifies GitHub build provenance for the tested
+  executable and ZIP. This does not provide Windows publisher signing.
+
+### Fixed
+
+- New-file creation publishes without replacing a competing destination. Filesystems without
+  hard-link support fail closed. Edits refuse detected concurrent content or metadata changes;
+  this remains a best-effort check rather than complete isolation from other writers.
+- MCP HTTP requests carry the modern metadata and matching headers. Replies are bounded and
+  checked against the request, including SSE replies. The local server rejects malformed or
+  mismatched requests before dispatch. Unsupported legacy configuration fails explicitly.
+- A cancelled model response no longer starts new tool actions. Cancellation is also checked
+  before file mutations, shell launch and MCP tool requests, including after approval.
+  Usage reported by a late response is retained. Completed changes are not rolled back.
+- Provider retries respect `Retry-After` without shortening its delay. Later attempts use
+  the remaining retry window, while the first request keeps its allowance for long reasoning.
+  Request timeouts are not retried.
+- A TUI session with a token budget stops new tasks when usage becomes unknown or incomplete.
+  Budget messages now explain that the active task may finish above the observed-token limit.
+- Resuming a new TUI session preserves its original budget. Older TUI sessions without a
+  saved budget setting require a new session. An incomplete final session record makes
+  restored usage uncertain and stops budgeted dispatch.
+- Local-route output identifies a loopback endpoint without claiming that computation stays
+  on the device or is unbilled. Such turns leave session money totals incomplete.
+- Shell termination reports failed process-tree cleanup even when the shell itself exits,
+  so a surviving descendant is not hidden behind a successful cleanup message.
 
 ## [0.2.2] - 2026-09-20
 
@@ -351,7 +391,8 @@ is not yet verified.
 - Report vulnerabilities per [SECURITY.md](SECURITY.md) - info@nosistech.com,
   5-business-day response SLA.
 
-[Unreleased]: https://github.com/nosistech/nosis-harness/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/nosistech/nosis-harness/compare/v0.3.0-rc.1...HEAD
+[0.3.0-rc.1]: https://github.com/nosistech/nosis-harness/compare/v0.2.2...v0.3.0-rc.1
 [0.2.2]: https://github.com/nosistech/nosis-harness/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/nosistech/nosis-harness/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/nosistech/nosis-harness/compare/v0.1.0...v0.2.0

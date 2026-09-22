@@ -6,10 +6,11 @@
 mod fleet_tools;
 mod protocol;
 mod receipts;
+mod request;
 mod response;
 mod route_tools;
 
-use protocol::{business_card, rpc_error, rpc_success, tools_call, tools_list};
+use protocol::{business_card, rpc_error, rpc_success, server_discover, tools_call, tools_list};
 use response::respond_json;
 
 use std::io::Read as _;
@@ -26,8 +27,7 @@ use serde_json::{json, Value};
 use subtle::ConstantTimeEq;
 use tiny_http::{Method, Request, Server};
 
-const PREVIEW_NOTICE: &str =
-    "nh-mcp preview - local only; do not expose publicly before the MCP final spec (2026-07-28).";
+const PREVIEW_NOTICE: &str = "nh-mcp preview - local only; do not expose publicly.";
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 #[cfg(test)]
 const MAX_RECEIPT_TAIL_BYTES: usize = nh_core::receipt::MAX_RECEIPT_TAIL_BYTES;
@@ -233,17 +233,16 @@ fn handle(mut request: Request, runtime: &Runtime) {
         return;
     }
 
-    if request.method() == &Method::Get {
-        if request.url() == "/.well-known/mcp.json" {
-            respond_json(request, runtime, 200, &business_card());
-        } else {
-            respond_json(request, runtime, 404, &json!({}));
-        }
+    if request.method() == &Method::Get && request.url() == "/.well-known/mcp.json" {
+        respond_json(request, runtime, 200, &business_card());
         return;
     }
-
-    if request.method() != &Method::Post || request.url() != "/mcp" {
+    if request.url() != "/mcp" {
         respond_json(request, runtime, 404, &json!({}));
+        return;
+    }
+    if request.method() != &Method::Post {
+        respond_json(request, runtime, 405, &json!({}));
         return;
     }
 
@@ -257,7 +256,7 @@ fn handle(mut request: Request, runtime: &Runtime) {
         respond_json(
             request,
             runtime,
-            200,
+            400,
             &rpc_error(Value::Null, -32700, "parse error"),
         );
         return;
@@ -267,7 +266,7 @@ fn handle(mut request: Request, runtime: &Runtime) {
             request,
             runtime,
             413,
-            &rpc_error(Value::Null, -32700, "request too large"),
+            &rpc_error(Value::Null, -32600, "request too large"),
         );
         return;
     }
@@ -277,22 +276,29 @@ fn handle(mut request: Request, runtime: &Runtime) {
             respond_json(
                 request,
                 runtime,
-                200,
+                400,
                 &rpc_error(Value::Null, -32700, "parse error"),
             );
             return;
         }
     };
-    let id = message.get("id").cloned().unwrap_or(Value::Null);
-    let response = match message.get("method").and_then(Value::as_str) {
-        Some("tools/list") => rpc_success(id, tools_list()),
-        Some("tools/call") => rpc_success(
-            id,
-            tools_call(message.get("params").unwrap_or(&Value::Null), runtime),
-        ),
-        _ => rpc_error(id, -32601, "method not found"),
+    let validated = match request::validate(&request, &message) {
+        Ok(validated) => validated,
+        Err(rejection) => {
+            respond_json(request, runtime, rejection.status, &rejection.body);
+            return;
+        }
     };
-    respond_json(request, runtime, 200, &response);
+    let (status, response) = match validated.method {
+        "server/discover" => (200, rpc_success(validated.id, server_discover())),
+        "tools/list" => (200, rpc_success(validated.id, tools_list())),
+        "tools/call" => (
+            200,
+            rpc_success(validated.id, tools_call(validated.params, runtime)),
+        ),
+        _ => (404, rpc_error(validated.id, -32601, "method not found")),
+    };
+    respond_json(request, runtime, status, &response);
 }
 
 fn loopback_headers(request: &Request, port: u16) -> bool {

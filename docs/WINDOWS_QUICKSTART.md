@@ -20,6 +20,9 @@ Get-FileHash -Algorithm SHA256 .\nh-VERSION-windows-x64.zip
 
 The checksum detects a changed download. It is not a publisher signature.
 Local preview builds are for review and are not published releases.
+Future releases that include build attestations can also be checked using the
+[release verification guide](https://github.com/nosistech/nosis-harness/blob/main/docs/RELEASE_VERIFICATION.md).
+Published v0.2.2 does not include that attestation.
 
 ## Open a terminal
 
@@ -40,7 +43,8 @@ Open a terminal in your project folder. Call the executable using its full path,
 for example `& 'C:\Users\you\Apps\Nosis\nh.exe' doctor`.
 For shorter commands from any folder, add the folder containing `nh.exe` to your
 **user** PATH through Windows' **Edit environment variables for your account**
-dialog, then open a new terminal. A WinGet installation manages this for you.
+dialog, then open a new terminal. Once the pending WinGet listing is approved,
+its installation will manage this for you.
 
 For v0.2.2 or later, start the guided setup from your project folder:
 
@@ -60,7 +64,10 @@ the command line, a task message, or a file. Provider calls may incur charges.
 The program asks before executing shell commands.
 
 Setup prints commands for returning to the selected model. For the full walkthrough,
-see the [guided setup guide](https://github.com/nosistech/nosis-harness/blob/v0.2.2/docs/GETTING_STARTED.md).
+see the [guided setup guide](https://github.com/nosistech/nosis-harness/blob/main/docs/GETTING_STARTED.md).
+The [practice tasks](https://github.com/nosistech/nosis-harness/blob/main/docs/TUTORIALS.md)
+walk through a free preview, a small reviewed edit and returning to work. v0.3.0-rc.1 candidate
+commands are labeled so you can distinguish them from your installed version.
 
 Run `nh --help` for commands. For a local model instead of a cloud API, follow
 the [local models guide](https://github.com/nosistech/nosis-harness/blob/main/docs/LOCAL_MODELS.md).
@@ -79,3 +86,7 @@ If setup reports an untrusted catalog after an upgrade, it has preserved your ol
 project catalog. Back it up outside the project before intentionally replacing it
 with the new bundled catalog; the guided setup guide explains the steps. Never trust
 a changed catalog without reviewing its provider destinations.
+v0.3.0-rc.1 candidate builds also offer an explicit `nh catalog migrate` command for
+recognized older bundled catalogs. This command is not in v0.2.2; see the current
+[guided setup guide](https://github.com/nosistech/nosis-harness/blob/main/docs/GETTING_STARTED.md)
+for its consent, backup and recovery behavior.

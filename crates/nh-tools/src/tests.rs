@@ -303,6 +303,110 @@ fn temporary_file_paths_are_distinct_and_non_collision_errors_surface() {
 }
 
 #[test]
+fn create_publication_never_replaces_a_competing_file() {
+    use std::io::Write as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let destination = dir.path().join("note.txt");
+    let (temp_path, mut temp_file) =
+        create_temp_file(dir.path(), ".nh-write-", 19, "note.txt").unwrap();
+    temp_file.write_all(b"staged bytes").unwrap();
+    temp_file.flush().unwrap();
+    temp_file.sync_all().unwrap();
+    drop(temp_file);
+
+    let publication = publish_create_only_with(&temp_path, &destination, "note.txt", || {
+        std::fs::write(&destination, b"competitor bytes")?;
+        Ok(())
+    })
+    .unwrap();
+
+    assert_eq!(publication, CreatePublication::DestinationExists);
+    assert_eq!(std::fs::read(&destination).unwrap(), b"competitor bytes");
+    assert!(!temp_path.exists(), "staging file was not cleaned");
+}
+
+#[test]
+fn edit_publication_refuses_a_concurrent_change_and_cleans_staging() {
+    use std::io::Write as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let destination = dir.path().join("note.txt");
+    std::fs::write(&destination, b"alpha payload").unwrap();
+    let metadata = std::fs::File::open(&destination)
+        .unwrap()
+        .metadata()
+        .unwrap();
+    let original_modified = metadata.modified().unwrap();
+    let (temp_path, mut temp_file) =
+        create_edit_temp_file(dir.path(), ".nh-edit-", 20, "note.txt").unwrap();
+    temp_file.write_all(b"edited bytes").unwrap();
+    temp_file.flush().unwrap();
+    temp_file.sync_all().unwrap();
+    drop(temp_file);
+
+    let publication = publish_edit_with(
+        &temp_path,
+        &destination,
+        b"alpha payload",
+        &metadata,
+        "note.txt",
+        || {
+            std::fs::write(&destination, b"omega payload")?;
+            std::fs::File::options()
+                .write(true)
+                .open(&destination)?
+                .set_times(std::fs::FileTimes::new().set_modified(original_modified))?;
+            Ok(())
+        },
+        || false,
+    )
+    .unwrap();
+
+    assert_eq!(publication, EditPublication::Conflict);
+    assert_eq!(std::fs::read(&destination).unwrap(), b"omega payload");
+    assert!(!temp_path.exists(), "staging file was not cleaned");
+}
+
+#[test]
+fn edit_publication_observes_cancellation_after_recheck() {
+    use std::io::Write as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let destination = dir.path().join("note.txt");
+    std::fs::write(&destination, b"original bytes").unwrap();
+    let metadata = std::fs::File::open(&destination)
+        .unwrap()
+        .metadata()
+        .unwrap();
+    let (temp_path, mut temp_file) =
+        create_edit_temp_file(dir.path(), ".nh-edit-", 21, "note.txt").unwrap();
+    temp_file.write_all(b"edited bytes").unwrap();
+    temp_file.flush().unwrap();
+    temp_file.sync_all().unwrap();
+    drop(temp_file);
+    let cancelled = AtomicBool::new(false);
+
+    let publication = publish_edit_with(
+        &temp_path,
+        &destination,
+        b"original bytes",
+        &metadata,
+        "note.txt",
+        || Ok(()),
+        || {
+            cancelled.store(true, Ordering::Release);
+            cancelled.load(Ordering::Acquire)
+        },
+    )
+    .unwrap();
+
+    assert_eq!(publication, EditPublication::Cancelled);
+    assert_eq!(std::fs::read(&destination).unwrap(), b"original bytes");
+    assert!(!temp_path.exists(), "staging file was not cleaned");
+}
+
+#[test]
 fn write_file_refuses_existing_file_and_names_edit_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("note.txt");
@@ -431,6 +535,69 @@ fn write_file_lowercase_ask_beats_typed_allow_and_denial_is_ok_shaped() {
     assert_eq!(result, "user denied: create Notes/New.txt");
     assert_eq!(*actions.lock().unwrap(), ["create Notes/New.txt"]);
     assert!(!dir.path().join("Notes/New.txt").exists());
+}
+
+#[test]
+fn cancellation_after_approval_stops_file_and_shell_mutations() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("note.txt"), "before").unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let approvals = Arc::new(AtomicUsize::new(0));
+    let make_ctx = || {
+        let cancel_on_approval = Arc::clone(&cancel);
+        let approvals_seen = Arc::clone(&approvals);
+        ToolCtx::new(
+            dir.path().to_path_buf(),
+            Box::new(move |_| {
+                approvals_seen.fetch_add(1, Ordering::SeqCst);
+                cancel_on_approval.store(true, Ordering::Release);
+                true
+            }),
+        )
+        .with_guard(Box::new(|access| match access {
+            Access::Write(_) | Access::Exec(_) => Guard::Ask,
+            _ => Guard::Allow,
+        }))
+        .with_cancel(Arc::clone(&cancel))
+    };
+
+    let created = WriteFile
+        .execute(
+            json!({"path": "new.txt", "content": "must not exist"}),
+            &make_ctx(),
+        )
+        .unwrap();
+    assert_eq!(created, "turn cancelled before file creation");
+    assert!(!dir.path().join("new.txt").exists());
+
+    cancel.store(false, Ordering::Release);
+    let edited = EditFile
+        .execute(
+            json!({"path": "note.txt", "old_string": "before", "new_string": "after"}),
+            &make_ctx(),
+        )
+        .unwrap();
+    assert_eq!(edited, "turn cancelled before file edit");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("note.txt")).unwrap(),
+        "before"
+    );
+
+    cancel.store(false, Ordering::Release);
+    let executed = ExecShell
+        .execute(
+            json!({"command": "echo should-not-run > marker.txt"}),
+            &make_ctx(),
+        )
+        .unwrap();
+    assert_eq!(executed, "turn cancelled before command execution");
+    assert!(!dir.path().join("marker.txt").exists());
+    assert_eq!(approvals.load(Ordering::SeqCst), 3);
+    assert!(std::fs::read_dir(dir.path()).unwrap().all(|entry| {
+        let name = entry.unwrap().file_name();
+        let name = name.to_string_lossy();
+        !name.starts_with(".nh-write-") && !name.starts_with(".nh-edit-")
+    }));
 }
 
 #[test]
@@ -1512,6 +1679,47 @@ fn exec_cancel_kills_child_without_claiming_a_timeout() {
         !dir.path().join("marker.txt").exists(),
         "cancelled command continued after its shell was killed"
     );
+}
+
+#[test]
+fn failed_tree_kill_is_reported_even_when_direct_child_is_reaped() {
+    #[cfg(windows)]
+    let mut child = std::process::Command::new("ping.exe")
+        .args(["-n", "6", "127.0.0.1"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    #[cfg(not(windows))]
+    let mut child = std::process::Command::new("sleep")
+        .arg("5")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let termination = terminate_child_tree_with(
+        &mut child,
+        "injected tree-kill failure",
+        TerminationReason::Cancelled,
+        |_| (false, "tree-kill injected failure".into()),
+    )
+    .unwrap();
+
+    let Termination::Incomplete { detail, .. } = termination else {
+        panic!("failed tree kill must not be reported as complete");
+    };
+    assert!(
+        detail.contains("tree-kill injected failure"),
+        "got: {detail}"
+    );
+    assert!(
+        detail.contains("direct child reaped, but descendant termination was not verified"),
+        "got: {detail}"
+    );
+    assert!(child.try_wait().unwrap().is_some());
 }
 
 #[test]

@@ -66,6 +66,7 @@ const EVENT_POLL: Duration = Duration::from_millis(50);
 const TURN_BELL_MIN: Duration = Duration::from_secs(10);
 const BUDGET_WARN_FRACTION: (u64, u64) = (4, 5);
 const BUDGET_REASON: &str = "budget reached";
+const BUDGET_USAGE_UNAVAILABLE_REASON: &str = "budget usage unavailable";
 const APPROVAL_LEGEND: &str = "[y] yes  [a] always  [n] no  [Esc] no + cancel turn";
 const TASKBAR_WAITING: &[u8] = b"\x1b]9;4;4;0\x07";
 const TASKBAR_CLEAR: &[u8] = b"\x1b]9;4;0;0\x07";

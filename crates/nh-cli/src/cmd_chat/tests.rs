@@ -1,7 +1,7 @@
 use super::*;
 use chrono::TimeZone;
 use nh_core::receipt::ReceiptWriter;
-use nh_core::session_ledger::{read_session, RestoredSession};
+use nh_core::session_ledger::{read_session, RestoredSession, SessionBudget};
 use nh_core::wire::{
     ChatRequest, ChatResponse, RetryExhausted, ThinkingEffort, Usage, UsageEvidence,
 };
@@ -278,6 +278,7 @@ fn test_session_from_catalog(
             model_id: route.model_id().to_owned(),
             profile: execution_policy.profile.clone(),
             created_utc: session_timestamp(off_peak_now()),
+            budget: Some(SessionBudget::Unlimited),
         })
         .unwrap();
     let agent = AgentLoop {
@@ -667,20 +668,29 @@ fn local_turn_and_price_command_use_the_ratified_meter_copy() {
 
     assert!(out.contains(nh_routes::LOCAL_METER_COPY), "got: {out}");
     assert!(err.contains(nh_routes::LOCAL_METER_COPY), "got: {err}");
-    assert!(err.contains("session no billed tokens"), "got: {err}");
+    assert!(
+        err.contains("session unknown (incomplete - 1 turn)"),
+        "got: {err}"
+    );
     assert!(!out.contains("$0.00"), "got: {out}");
     assert!(!err.contains("$0.00"), "got: {err}");
 }
 
 #[test]
-fn model_command_can_switch_explicitly_to_a_local_route() {
+fn model_command_can_switch_explicitly_to_a_local_route_without_losing_cost_uncertainty() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut session, _calls) = test_session("deepseek-v4-flash", tmp.path());
-    let (out, err) = drive(&mut session, &["/model local-test", "hello"]);
+    let (out, err) = drive(
+        &mut session,
+        &["cloud turn", "/model local-test", "local turn"],
+    );
 
     assert!(out.contains("switched to local-test"), "got: {out}");
     assert_eq!(session.route.class(), RouteClass::Local);
     assert!(err.contains(nh_routes::LOCAL_METER_COPY), "got: {err}");
+    assert_eq!(session.incomplete_cost_turns, 1);
+    assert_eq!(session.session_cost.len(), 1);
+    assert!(session_money(&session, off_peak_now()).starts_with('~'));
 }
 
 // ------------------------------------------------------------- footer
@@ -1041,6 +1051,34 @@ fn restored_totals_match_live_totals_across_route_switch() {
     assert_eq!(restored_totals, live_totals);
     assert_eq!(reopened.session_cost.len(), 2);
     assert_eq!(reopened.route.id(), "kimi-k2.6");
+}
+
+#[test]
+fn torn_session_tail_marks_restored_usage_and_cost_incomplete() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (session, _) = test_session("deepseek-v4-flash", tmp.path());
+    drop(session);
+    let path = tmp
+        .path()
+        .join(".nosis")
+        .join("sessions")
+        .join("test-session.jsonl");
+    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+    write!(file, r#"{{"event":"turn","ts_utc":"2026"#).unwrap();
+    drop(file);
+
+    let restored = read_session(tmp.path(), "test-session").unwrap();
+    assert!(restored.dropped_torn_tail);
+    let (reopened, _) = reopen_test_session(restored, tmp.path());
+
+    assert_eq!(
+        reopened.session_usage.as_ref().map(|usage| usage.evidence),
+        Some(UsageEvidence::Unknown)
+    );
+    assert_eq!(reopened.incomplete_cost_turns, 1);
+    let line = footer(&reopened);
+    assert!(line.contains("session unknown (incomplete - 1 turn)"));
+    assert!(line.contains("tokens: not reported by provider"));
 }
 
 #[test]

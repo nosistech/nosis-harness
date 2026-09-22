@@ -1,13 +1,11 @@
 //! Anthropic Messages request encoding, response parsing, and client.
 
-use std::time::Instant;
-
 use nh_routes::ThinkingDialect;
 use zeroize::Zeroizing;
 
 use super::http::{
     client, is_request_timeout, provider_error, read_body_capped, send_error,
-    MAX_PROVIDER_BODY_BYTES,
+    MAX_PROVIDER_BODY_BYTES, REQUEST_TIMEOUT,
 };
 use super::retry::{
     is_retryable, parse_retry_after, run_with_retry, system_jitter, AttemptOutcome, AttemptResult,
@@ -56,14 +54,15 @@ impl ChatClient for AnthropicMessagesClient {
             RetryPolicy::DEFAULT,
             &std::thread::sleep,
             &system_jitter,
-            |_| {
-                let started = Instant::now();
+            |attempt| {
+                let request_timeout = attempt.timeout.unwrap_or(REQUEST_TIMEOUT);
                 let response = match self
                     .http
                     .post(&url)
                     .header("x-api-key", self.api_key.as_str())
                     .header("anthropic-version", "2023-06-01")
                     .json(&request_body)
+                    .timeout(request_timeout)
                     .send()
                 {
                     Ok(response) => response,
@@ -73,9 +72,8 @@ impl ChatClient for AnthropicMessagesClient {
                                 timed_out: is_request_timeout(&error),
                             },
                             retry_after: None,
-                            detail: send_error(&url, &error).to_string(),
+                            detail: send_error(&url, &error, request_timeout).to_string(),
                             usage: None,
-                            elapsed: started.elapsed(),
                         };
                     }
                 };
@@ -84,19 +82,18 @@ impl ChatClient for AnthropicMessagesClient {
                     .headers()
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|value| value.to_str().ok())
-                    .and_then(parse_retry_after);
+                    .and_then(|value| parse_retry_after(value, chrono::Utc::now()));
                 let body = match read_body_capped(response, MAX_PROVIDER_BODY_BYTES) {
                     Ok(body) => body,
                     Err(error) => {
                         return AttemptResult::Failure {
-                            outcome: AttemptOutcome::HttpStatus(status.as_u16()),
+                            outcome: AttemptOutcome::IncompleteResponse,
                             retry_after,
                             detail: format!(
                                 "could not read provider HTTP {} response: {error}",
                                 status.as_u16()
                             ),
                             usage: None,
-                            elapsed: started.elapsed(),
                         };
                     }
                 };
@@ -114,7 +111,6 @@ impl ChatClient for AnthropicMessagesClient {
                         } else {
                             None
                         },
-                        elapsed: started.elapsed(),
                     };
                 }
                 match parse_response(&body) {
@@ -124,7 +120,6 @@ impl ChatClient for AnthropicMessagesClient {
                         retry_after: None,
                         detail: error.to_string(),
                         usage: extract_usage(&body),
-                        elapsed: started.elapsed(),
                     },
                 }
             },

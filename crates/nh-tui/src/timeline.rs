@@ -2,7 +2,7 @@
 
 use crate::session::safe_line;
 use crate::state::{AgentEvent, App, Status, TimelineEntry, TranscriptKind};
-use crate::{APPROVAL_LEGEND, BUDGET_REASON};
+use crate::APPROVAL_LEGEND;
 use chrono::{DateTime, TimeZone, Utc};
 use nh_core::agent::CompactionEvent;
 use nh_core::cost::{
@@ -290,7 +290,16 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
                 app.set_status(Status::Waiting, Utc::now());
             }
         }
-        AgentEvent::Usage(usage) => {
+        AgentEvent::Usage(mut usage) => {
+            let was_unavailable = app.budget_usage_unavailable();
+            if app
+                .usage
+                .as_ref()
+                .is_some_and(|prior| !prior.evidence.is_measured())
+                && usage.evidence.is_measured()
+            {
+                usage.mark_unreported_component();
+            }
             if app.route.class() == RouteClass::Api
                 && (!usage.evidence.is_measured() || app.route.price_at(Utc::now()).is_none())
             {
@@ -298,8 +307,14 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
             }
             app.usage = Some(usage);
             app.warn_before_budget();
-            if app.budget_reached() {
-                app.set_status(Status::Blocked(BUDGET_REASON.into()), Utc::now());
+            if !was_unavailable && app.budget_usage_unavailable() {
+                app.push_line(
+                    "budget usage is incomplete or unavailable - no more tasks will be sent in this budgeted session",
+                    TranscriptKind::Progress,
+                );
+            }
+            if let Some(reason) = app.budget_block_reason() {
+                app.set_status(Status::Blocked(reason.into()), Utc::now());
             }
         }
         AgentEvent::TaskReceipt(summary) => {
@@ -313,8 +328,8 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
                 TranscriptKind::Progress,
             );
             record_timeline_summary(app, summary);
-            let status = if app.budget_reached() {
-                Status::Blocked(BUDGET_REASON.into())
+            let status = if let Some(reason) = app.budget_block_reason() {
+                Status::Blocked(reason.into())
             } else {
                 Status::Idle
             };
@@ -324,8 +339,8 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
             app.active_model = None;
             app.active_tool = None;
             app.push_text("", &answer, TranscriptKind::Answer);
-            let status = if app.budget_reached() {
-                Status::Blocked(BUDGET_REASON.into())
+            let status = if let Some(reason) = app.budget_block_reason() {
+                Status::Blocked(reason.into())
             } else {
                 Status::Idle
             };
@@ -335,16 +350,19 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
             app.active_model = None;
             app.active_tool = None;
             let status_reason = safe_line(&app.scrubber, &reason);
+            let budget_reason = app.budget_block_reason();
             let what = reason
                 .lines()
                 .next()
                 .filter(|line| !line.trim().is_empty())
                 .unwrap_or("the task could not finish");
             let what = safe_line(&app.scrubber, what);
-            app.push_line(
-                &format!("! {what} - retry the task or type /help"),
-                TranscriptKind::Error,
+            let recovery = budget_reason.map_or_else(
+                || "retry the task or type /help".to_owned(),
+                |reason| format!("{reason}; use /help or start a new session"),
             );
+            app.push_line(&format!("! {what} - {recovery}"), TranscriptKind::Error);
+            let status_reason = budget_reason.unwrap_or(status_reason.as_str()).to_owned();
             app.set_status(Status::Blocked(status_reason), Utc::now());
         }
     }
@@ -412,7 +430,7 @@ fn record_route_turn_cost(
 ) {
     let cost = turn_cost(&app.resolver, route, usage, at);
     match &cost {
-        TurnCostVerdict::Local => {}
+        TurnCostVerdict::Local => app.mark_session_cost_incomplete(),
         TurnCostVerdict::NotStated(_) => app.mark_session_cost_incomplete(),
         TurnCostVerdict::Priced(cost) => app.add_session_cost(
             cost.currency,

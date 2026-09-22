@@ -20,22 +20,45 @@ jobs:
     name: Windows x64 (${{ inputs.mode }})
     runs-on: windows-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Require CI on the exact release source
+        if: inputs.mode == 'release-candidate'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SOURCE: ${{ github.sha }}
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          if ($env:GITHUB_REPOSITORY -ne 'nosistech/nosis-harness' -or
+              $env:RELEASE_REF -cnotmatch '^refs/tags/v\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$') {
+            throw 'Release candidates must run on a version tag in nosistech/nosis-harness.'
+          }
+          .\scripts\verify-release-ci.ps1 -SourceCommit $env:RELEASE_SOURCE
       - uses: dtolnay/rust-toolchain@191af2e1955bbe165f9bbacff2d2438002dff4d4 # 1.96.0
         with:
+          toolchain: "1.96.0"
           targets: x86_64-pc-windows-msvc
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
       - name: Prepare Windows package
         shell: pwsh
         env:
           PACKAGE_MODE: ${{ inputs.mode }}
-        run: .\scripts\package-windows.ps1 -Mode $env:PACKAGE_MODE
+        run: |
+          if (Test-Path -LiteralPath .\target\dist) {
+            throw 'target/dist already exists; refuse to package or upload stale cached artifacts.'
+          }
+          .\scripts\package-windows.ps1 -Mode $env:PACKAGE_MODE
       - name: Smoke-test packaged bytes
         shell: pwsh
+        env:
+          PACKAGE_MODE: ${{ inputs.mode }}
+          RELEASE_REF: ${{ github.ref }}
         run: |
           $ErrorActionPreference = "Stop"
 
@@ -49,6 +72,10 @@ jobs:
             throw "Expected exactly one nh-cli package."
           }
           $expectedVersion = [string]$cliPackages[0].version
+          if ($env:PACKAGE_MODE -eq 'release-candidate' -and
+              $env:RELEASE_REF -cne "refs/tags/v$expectedVersion") {
+            throw 'The dispatched release tag must exactly match the packaged version.'
+          }
 
           $archives = @(Get-ChildItem -LiteralPath .\target\dist -Recurse -File `
             -Filter "nh-$expectedVersion-windows-x64.zip")
@@ -133,5 +160,75 @@ jobs:
         with:
           name: nosis-harness-windows-${{ inputs.mode }}-${{ github.sha }}
           path: target/dist
+          if-no-files-found: error
+          retention-days: 14
+
+  attest:
+    name: Attest verified release candidate
+    needs: package
+    if: inputs.mode == 'release-candidate' && github.repository == 'nosistech/nosis-harness' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download the tested package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: nosis-harness-windows-release-candidate-${{ github.sha }}
+          path: package
+      - name: Validate subjects before attesting
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          executables=(package/release-candidate/*/nh.exe)
+          archives=(package/release-candidate/*/nh-*-windows-x64.zip)
+          checksums=(package/release-candidate/*/SHA256SUMS)
+          [[ ${#executables[@]} -eq 1 && ${#archives[@]} -eq 1 && ${#checksums[@]} -eq 1 ]] || {
+            echo 'Expected exactly one executable, ZIP and checksum file before attestation.' >&2
+            exit 1
+          }
+          # Packaging writes CRLF on Windows. Normalize only the verification stream.
+          (cd "$(dirname "${checksums[0]}")" && tr -d '\r' < SHA256SUMS | sha256sum --check --strict -)
+      - name: Attest executable and ZIP
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          # v4 auto-generates SLSA provenance when no custom predicate/SBOM is supplied.
+          subject-path: |
+            package/release-candidate/*/nh.exe
+            package/release-candidate/*/nh-*-windows-x64.zip
+          create-storage-record: false
+      - name: Verify both downloaded artifacts against the release source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SOURCE: ${{ github.sha }}
+          RELEASE_REF: ${{ github.ref }}
+          ATTESTATION_BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          executables=(package/release-candidate/*/nh.exe)
+          archives=(package/release-candidate/*/nh-*-windows-x64.zip)
+          [[ ${#executables[@]} -eq 1 && ${#archives[@]} -eq 1 ]]
+          for artifact in "${executables[@]}" "${archives[@]}"; do
+            gh attestation verify "$artifact" \
+              --bundle "$ATTESTATION_BUNDLE" \
+              --repo nosistech/nosis-harness \
+              --predicate-type https://slsa.dev/provenance/v1 \
+              --signer-workflow nosistech/nosis-harness/.github/workflows/package-windows.yml \
+              --source-ref "$RELEASE_REF" --source-digest "$RELEASE_SOURCE" \
+              --deny-self-hosted-runners
+          done
+      - name: Retain verification bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nosis-harness-attestation-${{ github.sha }}
+          path: ${{ steps.attest.outputs.bundle-path }}
           if-no-files-found: error
           retention-days: 14

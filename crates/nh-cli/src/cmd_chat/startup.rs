@@ -8,7 +8,7 @@ use nh_core::agent::AgentLoop;
 use nh_core::credential;
 use nh_core::receipt::ReceiptWriter;
 use nh_core::session_ledger::{
-    new_session_id, RestoredSession, SessionEvent, SessionLedger, Surface,
+    new_session_id, RestoredSession, SessionBudget, SessionEvent, SessionLedger, Surface,
 };
 use nh_core::terminal_capability::TerminalCapability;
 use nh_core::wire::ChatClient;
@@ -21,6 +21,7 @@ use super::{
     load_mcp, scrub_approval_line, scrub_line, ChatSession, ConnectFn, NotConnected, SharedScrubber,
 };
 use crate::cmd_run::{self, effort_for, DELEGATE_MSG};
+use crate::model_preference;
 use crate::usage_tracker::LastRequestUsage;
 
 struct Startup {
@@ -34,7 +35,7 @@ struct Startup {
 }
 
 impl Startup {
-    fn load(model: &str, profile: &str, resuming: bool) -> anyhow::Result<Self> {
+    fn load(model: Option<&str>, profile: &str, resuming: bool) -> anyhow::Result<Self> {
         let cwd = std::env::current_dir()?;
         let (root, catalog) = cmd_run::find_catalog(&cwd)?;
         let law = nh_law::load_checked(&root, &LoadOptions { cli_autonomy: None })?;
@@ -42,10 +43,17 @@ impl Startup {
         print_warnings(&law.warnings, &warning_scrubber);
 
         let resolver = RouteResolver::from_toml(&catalog)?;
-        let route = match resolver.resolve(model) {
+        let selected = if resuming {
+            model
+                .expect("resumed sessions always carry a recorded route")
+                .to_owned()
+        } else {
+            model_preference::selected_model(model, &resolver)?
+        };
+        let route = match resolver.resolve(&selected) {
             Ok(route) => route,
             Err(_) if resuming => anyhow::bail!(
-                "session route {model} is no longer available - restore it in catalog.toml, then retry"
+                "session route {selected} is no longer available - restore it in catalog.toml, then retry"
             ),
             Err(error) => return Err(error),
         };
@@ -78,7 +86,7 @@ struct InitialConnection {
 }
 
 pub(super) fn open(
-    model: &str,
+    model: Option<&str>,
     profile: &str,
     terminal_capability: TerminalCapability,
 ) -> anyhow::Result<ChatSession> {
@@ -92,7 +100,12 @@ pub(super) fn reopen(
     validate_surface(&restored)?;
     let route_id = restored.route_id.clone();
     let profile = restored.profile.clone();
-    open_session(&route_id, &profile, Some(restored), terminal_capability)
+    open_session(
+        Some(&route_id),
+        &profile,
+        Some(restored),
+        terminal_capability,
+    )
 }
 
 fn validate_surface(restored: &RestoredSession) -> anyhow::Result<()> {
@@ -106,7 +119,7 @@ fn validate_surface(restored: &RestoredSession) -> anyhow::Result<()> {
 }
 
 fn open_session(
-    model: &str,
+    model: Option<&str>,
     profile: &str,
     restored: Option<RestoredSession>,
     terminal_capability: TerminalCapability,
@@ -243,6 +256,10 @@ where
     };
     let event = if let Some(saved) = &restored {
         super::restore_session_totals(&mut session, &saved.turns)?;
+        if saved.dropped_torn_tail {
+            super::add_session_usage(&mut session, None);
+            session.incomplete_cost_turns = session.incomplete_cost_turns.saturating_add(1);
+        }
         SessionEvent::Resumed {
             ts_utc: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         }
@@ -254,6 +271,7 @@ where
             model_id: session.route.model_id().to_owned(),
             profile: session.active_profile.clone(),
             created_utc: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            budget: Some(SessionBudget::Unlimited),
         }
     };
     session.ledger_failed = session.ledger.append(&event).is_err();

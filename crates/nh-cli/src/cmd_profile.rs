@@ -6,12 +6,14 @@ use nh_routes::{Profiles, ResolvedRoute, RouteResolver};
 use nh_vault::Scrubber;
 
 use crate::cmd_run;
+use crate::model_preference;
 
-pub fn run(model: &str, terminal_capability: TerminalCapability) -> anyhow::Result<()> {
+pub fn run(model: Option<&str>, terminal_capability: TerminalCapability) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let (root, catalog) = cmd_run::find_catalog(&cwd)?;
     let resolver = RouteResolver::from_toml(&catalog)?;
-    let route = resolver.resolve(model)?;
+    let model = model_preference::selected_model(model, &resolver)?;
+    let route = resolver.resolve(&model)?;
     let (profiles, warnings) = Profiles::load(&root);
     let scrubber = Scrubber::new(Vec::new());
     for warning in warnings {

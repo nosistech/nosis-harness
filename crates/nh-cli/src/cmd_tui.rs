@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use nh_core::session_ledger::RestoredSession;
+use nh_core::session_ledger::{RestoredSession, SessionBudget};
 use nh_core::terminal_capability::TerminalCapability;
 use nh_law::LoadOptions;
 use nh_routes::{Profiles, RouteResolver};
@@ -11,9 +11,10 @@ use nh_tui::{mcp_palette_entries, PaletteEntry, TuiConfig};
 use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, Vault};
 
 use crate::cmd_run;
+use crate::model_preference;
 
 pub fn run(
-    model: &str,
+    model: Option<&str>,
     budget: Option<u64>,
     profile: &str,
     terminal_capability: TerminalCapability,
@@ -27,11 +28,27 @@ pub(crate) fn resume(
 ) -> anyhow::Result<()> {
     let model = restored.route_id.clone();
     let profile = restored.profile.clone();
-    run_with_resume(&model, None, &profile, Some(restored), terminal_capability)
+    let budget = restored_budget(restored.budget.as_ref())?;
+    run_with_resume(
+        Some(&model),
+        budget,
+        &profile,
+        Some(restored),
+        terminal_capability,
+    )
+}
+
+fn restored_budget(budget: Option<&SessionBudget>) -> anyhow::Result<Option<u64>> {
+    let Some(budget) = budget else {
+        anyhow::bail!(
+            "legacy TUI session has no saved budget state - start a new TUI session and set --budget deliberately"
+        );
+    };
+    Ok(budget.token_limit())
 }
 
 fn run_with_resume(
-    model: &str,
+    model: Option<&str>,
     budget: Option<u64>,
     profile: &str,
     resume: Option<RestoredSession>,
@@ -56,7 +73,14 @@ fn run_with_resume(
         inner: KeyringVault,
     };
     let credentialed_providers = credentialed_providers(&resolver, &law.policy, &vault);
-    let route = resolver.resolve(model)?;
+    let model = if resume.is_some() {
+        model
+            .expect("resumed sessions always carry a recorded route")
+            .to_owned()
+    } else {
+        model_preference::selected_model(model, &resolver)?
+    };
+    let route = resolver.resolve(&model)?;
     let (profiles, profile_warnings) = Profiles::load(&repo_root);
     for warning in &profile_warnings {
         eprintln!("warning: {}", pre_screen_line(&warning_scrubber, warning));
@@ -68,7 +92,7 @@ fn run_with_resume(
     nh_tui::run(TuiConfig {
         terminal_capability,
         resolver,
-        model_id: model.to_owned(),
+        model_id: model,
         profiles,
         profile: execution_policy.profile,
         law,
@@ -200,6 +224,23 @@ mod tests {
         output = 0.1
         price_confidence = "confirmed"
     "#;
+
+    #[test]
+    fn restored_budget_distinguishes_saved_limits_from_legacy_unknown() {
+        assert_eq!(
+            restored_budget(Some(&SessionBudget::Tokens { limit: 8_192 })).unwrap(),
+            Some(8_192)
+        );
+        assert_eq!(
+            restored_budget(Some(&SessionBudget::Unlimited)).unwrap(),
+            None
+        );
+
+        let error = restored_budget(None).unwrap_err().to_string();
+        assert!(error.contains("legacy TUI session"));
+        assert!(error.contains("start a new TUI session"));
+        assert!(error.contains("--budget"));
+    }
 
     struct StubVault {
         entries: BTreeSet<String>,

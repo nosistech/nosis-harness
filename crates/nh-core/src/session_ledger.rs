@@ -18,6 +18,29 @@ pub enum Surface {
     Tui,
 }
 
+/// Budget state recorded when an interactive session starts.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum SessionBudget {
+    /// The session was intentionally started without a token budget.
+    Unlimited,
+    /// The session stops dispatching after observing this many tokens.
+    Tokens { limit: u64 },
+}
+
+impl SessionBudget {
+    pub fn from_token_limit(limit: Option<u64>) -> Self {
+        limit.map_or(Self::Unlimited, |limit| Self::Tokens { limit })
+    }
+
+    pub fn token_limit(&self) -> Option<u64> {
+        match self {
+            Self::Unlimited => None,
+            Self::Tokens { limit } => Some(*limit),
+        }
+    }
+}
+
 /// One append-only session record. Each value occupies one JSONL line.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -29,6 +52,9 @@ pub enum SessionEvent {
         model_id: String,
         profile: String,
         created_utc: String,
+        /// Missing in legacy ledgers, which cannot prove the original budget.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        budget: Option<SessionBudget>,
     },
     Resumed {
         ts_utc: String,
@@ -68,6 +94,8 @@ pub struct RestoredSession {
     pub model_id: String,
     pub profile: String,
     pub created_utc: String,
+    /// `None` means the legacy ledger did not record its budget state.
+    pub budget: Option<SessionBudget>,
     pub history: Vec<ChatMessage>,
     pub turns: Vec<RestoredTurn>,
     pub ended: bool,
@@ -175,6 +203,7 @@ pub fn fold_session(events: &[SessionEvent]) -> anyhow::Result<RestoredSession> 
     let mut history = Vec::new();
     let mut turns = Vec::new();
     let mut ended = false;
+    let mut budget = None;
 
     for event in events {
         match event {
@@ -185,8 +214,12 @@ pub fn fold_session(events: &[SessionEvent]) -> anyhow::Result<RestoredSession> 
                 model_id: next_model,
                 profile: next_profile,
                 created_utc,
+                budget: next_budget,
             } => {
-                identity.get_or_insert_with(|| (session_id.clone(), *surface, created_utc.clone()));
+                if identity.is_none() {
+                    identity = Some((session_id.clone(), *surface, created_utc.clone()));
+                    budget = next_budget.clone();
+                }
                 route_id = Some(next_route.clone());
                 model_id = Some(next_model.clone());
                 profile = Some(next_profile.clone());
@@ -230,6 +263,7 @@ pub fn fold_session(events: &[SessionEvent]) -> anyhow::Result<RestoredSession> 
         model_id: model_id.context("session ledger has no model")?,
         profile: profile.context("session ledger has no profile")?,
         created_utc,
+        budget,
         history,
         turns,
         ended,
@@ -355,6 +389,7 @@ mod tests {
             model_id: "test-model".to_owned(),
             profile: "balanced".to_owned(),
             created_utc: "2026-07-31T14:05:02Z".to_owned(),
+            budget: Some(SessionBudget::Unlimited),
         }
     }
 
@@ -412,6 +447,42 @@ mod tests {
             original_bytes
         );
         assert!(!restored.dropped_torn_tail);
+    }
+
+    #[test]
+    fn started_budget_distinguishes_explicit_modes_from_legacy_unknown() {
+        let mut unlimited = started("unlimited");
+        let unlimited_json = serde_json::to_value(&unlimited).unwrap();
+        assert_eq!(
+            unlimited_json["budget"],
+            serde_json::json!({"mode": "unlimited"})
+        );
+        assert_eq!(
+            fold_session(&[unlimited.clone()]).unwrap().budget,
+            Some(SessionBudget::Unlimited)
+        );
+
+        let SessionEvent::Started { budget, .. } = &mut unlimited else {
+            unreachable!()
+        };
+        *budget = Some(SessionBudget::Tokens { limit: 12_345 });
+        let tokens_json = serde_json::to_value(&unlimited).unwrap();
+        assert_eq!(
+            tokens_json["budget"],
+            serde_json::json!({"mode": "tokens", "limit": 12_345})
+        );
+        assert_eq!(
+            fold_session(&[unlimited]).unwrap().budget,
+            Some(SessionBudget::Tokens { limit: 12_345 })
+        );
+
+        for legacy in [
+            br#"{"event":"started","session_id":"legacy","surface":"tui","route_id":"test-route","model_id":"test-model","profile":"balanced","created_utc":"2026-07-31T14:05:02Z"}"#.as_slice(),
+            br#"{"event":"started","session_id":"legacy","surface":"tui","route_id":"test-route","model_id":"test-model","profile":"balanced","created_utc":"2026-07-31T14:05:02Z","budget":null}"#.as_slice(),
+        ] {
+            let event: SessionEvent = serde_json::from_slice(legacy).unwrap();
+            assert_eq!(fold_session(&[event]).unwrap().budget, None);
+        }
     }
 
     #[test]

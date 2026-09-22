@@ -1,6 +1,6 @@
 //! MCP server configuration, authentication, and trust policy.
 
-use super::client::{SPEC_DEFAULT, SPEC_FALLBACK};
+use super::client::SPEC_DEFAULT;
 use anyhow::bail;
 use std::collections::BTreeMap;
 
@@ -77,9 +77,9 @@ fn server_config(name: String, raw: RawServer) -> anyhow::Result<McpServerConfig
         )
     })?;
     let spec = raw.spec.unwrap_or_else(|| SPEC_DEFAULT.to_string());
-    if spec != SPEC_DEFAULT && spec != SPEC_FALLBACK {
+    if spec != SPEC_DEFAULT {
         bail!(
-            "mcp server \"{name}\": unknown spec \"{spec}\" - use \"{SPEC_DEFAULT}\" (default) or \"{SPEC_FALLBACK}\""
+            "mcp server \"{name}\": unsupported protocol version \"{spec}\"; only \"{SPEC_DEFAULT}\" is supported and legacy initialize negotiation is unavailable"
         );
     }
     let auth = match raw.auth.as_deref().unwrap_or("none") {

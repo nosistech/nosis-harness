@@ -22,6 +22,42 @@ fn parses_init() {
 }
 
 #[test]
+fn parses_catalog_migrate() {
+    let cli = Cli::try_parse_from(["nh", "catalog", "migrate"]).unwrap();
+    assert!(matches!(
+        cli.cmd,
+        Cmd::Catalog {
+            action: CatalogAction::Migrate
+        }
+    ));
+}
+
+#[test]
+fn parses_model_preference_commands() {
+    let set = Cli::try_parse_from(["nh", "model", "set", "kimi-k2.6"]).unwrap();
+    assert!(matches!(
+        set.cmd,
+        Cmd::Model {
+            action: ModelAction::Set { model }
+        } if model == "kimi-k2.6"
+    ));
+    let show = Cli::try_parse_from(["nh", "model", "show"]).unwrap();
+    assert!(matches!(
+        show.cmd,
+        Cmd::Model {
+            action: ModelAction::Show
+        }
+    ));
+    let clear = Cli::try_parse_from(["nh", "model", "clear"]).unwrap();
+    assert!(matches!(
+        clear.cmd,
+        Cmd::Model {
+            action: ModelAction::Clear
+        }
+    ));
+}
+
+#[test]
 fn parses_doctor() {
     let cli = Cli::try_parse_from(["nh", "doctor"]).unwrap();
     assert!(matches!(cli.cmd, Cmd::Doctor));
@@ -82,7 +118,7 @@ fn parses_run_with_defaults() {
             image,
         } => {
             assert_eq!(task, "fix the failing test");
-            assert_eq!(model, "deepseek-v4-flash");
+            assert_eq!(model, None);
             assert_eq!(max_turns, 20);
             assert_eq!(think, None, "no --think = per-dialect default");
             assert_eq!(autonomy, None, "no --autonomy = law-file default");
@@ -116,7 +152,7 @@ fn parses_run_with_overrides() {
             image,
         } => {
             assert_eq!(task, "review the diff");
-            assert_eq!(model, "deepseek-v4-pro");
+            assert_eq!(model.as_deref(), Some("deepseek-v4-pro"));
             assert_eq!(max_turns, 5);
             assert_eq!(think, None);
             assert_eq!(autonomy, None);
@@ -227,11 +263,11 @@ fn parses_profile_overrides_on_live_commands() {
 }
 
 #[test]
-fn parses_chat_with_default_model() {
+fn parses_chat_without_an_explicit_model() {
     let cli = Cli::try_parse_from(["nh", "chat"]).unwrap();
     match cli.cmd {
         Cmd::Chat { model, profile } => {
-            assert_eq!(model, "deepseek-v4-flash");
+            assert_eq!(model, None);
             assert_eq!(profile, "balanced");
         }
         _ => panic!("expected chat"),
@@ -279,7 +315,7 @@ fn parses_chat_with_model_override() {
     let cli = Cli::try_parse_from(["nh", "chat", "--model", "kimi-k2.6"]).unwrap();
     match cli.cmd {
         Cmd::Chat { model, profile } => {
-            assert_eq!(model, "kimi-k2.6");
+            assert_eq!(model.as_deref(), Some("kimi-k2.6"));
             assert_eq!(profile, "balanced");
         }
         _ => panic!("expected chat"),
@@ -309,16 +345,13 @@ fn parses_why_with_optional_task_and_model() {
 }
 
 #[test]
-fn parses_profile_listing_with_default_and_model_override() {
+fn parses_profile_listing_with_saved_or_explicit_model() {
     let default = Cli::try_parse_from(["nh", "profile"]).unwrap();
-    assert!(matches!(
-        default.cmd,
-        Cmd::Profile { model } if model == "deepseek-v4-flash"
-    ));
+    assert!(matches!(default.cmd, Cmd::Profile { model: None }));
     let selected = Cli::try_parse_from(["nh", "profile", "--model", "kimi-k2.6"]).unwrap();
     assert!(matches!(
         selected.cmd,
-        Cmd::Profile { model } if model == "kimi-k2.6"
+        Cmd::Profile { model } if model.as_deref() == Some("kimi-k2.6")
     ));
 }
 
@@ -331,7 +364,7 @@ fn parses_tui_with_defaults() {
             budget,
             profile,
         } => {
-            assert_eq!(model, "deepseek-v4-flash");
+            assert_eq!(model, None);
             assert_eq!(budget, None);
             assert_eq!(profile, "balanced");
         }
@@ -349,7 +382,7 @@ fn parses_tui_with_model_and_budget() {
             budget,
             profile,
         } => {
-            assert_eq!(model, "kimi-k2.6");
+            assert_eq!(model.as_deref(), Some("kimi-k2.6"));
             assert_eq!(budget, Some(12000));
             assert_eq!(profile, "balanced");
         }

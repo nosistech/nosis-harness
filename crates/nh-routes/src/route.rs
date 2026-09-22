@@ -27,7 +27,8 @@ impl RouteClass {
 }
 
 /// Verbatim user-facing qualifier for local-route metering.
-pub const LOCAL_METER_COPY: &str = "Local: no billed tokens; hardware and power are not metered.";
+pub const LOCAL_METER_COPY: &str =
+    "Loopback endpoint: execution location and billing are not verified.";
 
 /// How a route expresses thinking effort on the wire (plan §3, A.1-A.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

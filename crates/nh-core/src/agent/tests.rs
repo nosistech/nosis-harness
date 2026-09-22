@@ -1,7 +1,7 @@
 use super::context::{estimate_tokens, message_bytes, IMAGE_ESTIMATE_TOKENS};
 use super::*;
 use crate::wire::UsageEvidence;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -529,6 +529,317 @@ impl Tool for CountingTool {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok("executed".into())
     }
+}
+
+struct LateCancellingClient {
+    cancel: Arc<AtomicBool>,
+    calls: Mutex<u8>,
+}
+
+impl ChatClient for LateCancellingClient {
+    fn complete(&self, req: &ChatRequest) -> anyhow::Result<crate::wire::ChatResponse> {
+        let mut calls = self.calls.lock().unwrap();
+        let first = *calls == 0;
+        *calls += 1;
+        drop(calls);
+        if !first {
+            assert!(req.messages.iter().any(|message| {
+                message.role == "tool"
+                    && message.tool_call_id.as_deref() == Some("late-tool")
+                    && message.content.as_deref() == Some("turn cancelled before tool execution")
+            }));
+            return Ok(crate::wire::ChatResponse {
+                message: message("assistant", "next turn works"),
+                finish_reason: FinishReason::Stop,
+                usage: None,
+                retries: RetryStats::default(),
+            });
+        }
+        self.cancel.store(true, Ordering::Release);
+        Ok(crate::wire::ChatResponse {
+            message: ChatMessage {
+                role: "assistant".into(),
+                content: None,
+                parts: None,
+                tool_calls: Some(vec![ToolCallReq {
+                    id: "late-tool".into(),
+                    name: "count_tool".into(),
+                    arguments: "{}".into(),
+                }]),
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            finish_reason: FinishReason::ToolUse,
+            usage: Some(Usage {
+                prompt_tokens: 31,
+                completion_tokens: 7,
+                cached_tokens: Some(11),
+                evidence: UsageEvidence::Measured,
+            }),
+            retries: RetryStats {
+                retries: 1,
+                rate_limited: 1,
+            },
+        })
+    }
+}
+
+#[test]
+fn cancellation_observed_after_provider_preserves_usage_and_runs_no_tool() {
+    let dir = tempfile::tempdir().unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let executions = Arc::new(AtomicUsize::new(0));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = agent_with_receipt_path(
+        dir.path(),
+        dir.path().join("receipts.jsonl"),
+        Box::new(LateCancellingClient {
+            cancel: Arc::clone(&cancel),
+            calls: Mutex::new(0),
+        }),
+        events,
+    );
+    agent.ctx = ToolCtx::new(dir.path().to_path_buf(), Box::new(|_| false))
+        .with_cancel(Arc::clone(&cancel));
+    agent.tools = vec![Box::new(CountingTool(Arc::clone(&executions)))];
+    let mut history = Vec::new();
+
+    let (answer, receipt) = agent.run_with_history(&mut history, "cancel late").unwrap();
+
+    assert_eq!(answer, "turn cancelled");
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    assert_eq!(receipt.kind, ReceiptKind::CancelledTurn);
+    assert_eq!(receipt.outcome, Outcome::Partial);
+    assert_eq!(receipt.tool_calls, 0);
+    assert_eq!(
+        receipt.retries,
+        RetryStats {
+            retries: 1,
+            rate_limited: 1,
+        }
+    );
+    assert_eq!(
+        receipt.usage,
+        Some(Usage {
+            prompt_tokens: 31,
+            completion_tokens: 7,
+            cached_tokens: Some(11),
+            evidence: UsageEvidence::Measured,
+        })
+    );
+    assert_eq!(history.len(), 4);
+    assert_eq!(history[0].role, "system");
+    assert_eq!(history[1].role, "user");
+    assert_eq!(history[2].role, "assistant");
+    assert_eq!(history[3].role, "tool");
+    assert_eq!(history[3].tool_call_id.as_deref(), Some("late-tool"));
+    assert_eq!(
+        history[3].content.as_deref(),
+        Some("turn cancelled before tool execution")
+    );
+
+    cancel.store(false, Ordering::Release);
+    let (next_answer, next_receipt) = agent
+        .run_with_history(&mut history, "continue after cancellation")
+        .unwrap();
+    assert_eq!(next_answer, "next turn works");
+    assert_eq!(next_receipt.kind, ReceiptKind::Task);
+}
+
+struct CancellingTool {
+    cancel: Arc<AtomicBool>,
+    executions: Arc<AtomicUsize>,
+}
+
+impl Tool for CancellingTool {
+    fn spec(&self) -> nh_tools::ToolSpec {
+        nh_tools::ToolSpec {
+            name: "cancel_tool".into(),
+            description: "cancel after one execution".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    fn execute(&self, _args: serde_json::Value, _ctx: &ToolCtx) -> anyhow::Result<String> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        self.cancel.store(true, Ordering::Release);
+        Ok("first tool completed".into())
+    }
+}
+
+struct CancelBetweenToolsClient {
+    calls: Mutex<u8>,
+}
+
+impl ChatClient for CancelBetweenToolsClient {
+    fn complete(&self, req: &ChatRequest) -> anyhow::Result<crate::wire::ChatResponse> {
+        let mut calls = self.calls.lock().unwrap();
+        let first = *calls == 0;
+        *calls += 1;
+        drop(calls);
+        if first {
+            return Ok(crate::wire::ChatResponse {
+                message: ChatMessage {
+                    role: "assistant".into(),
+                    content: None,
+                    parts: None,
+                    tool_calls: Some(vec![
+                        ToolCallReq {
+                            id: "runs".into(),
+                            name: "cancel_tool".into(),
+                            arguments: "{}".into(),
+                        },
+                        ToolCallReq {
+                            id: "skipped".into(),
+                            name: "count_tool".into(),
+                            arguments: "{}".into(),
+                        },
+                    ]),
+                    tool_call_id: None,
+                    reasoning_content: None,
+                },
+                finish_reason: FinishReason::ToolUse,
+                usage: None,
+                retries: RetryStats::default(),
+            });
+        }
+
+        let assistant = req
+            .messages
+            .iter()
+            .find(|message| message.role == "assistant" && message.tool_calls.is_some())
+            .expect("cancelled turn keeps its assistant tool call message");
+        for call in assistant.tool_calls.as_deref().unwrap() {
+            assert!(req.messages.iter().any(|message| {
+                message.role == "tool" && message.tool_call_id.as_deref() == Some(call.id.as_str())
+            }));
+        }
+        Ok(crate::wire::ChatResponse {
+            message: message("assistant", "next turn works"),
+            finish_reason: FinishReason::Stop,
+            usage: None,
+            retries: RetryStats::default(),
+        })
+    }
+}
+
+#[test]
+fn cancellation_between_tools_skips_the_rest_and_keeps_history_replayable() {
+    let dir = tempfile::tempdir().unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let first_executions = Arc::new(AtomicUsize::new(0));
+    let skipped_executions = Arc::new(AtomicUsize::new(0));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = agent_with_receipt_path(
+        dir.path(),
+        dir.path().join("receipts.jsonl"),
+        Box::new(CancelBetweenToolsClient {
+            calls: Mutex::new(0),
+        }),
+        events,
+    );
+    agent.ctx = ToolCtx::new(dir.path().to_path_buf(), Box::new(|_| false))
+        .with_cancel(Arc::clone(&cancel));
+    agent.tools = vec![
+        Box::new(CancellingTool {
+            cancel: Arc::clone(&cancel),
+            executions: Arc::clone(&first_executions),
+        }),
+        Box::new(CountingTool(Arc::clone(&skipped_executions))),
+    ];
+    let mut history = Vec::new();
+
+    let (_, cancelled) = agent
+        .run_with_history(&mut history, "use two tools")
+        .unwrap();
+
+    assert_eq!(cancelled.kind, ReceiptKind::CancelledTurn);
+    assert_eq!(cancelled.tool_calls, 1);
+    assert_eq!(first_executions.load(Ordering::SeqCst), 1);
+    assert_eq!(skipped_executions.load(Ordering::SeqCst), 0);
+    let tool_messages = history
+        .iter()
+        .filter(|message| message.role == "tool")
+        .collect::<Vec<_>>();
+    assert_eq!(tool_messages.len(), 2);
+    assert_eq!(
+        tool_messages[0].content.as_deref(),
+        Some("first tool completed")
+    );
+    assert_eq!(
+        tool_messages[1].content.as_deref(),
+        Some("turn cancelled before tool execution")
+    );
+
+    cancel.store(false, Ordering::Release);
+    let (answer, next) = agent
+        .run_with_history(&mut history, "continue safely")
+        .unwrap();
+    assert_eq!(answer, "next turn works");
+    assert_eq!(next.kind, ReceiptKind::Task);
+    assert_eq!(skipped_executions.load(Ordering::SeqCst), 0);
+}
+
+struct ProgressCancellationClient;
+
+impl ChatClient for ProgressCancellationClient {
+    fn complete(&self, _req: &ChatRequest) -> anyhow::Result<crate::wire::ChatResponse> {
+        Ok(crate::wire::ChatResponse {
+            message: ChatMessage {
+                role: "assistant".into(),
+                content: None,
+                parts: None,
+                tool_calls: Some(vec![ToolCallReq {
+                    id: "cancelled-at-progress".into(),
+                    name: "count_tool".into(),
+                    arguments: "{}".into(),
+                }]),
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            finish_reason: FinishReason::ToolUse,
+            usage: None,
+            retries: RetryStats::default(),
+        })
+    }
+}
+
+#[test]
+fn cancellation_from_progress_callback_stops_before_arbitrary_tool_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let executions = Arc::new(AtomicUsize::new(0));
+    let callback_cancel = Arc::clone(&cancel);
+    let mut agent = agent_with_receipt_path(
+        dir.path(),
+        dir.path().join("receipts.jsonl"),
+        Box::new(ProgressCancellationClient),
+        Arc::new(Mutex::new(Vec::new())),
+    );
+    agent.max_turns = 2;
+    agent.ctx = ToolCtx::new(dir.path().to_path_buf(), Box::new(|_| false))
+        .with_cancel(Arc::clone(&cancel));
+    agent.tools = vec![Box::new(CountingTool(Arc::clone(&executions)))];
+    agent.on_event = Some(Box::new(move |line| {
+        if line.contains("count_tool") {
+            callback_cancel.store(true, Ordering::Release);
+        }
+    }));
+    let mut history = Vec::new();
+
+    let (answer, receipt) = agent
+        .run_with_history(&mut history, "cancel from progress")
+        .unwrap();
+
+    assert_eq!(answer, "turn cancelled");
+    assert_eq!(receipt.kind, ReceiptKind::CancelledTurn);
+    assert_eq!(receipt.tool_calls, 1);
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    assert!(history.iter().any(|message| {
+        message.role == "tool"
+            && message.tool_call_id.as_deref() == Some("cancelled-at-progress")
+            && message.content.as_deref() == Some("turn cancelled before tool execution")
+    }));
 }
 
 #[test]

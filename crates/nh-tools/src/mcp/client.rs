@@ -1,18 +1,20 @@
 //! Stateless MCP transport, bounded responses, authentication, and tool cache.
 
 mod oauth;
+mod response;
 
 use super::config::{McpAuth, McpServerConfig};
 use anyhow::{bail, Context as _};
 use nh_vault::{EnvFallbackVault, KeyringVault, SecretValue, Vault};
 use oauth::OAuthState;
+use response::{read_rpc_reply, RpcReply};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 pub(super) const SPEC_DEFAULT: &str = "2026-07-28";
-pub(super) const SPEC_FALLBACK: &str = "2025-11-25";
 /// Pinned default when `tools/list` carries no `result._meta.ttlMs`.
 pub(super) const DEFAULT_TTL_MS: u64 = 60_000;
 pub(super) const MAX_MCP_BODY_BYTES: usize = 4 * 1024 * 1024;
@@ -46,7 +48,7 @@ pub(super) fn read_body_capped(
     if buf.len() > max {
         anyhow::bail!("mcp response exceeded cap of {max} bytes");
     }
-    Ok(String::from_utf8_lossy(&buf).into_owned())
+    String::from_utf8(buf).context("mcp response was not valid UTF-8")
 }
 
 // ---------------------------------------------------------------------------
@@ -86,12 +88,21 @@ pub struct McpClient {
     pub(super) startup_http: reqwest::blocking::Client,
     pub(super) next_id: AtomicU64,
     pub(super) cache: Mutex<Option<ToolCache>>,
+    pub(super) unsupported_header_tools: Mutex<HashSet<String>>,
     pub(super) oauth: Mutex<OAuthState>,
     pub(super) refresh_lock: Mutex<()>,
 }
 
 impl McpClient {
     pub fn new(config: McpServerConfig) -> anyhow::Result<Self> {
+        if config.spec != SPEC_DEFAULT {
+            bail!(
+                "mcp server \"{}\": unsupported protocol version {:?}; only {:?} is supported and legacy initialize negotiation is unavailable",
+                config.name,
+                config.spec,
+                SPEC_DEFAULT
+            );
+        }
         // Explicit timeouts, never the hidden 30 s blocking default.
         let http = reqwest::blocking::Client::builder()
             .timeout(REQUEST_TIMEOUT)
@@ -111,6 +122,7 @@ impl McpClient {
             startup_http,
             next_id: AtomicU64::new(1),
             cache: Mutex::new(None),
+            unsupported_header_tools: Mutex::new(HashSet::new()),
             oauth: Mutex::new(OAuthState::default()),
             refresh_lock: Mutex::new(()),
         })
@@ -133,11 +145,32 @@ impl McpClient {
             }
         }
         let result = self.rpc_with(&self.startup_http, "tools/list", json!({}))?;
-        let mut entries: Vec<ToolEntry> = result
+        let mut unsupported = HashSet::new();
+        let mut entries = Vec::new();
+        for tool in result
             .get("tools")
             .and_then(Value::as_array)
-            .map(|tools| tools.iter().filter_map(parse_tool).collect())
-            .unwrap_or_default();
+            .into_iter()
+            .flatten()
+        {
+            let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
+            if tool
+                .get("inputSchema")
+                .is_some_and(schema_uses_parameter_headers)
+            {
+                eprintln!(
+                    "warning: an MCP tool uses unsupported x-mcp-header annotations; excluding it"
+                );
+                unsupported.insert(name.to_string());
+                continue;
+            }
+            if let Some(entry) = parse_tool(tool) {
+                entries.push(entry);
+            }
+        }
+        *self.unsupported_header_tools.lock().map_err(|_| {
+            anyhow::anyhow!("MCP unsupported-tool state is unavailable after an internal panic")
+        })? = unsupported;
         if entries.len() > MAX_TOOLS {
             eprintln!(
                 "warning: mcp server \"{}\" advertised {} tools; using the first {}",
@@ -176,6 +209,16 @@ impl McpClient {
     /// `[<type> block]`. `isError: true` becomes a one-line `Err`.
     /// The returned text is DATA for the model, never instructions.
     pub fn call_tool(&self, name: &str, args: Value) -> anyhow::Result<String> {
+        if self
+            .unsupported_header_tools
+            .lock()
+            .map_err(|_| {
+                anyhow::anyhow!("MCP unsupported-tool state is unavailable after an internal panic")
+            })?
+            .contains(name)
+        {
+            bail!("mcp tool is unavailable because x-mcp-header parameters are not supported");
+        }
         let result = self.rpc("tools/call", json!({ "name": name, "arguments": args }))?;
         let text = render_content(result.get("content"));
         if result.get("isError").and_then(Value::as_bool) == Some(true) {
@@ -189,42 +232,9 @@ impl McpClient {
         Ok(text)
     }
 
-    /// Server business card: GET `<url>/.well-known/mcp.json`, falling back to
-    /// JSON-RPC `server/discover`. Both failing → one friendly error.
+    /// Server business card through the modern `server/discover` request.
     pub fn discover(&self) -> anyhow::Result<Value> {
-        let headers = self.request_headers_with(&self.startup_http)?;
-        if let Ok(card) = self.get_well_known(&headers) {
-            return Ok(card);
-        }
-        match self.rpc_with(&self.startup_http, "server/discover", json!({})) {
-            Ok(card) => Ok(card),
-            Err(_) => bail!(
-                "mcp server \"{}\" unreachable - check the url in .nosis/mcp.toml",
-                self.config.name
-            ),
-        }
-    }
-
-    pub(super) fn get_well_known(
-        &self,
-        headers: &[(String, SecretValue)],
-    ) -> anyhow::Result<Value> {
-        let url = format!(
-            "{}/.well-known/mcp.json",
-            self.config.url.trim_end_matches('/')
-        );
-        let mut request = self.startup_http.get(&url);
-        for (name, value) in headers {
-            request = request.header(name.as_str(), value.as_str());
-        }
-        let response = request
-            .send()
-            .with_context(|| format!("could not reach {url}"))?;
-        if !response.status().is_success() {
-            bail!("{url} returned HTTP {}", response.status().as_u16());
-        }
-        let body = read_body_capped(response, MAX_MCP_BODY_BYTES)?;
-        serde_json::from_str(&body).with_context(|| format!("{url} sent invalid JSON"))
+        self.rpc_with(&self.startup_http, "server/discover", json!({}))
     }
 
     /// One JSON-RPC 2.0 call. Every request's params carries `_meta` - the
@@ -239,22 +249,58 @@ impl McpClient {
         method: &str,
         mut params: Value,
     ) -> anyhow::Result<Value> {
-        params["_meta"] = json!({
-            "protocolVersion": self.config.spec,
-            "clientInfo": { "name": "nosis-harness", "version": env!("CARGO_PKG_VERSION") },
-            "capabilities": {}
-        });
+        let params_object = params
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("MCP request params must be an object"))?;
+        let meta = params_object
+            .entry("_meta")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("MCP request _meta must be an object"))?;
+        meta.insert(
+            "io.modelcontextprotocol/protocolVersion".into(),
+            json!(self.config.spec),
+        );
+        meta.insert(
+            "io.modelcontextprotocol/clientInfo".into(),
+            json!({ "name": "nosis-harness", "version": env!("CARGO_PKG_VERSION") }),
+        );
+        meta.insert(
+            "io.modelcontextprotocol/clientCapabilities".into(),
+            json!({}),
+        );
+        let request_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let body = json!({
             "jsonrpc": "2.0",
-            "id": self.next_id.fetch_add(1, Ordering::Relaxed),
+            "id": request_id,
             "method": method,
             "params": params
         });
+        let mcp_name = if method == "tools/call" {
+            let name = body["params"]["name"]
+                .as_str()
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("tools/call needs a non-empty tool name"))?;
+            Some(encode_header_value("Mcp-Name", name)?)
+        } else {
+            None
+        };
         let url = &self.config.url;
         let mut retried_oauth = false;
         loop {
             let headers = self.request_headers_with(http)?;
-            let mut request = http.post(url).json(&body);
+            let mut request = http
+                .post(url)
+                .header(
+                    reqwest::header::ACCEPT,
+                    "application/json, text/event-stream",
+                )
+                .header("MCP-Protocol-Version", self.config.spec.as_str())
+                .header("Mcp-Method", method)
+                .json(&body);
+            if let Some(name) = &mcp_name {
+                request = request.header("Mcp-Name", name);
+            }
             for (name, value) in &headers {
                 request = request.header(name.as_str(), value.as_str());
             }
@@ -272,6 +318,11 @@ impl McpClient {
                         .flatten()
                 });
                 self.refresh_oauth(http, rejected_access)?;
+                if method == "tools/call" {
+                    bail!(
+                        "{url} rejected MCP authorization; credentials were refreshed, but the tool call was not replayed - retry explicitly"
+                    );
+                }
                 retried_oauth = true;
                 continue;
             }
@@ -283,17 +334,10 @@ impl McpClient {
                 };
                 bail!("{url} returned HTTP {}{hint}", status.as_u16());
             }
-            let text = read_body_capped(response, MAX_MCP_BODY_BYTES)?;
-            let reply: Value = serde_json::from_str(&text)
-                .map_err(|_| anyhow::anyhow!("{url} sent invalid JSON - is it an MCP endpoint?"))?;
-            if let Some(error) = reply.get("error") {
-                let message = error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown error");
-                bail!("server error: {message}");
+            match read_rpc_reply(response, &json!(request_id), url)? {
+                RpcReply::Complete(result) => return Ok(result),
+                RpcReply::ServerError(message) => bail!("server error: {message}"),
             }
-            return Ok(reply.get("result").cloned().unwrap_or(Value::Null));
         }
     }
 
@@ -328,6 +372,39 @@ impl McpClient {
             lint_header(name, value.as_str())?;
         }
         Ok(headers)
+    }
+}
+
+fn schema_uses_parameter_headers(value: &Value) -> bool {
+    match value {
+        Value::Array(values) => values.iter().any(schema_uses_parameter_headers),
+        Value::Object(fields) => {
+            fields
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("x-mcp-header"))
+                || fields.values().any(schema_uses_parameter_headers)
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
+    }
+}
+
+fn encode_header_value(header_name: &str, raw: &str) -> anyhow::Result<String> {
+    lint_header(header_name, raw)?;
+    if raw.is_empty() {
+        bail!("refused to send empty {header_name} header");
+    }
+    let bytes = raw.as_bytes();
+    let sentinel = raw.starts_with("=?base64?") && raw.ends_with("?=");
+    let plain = bytes
+        .iter()
+        .all(|byte| *byte == b'\t' || (b' '..=b'~').contains(byte))
+        && !bytes.first().is_some_and(u8::is_ascii_whitespace)
+        && !bytes.last().is_some_and(u8::is_ascii_whitespace)
+        && !sentinel;
+    if plain {
+        Ok(raw.to_string())
+    } else {
+        Ok(format!("=?base64?{}?=", crate::encode_base64(bytes)))
     }
 }
 

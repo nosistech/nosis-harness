@@ -237,7 +237,9 @@ fn model_picker_rows(app: &App) -> Vec<PickerRow> {
                     value: id.clone(),
                     label: terminal_text(
                         app,
-                        &format!("{id} · local · explicit selection only · no billed tokens"),
+                        &format!(
+                            "{id} · local endpoint · explicit selection only · billing unknown"
+                        ),
                     ),
                 });
             }

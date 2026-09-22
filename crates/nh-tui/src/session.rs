@@ -79,8 +79,10 @@ pub(super) fn restore_app(
         TranscriptKind::Progress,
     );
     if restored.dropped_torn_tail {
+        crate::worker::add_usage(&mut app.usage, None);
+        app.mark_session_cost_incomplete();
         app.push_line(
-            "last session record was incomplete and was dropped - continuing safely",
+            "last session record was incomplete and was dropped - in-flight usage may be missing",
             TranscriptKind::Progress,
         );
     }
@@ -96,8 +98,8 @@ pub(super) fn restore_app(
             TranscriptKind::Progress,
         );
     }
-    if app.budget_reached() {
-        app.set_status(Status::Blocked(crate::BUDGET_REASON.into()), Utc::now());
+    if let Some(reason) = app.budget_block_reason() {
+        app.set_status(Status::Blocked(reason.into()), Utc::now());
     }
     Ok(())
 }
@@ -196,6 +198,7 @@ pub(super) fn run_tui_session(
         initial: Some(initial),
         profiles: profiles.clone(),
         active_profile: execution_policy.profile.clone(),
+        budget,
         resume,
     })?;
     // Keep App after Worker: unwinding drops its approval sender before Worker::drop.

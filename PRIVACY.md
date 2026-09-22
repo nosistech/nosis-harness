@@ -10,6 +10,10 @@ history, task text, tool definitions, and tool results needed for that request. 
 routes use TLS and go directly from your machine to the exact catalog origin approved for
 that credential; `nh` adds no Nosis-operated intermediary.
 
+A configured local route connects to a loopback endpoint. That server can forward requests
+to a cloud service. `nh` cannot establish the final execution location or billing policy from
+the loopback address. Check the server's model and cloud settings before sending private data.
+
 Two other features can create network traffic:
 
 - MCP discovery and tool calls go to endpoints that the operator placed in user-global
@@ -35,6 +39,12 @@ their own policies.
 - **Receipts** - the cost/usage ledger - are written locally to `.nosis/receipts.jsonl`
   and are not automatically uploaded by `nh`.
 - **Fleet state** lives under `.nosis/fleet/`.
+- **Remembered model (unreleased)** is an opt-in route ID in `~/.nosis/model`,
+  shared across projects. It contains no credential, endpoint or permission grant.
+  `nh model clear` removes the preference; explicit `--model` overrides it.
+- **Catalog migration backups (unreleased)** stay beside the project catalog as
+  `catalog.toml.nh-backup-*`. They contain the recognized older bundled catalog,
+  not API keys. Keep them until you have verified the upgrade.
 - **Session transcripts** for `nh chat` and `nh tui` are written locally to
   `.nosis/sessions/<id>.jsonl` so that an interrupted session can be resumed. They contain
   the conversation itself, not only its cost. The same redaction is applied before each
@@ -46,6 +56,8 @@ their own policies.
 - **Redaction** is applied to application-controlled terminal, receipt, tool-result, and
   MCP-result paths using known key shapes plus active literal credentials. Redaction lowers
   risk but is not a reason to put secrets in prompts or task text.
+  It does not remove all confidential code, personal information or other sensitive content
+  from saved conversations. Review transcripts before sharing them.
 
 ## Delete local data
 

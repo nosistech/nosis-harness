@@ -475,6 +475,28 @@ impl AgentLoop {
         let mut compaction_total = CompactionStats::default();
 
         while turns < self.max_turns {
+            if self.turn_cancelled() {
+                return Ok(self.finish_cancelled_turn(
+                    task,
+                    turn_started,
+                    "turn cancelled".into(),
+                    ReceiptFields {
+                        turns,
+                        tool_calls,
+                        duration_ms: 0,
+                        outcome: Outcome::Partial,
+                        failure_class: Some(FailureClass::Constraint),
+                        usage: if usage_overflowed {
+                            None
+                        } else {
+                            usage_total.clone()
+                        },
+                        repairs,
+                        retries: retry_total,
+                        compaction: compaction_total,
+                    },
+                ));
+            }
             self.report_prefix_drift(&prefix_seal, history, &mut prefix_drift_reported);
 
             if let Some(limit) = self.context_limit {
@@ -596,10 +618,41 @@ impl AgentLoop {
             {
                 usage_overflowed = true;
             }
-            push_message(history, &mut appended, resp.message.clone());
             let calls = resp.message.tool_calls.clone().unwrap_or_default();
             let finish_kind = classify_finish_reason(&resp.finish_reason);
             let tool_use_confirmed = matches!(finish_kind, FinishKind::ToolUse);
+            if self.turn_cancelled() {
+                let (outcome, failure_class) = cancelled_response_outcome(finish_kind, &calls);
+                let answer = resp
+                    .message
+                    .content
+                    .clone()
+                    .filter(|content| !content.is_empty())
+                    .unwrap_or_else(|| "turn cancelled".into());
+                push_message(history, &mut appended, resp.message.clone());
+                append_cancelled_tool_results(history, &mut appended, &calls);
+                return Ok(self.finish_cancelled_turn(
+                    task,
+                    turn_started,
+                    answer,
+                    ReceiptFields {
+                        turns,
+                        tool_calls,
+                        duration_ms: 0,
+                        outcome,
+                        failure_class,
+                        usage: if usage_overflowed {
+                            None
+                        } else {
+                            usage_total.clone()
+                        },
+                        repairs,
+                        retries: retry_total,
+                        compaction: compaction_total,
+                    },
+                ));
+            }
+            push_message(history, &mut appended, resp.message.clone());
             if calls.is_empty() || !tool_use_confirmed {
                 self.report_prefix_drift(&prefix_seal, history, &mut prefix_drift_reported);
                 let text = resp.message.content.clone().unwrap_or_default();
@@ -653,7 +706,30 @@ impl AgentLoop {
                 self.append_receipt(&mut receipt);
                 return Ok((text, receipt));
             }
-            for call in &calls {
+            for (call_index, call) in calls.iter().enumerate() {
+                if self.turn_cancelled() {
+                    append_cancelled_tool_results(history, &mut appended, &calls[call_index..]);
+                    return Ok(self.finish_cancelled_turn(
+                        task,
+                        turn_started,
+                        "turn cancelled".into(),
+                        ReceiptFields {
+                            turns,
+                            tool_calls,
+                            duration_ms: 0,
+                            outcome: Outcome::Partial,
+                            failure_class: Some(FailureClass::Constraint),
+                            usage: if usage_overflowed {
+                                None
+                            } else {
+                                usage_total.clone()
+                            },
+                            repairs,
+                            retries: retry_total,
+                            compaction: compaction_total,
+                        },
+                    ));
+                }
                 tool_calls += 1;
                 self.emit(&progress_line(turns, call));
                 let result = self.run_tool(call);
@@ -780,6 +856,14 @@ impl AgentLoop {
             );
         };
 
+        if self.turn_cancelled() {
+            return finish_tool_run(
+                "turn cancelled before tool execution".into(),
+                repair_notes,
+                Vec::new(),
+            );
+        }
+
         match tool.execute_with_audit(args, &self.ctx) {
             Ok(execution) => finish_tool_run(execution.output, repair_notes, execution.audit),
             Err(error) => {
@@ -797,6 +881,23 @@ impl AgentLoop {
         if let Some(f) = &self.on_event {
             f(line);
         }
+    }
+
+    fn turn_cancelled(&self) -> bool {
+        self.ctx.cancel.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn finish_cancelled_turn(
+        &self,
+        task: &str,
+        turn_started: std::time::Instant,
+        answer: String,
+        mut fields: ReceiptFields,
+    ) -> (String, Receipt) {
+        fields.duration_ms = u64::try_from(turn_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let mut receipt = self.make_receipt(task, fields);
+        self.append_receipt(&mut receipt);
+        (answer, receipt)
     }
 
     fn append_receipt(&self, receipt: &mut Receipt) {
@@ -847,6 +948,44 @@ impl AgentLoop {
             compaction: Box::new(compaction),
             effective_profile: self.profile.clone(),
         }
+    }
+}
+
+fn cancelled_response_outcome(
+    finish_kind: FinishKind,
+    calls: &[ToolCallReq],
+) -> (Outcome, Option<FailureClass>) {
+    match finish_kind {
+        FinishKind::Normal if calls.is_empty() => (Outcome::Pass, None),
+        FinishKind::Filtered => (Outcome::Fail, Some(FailureClass::Filtered)),
+        FinishKind::Context => (Outcome::Partial, Some(FailureClass::Context)),
+        FinishKind::Normal
+        | FinishKind::ToolUse
+        | FinishKind::Truncated
+        | FinishKind::Interrupted
+        | FinishKind::Missing
+        | FinishKind::Unknown => (Outcome::Partial, Some(FailureClass::Constraint)),
+    }
+}
+
+fn append_cancelled_tool_results(
+    history: &mut Vec<ChatMessage>,
+    appended: &mut Option<&mut Vec<ChatMessage>>,
+    calls: &[ToolCallReq],
+) {
+    for call in calls {
+        push_message(
+            history,
+            appended,
+            ChatMessage {
+                role: "tool".into(),
+                content: Some("turn cancelled before tool execution".into()),
+                parts: None,
+                tool_calls: None,
+                tool_call_id: Some(call.id.clone()),
+                reasoning_content: None,
+            },
+        );
     }
 }
 

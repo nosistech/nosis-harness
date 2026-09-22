@@ -7,7 +7,13 @@ and top-tier cost comparisons exclude them.
 
 The meter says exactly:
 
-> Local: no billed tokens; hardware and power are not metered.
+> Loopback endpoint: execution location and billing are not verified.
+
+The address tells Nosis where to connect. It does not establish where the server runs the
+model or whether another service bills the request. For example, a local Ollama server can
+use a cloud model. Review the server's cloud settings and selected model before sending
+private data. Local-route turns leave session money totals incomplete instead of counting
+them as known zero. Hardware and power costs are not measured.
 
 ## Reference path and context honesty
 

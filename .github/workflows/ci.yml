@@ -32,10 +32,15 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@191af2e1955bbe165f9bbacff2d2438002dff4d4 # 1.96.0
         with:
+          toolchain: "1.96.0"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
       - name: Format check
         run: cargo fmt --all --check
+      - name: Release gate fixtures
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\test-release-ci.ps1
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets --release -- -D warnings
       - name: Documentation
@@ -46,6 +51,13 @@ jobs:
         # --no-fail-fast matches gate.ps1. Without it cargo stops at the first failing
         # binary, so a red run reports only part of the suite and hides the rest.
         run: cargo test --locked --workspace --release --no-fail-fast
+      - name: Check command reference
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --locked --release -p nh-cli
+          if ($LASTEXITCODE -ne 0) { throw 'CLI build failed.' }
+          .\scripts\generate-cli-reference.ps1 -Check
 
   supply-chain:
     name: Supply chain
@@ -56,6 +68,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@191af2e1955bbe165f9bbacff2d2438002dff4d4 # 1.96.0
+        with:
+          toolchain: "1.96.0"
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked --version 0.20.2

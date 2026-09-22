@@ -5,6 +5,7 @@
 
 use clap::{Parser, Subcommand};
 
+mod cmd_catalog;
 mod cmd_chat;
 mod cmd_doctor;
 mod cmd_fleet;
@@ -17,6 +18,7 @@ mod cmd_run;
 mod cmd_setup;
 mod cmd_tui;
 mod cmd_why;
+mod model_preference;
 mod usage_tracker;
 
 #[derive(Parser)]
@@ -49,6 +51,11 @@ impl AsciiArg {
 enum Cmd {
     /// Set up this project, choose a model, and optionally start chat
     Setup,
+    /// Review and migrate a known historical bundled catalog
+    Catalog {
+        #[command(subcommand)]
+        action: CatalogAction,
+    },
     /// Set up .nosis/ in this repo (receipts dir, .gitignore, secret-pattern pre-commit hook)
     Init,
     /// Manage API keys in the OS-native vault (never echoed, never stored in files)
@@ -56,13 +63,18 @@ enum Cmd {
         #[command(subcommand)]
         action: KeyAction,
     },
+    /// Manage the operator-owned default model used when --model is omitted
+    Model {
+        #[command(subcommand)]
+        action: ModelAction,
+    },
     /// Run an agent task
     Run {
         /// The task, in plain words
         task: String,
-        /// Model id from catalog.toml
-        #[arg(long, default_value = "deepseek-v4-flash")]
-        model: String,
+        /// Model id override; otherwise use the saved model or bundled default
+        #[arg(long)]
+        model: Option<String>,
         /// Max agent turns before giving up with a timeout receipt
         #[arg(long, default_value_t = 20)]
         #[arg(value_parser = parse_max_turns)]
@@ -82,9 +94,9 @@ enum Cmd {
     },
     /// Chat with a model - /model and /provider switch routes mid-session
     Chat {
-        /// Model id from catalog.toml
-        #[arg(long, default_value = "deepseek-v4-flash")]
-        model: String,
+        /// Model id override; otherwise use the saved model or bundled default
+        #[arg(long)]
+        model: Option<String>,
         /// Execution profile: frugal, balanced, or max-quality
         #[arg(long, default_value = "balanced")]
         profile: String,
@@ -106,15 +118,15 @@ enum Cmd {
     },
     /// List execution profiles and their caps for a model
     Profile {
-        /// Model id whose route capability is used for effective caps
-        #[arg(long, default_value = "deepseek-v4-flash")]
-        model: String,
+        /// Model id override; otherwise use the saved model or bundled default
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Open the full-screen terminal UI
     Tui {
-        /// Model id from catalog.toml
-        #[arg(long, default_value = "deepseek-v4-flash")]
-        model: String,
+        /// Model id override; otherwise use the saved model or bundled default
+        #[arg(long)]
+        model: Option<String>,
         /// Observed session token stop; the active turn is allowed to finish
         #[arg(long)]
         budget: Option<u64>,
@@ -132,6 +144,12 @@ enum Cmd {
         #[command(subcommand)]
         action: McpAction,
     },
+}
+
+#[derive(Subcommand)]
+enum CatalogAction {
+    /// Replace an exact historical bundled catalog after an explicit review
+    Migrate,
 }
 
 #[derive(Subcommand)]
@@ -176,6 +194,16 @@ enum KeyAction {
     Remove { entry: String },
 }
 
+#[derive(Subcommand)]
+enum ModelAction {
+    /// Save a default model after validating it against the trusted catalog
+    Set { model: String },
+    /// Show and validate the saved default model
+    Show,
+    /// Remove the saved default model
+    Clear,
+}
+
 fn parse_max_turns(value: &str) -> Result<u32, String> {
     let turns = value
         .parse::<u32>()
@@ -207,10 +235,18 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
         nh_core::terminal_capability::TerminalCapability::from_process(forced_ascii);
     match cli.cmd {
         Cmd::Setup => cmd_setup::run(terminal_capability, forced_ascii),
+        Cmd::Catalog {
+            action: CatalogAction::Migrate,
+        } => cmd_catalog::migrate(),
         Cmd::Init => cmd_init::run(),
         Cmd::Key { action } => match action {
             KeyAction::Add { entry } => cmd_key::add(&entry),
             KeyAction::Remove { entry } => cmd_key::remove(&entry),
+        },
+        Cmd::Model { action } => match action {
+            ModelAction::Set { model } => model_preference::set(&model),
+            ModelAction::Show => model_preference::show(),
+            ModelAction::Clear => model_preference::clear(),
         },
         Cmd::Run {
             task,
@@ -222,7 +258,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             image,
         } => cmd_run::run(
             &task,
-            &model,
+            model.as_deref(),
             cmd_run::RunOptions {
                 max_turns,
                 think,
@@ -232,18 +268,20 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 terminal_capability,
             },
         ),
-        Cmd::Chat { model, profile } => cmd_chat::run(&model, &profile, terminal_capability),
+        Cmd::Chat { model, profile } => {
+            cmd_chat::run(model.as_deref(), &profile, terminal_capability)
+        }
         Cmd::Doctor => cmd_doctor::run(terminal_capability, forced_ascii),
         Cmd::Resume { session_id } => cmd_resume::run(session_id.as_deref(), terminal_capability),
         Cmd::Why { task, model } => {
             cmd_why::run(task.as_deref(), model.as_deref(), terminal_capability)
         }
-        Cmd::Profile { model } => cmd_profile::run(&model, terminal_capability),
+        Cmd::Profile { model } => cmd_profile::run(model.as_deref(), terminal_capability),
         Cmd::Tui {
             model,
             budget,
             profile,
-        } => cmd_tui::run(&model, budget, &profile, terminal_capability),
+        } => cmd_tui::run(model.as_deref(), budget, &profile, terminal_capability),
         Cmd::Fleet {
             action:
                 FleetAction::Run {

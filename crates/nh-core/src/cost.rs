@@ -33,7 +33,7 @@ pub const PRICE_VERIFY_LIVE: &str = "*price verify_live";
 /// Shared decision for the cost of one provider turn.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TurnCostVerdict {
-    /// Local execution has hardware cost but no billed-token price.
+    /// A loopback endpoint whose execution location and billing are unverified.
     Local,
     /// The cost cannot be stated honestly; the string is the canonical reason.
     NotStated(&'static str),

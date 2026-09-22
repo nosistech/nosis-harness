@@ -11,7 +11,9 @@ use chrono::{DateTime, Utc};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use nh_core::agent::{CompactionEvent, MAX_TASK_BYTES};
 use nh_core::receipt::{CompactionStats, ReceiptKind};
-use nh_core::session_ledger::{list_sessions, read_session};
+use nh_core::session_ledger::{
+    fold_session, list_sessions, read_session, SessionBudget, SessionEvent, Surface,
+};
 use nh_core::terminal_capability::TerminalCapability;
 use nh_core::wire::{ChatRequest, ChatResponse};
 use nh_routes::Currency;
@@ -665,6 +667,31 @@ fn help_overlay_and_hint_bar_render_from_the_same_binding_table() {
 }
 
 #[test]
+fn f1_help_renders_at_eighty_columns_and_a_smaller_terminal() {
+    for (width, height) in [(80, 20), (40, 10)] {
+        let mut app = test_app(None);
+        assert_eq!(
+            reduce_key(&mut app, code_key(KeyCode::F(1))),
+            UiAction::None
+        );
+
+        let help = buffer_text(&render_buffer(&app, width, height));
+
+        assert_eq!(app.overlay, Overlay::Help);
+        assert!(help.contains("Help"), "{width}x{height}: {help}");
+        assert!(help.contains("Keys for"), "{width}x{height}: {help}");
+        assert!(help.contains("commands"), "{width}x{height}: {help}");
+        assert!(help.contains("scroll"), "{width}x{height}: {help}");
+        if width == 80 {
+            assert!(
+                help.contains("Shift+Enter/Ctrl+J"),
+                "{width}x{height}: {help}"
+            );
+        }
+    }
+}
+
+#[test]
 fn esc_binding_reaches_both_key_surfaces_only_when_it_can_interrupt() {
     for status in [Status::Idle, Status::FinishingInterrupted] {
         let mut app = test_app(None);
@@ -1143,7 +1170,7 @@ fn modal_frames_clear_transcript_for_every_overlay() {
             modal_area(terminal, 14),
             "Commands",
         ),
-        (Overlay::Help, modal_area(terminal, 18), "Help · read-only"),
+        (Overlay::Help, modal_area(terminal, 22), "Help · read-only"),
         (
             Overlay::TrustDial,
             modal_area(terminal, 8),
@@ -1423,7 +1450,7 @@ fn unicode_mode_preserves_existing_main_transcript_and_overlay_glyphs() {
 
     app.overlay = Overlay::Help;
     let overlay = render_buffer(&app, 100, 30);
-    assert_plain_modal_ring(&overlay, modal_area(Rect::new(0, 0, 100, 30), 18));
+    assert_plain_modal_ring(&overlay, modal_area(Rect::new(0, 0, 100, 30), 22));
     let overlay_text = buffer_text(&overlay);
     assert!(
         overlay_text.contains("Help \u{b7} read-only"),
@@ -2343,6 +2370,31 @@ fn slash_opens_live_command_menu_and_mod_filter_surfaces_model() {
 }
 
 #[test]
+fn command_menu_newline_shortcuts_never_execute_the_selected_command() {
+    let mut app = test_app(None);
+    type_text(&mut app, "/mod");
+
+    for key in [
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+        ctrl_key('j'),
+    ] {
+        assert_eq!(reduce_key(&mut app, key), UiAction::None);
+        assert_eq!(app.input, "/mod");
+        assert!(matches!(app.overlay, Overlay::CommandMenu { .. }));
+        assert!(app.transcript.is_empty());
+    }
+
+    assert_eq!(
+        reduce_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)
+        ),
+        UiAction::None
+    );
+    assert_eq!(app.input, "/model ");
+}
+
+#[test]
 fn paste_appends_to_input_without_dispatching() {
     let mut app = test_app(None);
 
@@ -2363,7 +2415,7 @@ fn paste_while_working_appends_to_the_queued_input_buffer() {
     let action = reduce_input_event(&mut app, Event::Paste("line\nfrom paste".into()));
 
     assert_eq!(action, UiAction::None);
-    assert_eq!(app.input, "next line from paste");
+    assert_eq!(app.input, "next line\nfrom paste");
     assert_eq!(app.overlay, Overlay::None);
     assert_eq!(app.status, Status::Working);
     assert!(app.transcript.is_empty());
@@ -2372,20 +2424,118 @@ fn paste_while_working_appends_to_the_queued_input_buffer() {
 
     reduce_key(&mut app, code_key(KeyCode::Enter));
     reduce_input_event(&mut app, Event::Paste(" edited".into()));
-    assert_eq!(app.input, "next line from paste edited");
+    assert_eq!(app.input, "next line\nfrom paste edited");
     assert!(app.pending_send);
 }
 
 #[test]
-fn multiline_paste_becomes_one_input_line_without_dispatching() {
+fn multiline_paste_preserves_newlines_without_dispatching() {
     let mut app = test_app(None);
 
     let action = reduce_input_event(&mut app, Event::Paste("line1\nline2".into()));
 
     assert_eq!(action, UiAction::None);
-    assert_eq!(app.input, "line1 line2");
+    assert_eq!(app.input, "line1\nline2");
     assert!(app.transcript.is_empty());
     assert_eq!(app.status, Status::Idle);
+}
+
+#[test]
+fn dispatched_multiline_prompt_renders_every_line_in_the_transcript() {
+    let mut app = test_app(None);
+    let task = "first line\nsecond line\nthird line";
+    reduce_input_event(&mut app, Event::Paste(task.into()));
+
+    assert_eq!(
+        reduce_key(&mut app, code_key(KeyCode::Enter)),
+        UiAction::Dispatch(task.to_owned())
+    );
+    let task_lines = app
+        .transcript
+        .iter()
+        .filter(|line| line.kind == TranscriptKind::Task)
+        .map(|line| line.text.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(task_lines, ["first line", "second line", "third line"]);
+
+    let rendered = buffer_text(&render_buffer(&app, 80, 20));
+    for line in task.lines() {
+        assert!(rendered.contains(line), "missing {line:?}: {rendered}");
+    }
+}
+
+#[test]
+fn shift_enter_and_ctrl_j_insert_newlines_while_plain_enter_submits() {
+    let mut app = test_app(None);
+    type_text(&mut app, "first");
+
+    assert_eq!(
+        reduce_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
+        UiAction::None
+    );
+    type_text(&mut app, "second");
+    assert_eq!(reduce_key(&mut app, ctrl_key('j')), UiAction::None);
+    type_text(&mut app, "third");
+    assert_eq!(app.input, "first\nsecond\nthird");
+    assert!(app.transcript.is_empty());
+
+    assert_eq!(
+        reduce_key(&mut app, code_key(KeyCode::Enter)),
+        UiAction::Dispatch("first\nsecond\nthird".to_owned())
+    );
+    assert!(app.input.is_empty());
+
+    let mut control_enter = test_app(None);
+    type_text(&mut control_enter, "send with control enter");
+    assert_eq!(
+        reduce_key(
+            &mut control_enter,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)
+        ),
+        UiAction::Dispatch("send with control enter".to_owned())
+    );
+}
+
+#[test]
+fn composer_cursor_editing_is_utf8_safe_and_line_navigation_preserves_column() {
+    let mut app = test_app(None);
+    reduce_input_event(&mut app, Event::Paste("aé\nxy".into()));
+
+    reduce_key(&mut app, code_key(KeyCode::Home));
+    reduce_key(&mut app, code_key(KeyCode::Up));
+    reduce_key(&mut app, code_key(KeyCode::Right));
+    reduce_key(&mut app, code_key(KeyCode::Delete));
+    reduce_key(&mut app, char_key('中'));
+    assert_eq!(app.input, "a中\nxy");
+
+    reduce_key(&mut app, code_key(KeyCode::Down));
+    reduce_key(&mut app, code_key(KeyCode::Backspace));
+    assert_eq!(app.input, "a中\nx");
+}
+
+#[test]
+fn paste_normalizes_crlf_and_bare_cr_to_one_newline_each() {
+    let mut app = test_app(None);
+
+    reduce_input_event(&mut app, Event::Paste("one\r\ntwo\rthree".into()));
+
+    assert_eq!(app.input, "one\ntwo\nthree");
+    assert!(app.transcript.is_empty());
+}
+
+#[test]
+fn multiline_composer_shows_at_most_five_rows_and_keeps_latest_visible_when_narrow() {
+    let mut app = test_app(None);
+    reduce_input_event(
+        &mut app,
+        Event::Paste("row1\nrow2\nrow3\nrow4\nrow5\nrow6\nrow7".into()),
+    );
+
+    let rendered = buffer_text(&render_buffer(&app, 24, 13));
+
+    assert!(rendered.contains("row7"), "got: {rendered}");
+    assert!(rendered.contains("row3"), "got: {rendered}");
+    assert!(!rendered.contains("row2"), "got: {rendered}");
 }
 
 #[test]
@@ -2488,7 +2638,7 @@ fn bare_model_opens_an_honest_catalog_picker_and_uses_the_typed_switch_action() 
         labels[4]
     );
     assert!(
-        labels[5].contains("local · explicit selection only · no billed tokens"),
+        labels[5].contains("local endpoint · explicit selection only · billing unknown"),
         "got: {}",
         labels[5]
     );
@@ -3997,8 +4147,7 @@ fn local_hud_and_turn_meter_do_not_present_hardware_cost_as_zero() {
     };
 
     assert!(
-        app.hud_line(fixed_at())
-            .contains("session no billed tokens"),
+        app.hud_line(fixed_at()).contains("session billing unknown"),
         "got: {}",
         app.hud_line(fixed_at())
     );
@@ -4012,6 +4161,10 @@ fn local_hud_and_turn_meter_do_not_present_hardware_cost_as_zero() {
         Some(nh_routes::LOCAL_METER_COPY)
     );
     assert!(app.session_cost.is_empty());
+    assert!(app.session_cost_incomplete);
+    assert!(app
+        .hud_line(fixed_at())
+        .contains("session unavailable - meter incomplete"));
 }
 
 #[test]
@@ -4771,7 +4924,7 @@ fn measured_usage_warns_once_when_it_crosses_eighty_percent() {
         }),
     );
     assert!(app.budget_warned);
-    let warning = "budget warning: 80 tokens used of 100 budget - session will stop at the budget";
+    let warning = "budget warning: 80 observed tokens of 100; new tasks stop when observed usage reaches the budget";
     assert_eq!(
         app.transcript
             .iter()
@@ -4838,9 +4991,58 @@ fn unmeasured_usage_produces_no_budget_warning_line() {
             .transcript
             .iter()
             .all(|line| !line.text.starts_with("budget warning:")));
+        assert_eq!(
+            app.status,
+            Status::Blocked(BUDGET_USAGE_UNAVAILABLE_REASON.into())
+        );
+        assert!(app.budget_blocks_dispatch());
+        assert!(app.transcript.iter().any(|line| {
+            line.text
+                == "budget usage is incomplete or unavailable - no more tasks will be sent in this budgeted session"
+        }));
+        app.status = Status::Idle;
+        app.input = "must not dispatch".into();
+        assert_eq!(app.dispatch(), None);
+
+        apply_event(
+            &mut app,
+            AgentEvent::Usage(Usage {
+                prompt_tokens: 90,
+                completion_tokens: 1,
+                cached_tokens: Some(0),
+                evidence: UsageEvidence::Measured,
+            }),
+        );
+        assert!(!app.usage.as_ref().unwrap().evidence.is_measured());
+        assert!(app.budget_blocks_dispatch());
         let rendered = buffer_text(&render_buffer(&app, 100, 20));
         assert!(!rendered.contains("budget warning:"), "got: {rendered}");
+        assert!(
+            rendered.contains("budget usage unavailable"),
+            "got: {rendered}"
+        );
     }
+}
+
+#[test]
+fn unbudgeted_unknown_usage_does_not_block_dispatch() {
+    let mut app = test_app(None);
+    apply_event(
+        &mut app,
+        AgentEvent::Usage(Usage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cached_tokens: None,
+            evidence: UsageEvidence::Unknown,
+        }),
+    );
+    app.input = "continue without a token budget".into();
+
+    assert!(!app.budget_blocks_dispatch());
+    assert_eq!(
+        app.dispatch().as_deref(),
+        Some("continue without a token budget")
+    );
 }
 
 #[test]
@@ -5039,9 +5241,11 @@ struct MeterGapClient {
     calls: Arc<AtomicU64>,
 }
 
+type CapturedRequestHistory = Arc<Mutex<Vec<Vec<(String, String)>>>>;
+
 struct BlockingMeasuredClient {
     calls: Arc<AtomicU64>,
-    request_lengths: Arc<Mutex<Vec<usize>>>,
+    requests: CapturedRequestHistory,
     started: mpsc::Sender<()>,
     release: Arc<(Mutex<bool>, Condvar)>,
 }
@@ -5057,10 +5261,18 @@ impl ChatClient for FailingClient {
 impl ChatClient for BlockingMeasuredClient {
     fn complete(&self, request: &ChatRequest) -> anyhow::Result<ChatResponse> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        self.request_lengths
-            .lock()
-            .unwrap()
-            .push(request.messages.len());
+        self.requests.lock().unwrap().push(
+            request
+                .messages
+                .iter()
+                .map(|message| {
+                    (
+                        message.role.clone(),
+                        message.content.clone().unwrap_or_default(),
+                    )
+                })
+                .collect(),
+        );
         if call == 0 {
             self.started.send(()).unwrap();
             let (released, wake) = &*self.release;
@@ -5245,17 +5457,17 @@ fn detached_worker_shutdown_is_reported_as_unclean() {
 fn worker_cancels_one_turn_after_measuring_it_then_runs_the_next_task() {
     let root = temp_dir();
     let calls = Arc::new(AtomicU64::new(0));
-    let request_lengths = Arc::new(Mutex::new(Vec::new()));
+    let requests = Arc::new(Mutex::new(Vec::new()));
     let (started_tx, started_rx) = mpsc::channel();
     let release = Arc::new((Mutex::new(false), Condvar::new()));
     let client_calls = Arc::clone(&calls);
-    let client_lengths = Arc::clone(&request_lengths);
+    let client_requests = Arc::clone(&requests);
     let client_release = Arc::clone(&release);
     let connect: ConnectFn = Box::new(move |_, _| {
         Ok((
             Box::new(BlockingMeasuredClient {
                 calls: Arc::clone(&client_calls),
-                request_lengths: Arc::clone(&client_lengths),
+                requests: Arc::clone(&client_requests),
                 started: started_tx.clone(),
                 release: Arc::clone(&client_release),
             }),
@@ -5267,6 +5479,7 @@ fn worker_cancels_one_turn_after_measuring_it_then_runs_the_next_task() {
         route: test_route(),
         profiles: Profiles::bundled(),
         active_profile: "balanced".into(),
+        budget: None,
         law,
         repo_root: root.clone(),
         workdir: root.clone(),
@@ -5346,7 +5559,15 @@ fn worker_cancels_one_turn_after_measuring_it_then_runs_the_next_task() {
         }
     }
 
-    assert_eq!(*request_lengths.lock().unwrap(), vec![2, 4]);
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests.iter().map(Vec::len).collect::<Vec<_>>(),
+        vec![2, 4]
+    );
+    assert_eq!(requests[1][1], ("user".into(), "interrupted".into()));
+    assert_eq!(requests[1][2], ("assistant".into(), "ok".into()));
+    assert_eq!(requests[1][3], ("user".into(), "next".into()));
+    drop(requests);
     let durable = std::fs::read_to_string(root.join(".nosis").join("receipts.jsonl")).unwrap();
     let durable = durable.lines().collect::<Vec<_>>();
     assert_eq!(durable.len(), 2);
@@ -5373,6 +5594,7 @@ fn worker_error_projects_cores_real_receipt_and_unknown_meter() {
         route: test_route(),
         profiles: Profiles::bundled(),
         active_profile: "balanced".into(),
+        budget: None,
         law,
         repo_root: root.clone(),
         workdir: root.clone(),
@@ -5387,6 +5609,7 @@ fn worker_error_projects_cores_real_receipt_and_unknown_meter() {
         .send(WorkerCommand::Task("failing task".into()))
         .unwrap();
     let mut app = meter_app();
+    app.budget = Some(100);
     let mut projected_receipt = None;
     let mut saw_usage = false;
     loop {
@@ -5436,6 +5659,17 @@ fn worker_error_projects_cores_real_receipt_and_unknown_meter() {
         "unavailable - meter incomplete"
     );
     assert_eq!(app.usage.as_ref().unwrap().evidence, UsageEvidence::Unknown);
+    assert_eq!(
+        app.status,
+        Status::Blocked(BUDGET_USAGE_UNAVAILABLE_REASON.into())
+    );
+    let failure_line = app
+        .transcript
+        .iter()
+        .find(|line| line.kind == TranscriptKind::Error)
+        .expect("failure remains visible");
+    assert!(failure_line.text.contains("budget usage unavailable"));
+    assert!(!failure_line.text.contains("retry the task"));
     assert_eq!(app.timeline.len(), 1);
     assert_eq!(app.timeline[0].ts_utc, projected_receipt.ts_utc);
     assert_eq!(app.timeline[0].model_id, projected_receipt.model_id);
@@ -5472,6 +5706,7 @@ fn real_worker_and_ledger_replay_mark_a_measured_plus_unmetered_session() {
         route,
         profiles: Profiles::bundled(),
         active_profile: "balanced".into(),
+        budget: Some(100),
         law,
         repo_root: root.clone(),
         workdir: root.clone(),
@@ -5526,6 +5761,10 @@ fn real_worker_and_ledger_replay_mark_a_measured_plus_unmetered_session() {
         "got: {hud}"
     );
     assert!(hud.contains("~12% ~12/100 lower bound"), "got: {hud}");
+    assert_eq!(
+        app.status,
+        Status::Blocked(BUDGET_USAGE_UNAVAILABLE_REASON.into())
+    );
     let duration = measured_duration(
         app.timeline[1]
             .duration_ms
@@ -5542,6 +5781,7 @@ fn real_worker_and_ledger_replay_mark_a_measured_plus_unmetered_session() {
     let sessions = list_sessions(&root).unwrap();
     assert_eq!(sessions.sessions.len(), 1);
     let restored = read_session(&root, &sessions.sessions[0].session_id).unwrap();
+    assert_eq!(restored.budget, Some(SessionBudget::Tokens { limit: 100 }));
     assert_eq!(restored.turns.len(), 2);
     assert_eq!(
         restored.turns[0].usage.as_ref().unwrap().evidence,
@@ -5560,6 +5800,10 @@ fn real_worker_and_ledger_replay_mark_a_measured_plus_unmetered_session() {
     let replay_hud = replay.hud_line(fixed_at());
     assert!(replay_hud.contains("~12% ~12/100 lower bound"));
     assert!(replay_hud.contains("resumed"));
+    assert_eq!(
+        replay.status,
+        Status::Blocked(BUDGET_USAGE_UNAVAILABLE_REASON.into())
+    );
 
     let free_catalog = METER_CATALOG
         .replace("cache_hit = 0.02", "cache_hit = 0.0")
@@ -5576,6 +5820,54 @@ fn real_worker_and_ledger_replay_mark_a_measured_plus_unmetered_session() {
     assert!(!mixed_free_money.contains("¥0.00"));
 
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn torn_session_tail_makes_budget_usage_and_cost_incomplete_on_restore() {
+    let mut restored = fold_session(&[
+        SessionEvent::Started {
+            session_id: "torn-budget".into(),
+            surface: Surface::Tui,
+            route_id: "meter-route".into(),
+            model_id: "meter-route".into(),
+            profile: "balanced".into(),
+            created_utc: "2026-09-20T12:00:00Z".into(),
+            budget: Some(SessionBudget::Tokens { limit: 100 }),
+        },
+        SessionEvent::Turn {
+            ts_utc: "2026-09-20T12:01:00Z".into(),
+            route_id: "meter-route".into(),
+            messages: Vec::new(),
+            usage: Some(Usage {
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                cached_tokens: Some(4),
+                evidence: UsageEvidence::Measured,
+            }),
+        },
+    ])
+    .unwrap();
+    restored.dropped_torn_tail = true;
+    let mut app = meter_app();
+    app.budget = restored
+        .budget
+        .as_ref()
+        .and_then(SessionBudget::token_limit);
+
+    restore_app(&mut app, &restored, "law bytes").unwrap();
+
+    let usage = app.usage.as_ref().unwrap();
+    assert_eq!(usage.evidence, UsageEvidence::Partial);
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (10, 2));
+    assert_eq!(
+        app.status,
+        Status::Blocked(BUDGET_USAGE_UNAVAILABLE_REASON.into())
+    );
+    assert!(app.session_money(fixed_at()).contains("meter incomplete"));
+    assert!(app
+        .transcript
+        .iter()
+        .any(|line| { line.text.contains("in-flight usage may be missing") }));
 }
 
 #[test]
@@ -5596,6 +5888,7 @@ fn queued_task_transition_is_forwarded_to_the_worker_exactly_once() {
         route: test_route(),
         profiles: Profiles::bundled(),
         active_profile: "balanced".into(),
+        budget: None,
         law,
         repo_root: root.clone(),
         workdir: root.clone(),
@@ -5659,6 +5952,7 @@ fn model_switch_keeps_worker_history_transcript_and_updates_route_identity() {
         route: test_route(),
         profiles: Profiles::bundled(),
         active_profile: "balanced".into(),
+        budget: None,
         law,
         repo_root: root.clone(),
         workdir: root.clone(),
@@ -5754,6 +6048,7 @@ fn keyless_switch_accepts_route_then_next_task_surfaces_add_key_line() {
         route: test_route(),
         profiles: Profiles::bundled(),
         active_profile: "balanced".into(),
+        budget: None,
         law,
         repo_root: root.clone(),
         workdir: root.clone(),
@@ -5774,6 +6069,21 @@ fn keyless_switch_accepts_route_then_next_task_surfaces_add_key_line() {
         .send(WorkerCommand::Task("hello".into()))
         .unwrap();
 
+    let usage = worker.events.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(matches!(
+        &usage,
+        AgentEvent::Usage(Usage {
+            evidence: UsageEvidence::Unknown,
+            ..
+        })
+    ));
+    let mut budgeted = meter_app();
+    budgeted.budget = Some(100);
+    apply_event(&mut budgeted, usage);
+    assert_eq!(
+        budgeted.status,
+        Status::Blocked(BUDGET_USAGE_UNAVAILABLE_REASON.into())
+    );
     match worker.events.recv_timeout(Duration::from_secs(2)).unwrap() {
         AgentEvent::Failed(reason) => {
             assert!(reason.contains("nh key add other"), "got: {reason}");
@@ -5809,6 +6119,7 @@ fn worker_uses_injected_client_and_keeps_one_history_across_tasks() {
         route: test_route(),
         profiles: Profiles::bundled(),
         active_profile: "balanced".into(),
+        budget: None,
         law,
         repo_root: root.clone(),
         workdir: root.clone(),
@@ -5870,6 +6181,7 @@ fn worker_emits_typed_compaction_with_exact_preceding_call_cache() {
         route: test_route(),
         profiles: Profiles::bundled(),
         active_profile: "balanced".into(),
+        budget: None,
         law,
         repo_root: root.clone(),
         workdir: root.clone(),
@@ -5943,6 +6255,7 @@ fn restored_worker_sends_restored_history_on_first_request() {
         route: test_route(),
         profiles: Profiles::bundled(),
         active_profile: "balanced".into(),
+        budget: None,
         law,
         repo_root: root.clone(),
         workdir: root.clone(),
@@ -5983,6 +6296,7 @@ fn restored_worker_sends_restored_history_on_first_request() {
         route: test_route(),
         profiles: Profiles::bundled(),
         active_profile: "balanced".into(),
+        budget: None,
         law,
         repo_root: root.clone(),
         workdir: root.clone(),
@@ -6033,6 +6347,7 @@ fn worker_profile_change_reconnects_with_clamp_and_records_next_turn() {
         route: test_route(),
         profiles: Profiles::bundled(),
         active_profile: "balanced".into(),
+        budget: None,
         law,
         repo_root: root.clone(),
         workdir: root.clone(),
@@ -6089,6 +6404,7 @@ fn keyless_worker_starts_and_task_surfaces_the_add_key_line() {
         route: test_route(),
         profiles: Profiles::bundled(),
         active_profile: "balanced".into(),
+        budget: None,
         law,
         repo_root: root.clone(),
         workdir: root.clone(),
@@ -6102,6 +6418,13 @@ fn keyless_worker_starts_and_task_surfaces_the_add_key_line() {
         .commands
         .send(WorkerCommand::Task("hello".into()))
         .unwrap();
+    assert!(matches!(
+        worker.events.recv_timeout(Duration::from_secs(2)).unwrap(),
+        AgentEvent::Usage(Usage {
+            evidence: UsageEvidence::Unknown,
+            ..
+        })
+    ));
     match worker.events.recv_timeout(Duration::from_secs(2)).unwrap() {
         AgentEvent::Failed(reason) => {
             assert!(reason.contains("nh key add test"), "got: {reason}");

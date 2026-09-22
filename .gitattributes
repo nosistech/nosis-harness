@@ -6,6 +6,7 @@
 
 *.rs   text
 *.toml text
+crates/nh-cli/catalog-history/*.toml text eol=lf
 *.md   text
 *.json text
 

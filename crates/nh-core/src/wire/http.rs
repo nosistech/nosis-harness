@@ -42,10 +42,19 @@ pub(super) fn read_body_capped(
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-pub(super) fn send_error(url: &str, error: &reqwest::Error) -> anyhow::Error {
+pub(super) fn send_error(
+    url: &str,
+    error: &reqwest::Error,
+    request_timeout: Duration,
+) -> anyhow::Error {
     anyhow::anyhow!(
         "{}",
-        send_error_line(url, is_request_timeout(error), &error.to_string(),)
+        send_error_line(
+            url,
+            is_request_timeout(error),
+            &error.to_string(),
+            request_timeout,
+        )
     )
 }
 
@@ -53,14 +62,27 @@ pub(super) fn is_request_timeout(error: &reqwest::Error) -> bool {
     error.is_timeout() && !error.is_connect()
 }
 
-pub(super) fn send_error_line(url: &str, timed_out: bool, detail: &str) -> String {
+pub(super) fn send_error_line(
+    url: &str,
+    timed_out: bool,
+    detail: &str,
+    request_timeout: Duration,
+) -> String {
     if timed_out {
         format!(
-            "provider at {url} did not answer within {}s - retry, or switch to another route",
-            REQUEST_TIMEOUT.as_secs()
+            "provider at {url} did not answer within {} - retry, or switch to another route",
+            timeout_label(request_timeout)
         )
     } else {
         format!("could not reach provider at {url}: {detail}")
+    }
+}
+
+fn timeout_label(timeout: Duration) -> String {
+    if timeout.subsec_nanos() == 0 {
+        format!("{}s", timeout.as_secs())
+    } else {
+        format!("{:.3}s", timeout.as_secs_f64())
     }
 }
 

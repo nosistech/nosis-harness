@@ -155,6 +155,7 @@ fn timeout_error_says_what_happened_and_what_to_do() {
         "https://api.example.com/chat/completions",
         true,
         "op timed out",
+        REQUEST_TIMEOUT,
     );
     assert_eq!(
         line,
@@ -166,12 +167,20 @@ fn timeout_error_says_what_happened_and_what_to_do() {
         "https://api.example.com/chat/completions",
         false,
         "dns error",
+        Duration::from_millis(12_500),
     );
     assert!(
         line.starts_with("could not reach provider at "),
         "got: {line}"
     );
     assert!(line.ends_with("dns error"), "got: {line}");
+    let retry_line = send_error_line(
+        "https://api.example.com/chat/completions",
+        true,
+        "op timed out",
+        Duration::from_millis(12_500),
+    );
+    assert!(retry_line.contains("within 12.500s"), "got: {retry_line}");
 }
 
 #[test]

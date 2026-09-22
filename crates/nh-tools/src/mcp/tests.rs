@@ -1,14 +1,12 @@
 use super::adapter::{args_one_line, McpToolAdapter};
-use super::client::{
-    lint_headers, ToolEntry, MAX_MCP_BODY_BYTES, MAX_TOOLS, SPEC_DEFAULT, SPEC_FALLBACK,
-};
+use super::client::{lint_headers, ToolEntry, MAX_MCP_BODY_BYTES, MAX_TOOLS, SPEC_DEFAULT};
 use super::*;
 use crate::{Tool, ToolCtx, ToolSpec};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -54,6 +52,20 @@ where
         url: format!("http://{addr}/mcp"),
         recorded,
     }
+}
+
+fn start_raw_peer<F>(handler: F) -> (String, std::thread::JoinHandle<()>)
+where
+    F: FnOnce(Recorded, &mut TcpStream) + Send + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind raw MCP peer");
+    let address = listener.local_addr().expect("raw MCP peer addr");
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept raw MCP request");
+        let request = read_request(&mut stream).expect("read raw MCP request");
+        handler(request, &mut stream);
+    });
+    (format!("http://{address}/mcp"), handle)
 }
 
 fn read_request(stream: &mut TcpStream) -> Option<Recorded> {
@@ -289,7 +301,7 @@ future_knob = "whatever"
 }
 
 #[test]
-fn config_oauth2_and_fallback_spec_parse_fine() {
+fn config_rejects_legacy_spec_before_auth_configuration() {
     let toml_str = r#"
 [servers.korvin]
 url = "http://localhost:2/mcp"
@@ -299,16 +311,10 @@ token_url = "https://auth.example.test/token"
 client_id = "korvin-client"
 vault_entry = "korvin-oauth"
 "#;
-    let configs = load_mcp_config(toml_str).unwrap();
-    assert_eq!(
-        configs[0].auth,
-        McpAuth::OAuth2 {
-            token_url: "https://auth.example.test/token".into(),
-            client_id: "korvin-client".into(),
-            vault_entry: "korvin-oauth".into(),
-        }
-    );
-    assert_eq!(configs[0].spec, SPEC_FALLBACK);
+    let error = load_mcp_config(toml_str).unwrap_err().to_string();
+    assert!(error.contains("unsupported protocol version"), "{error}");
+    assert!(error.contains("legacy initialize negotiation is unavailable"));
+    assert!(error.contains(SPEC_DEFAULT));
 }
 
 #[test]
@@ -338,9 +344,8 @@ fn config_unknown_spec_names_valid_values() {
     let err = load_mcp_config("[servers.a]\nurl = \"http://x/mcp\"\nspec = \"2024-01-01\"")
         .unwrap_err()
         .to_string();
-    assert!(err.contains("unknown spec \"2024-01-01\""), "got: {err}");
+    assert!(err.contains("unsupported protocol version"), "got: {err}");
     assert!(err.contains(SPEC_DEFAULT), "got: {err}");
-    assert!(err.contains(SPEC_FALLBACK), "got: {err}");
 }
 
 #[test]
@@ -399,10 +404,7 @@ fn stateless_invariant_no_session_no_initialize_meta_on_every_request() {
     client.discover().unwrap();
 
     let recorded = mock.recorded.lock().unwrap();
-    assert!(
-        recorded.len() >= 5,
-        "expected list + 2 calls + GET + fallback POST"
-    );
+    assert!(recorded.len() == 4, "expected list + 2 calls + discover");
     for request in recorded.iter() {
         assert!(
             !request.head.to_ascii_lowercase().contains("mcp-session-id"),
@@ -417,28 +419,45 @@ fn stateless_invariant_no_session_no_initialize_meta_on_every_request() {
             );
             assert_eq!(request.body["jsonrpc"], json!("2.0"));
             let meta = &request.body["params"]["_meta"];
-            assert_eq!(meta["protocolVersion"], json!("2026-07-28"));
-            assert_eq!(meta["clientInfo"]["name"], json!("nosis-harness"));
             assert_eq!(
-                meta["clientInfo"]["version"],
+                meta["io.modelcontextprotocol/protocolVersion"],
+                json!("2026-07-28")
+            );
+            assert_eq!(
+                meta["io.modelcontextprotocol/clientInfo"]["name"],
+                json!("nosis-harness")
+            );
+            assert_eq!(
+                meta["io.modelcontextprotocol/clientInfo"]["version"],
                 json!(env!("CARGO_PKG_VERSION"))
             );
-            assert_eq!(meta["capabilities"], json!({}));
+            assert_eq!(
+                meta["io.modelcontextprotocol/clientCapabilities"],
+                json!({})
+            );
+            let head = request.head.to_ascii_lowercase();
+            assert!(head.contains("accept: application/json, text/event-stream"));
+            assert!(head.contains("mcp-protocol-version: 2026-07-28"));
+            assert!(head.contains(&format!(
+                "mcp-method: {}",
+                request.body["method"].as_str().unwrap()
+            )));
+            if request.body["method"] == json!("tools/call") {
+                let name = request.body["params"]["name"].as_str().unwrap();
+                assert!(head.contains(&format!("mcp-name: {name}")));
+            }
         }
     }
 }
 
 #[test]
-fn fallback_spec_is_echoed_in_meta() {
+fn public_config_with_legacy_spec_is_rejected_before_network() {
     let mock = start_mock(|req| rpc_result(req, mock_tools_result(None)));
     let mut cfg = config(&mock.url, McpTrust::Ask);
-    cfg.spec = SPEC_FALLBACK.into();
-    mcp_client(cfg).list_tools().unwrap();
-    let recorded = mock.recorded.lock().unwrap();
-    assert_eq!(
-        recorded[0].body["params"]["_meta"]["protocolVersion"],
-        json!(SPEC_FALLBACK)
-    );
+    cfg.spec = "2025-11-25".into();
+    let error = McpClient::new(cfg).err().unwrap().to_string();
+    assert!(error.contains("unsupported protocol version"), "{error}");
+    assert!(mock.recorded.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -612,41 +631,271 @@ fn jsonrpc_error_is_a_friendly_one_liner() {
 // ---- §3.2 discovery ----
 
 #[test]
-fn discover_reads_well_known_business_card() {
-    let mock = start_mock(|req| {
-        if req.method == "GET" && req.path.ends_with("/.well-known/mcp.json") {
-            (200, json!({ "name": "mock-server" }).to_string())
-        } else {
-            (500, "{}".to_string())
-        }
+fn raw_sse_peer_returns_matching_final_before_eof() {
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (url, peer) = start_raw_peer(move |request, stream| {
+        let lower = request.head.to_ascii_lowercase();
+        assert!(lower.contains("accept: application/json, text/event-stream"));
+        assert!(lower.contains("mcp-protocol-version: 2026-07-28"));
+        assert!(lower.contains("mcp-method: tools/call"));
+        let name_header = request
+            .head
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("Mcp-Name").then(|| value.trim())
+            })
+            .expect("Mcp-Name header");
+        assert_eq!(name_header, "=?base64?dMO4w7hs?=");
+        let final_result = json!({
+            "jsonrpc": "2.0",
+            "id": request.body["id"],
+            "result": {
+                "resultType": "complete",
+                "content": [{ "type": "text", "text": "sse ok" }]
+            }
+        });
+        let events = format!(
+            "\u{feff}: keepalive\r\ndata: {{\"jsonrpc\":\"2.0\",\r\ndata: \"method\":\"notifications/progress\",\"params\":{{}}}}\r\n\r\ndata: {final_result}\r\r"
+        );
+        let head =
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n";
+        stream.write_all(head.as_bytes()).unwrap();
+        stream.write_all(events.as_bytes()).unwrap();
+        stream.flush().unwrap();
+        let _ = release_rx.recv_timeout(Duration::from_secs(2));
+    });
+    let client = mcp_client(config(&url, McpTrust::Ask));
+
+    let started = Instant::now();
+    let result = client.call_tool("t\u{f8}\u{f8}l", json!({})).unwrap();
+    let elapsed = started.elapsed();
+    release_tx.send(()).unwrap();
+    peer.join().unwrap();
+
+    assert_eq!(result, "sse ok");
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "client waited for SSE EOF after the final result: {elapsed:?}"
+    );
+}
+
+#[test]
+fn raw_sse_peer_rejects_a_wrong_id_before_a_later_valid_result() {
+    let (url, peer) = start_raw_peer(|request, stream| {
+        let id = request.body["id"].as_u64().unwrap();
+        let events = format!(
+            "data: {{\"jsonrpc\":\"2.0\",\"id\":{},\"result\":{{\"resultType\":\"complete\"}}}}\n\ndata: {{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"resultType\":\"complete\"}}}}\n\n",
+            id + 1
+        );
+        let reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{events}",
+            events.len()
+        );
+        stream.write_all(reply.as_bytes()).unwrap();
+    });
+    let client = mcp_client(config(&url, McpTrust::Ask));
+
+    let error = client.call_tool("peek", json!({})).unwrap_err().to_string();
+    peer.join().unwrap();
+
+    assert!(error.contains("response id did not match"), "{error}");
+}
+
+#[test]
+fn raw_sse_peer_rejects_an_independent_server_request() {
+    let (url, peer) = start_raw_peer(|_, stream| {
+        let event = "data: {\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"sampling/createMessage\",\"params\":{}}\n\n";
+        let reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{event}",
+            event.len()
+        );
+        stream.write_all(reply.as_bytes()).unwrap();
+    });
+    let client = mcp_client(config(&url, McpTrust::Ask));
+
+    let error = client.list_tools().unwrap_err().to_string();
+    peer.join().unwrap();
+
+    assert!(error.contains("independent server request"), "{error}");
+}
+
+#[test]
+fn raw_sse_peer_rejects_an_unterminated_final_event() {
+    let (url, peer) = start_raw_peer(|request, stream| {
+        let event = format!(
+            "data: {{\"jsonrpc\":\"2.0\",\"id\":{},\"result\":{{\"resultType\":\"complete\"}}}}",
+            request.body["id"]
+        );
+        let reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{event}",
+            event.len()
+        );
+        stream.write_all(reply.as_bytes()).unwrap();
+    });
+    let client = mcp_client(config(&url, McpTrust::Ask));
+
+    let error = client.list_tools().unwrap_err().to_string();
+    peer.join().unwrap();
+
+    assert!(
+        error.contains("before the matching final result"),
+        "{error}"
+    );
+}
+
+#[test]
+fn raw_json_peer_rejects_invalid_response_envelopes() {
+    let cases = [
+        ("wrong-version", "invalid JSON-RPC version"),
+        ("result-and-error", "exactly one of result or error"),
+        ("method-and-result", "request or notification method"),
+        ("unsupported-result", "unsupported resultType"),
+    ];
+
+    for (case, expected) in cases {
+        let (url, peer) = start_raw_peer(move |request, stream| {
+            let id = request.body["id"].clone();
+            let body = match case {
+                "wrong-version" => json!({"jsonrpc":"1.0","id":id,"result":{}}),
+                "result-and-error" => json!({
+                    "jsonrpc":"2.0",
+                    "id":id,
+                    "result":{},
+                    "error":{"code":-32000,"message":"no"}
+                }),
+                "method-and-result" => json!({
+                    "jsonrpc":"2.0",
+                    "id":id,
+                    "method":"notifications/progress",
+                    "result":{}
+                }),
+                "unsupported-result" => json!({
+                    "jsonrpc":"2.0",
+                    "id":id,
+                    "result":{"resultType":"input_required"}
+                }),
+                _ => unreachable!(),
+            }
+            .to_string();
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(reply.as_bytes()).unwrap();
+        });
+        let client = mcp_client(config(&url, McpTrust::Ask));
+
+        let error = client.list_tools().unwrap_err().to_string();
+        peer.join().unwrap();
+
+        assert!(error.contains(expected), "case {case}: {error}");
+    }
+}
+
+#[test]
+fn raw_sse_peer_caps_a_single_unterminated_line() {
+    let (url, peer) = start_raw_peer(|_, stream| {
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            MAX_MCP_BODY_BYTES + 1
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        let oversized_line = vec![b'x'; MAX_MCP_BODY_BYTES + 1];
+        let _ = stream.write_all(&oversized_line);
+    });
+    let client = mcp_client(config(&url, McpTrust::Ask));
+
+    let error = client.list_tools().unwrap_err().to_string();
+    peer.join().unwrap();
+
+    assert!(error.contains("response exceeded cap"), "{error}");
+}
+
+#[test]
+fn secret_shaped_tool_name_is_rejected_before_header_encoding_or_network() {
+    let mock = start_mock(full_responder);
+    let client = mcp_client(config(&mock.url, McpTrust::Ask));
+
+    let error = client
+        .call_tool(concat!("sk", "-", "abcdefghijkl"), json!({}))
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("looks like a secret"), "{error}");
+    assert!(mock.recorded.lock().unwrap().is_empty());
+}
+
+#[test]
+fn advertised_parameter_header_tool_is_excluded_and_remembered() {
+    let mock = start_mock(|request| {
+        rpc_result(
+            request,
+            json!({
+                "tools": [{
+                    "name": "annotated",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "region": { "type": "string", "X-MCP-Header": "Region" }
+                        }
+                    }
+                }]
+            }),
+        )
     });
     let client = mcp_client(config(&mock.url, McpTrust::Ask));
-    let card = client.discover().unwrap();
-    assert_eq!(card["name"], json!("mock-server"));
-    let recorded = mock.recorded.lock().unwrap();
-    assert_eq!(recorded.len(), 1, "well-known hit must need no POST");
-    assert_eq!(recorded[0].method, "GET");
-    assert_eq!(recorded[0].path, "/mcp/.well-known/mcp.json");
+
+    assert!(client.list_tools().unwrap().is_empty());
+    let error = client
+        .call_tool("annotated", json!({ "region": "test" }))
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("x-mcp-header parameters are not supported"));
+    assert_eq!(mock.recorded.lock().unwrap().len(), 1);
 }
 
 #[test]
-fn discover_falls_back_to_server_discover_post() {
-    let mock = start_mock(full_responder); // GETs 404
+fn discover_uses_the_direct_modern_rpc() {
+    let mock = start_mock(full_responder);
     let client = mcp_client(config(&mock.url, McpTrust::Ask));
     let card = client.discover().unwrap();
     assert_eq!(card["name"], json!("mock-server"));
     let recorded = mock.recorded.lock().unwrap();
-    assert_eq!(recorded.len(), 2);
-    assert_eq!(recorded[0].method, "GET");
-    assert_eq!(recorded[1].body["method"], json!("server/discover"));
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].method, "POST");
+    assert_eq!(recorded[0].path, "/mcp");
+    assert_eq!(recorded[0].body["method"], json!("server/discover"));
 }
 
 #[test]
-fn discover_unreachable_is_one_friendly_error() {
+fn discover_invalid_response_does_not_trigger_a_fallback_request() {
+    let mock = start_mock(|request| {
+        (
+            200,
+            json!({
+                "jsonrpc": "2.0",
+                "id": request.body["id"].as_u64().unwrap() + 1,
+                "result": { "resultType": "complete" }
+            })
+            .to_string(),
+        )
+    });
+    let client = mcp_client(config(&mock.url, McpTrust::Ask));
+    let error = client.discover().unwrap_err().to_string();
+    assert!(error.contains("response id did not match"), "{error}");
+    let recorded = mock.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].body["method"], json!("server/discover"));
+}
+
+#[test]
+fn discover_unreachable_preserves_the_transport_error() {
     let client = mcp_client(config(&refused_url(), McpTrust::Ask));
     let err = client.discover().unwrap_err().to_string();
     assert!(
-        err.contains("unreachable - check the url in .nosis/mcp.toml"),
+        err.contains("could not reach http://127.0.0.1:"),
         "got: {err}"
     );
 }
@@ -745,7 +994,7 @@ fn oauth_refresh_refuses_redirects_without_replaying_the_form() {
 }
 
 #[test]
-fn oauth2_refreshes_on_absence_expiry_and_one_401_retry() {
+fn oauth2_refreshes_without_replaying_a_rejected_tool_call() {
     const REFRESH_ENV: &str = "NH_MOCK_OAUTH_REFRESH_KEY";
     const SECRET_ENV: &str = "NH_MOCK_OAUTH_SECRET_KEY";
     std::env::set_var(REFRESH_ENV, "refresh-token-fake");
@@ -800,6 +1049,9 @@ fn oauth2_refreshes_on_absence_expiry_and_one_401_retry() {
     assert_eq!(mint_count.load(Ordering::SeqCst), 2);
 
     *valid_token.lock().unwrap() = "server-invalidated".into();
+    let error = client.call_tool("peek", json!({})).unwrap_err().to_string();
+    assert!(error.contains("tool call was not replayed"), "{error}");
+    assert_eq!(mcp_server.recorded.lock().unwrap().len(), 3);
     assert_eq!(client.call_tool("peek", json!({})).unwrap(), "ok");
     assert_eq!(
         mint_count.load(Ordering::SeqCst),
@@ -823,7 +1075,7 @@ fn oauth2_refreshes_on_absence_expiry_and_one_401_retry() {
             "fresh-access-2",
             "fresh-access-3"
         ],
-        "the 401 path must send stale once, refresh, then retry once with fresh"
+        "the rejected tool call must be sent once; only an explicit retry may use the fresh token"
     );
     for request in mcp_recorded.iter() {
         for line in request.head.lines() {
@@ -1007,6 +1259,36 @@ fn adapters_are_namespaced_and_described() {
 }
 
 #[test]
+fn unsafe_or_oversized_remote_tool_names_are_never_offered() {
+    let oversized = "x".repeat(54);
+    let mock = start_mock(move |request| {
+        rpc_result(
+            request,
+            json!({
+                "tools": [
+                    { "name": "ok_1", "inputSchema": { "type": "object" } },
+                    { "name": "bad.name", "inputSchema": { "type": "object" } },
+                    { "name": "bad\u{1b}", "inputSchema": { "type": "object" } },
+                    { "name": oversized, "inputSchema": { "type": "object" } }
+                ]
+            }),
+        )
+    });
+
+    let set = mcp_tools(&[config(&mock.url, McpTrust::Ask)], &|_| true);
+    let names = set
+        .tools
+        .iter()
+        .map(|tool| tool.spec().name)
+        .collect::<Vec<_>>();
+
+    assert_eq!(names, ["mcp__mock__ok_1"]);
+    assert_eq!(set.warnings.len(), 1);
+    assert!(set.warnings[0].contains("excluded 3 tools"));
+    assert!(!set.warnings[0].contains("bad.name"));
+}
+
+#[test]
 fn adapters_sanitize_untrusted_description_and_schema_strings() {
     let mock = start_mock(|request| {
         rpc_result(
@@ -1149,6 +1431,34 @@ fn send_law_ask_reuses_the_existing_approval_for_auto_read_only() {
 }
 
 #[test]
+fn cancellation_after_approval_stops_mcp_call_before_network_send() {
+    let mock = start_mock(full_responder);
+    let set = mcp_tools(&[config(&mock.url, McpTrust::Ask)], &|_| true);
+    let shout = set
+        .tools
+        .iter()
+        .find(|tool| tool.spec().name == "mcp__mock__shout")
+        .unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_on_approval = Arc::clone(&cancel);
+    let ctx = ToolCtx::new(
+        PathBuf::from("."),
+        Box::new(move |_| {
+            cancel_on_approval.store(true, Ordering::Release);
+            true
+        }),
+    )
+    .with_cancel(cancel);
+
+    let result = shout
+        .execute(json!({ "text": "must not send" }), &ctx)
+        .unwrap();
+
+    assert_eq!(result, "turn cancelled before MCP tool call");
+    assert_eq!(count_method(&mock, "tools/call"), 0);
+}
+
+#[test]
 fn trust_auto_read_only_skips_gate_mutating_still_asks() {
     let mock = start_mock(full_responder);
     let set = mcp_tools(&[config(&mock.url, McpTrust::Auto)], &|_| true);
@@ -1232,6 +1542,7 @@ fn blocked_adapter_execute_names_the_fix() {
     // Defense in depth: even a directly-built Block adapter refuses.
     let adapter = McpToolAdapter {
         server: "mock".into(),
+        exposed_name: "mcp__mock__shout".into(),
         trust: McpTrust::Block,
         entry: ToolEntry {
             info: McpToolInfo {

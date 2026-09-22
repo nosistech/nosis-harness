@@ -141,7 +141,7 @@ const CHAT_HELP: &str = "commands: /image <path> (PNG or JPEG; max 4 for the nex
                          /model <id>, /provider <name>, /price, /tools, /quit";
 
 pub fn run(
-    model: &str,
+    model: Option<&str>,
     profile: &str,
     terminal_capability: TerminalCapability,
 ) -> anyhow::Result<()> {
@@ -164,7 +164,9 @@ fn run_session(mut session: ChatSession) -> anyhow::Result<()> {
             scrub_line(&session.scrubber, session.route.id())
         );
         if session.dropped_torn_tail {
-            eprintln!("last session record was incomplete and was dropped - continuing safely");
+            eprintln!(
+                "last session record was incomplete and was dropped - in-flight usage may be missing"
+            );
         }
         if session.constitution_changed {
             eprintln!(
@@ -621,6 +623,7 @@ fn add_route_cost(
     at: DateTime<Utc>,
 ) {
     if route.class() == RouteClass::Local {
+        s.incomplete_cost_turns = s.incomplete_cost_turns.saturating_add(1);
         return;
     }
     let Some(usage) = usage.filter(|usage| usage.evidence == UsageEvidence::Measured) else {
@@ -748,7 +751,7 @@ fn session_money(s: &ChatSession, at: DateTime<Utc>) -> String {
     }
     let mut display = if s.session_cost.is_empty() {
         if s.route.class() == RouteClass::Local {
-            "no billed tokens".into()
+            "billing unknown".into()
         } else {
             s.route.price_at(at).map_or_else(
                 || "-".into(),

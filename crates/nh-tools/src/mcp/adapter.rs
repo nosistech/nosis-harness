@@ -2,9 +2,11 @@
 
 use super::client::{McpClient, ToolEntry, ARGS_SUMMARY_MAX};
 use super::config::{McpServerConfig, McpTrust};
-use crate::{render_tool_result, Tool, ToolCtx, ToolSpec};
+use crate::{cancelled_before, render_tool_result, Tool, ToolCtx, ToolSpec};
 use serde_json::Value;
 use std::sync::Arc;
+
+const MAX_EXPOSED_TOOL_NAME_BYTES: usize = 64;
 
 /// Adapters for every configured server, plus one friendly warning line per
 /// server whose tools could not be listed (never a hard failure).
@@ -23,6 +25,13 @@ pub fn mcp_tools(configs: &[McpServerConfig], send_allowed: &dyn Fn(&str) -> boo
             continue;
         }
         let server = config.name.clone();
+        if !safe_name_component(&server) {
+            warnings.push(
+                "an MCP server name is not safe to expose as a model tool name; server not contacted"
+                    .to_string(),
+            );
+            continue;
+        }
         let Some(host) = nh_vault::host_of(&config.url) else {
             warnings.push(format!(
                 "mcp server \"{server}\": could not parse a host from its url - not contacted"
@@ -45,13 +54,24 @@ pub fn mcp_tools(configs: &[McpServerConfig], send_allowed: &dyn Fn(&str) -> boo
         };
         match client.list_tools_full() {
             Ok(entries) => {
+                let mut excluded_names = 0_usize;
                 for entry in entries {
+                    let Some(exposed_name) = exposed_tool_name(&server, &entry.info.name) else {
+                        excluded_names += 1;
+                        continue;
+                    };
                     tools.push(Box::new(McpToolAdapter {
                         server: server.clone(),
+                        exposed_name,
                         trust,
                         entry,
                         client: Arc::clone(&client),
                     }));
+                }
+                if excluded_names > 0 {
+                    warnings.push(format!(
+                        "mcp server \"{server}\": excluded {excluded_names} tools whose names cannot be exposed safely"
+                    ));
                 }
             }
             Err(e) => warnings.push(format!("mcp server \"{server}\": {e}")),
@@ -60,8 +80,24 @@ pub fn mcp_tools(configs: &[McpServerConfig], send_allowed: &dyn Fn(&str) -> boo
     McpToolset { tools, warnings }
 }
 
+fn exposed_tool_name(server: &str, tool: &str) -> Option<String> {
+    if !safe_name_component(server) || !safe_name_component(tool) {
+        return None;
+    }
+    let name = format!("mcp__{server}__{tool}");
+    (name.len() <= MAX_EXPOSED_TOOL_NAME_BYTES).then_some(name)
+}
+
+fn safe_name_component(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
 pub(super) struct McpToolAdapter {
     pub(super) server: String,
+    pub(super) exposed_name: String,
     pub(super) trust: McpTrust,
     pub(super) entry: ToolEntry,
     pub(super) client: Arc<McpClient>,
@@ -70,13 +106,16 @@ pub(super) struct McpToolAdapter {
 impl Tool for McpToolAdapter {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: format!("mcp__{}__{}", self.server, self.entry.info.name),
+            name: self.exposed_name.clone(),
             description: format!("[MCP {}] {}", self.server, self.entry.info.description),
             parameters: self.entry.info.input_schema.clone(),
         }
     }
 
     fn execute(&self, args: Value, ctx: &ToolCtx) -> anyhow::Result<String> {
+        if let Some(cancelled) = cancelled_before("MCP tool call", ctx) {
+            return Ok(cancelled);
+        }
         let Some(host) = nh_vault::host_of(&self.client.config.url) else {
             return Ok(render_tool_result(
                 "blocked by law: could not parse the MCP server host".to_string(),
@@ -112,6 +151,9 @@ impl Tool for McpToolAdapter {
                     ));
                 }
             }
+        }
+        if let Some(cancelled) = cancelled_before("MCP tool call", ctx) {
+            return Ok(cancelled);
         }
         let raw = self.client.call_tool(tool, args)?;
         Ok(render_tool_result(raw, ctx))

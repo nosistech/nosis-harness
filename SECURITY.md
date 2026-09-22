@@ -12,7 +12,7 @@ nosis is in development and is before version 1.0. We apply security fixes to th
 | `main` branch      | Yes            |
 | All older releases | No             |
 
-The current release is `v0.2.1`. It includes the rustls fix for RUSTSEC-2026-0285 and retains the guarded reading of repository-controlled configuration introduced in `v0.2.0`. The Security sections of those entries in `CHANGELOG.md` describe the changes.
+The current published release is `v0.2.2`. It includes the rustls fix for RUSTSEC-2026-0285 and retains the guarded reading of repository-controlled configuration introduced in `v0.2.0`. The `v0.3.0-rc.1` candidate adds cancellation, file conflict and usage-accounting corrections described in `CHANGELOG.md`; these are not in the current download.
 
 ### How a C runtime fix reaches you
 
