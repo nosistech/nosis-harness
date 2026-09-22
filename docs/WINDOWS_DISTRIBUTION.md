@@ -80,8 +80,9 @@ bytes and creates a GitHub build attestation for the executable and ZIP. Only th
 job receives OIDC and attestation-write permissions; repository contents stay
 read-only. It verifies both artifacts against the repository, workflow, source tag
 and commit, and retains the verification bundle as a separate Actions artifact.
-See [release verification](RELEASE_VERIFICATION.md). This workflow change must pass
-CI before it can be described as a verified release capability.
+See [release verification](RELEASE_VERIFICATION.md). The v0.3.0-rc.1 candidate
+completed this workflow and independent download verification. It remains a draft;
+publisher signing and clean standard-user installation testing are still pending.
 
 ## Make installation available
 

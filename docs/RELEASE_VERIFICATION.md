@@ -1,9 +1,13 @@
 # Verify a Windows release
 
 **Version boundary:** published v0.2.2 is unsigned and does not have the new build
-attestation. Use its release checksum instructions. The attestation workflow in
-this source tree is prepared for a future release and has not yet run in GitHub
-Actions. Do not assume an old asset has been signed or attested retroactively.
+attestation. Use its release checksum instructions. The v0.3.0-rc.1 candidate
+[packaging and attestation run](https://github.com/nosistech/nosis-harness/actions/runs/35791434747)
+passed. Both downloaded subjects were verified with the saved bundle and GitHub
+lookup against source `796f94840b8f528532e1a2e24e3a098e412e0c74` and tag
+`v0.3.0-rc.1`. The candidate remains a draft, pending publisher signing and clean
+installation verification. Do not assume an old asset has been signed or attested
+retroactively.
 
 ## Check the source and bytes
 
