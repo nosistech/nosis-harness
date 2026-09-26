@@ -61,7 +61,7 @@ jobs:
         with:
           toolchain: "1.96.0"
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2.9.1
       - name: Format check
         run: cargo fmt --all --check
       - name: Release gate fixtures
@@ -100,7 +100,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@191af2e1955bbe165f9bbacff2d2438002dff4d4 # 1.96.0
         with:
           toolchain: "1.96.0"
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2.9.1
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked --version 0.20.2
       - name: Cargo deny
