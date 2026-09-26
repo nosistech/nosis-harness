@@ -269,8 +269,7 @@ impl ReceiptWriter {
 
     pub fn append(&self, receipt: &Receipt) -> anyhow::Result<()> {
         let path = crate::runtime_path::ensure_contained_file(&self.root, &self.path, "receipts")?;
-        let line = serde_json::to_string(receipt).context("could not serialize receipt")?;
-        let line = self.scrubber.scrub(&line);
+        let line = crate::jsonl::serialize_scrubbed(receipt, &self.scrubber, "receipt")?;
         crate::jsonl::append_locked_line(&path, &line)
     }
 }
@@ -370,6 +369,27 @@ mod tests {
             .map(|line| serde_json::from_str::<Receipt>(line).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(receipts.len(), WRITERS * RECEIPTS_PER_WRITER);
+    }
+
+    #[test]
+    fn receipt_scrubs_decoded_task_text_before_json_encoding() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".nosis").join("receipts.jsonl");
+        let secret = ["receipt", "\"", "\\", "\n", "secret"].concat();
+        let writer = ReceiptWriter::for_path(
+            temp.path(),
+            path.clone(),
+            nh_vault::Scrubber::new(vec![secret.clone()]),
+        );
+
+        writer
+            .append(&receipt(format!("task contains {secret}")))
+            .unwrap();
+
+        let bytes = std::fs::read(path).unwrap();
+        let persisted: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(persisted["task"], "task contains [REDACTED]");
+        assert!(!String::from_utf8(bytes).unwrap().contains(&secret));
     }
 
     #[test]

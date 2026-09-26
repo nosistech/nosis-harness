@@ -1,4 +1,4 @@
-# Model updates checked September 22, 2026
+# Model updates checked September 25, 2026
 
 **Unreleased source catalog.** These additions are not in the v0.2.2 download or
 the existing v0.3.0-rc.1 draft. All four routes passed a small live text/tool-call
@@ -27,9 +27,9 @@ In its notice checked September 22, 2026, Xiaomi says `mimo-v2.5` and `mimo-v2.5
 **For v0.2.2 users:** no published Nosis build contains these new routes yet.
 Keep your current installation and watch the [releases page](https://github.com/nosistech/nosis-harness/releases)
 for a build that includes them. Rerunning v0.2.2 setup cannot add these routes.
-If you need them before a release, the source must first be published and built
-using [the contributor instructions](../CONTRIBUTING.md); there is no ready download
-for this working tree. You can explicitly choose another supported provider meanwhile.
+If you need them before a release, build the published source using
+[the contributor instructions](../CONTRIBUTING.md); there is no ready download
+containing these changes yet. You can explicitly choose another supported provider meanwhile.
 
 The commands below require a build containing the new catalog. After installing it, run this in your project:
 
@@ -78,3 +78,29 @@ the provider's bill remains authoritative.
 MiMo routes and Kimi K3 now use the documented `max_completion_tokens` request field
 for their output ceiling. This includes reasoning tokens where the provider specifies
 that behavior. It does not create a hard spending cap across calls or retries.
+
+## Price and compatibility limits
+
+The September 25 review checked all 16 catalog entries against current provider
+documentation where available. It did not repeat live requests for every model.
+Only the four additions above have the recorded September 22 text/tool smoke
+checks; a catalog entry is not evidence of reliability on your task. Current
+dynamic Kimi documentation did not independently reconfirm the older K2.7 Code
+Highspeed rates, so check the provider's account pricing before choosing it.
+
+DeepSeek's official peak schedule excludes Chinese public holidays. Nosis uses
+weekday/time windows and can therefore overestimate on those holidays. A task
+can also cross a price window after its initial quote.
+[DeepSeek pricing](https://api-docs.deepseek.com/quick_start/pricing/).
+
+Kimi K3 separately reports cache-write tokens. Nosis currently folds them into
+the non-cache-read input bucket; its default five-minute write rate matches
+ordinary input pricing. One-hour caching is not requested or priced by Nosis.
+The receipt does not separately show cache writes or their lifetime.
+[Kimi caching](https://platform.kimi.ai/docs/guide/context-caching).
+
+Coding subscriptions may use different endpoints, credentials and entitlements.
+For example, Kimi K2.8 Preview is listed in Kimi Code's service; it is not a drop-in
+model ID for Nosis's existing Moonshot API route. Premium speed variants and new
+modalities require explicit integration and testing before being advertised here.
+[Kimi Code models](https://www.kimi.com/code/docs/en/kimi-code/models.html).

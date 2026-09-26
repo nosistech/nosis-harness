@@ -598,6 +598,28 @@ fn ledger_scrubber_redacts_fake_key_literals() {
 }
 
 #[test]
+fn durable_writer_scrubs_decoded_error_fields_before_json_encoding() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("ledger.jsonl");
+    let secret = ["fleet", "\"", "\\", "\n", "secret"].concat();
+    let ledger = DurableWriter::open(&path, Scrubber::new(vec![secret.clone()])).unwrap();
+
+    ledger
+        .append(&LedgerEvent::RunFailed {
+            run_id: "failed-run".into(),
+            reason: format!("provider reflected {secret}"),
+        })
+        .unwrap();
+
+    let events = read_ledger(&path).unwrap();
+    assert!(matches!(
+        events.as_slice(),
+        [LedgerEvent::RunFailed { reason, .. }] if reason == "provider reflected [REDACTED]"
+    ));
+    assert!(!fs::read_to_string(path).unwrap().contains(&secret));
+}
+
+#[test]
 fn budget_halts_new_dispatch_and_terminals_every_task() {
     let _env = TestEnv::echo();
     let tmp = tempfile::tempdir().unwrap();

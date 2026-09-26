@@ -1,4 +1,6 @@
-use super::context::{estimate_tokens, message_bytes, IMAGE_ESTIMATE_TOKENS};
+use super::context::{
+    compaction_marker_stats, estimate_tokens, message_bytes, IMAGE_ESTIMATE_TOKENS,
+};
 use super::*;
 use crate::wire::UsageEvidence;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -49,6 +51,124 @@ fn compaction_keeps_retained_messages_byte_identical_and_prefix_sealed() {
         !seal.check(&drifted),
         "release builds must detect prefix drift"
     );
+}
+
+#[test]
+fn compaction_preserves_route_and_shell_system_corrections_with_complete_tool_groups() {
+    let route_correction = message("system", "[nosis] route changed to corrected-route");
+    let shell_correction = message("system", SHELL_AVAILABLE_SESSION_NOTICE);
+    let tool_call = ChatMessage {
+        role: "assistant".into(),
+        content: None,
+        parts: None,
+        tool_calls: Some(vec![ToolCallReq {
+            id: "retained-call".into(),
+            name: "read_file".into(),
+            arguments: r#"{"path":"README.md"}"#.into(),
+        }]),
+        tool_call_id: None,
+        reasoning_content: None,
+    };
+    let tool_result = ChatMessage {
+        role: "tool".into(),
+        content: Some("retained result".into()),
+        parts: None,
+        tool_calls: None,
+        tool_call_id: Some("retained-call".into()),
+        reasoning_content: None,
+    };
+    let mut history = vec![
+        message("system", "sealed constitution"),
+        message("user", "old task"),
+        message("assistant", "old answer"),
+        route_correction.clone(),
+        shell_correction.clone(),
+        message("user", "middle task"),
+        message("assistant", "middle answer"),
+        message("user", "recent task"),
+        tool_call,
+        tool_result,
+        message("user", "latest task"),
+        message("assistant", "latest answer"),
+    ];
+    let removed = history[1..3]
+        .iter()
+        .chain(history[5..7].iter())
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let compaction = compact_history(&mut history, 1).expect("compaction fires");
+
+    assert_eq!(compaction.messages, removed.len());
+    assert_eq!(
+        compaction.estimated_tokens_elided,
+        estimate_tokens(&removed)
+    );
+    assert_eq!(message_bytes(&history[2]), message_bytes(&route_correction));
+    assert_eq!(message_bytes(&history[3]), message_bytes(&shell_correction));
+    for message in history.iter().filter(|message| message.role == "assistant") {
+        for call in message.tool_calls.as_deref().unwrap_or_default() {
+            assert!(history.iter().any(|candidate| {
+                candidate.role == "tool" && candidate.tool_call_id.as_deref() == Some(&call.id)
+            }));
+        }
+    }
+}
+
+#[test]
+fn repeated_compaction_replaces_only_the_exact_generated_marker() {
+    let similar_instruction = message(
+        "system",
+        "[nosis] earlier context compacted: keep this system instruction",
+    );
+    let mut history = vec![
+        message("system", "sealed constitution"),
+        message("user", "old task"),
+        message("assistant", "old answer"),
+        similar_instruction.clone(),
+        message("user", "middle task"),
+        message("assistant", "middle answer"),
+        message("user", "recent task"),
+        message("assistant", "recent answer"),
+        message("user", "latest task"),
+        message("assistant", "latest answer"),
+    ];
+
+    let first = compact_history(&mut history, 1).expect("first compaction fires");
+    let first_marker = history
+        .iter()
+        .find_map(compaction_marker_stats)
+        .expect("generated marker is present");
+    assert_eq!(
+        first_marker,
+        (first.messages, first.estimated_tokens_elided)
+    );
+    history.extend([
+        message("user", "newer task"),
+        message("assistant", "newer answer"),
+        message("user", "newest task"),
+        message("assistant", "newest answer"),
+    ]);
+
+    let second = compact_history(&mut history, 1).expect("second compaction fires");
+    let markers = history
+        .iter()
+        .filter_map(compaction_marker_stats)
+        .collect::<Vec<_>>();
+
+    assert_eq!(markers.len(), 1);
+    assert_eq!(
+        markers[0],
+        (
+            first_marker.0.saturating_add(second.messages),
+            first_marker
+                .1
+                .saturating_add(second.estimated_tokens_elided),
+        )
+    );
+    assert!(history
+        .iter()
+        .any(|message| message_bytes(message) == message_bytes(&similar_instruction)));
 }
 
 #[test]
@@ -230,6 +350,26 @@ impl ChatClient for UsageFinishClient {
 
 struct FinishReasonClient {
     finish_reason: FinishReason,
+}
+
+struct EmptyAnswerClient;
+
+impl ChatClient for EmptyAnswerClient {
+    fn complete(&self, _req: &ChatRequest) -> anyhow::Result<crate::wire::ChatResponse> {
+        Ok(crate::wire::ChatResponse {
+            message: ChatMessage {
+                role: "assistant".into(),
+                content: None,
+                parts: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            finish_reason: FinishReason::Stop,
+            usage: None,
+            retries: Default::default(),
+        })
+    }
 }
 
 impl ChatClient for FinishReasonClient {
@@ -434,6 +574,40 @@ fn normal_finish_reasons_remain_passes() {
 }
 
 #[test]
+fn empty_normal_finish_is_partial_instead_of_a_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = agent_with_receipt_path(
+        dir.path(),
+        dir.path().join("receipts.jsonl"),
+        Box::new(EmptyAnswerClient),
+        Arc::clone(&events),
+    );
+
+    let (answer, receipt) = agent.run("empty answer").unwrap();
+
+    assert!(answer.is_empty());
+    assert_eq!(receipt.outcome, Outcome::Partial);
+    assert_eq!(receipt.failure_class, Some(FailureClass::Constraint));
+    assert_eq!(
+        events.lock().unwrap().as_slice(),
+        ["normal finish without an answer - treated as partial"]
+    );
+}
+
+#[test]
+fn cancelled_empty_normal_finish_is_partial_instead_of_a_pass() {
+    assert_eq!(
+        cancelled_response_outcome(FinishKind::Normal, &[], None),
+        (Outcome::Partial, Some(FailureClass::Constraint))
+    );
+    assert_eq!(
+        cancelled_response_outcome(FinishKind::Normal, &[], Some("answer")),
+        (Outcome::Pass, None)
+    );
+}
+
+#[test]
 fn missing_finish_reason_is_partial_and_never_normal() {
     let (answer, receipt, emitted) = run_finish_reason_value(FinishReason::Missing);
 
@@ -576,6 +750,50 @@ fn unmetered_final_call_degrades_prior_measurement_to_partial() {
 
 struct UnsafeFinishToolClient {
     finish_reason: FinishReason,
+}
+
+struct UnsafeThenAnswerClient {
+    calls: Mutex<u8>,
+}
+
+impl ChatClient for UnsafeThenAnswerClient {
+    fn complete(&self, req: &ChatRequest) -> anyhow::Result<crate::wire::ChatResponse> {
+        let mut calls = self.calls.lock().unwrap();
+        let call = *calls;
+        *calls += 1;
+        drop(calls);
+        if call == 0 {
+            return UnsafeFinishToolClient {
+                finish_reason: FinishReason::Truncated,
+            }
+            .complete(req);
+        }
+
+        let assistant = req
+            .messages
+            .iter()
+            .find(|message| {
+                message.role == "assistant"
+                    && message
+                        .tool_calls
+                        .as_ref()
+                        .is_some_and(|calls| calls.iter().any(|call| call.id == "must-not-run"))
+            })
+            .expect("refused assistant tool call remains in replay history");
+        let call = assistant.tool_calls.as_ref().unwrap().first().unwrap();
+        assert!(req.messages.iter().any(|message| {
+            message.role == "tool"
+                && message.tool_call_id.as_deref() == Some(&call.id)
+                && message.content.as_deref()
+                    == Some("tool call not executed because finish reason did not confirm tool use")
+        }));
+        Ok(crate::wire::ChatResponse {
+            message: message("assistant", "next request accepted"),
+            finish_reason: FinishReason::Stop,
+            usage: None,
+            retries: Default::default(),
+        })
+    }
 }
 
 impl ChatClient for UnsafeFinishToolClient {
@@ -968,8 +1186,68 @@ fn truncated_or_filtered_completion_never_executes_attached_tool_call() {
         assert_eq!(executions.load(Ordering::SeqCst), 0);
         assert_eq!(receipt.tool_calls, 0);
         assert_eq!(receipt.outcome, expected_outcome);
-        assert!(!history.iter().any(|message| message.role == "tool"));
+        assert!(history.iter().any(|message| {
+            message.role == "tool"
+                && message.tool_call_id.as_deref() == Some("must-not-run")
+                && message.content.as_deref()
+                    == Some("tool call not executed because finish reason did not confirm tool use")
+        }));
     }
+}
+
+#[test]
+fn refused_tool_call_keeps_replay_valid_for_the_next_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let executions = Arc::new(AtomicUsize::new(0));
+    let mut agent = agent_with_receipt_path(
+        dir.path(),
+        dir.path().join("receipts.jsonl"),
+        Box::new(UnsafeThenAnswerClient {
+            calls: Mutex::new(0),
+        }),
+        Arc::new(Mutex::new(Vec::new())),
+    );
+    agent.tools = vec![Box::new(CountingTool(Arc::clone(&executions)))];
+    let mut history = Vec::new();
+
+    let (_, first) = agent
+        .run_with_history(&mut history, "do not execute")
+        .unwrap();
+    assert_eq!(first.outcome, Outcome::Partial);
+    let ledger = crate::session_ledger::SessionLedger::create(
+        dir.path(),
+        "refused-replay",
+        nh_vault::Scrubber::new(Vec::new()),
+    );
+    ledger
+        .append(&crate::session_ledger::SessionEvent::Started {
+            session_id: "refused-replay".into(),
+            surface: crate::session_ledger::Surface::Chat,
+            route_id: "mock-route".into(),
+            model_id: "mock-model".into(),
+            profile: "balanced".into(),
+            created_utc: "2026-09-25T00:00:00Z".into(),
+            budget: Some(crate::session_ledger::SessionBudget::Unlimited),
+        })
+        .unwrap();
+    ledger
+        .append(&crate::session_ledger::SessionEvent::Turn {
+            ts_utc: "2026-09-25T00:00:01Z".into(),
+            route_id: "mock-route".into(),
+            messages: history,
+            usage: None,
+        })
+        .unwrap();
+    let mut restored = crate::session_ledger::read_session(dir.path(), "refused-replay")
+        .unwrap()
+        .history;
+    let (answer, second) = agent
+        .run_with_history(&mut restored, "continue safely")
+        .unwrap();
+
+    assert_eq!(answer, "next request accepted");
+    assert_eq!(second.outcome, Outcome::Pass);
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
 }
 
 #[test]

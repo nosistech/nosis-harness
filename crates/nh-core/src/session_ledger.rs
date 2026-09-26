@@ -188,8 +188,7 @@ impl SessionLedger {
     pub fn append(&self, event: &SessionEvent) -> anyhow::Result<()> {
         validate_session_id(&self.session_id)?;
         let path = crate::runtime_path::ensure_contained_file(&self.root, &self.path, "session")?;
-        let line = serde_json::to_string(event).context("could not serialize session record")?;
-        let line = self.scrubber.scrub(&line);
+        let line = crate::jsonl::serialize_scrubbed(event, &self.scrubber, "session record")?;
         crate::jsonl::append_locked_line(&path, &line)
     }
 }
@@ -445,6 +444,124 @@ mod tests {
         assert_eq!(
             serde_json::to_vec(&restored.history).unwrap(),
             original_bytes
+        );
+        assert!(!restored.dropped_torn_tail);
+    }
+
+    #[test]
+    fn durable_session_scrubs_decoded_strings_and_nested_tool_arguments() {
+        let root = tempfile::tempdir().unwrap();
+        let id = "scrubbed-session";
+        let secret = ["fixture", "\"", "\\", "\n", "secret"].concat();
+        let valid_arguments = serde_json::to_string(&serde_json::json!({
+            "token": secret.clone(),
+            "nested": {(secret.clone()): "value"},
+        }))
+        .unwrap();
+        let collision_left = "collision-left".to_owned();
+        let collision_right = "collision-right".to_owned();
+        let collision_arguments = serde_json::to_string(&serde_json::json!({
+            (collision_left.clone()): "left",
+            (collision_right.clone()): "right",
+        }))
+        .unwrap();
+        let clean_arguments = r#"{ "z": 1, "a" : [ true ] }"#;
+        let shadow_secret = "SECRET".to_owned();
+        let escaped_shadow = r"SEC\u0052ET";
+        let shadow_arguments = format!(r#"{{"cmd":"{escaped_shadow}","cmd":"ls"}}"#);
+        let writer = SessionLedger::create(
+            root.path(),
+            id,
+            nh_vault::Scrubber::new(vec![
+                secret.clone(),
+                collision_left.clone(),
+                collision_right.clone(),
+                shadow_secret.clone(),
+            ]),
+        );
+        writer.append(&started(id)).unwrap();
+        writer
+            .append(&SessionEvent::Turn {
+                ts_utc: "2026-07-31T14:06:00Z".to_owned(),
+                route_id: "test-route".to_owned(),
+                messages: vec![ChatMessage {
+                    role: "assistant".to_owned(),
+                    content: Some(format!("answer {secret}")),
+                    parts: None,
+                    tool_calls: Some(vec![
+                        crate::wire::ToolCallReq {
+                            id: "valid".to_owned(),
+                            name: "read_file".to_owned(),
+                            arguments: valid_arguments,
+                        },
+                        crate::wire::ToolCallReq {
+                            id: "invalid".to_owned(),
+                            name: "read_file".to_owned(),
+                            arguments: format!("not-json {secret}"),
+                        },
+                        crate::wire::ToolCallReq {
+                            id: "collision".to_owned(),
+                            name: "read_file".to_owned(),
+                            arguments: collision_arguments,
+                        },
+                        crate::wire::ToolCallReq {
+                            id: "clean".to_owned(),
+                            name: "read_file".to_owned(),
+                            arguments: clean_arguments.to_owned(),
+                        },
+                        crate::wire::ToolCallReq {
+                            id: "shadowed".to_owned(),
+                            name: "exec_shell".to_owned(),
+                            arguments: shadow_arguments,
+                        },
+                    ]),
+                    tool_call_id: None,
+                    reasoning_content: Some(format!("reasoning {secret}")),
+                }],
+                usage: None,
+            })
+            .unwrap();
+
+        let bytes = std::fs::read(ledger_path(root.path(), id)).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        let persisted: serde_json::Value =
+            serde_json::from_str(text.lines().nth(1).unwrap()).unwrap();
+        let message = &persisted["messages"][0];
+        assert_eq!(message["content"], "answer [REDACTED]");
+        assert_eq!(message["reasoning_content"], "reasoning [REDACTED]");
+        let arguments: serde_json::Value =
+            serde_json::from_str(message["tool_calls"][0]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(arguments["token"], "[REDACTED]");
+        assert_eq!(arguments["nested"]["[REDACTED]"], "value");
+        assert_eq!(
+            message["tool_calls"][1]["arguments"],
+            r#"{"_nosis":"tool arguments omitted from durable record"}"#
+        );
+        assert_eq!(
+            message["tool_calls"][2]["arguments"],
+            r#"{"_nosis":"tool arguments omitted from durable record"}"#
+        );
+        assert_eq!(message["tool_calls"][3]["arguments"], clean_arguments);
+        assert_eq!(message["tool_calls"][4]["arguments"], r#"{"cmd":"ls"}"#);
+        assert!(!message["tool_calls"][4]["arguments"]
+            .as_str()
+            .unwrap()
+            .contains(escaped_shadow));
+        assert!(!text.contains(&secret));
+        assert!(!text.contains(&collision_left));
+        assert!(!text.contains(&collision_right));
+        assert!(!text.contains(&shadow_secret));
+        assert!(!text.contains(r"SEC\\u0052ET"));
+
+        let restored = read_session(root.path(), id).unwrap();
+        assert_eq!(restored.history.len(), 1);
+        assert_eq!(
+            restored.history[0].tool_calls.as_ref().unwrap()[3].arguments,
+            clean_arguments
+        );
+        assert_eq!(
+            restored.history[0].tool_calls.as_ref().unwrap()[4].arguments,
+            r#"{"cmd":"ls"}"#
         );
         assert!(!restored.dropped_torn_tail);
     }

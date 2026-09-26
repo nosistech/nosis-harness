@@ -3,7 +3,8 @@
 This guide accompanies the portable Windows x64 package. You do not need Rust,
 Visual Studio, or the Visual C++ Redistributable to run it.
 
-For the published version, download the ZIP from the
+Already extracted a package? Continue at **Open a terminal** below; you do not
+need to download another copy. For the published stable version, download the ZIP from the
 [v0.2.2 release](https://github.com/nosistech/nosis-harness/releases/tag/v0.2.2).
 The minimum path is: verify the download, extract it, open your project in a
 terminal and run setup. Adding Nosis to PATH is optional.
@@ -63,7 +64,7 @@ For v0.2.2 or later, start the guided setup from your project folder:
 Use your actual executable path. If `nh` is on PATH, just run `nh setup` or `nh`.
 The guide confirms the folder, checks the installation, and lets you choose a cloud
 model. It offers a free price preview, secure key entry, and an optional chat.
-Current unreleased source offers a read-only first task instead; the downloaded
+The newer v0.3.0-rc.2 source offers a read-only first task instead; the downloaded
 v0.2.2 does not enforce read-only task permissions.
 Existing configuration and keys are preserved; missing ignore entries may be added.
 Press Enter to decline a yes/no question, or type `cancel` to stop.

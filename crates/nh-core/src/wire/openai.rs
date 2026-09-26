@@ -442,6 +442,11 @@ pub(super) fn parse_response(body: &str) -> anyhow::Result<ChatResponse> {
         .into_iter()
         .next()
         .ok_or_else(|| anyhow::anyhow!("provider response had no choices"))?;
+    let role = match choice.message.role {
+        None => "assistant".to_owned(),
+        Some(role) if role == "assistant" => role,
+        Some(_) => anyhow::bail!("provider response message role was not assistant"),
+    };
     let tool_calls = choice.message.tool_calls.map(|calls| {
         calls
             .into_iter()
@@ -454,7 +459,7 @@ pub(super) fn parse_response(body: &str) -> anyhow::Result<ChatResponse> {
     });
     Ok(ChatResponse {
         message: ChatMessage {
-            role: choice.message.role.unwrap_or_else(|| "assistant".into()),
+            role,
             content: choice.message.content,
             parts: None,
             tool_calls,

@@ -2,8 +2,109 @@
 
 use anyhow::Context as _;
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 use std::io::Write as _;
 use std::path::Path;
+
+const OMITTED_TOOL_ARGUMENTS: &str = r#"{"_nosis":"tool arguments omitted from durable record"}"#;
+
+/// Serialize durable JSON only after scrubbing decoded string values.
+///
+/// Tool-call arguments are JSON encoded inside a string, so they receive a
+/// second structural pass before the outer record is encoded. Invalid nested
+/// JSON is replaced rather than persisted without proven redaction.
+pub(crate) fn serialize_scrubbed<T: Serialize>(
+    value: &T,
+    scrubber: &nh_vault::Scrubber,
+    record_name: &str,
+) -> anyhow::Result<String> {
+    let mut value = serde_json::to_value(value)
+        .with_context(|| format!("could not serialize {record_name}"))?;
+    scrub_tool_arguments(&mut value, scrubber)?;
+    scrub_json_value(&mut value, scrubber)?;
+    serde_json::to_string(&value).with_context(|| format!("could not serialize {record_name}"))
+}
+
+/// Parse and structurally scrub one already-serialized JSON value.
+pub(crate) fn scrub_json_text(text: &str, scrubber: &nh_vault::Scrubber) -> anyhow::Result<String> {
+    let mut value = serde_json::from_str(text).context("could not parse JSON for redaction")?;
+    scrub_json_value(&mut value, scrubber)?;
+    serde_json::to_string(&value).context("could not serialize scrubbed JSON")
+}
+
+fn scrub_tool_arguments(
+    value: &mut serde_json::Value,
+    scrubber: &nh_vault::Scrubber,
+) -> anyhow::Result<()> {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                scrub_tool_arguments(value, scrubber)?;
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            if let Some(serde_json::Value::Array(calls)) = fields.get_mut("tool_calls") {
+                for call in calls {
+                    let Some(arguments) = call
+                        .as_object_mut()
+                        .and_then(|call| call.get_mut("arguments"))
+                        .and_then(|arguments| arguments.as_str())
+                    else {
+                        continue;
+                    };
+                    let scrubbed = scrub_argument_string(arguments, scrubber)
+                        .unwrap_or_else(|_| OMITTED_TOOL_ARGUMENTS.to_owned());
+                    call["arguments"] = serde_json::Value::String(scrubbed);
+                }
+            }
+            for value in fields.values_mut() {
+                scrub_tool_arguments(value, scrubber)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn scrub_argument_string(arguments: &str, scrubber: &nh_vault::Scrubber) -> anyhow::Result<String> {
+    if arguments.trim().is_empty() {
+        return Ok(arguments.to_owned());
+    }
+    let mut nested = serde_json::from_str::<serde_json::Value>(arguments)
+        .context("could not parse tool arguments for redaction")?;
+    let original = nested.clone();
+    scrub_json_value(&mut nested, scrubber)?;
+    if nested == original && !arguments.contains('\\') {
+        return Ok(arguments.to_owned());
+    }
+    serde_json::to_string(&nested).context("could not serialize scrubbed tool arguments")
+}
+
+fn scrub_json_value(
+    value: &mut serde_json::Value,
+    scrubber: &nh_vault::Scrubber,
+) -> anyhow::Result<()> {
+    match value {
+        serde_json::Value::String(text) => *text = scrubber.scrub(text),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                scrub_json_value(value, scrubber)?;
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            let original = std::mem::take(fields);
+            for (name, mut field) in original {
+                scrub_json_value(&mut field, scrubber)?;
+                let name = scrubber.scrub(&name);
+                if fields.insert(name, field).is_some() {
+                    anyhow::bail!("scrubbing produced duplicate JSON object keys");
+                }
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+    Ok(())
+}
 
 /// SECURITY INVARIANT: each complete line is locked, flushed, and synced before return.
 pub(crate) fn append_locked_line(path: &Path, line: &str) -> anyhow::Result<()> {

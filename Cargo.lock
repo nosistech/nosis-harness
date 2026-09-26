@@ -1246,7 +1246,7 @@ dependencies = [
 
 [[package]]
 name = "nh-cli"
-version = "0.3.0-rc.1"
+version = "0.3.0-rc.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1269,7 +1269,7 @@ dependencies = [
 
 [[package]]
 name = "nh-core"
-version = "0.3.0-rc.1"
+version = "0.3.0-rc.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1285,7 +1285,7 @@ dependencies = [
 
 [[package]]
 name = "nh-fleet"
-version = "0.3.0-rc.1"
+version = "0.3.0-rc.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1302,7 +1302,7 @@ dependencies = [
 
 [[package]]
 name = "nh-law"
-version = "0.3.0-rc.1"
+version = "0.3.0-rc.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -1311,7 +1311,7 @@ dependencies = [
 
 [[package]]
 name = "nh-mcp"
-version = "0.3.0-rc.1"
+version = "0.3.0-rc.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -1332,7 +1332,7 @@ dependencies = [
 
 [[package]]
 name = "nh-routes"
-version = "0.3.0-rc.1"
+version = "0.3.0-rc.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1344,7 +1344,7 @@ dependencies = [
 
 [[package]]
 name = "nh-tools"
-version = "0.3.0-rc.1"
+version = "0.3.0-rc.2"
 dependencies = [
  "anyhow",
  "getrandom 0.2.17",
@@ -1360,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "nh-tui"
-version = "0.3.0-rc.1"
+version = "0.3.0-rc.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1375,7 +1375,7 @@ dependencies = [
 
 [[package]]
 name = "nh-vault"
-version = "0.3.0-rc.1"
+version = "0.3.0-rc.2"
 dependencies = [
  "anyhow",
  "keyring",

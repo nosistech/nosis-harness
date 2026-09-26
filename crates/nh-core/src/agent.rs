@@ -711,7 +711,11 @@ impl AgentLoop {
             let finish_kind = classify_finish_reason(&resp.finish_reason);
             let tool_use_confirmed = matches!(finish_kind, FinishKind::ToolUse);
             if self.turn_cancelled() {
-                let (outcome, failure_class) = cancelled_response_outcome(finish_kind, &calls);
+                let (outcome, failure_class) = cancelled_response_outcome(
+                    finish_kind,
+                    &calls,
+                    resp.message.content.as_deref(),
+                );
                 let answer = resp
                     .message
                     .content
@@ -743,6 +747,14 @@ impl AgentLoop {
             }
             push_message(history, &mut appended, resp.message.clone());
             if calls.is_empty() || !tool_use_confirmed {
+                if !calls.is_empty() {
+                    append_unexecuted_tool_results(
+                        history,
+                        &mut appended,
+                        &calls,
+                        "tool call not executed because finish reason did not confirm tool use",
+                    );
+                }
                 self.report_prefix_drift(&prefix_seal, history, &mut prefix_drift_reported);
                 let text = resp.message.content.clone().unwrap_or_default();
                 if !calls.is_empty() {
@@ -751,7 +763,13 @@ impl AgentLoop {
                     );
                 }
                 let (outcome, failure_class) = match finish_kind {
-                    FinishKind::Normal if calls.is_empty() => (Outcome::Pass, None),
+                    FinishKind::Normal if calls.is_empty() && !text.trim().is_empty() => {
+                        (Outcome::Pass, None)
+                    }
+                    FinishKind::Normal if calls.is_empty() => {
+                        self.emit("normal finish without an answer - treated as partial");
+                        (Outcome::Partial, Some(FailureClass::Constraint))
+                    }
                     FinishKind::Normal | FinishKind::ToolUse => {
                         if calls.is_empty() {
                             self.emit(
@@ -1048,9 +1066,14 @@ impl AgentLoop {
 fn cancelled_response_outcome(
     finish_kind: FinishKind,
     calls: &[ToolCallReq],
+    content: Option<&str>,
 ) -> (Outcome, Option<FailureClass>) {
     match finish_kind {
-        FinishKind::Normal if calls.is_empty() => (Outcome::Pass, None),
+        FinishKind::Normal
+            if calls.is_empty() && content.is_some_and(|content| !content.trim().is_empty()) =>
+        {
+            (Outcome::Pass, None)
+        }
         FinishKind::Filtered => (Outcome::Fail, Some(FailureClass::Filtered)),
         FinishKind::Context => (Outcome::Partial, Some(FailureClass::Context)),
         FinishKind::Normal
@@ -1067,13 +1090,27 @@ fn append_cancelled_tool_results(
     appended: &mut Option<&mut Vec<ChatMessage>>,
     calls: &[ToolCallReq],
 ) {
+    append_unexecuted_tool_results(
+        history,
+        appended,
+        calls,
+        "turn cancelled before tool execution",
+    );
+}
+
+fn append_unexecuted_tool_results(
+    history: &mut Vec<ChatMessage>,
+    appended: &mut Option<&mut Vec<ChatMessage>>,
+    calls: &[ToolCallReq],
+    reason: &str,
+) {
     for call in calls {
         push_message(
             history,
             appended,
             ChatMessage {
                 role: "tool".into(),
-                content: Some("turn cancelled before tool execution".into()),
+                content: Some(reason.into()),
                 parts: None,
                 tool_calls: None,
                 tool_call_id: Some(call.id.clone()),

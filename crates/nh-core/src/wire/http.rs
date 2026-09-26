@@ -103,13 +103,16 @@ pub(super) fn provider_error(status: reqwest::StatusCode, body: &str, key: &str)
 
 /// One-line, truncated body snippet with credentials redacted.
 pub(super) fn scrub_snippet(body: &str, key: &str) -> String {
-    // SECURITY INVARIANT: provider errors use the shared shape-aware scrubber
-    // before their body text can reach a user-visible error.
-    let scrubbed = nh_vault::Scrubber::new(vec![key.to_owned()]).scrub(body);
+    // SECURITY INVARIANT: provider JSON is decoded before redaction so JSON
+    // escaping cannot hide a reflected credential. Unstructured bodies are
+    // omitted because their encoding cannot be proven safe.
+    let scrubber = nh_vault::Scrubber::new(vec![key.to_owned()]);
+    let scrubbed = match crate::jsonl::scrub_json_text(body, &scrubber) {
+        Ok(scrubbed) => scrubbed,
+        Err(_) if body.trim().is_empty() => return "(empty body)".into(),
+        Err(_) => return "(unstructured body omitted)".into(),
+    };
     let scrubbed = scrubbed.split_whitespace().collect::<Vec<_>>().join(" ");
-    if scrubbed.is_empty() {
-        return "(empty body)".into();
-    }
     if scrubbed.chars().count() > 200 {
         let mut truncated: String = scrubbed.chars().take(200).collect();
         truncated.push('…');

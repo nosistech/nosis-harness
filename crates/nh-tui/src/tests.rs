@@ -6029,14 +6029,23 @@ fn worker_cancels_one_turn_after_measuring_it_then_runs_the_next_task() {
     assert_eq!(requests[1][2], ("assistant".into(), "ok".into()));
     assert_eq!(requests[1][3], ("user".into(), "next".into()));
     drop(requests);
-    let durable = std::fs::read_to_string(root.join(".nosis").join("receipts.jsonl")).unwrap();
-    let durable = durable.lines().collect::<Vec<_>>();
+    let durable = std::fs::read(root.join(".nosis").join("receipts.jsonl")).unwrap();
+    let durable = nh_core::receipt::parse_receipt_jsonl(&durable, usize::MAX).unwrap();
     assert_eq!(durable.len(), 2);
-    assert!(durable[0].contains(r#""kind":"cancelled_turn""#));
-    assert!(durable[0].contains(
-        r#""usage":{"prompt_tokens":31,"completion_tokens":7,"cached_tokens":11,"evidence":"measured"}"#
-    ));
-    assert!(!durable[1].contains(r#""kind""#));
+    let cancelled = &durable[0];
+    assert_eq!(cancelled.kind, ReceiptKind::CancelledTurn);
+    assert_eq!(
+        cancelled.usage,
+        Some(Usage {
+            prompt_tokens: 31,
+            completion_tokens: 7,
+            cached_tokens: Some(11),
+            evidence: UsageEvidence::Measured,
+        })
+    );
+    let next = &durable[1];
+    assert_eq!(next.kind, ReceiptKind::Task);
+    assert_eq!(next.task, "next");
     assert_eq!(worker.shutdown(), WorkerShutdown::Clean);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -6103,11 +6112,13 @@ fn worker_error_projects_cores_real_receipt_and_unknown_meter() {
 
     let durable = std::fs::read(root.join(".nosis").join("receipts.jsonl")).unwrap();
     let expected = format!(
-        "{{\"ts_utc\":\"{}\",\"model_id\":\"test-route\",\"task\":\"failing task\",\"turns\":1,\"tool_calls\":0,\"duration_ms\":{},\"outcome\":\"fail\",\"failure_class\":\"verification\",\"effective_profile\":\"balanced\"}}\n",
-        projected_receipt.ts_utc,
-        projected_receipt
-            .duration_ms
-            .expect("a completed turn always records duration_ms")
+        "{}\n",
+        nh_core::serialize_scrubbed_json(
+            &projected_receipt,
+            &Scrubber::new(Vec::new()),
+            "receipt",
+        )
+        .unwrap()
     );
     assert_eq!(
         durable,

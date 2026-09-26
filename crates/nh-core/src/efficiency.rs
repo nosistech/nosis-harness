@@ -504,10 +504,11 @@ impl EfficiencyRecorder {
                 &self.inner.path,
                 "efficiency log",
             )?;
-            let line = serde_json::to_string(record)
-                .map_err(anyhow::Error::new)
-                .map_err(|error| error.context("could not serialize efficiency record"))?;
-            let line = self.inner.scrubber.scrub(&line);
+            let line = crate::jsonl::serialize_scrubbed(
+                record,
+                &self.inner.scrubber,
+                "efficiency record",
+            )?;
             crate::jsonl::append_locked_line_bounded(&path, &line, self.inner.max_bytes)
         })();
         if let Err(error) = result {

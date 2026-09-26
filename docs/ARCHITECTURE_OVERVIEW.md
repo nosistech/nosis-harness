@@ -14,7 +14,7 @@ and execution location are not inferred from the address.
 ## Main Components
 
 - `nh-cli`: command parsing and the `setup`, `init`, `key`, `run`, `chat`, `doctor`, `resume`, `why`,
-  `profile`, `tui`, `fleet`, and loopback `mcp serve` surfaces.
+  `profile`, `catalog`, `model`, `tui`, `fleet`, and loopback `mcp serve` surfaces.
 - `nh-tui`: ratatui frontend, with terminal lifecycle and worker ownership extracted into
   dedicated modules. Its timeline is view/inspect only; snapshot restore is not implemented.
 - `nh-core`: OpenAI/Anthropic wire clients, turn loop, context compaction, receipts, the
@@ -95,7 +95,7 @@ executable and ZIP with checksums. Source installation remains available. The Wi
 approval and is not available through WinGet yet.
 Version 0.2.2 adds an in-terminal setup guide and DeepSeek Flash image input.
 Windows is supported. macOS is in testing. Linux builds from source and is not yet verified.
-Required CI covers Windows, macOS, and a supply-chain check.
+Required CI covers Windows, macOS, supply chain, and public-tree/secret checks.
 
 There is no OS-level sandbox. Containment is policy-level: workspace path checks,
 protected-file holds, exact-origin credential audiences, minimal child environments, explicit

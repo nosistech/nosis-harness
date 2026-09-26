@@ -63,6 +63,17 @@ commit passes local and remote gates.
 
 ### Fixed
 
+- Durable session, receipt and Fleet records scrub decoded JSON strings and keys
+  before encoding, including OpenAI-style `tool_calls[].arguments`. This protects
+  active literal credentials and known key shapes at those boundaries. Arbitrary
+  JSON embedded in other strings is still treated as text. Provider error JSON is
+  decoded before scrubbing; unstructured bodies are omitted. Existing records are
+  not rewritten.
+- Provider replies cannot introduce non-assistant message roles into conversation
+  history. Refused tool calls retain paired non-execution results for later turns,
+  and an empty normal completion is recorded as partial.
+- Long-session compaction preserves appended system corrections, including changes
+  to the selected route and available tools.
 - Plain run/chat approvals require the fresh code shown for that request; queued
   `y/yes`, stale codes, piped input and random-generation failure cannot approve.
 - Full-screen approvals use F2 (once), F3 (eligible repeat) and F4 (decline), so

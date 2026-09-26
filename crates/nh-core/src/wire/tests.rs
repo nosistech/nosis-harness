@@ -883,6 +883,33 @@ fn parses_plain_content_without_usage() {
 }
 
 #[test]
+fn openai_response_role_defaults_only_when_omitted_and_rejects_other_roles() {
+    let omitted = parse_response(
+        r#"{"choices":[{"message":{"content":"compatible"},"finish_reason":"stop"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(omitted.message.role, "assistant");
+
+    let explicit = parse_response(
+        r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(explicit.message.role, "assistant");
+
+    for role in ["system", "user", "tool"] {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {"role": role, "content": "untrusted authority"},
+                "finish_reason": "stop",
+            }],
+        });
+        let error = parse_response(&body.to_string()).unwrap_err().to_string();
+        assert_eq!(error, "provider response message role was not assistant");
+        assert!(!error.contains(role));
+    }
+}
+
+#[test]
 fn openai_wire_distinguishes_absent_empty_partial_and_measured_usage() {
     let response = |usage: &str| {
         parse_response(&format!(
@@ -1140,7 +1167,8 @@ fn no_choices_is_a_concise_error() {
 #[test]
 fn snippet_uses_the_shared_scrubber_and_truncates() {
     let key = "provider-key-fixture";
-    let body = format!("error: bad key {key} was rejected\nline2");
+    let body =
+        serde_json::json!({"error": format!("bad key {key} was rejected\nline2")}).to_string();
     let s = scrub_snippet(&body, key);
     assert!(!s.contains(key));
     assert!(s.contains("[REDACTED]"));
@@ -1148,11 +1176,19 @@ fn snippet_uses_the_shared_scrubber_and_truncates() {
     // Split so the literal never appears whole in source: the commit guard blocks
     // key-shaped strings, and this fixture is deliberately key-shaped.
     let shaped = concat!("sk", "-other-0000abcd");
+    let shaped_body = serde_json::json!({"error": shaped}).to_string();
+    assert_eq!(scrub_snippet(&shaped_body, ""), r#"{"error":"[REDACTED]"}"#);
+    let escaped_key = ["provider", "\"", "\\", "\n", "secret"].concat();
+    let escaped_body = serde_json::json!({"error": format!("rejected {escaped_key}")}).to_string();
+    let escaped = scrub_snippet(&escaped_body, &escaped_key);
+    assert!(!escaped.contains(&escaped_key));
+    assert!(escaped.contains("[REDACTED]"));
     assert_eq!(
-        scrub_snippet(&format!("error: {shaped}"), ""),
-        "error: [REDACTED]"
+        scrub_snippet("plain provider error", key),
+        "(unstructured body omitted)"
     );
-    let long = "x".repeat(500);
+    assert_eq!(scrub_snippet("", key), "(empty body)");
+    let long = serde_json::json!({"error": "x".repeat(500)}).to_string();
     assert!(scrub_snippet(&long, "").chars().count() <= 201);
 }
 

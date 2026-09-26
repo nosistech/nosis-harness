@@ -68,7 +68,7 @@ an existing output directory; neither deletes prior builds.
 
 The manual **Package Windows** GitHub Actions workflow runs the same script. Select
 the intended tag and `release-candidate` mode for a candidate. It requires successful
-Windows, macOS and supply-chain jobs in the newest eligible CI run on that exact
+Windows, macOS, supply-chain and public-tree/secret jobs in the newest eligible CI run on that exact
 commit; Linux remains non-blocking under the platform policy. Missing, failed,
 skipped or unfinished required jobs stop candidate preparation. Preview builds do
 not receive an attestation. The workflow does not publish a GitHub Release.
@@ -81,17 +81,23 @@ job receives OIDC and attestation-write permissions; repository contents stay
 read-only. It verifies both artifacts against the repository, workflow, source tag
 and commit, and retains the verification bundle as a separate Actions artifact.
 See [release verification](RELEASE_VERIFICATION.md). The v0.3.0-rc.1 candidate
-completed this workflow and independent download verification. It remains a draft;
-publisher signing and clean standard-user installation testing are still pending.
+completed this workflow and independent download verification. It remains a draft
+and does not contain the current source improvements. A newer build needs its own
+version and verification; existing candidate bytes must not be replaced. Clean
+standard-user installation testing is pending. Publisher signing is optional
+future work, not a requirement to enroll in a paid service before testing.
 
 ## Make installation available
 
 After release approval:
 
-1. Test the candidate on Windows with Defender enabled, including a standard-user
+1. Test the candidate on Windows with the user's normal antivirus protection
+   enabled (for example, Kaspersky or Defender), including a standard-user
    WinGet install, `nh doctor`, upgrade, and uninstall. Use an isolated test machine
    for local-manifest installation settings. Check that the ZIP extracts correctly
-   and its binary matches the standalone executable and checksums.
+   and its binary matches the standalone executable and checksums. Do not disable
+   antivirus or add exclusions to make a test pass. Record developer-laptop and
+   clean-machine results separately; see [installation checks](INSTALLATION_CHECK.md).
 2. Attach the verified executable, ZIP, `SHA256SUMS`, `LICENSE`, and quickstart to
    the matching GitHub Release. Use the exact ZIP filename from the manifests.
    Publish the provenance record and attestation bundle alongside them. Upload the same bytes that were

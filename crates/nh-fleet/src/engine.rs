@@ -187,8 +187,7 @@ impl DurableWriter {
     }
 
     pub(super) fn append<T: Serialize>(&self, value: &T) -> anyhow::Result<()> {
-        let line = serde_json::to_string(value).context("could not serialize fleet event")?;
-        let line = self.scrubber.scrub(&line);
+        let line = nh_core::serialize_scrubbed_json(value, &self.scrubber, "fleet event")?;
         let record = format!("{line}\n");
         let mut file = self
             .file

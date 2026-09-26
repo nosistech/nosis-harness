@@ -142,14 +142,50 @@ pub(super) fn compact_history(history: &mut Vec<ChatMessage>, limit: u64) -> Opt
         .iter()
         .copied()
         .filter(|index| *index > 1)
-        .find(|index| prefix_tokens.saturating_add(estimate_tokens(&history[*index..])) <= target)
+        .find(|index| {
+            let correction_tokens = history[1..*index]
+                .iter()
+                .filter(|message| {
+                    message.role == "system" && compaction_marker_stats(message).is_none()
+                })
+                .map(|message| estimate_tokens(std::slice::from_ref(message)))
+                .sum::<u64>();
+            prefix_tokens
+                .saturating_add(correction_tokens)
+                .saturating_add(estimate_tokens(&history[*index..]))
+                <= target
+        })
         .unwrap_or(required_start);
     if start <= 1 {
         return None;
     }
 
-    let messages = start - 1;
-    let tokens = estimate_tokens(&history[1..start]);
+    let preserved_systems = history[1..start]
+        .iter()
+        .filter(|message| message.role == "system" && compaction_marker_stats(message).is_none())
+        .cloned()
+        .collect::<Vec<_>>();
+    let removed = history[1..start]
+        .iter()
+        .filter(|message| message.role != "system")
+        .cloned()
+        .collect::<Vec<_>>();
+    if removed.is_empty() {
+        return None;
+    }
+    let messages = removed.len();
+    let tokens = estimate_tokens(&removed);
+    let (prior_messages, prior_tokens) = history[1..start]
+        .iter()
+        .filter_map(compaction_marker_stats)
+        .fold((0_usize, 0_u64), |total, prior| {
+            (
+                total.0.saturating_add(prior.0),
+                total.1.saturating_add(prior.1),
+            )
+        });
+    let notice_messages = prior_messages.saturating_add(messages);
+    let notice_tokens = prior_tokens.saturating_add(tokens);
     let retained_seal = PrefixSeal::new(&history[start..]);
     history.drain(1..start);
     history.insert(
@@ -157,11 +193,13 @@ pub(super) fn compact_history(history: &mut Vec<ChatMessage>, limit: u64) -> Opt
         plain_msg(
             "system",
             format!(
-                "[nosis] earlier context compacted: {messages} messages, ~{tokens} tokens elided."
+                "[nosis] earlier context compacted: {notice_messages} messages, ~{notice_tokens} tokens elided."
             ),
         ),
     );
-    let prefix_held = retained_seal.check_at(history, 2);
+    let retained_start = 2 + preserved_systems.len();
+    history.splice(2..2, preserved_systems);
+    let prefix_held = retained_seal.check_at(history, retained_start);
     debug_assert!(prefix_held, "compaction changed a retained real message");
 
     Some(Compaction {
@@ -169,6 +207,31 @@ pub(super) fn compact_history(history: &mut Vec<ChatMessage>, limit: u64) -> Opt
         estimated_tokens_elided: tokens,
         prefix_held,
     })
+}
+
+pub(super) fn compaction_marker_stats(message: &ChatMessage) -> Option<(usize, u64)> {
+    if message.role != "system"
+        || message.parts.is_some()
+        || message.tool_calls.is_some()
+        || message.tool_call_id.is_some()
+        || message.reasoning_content.is_some()
+    {
+        return None;
+    }
+    let text = message
+        .content
+        .as_deref()?
+        .strip_prefix("[nosis] earlier context compacted: ")?;
+    let (messages, tokens) = text.split_once(" messages, ~")?;
+    let tokens = tokens.strip_suffix(" tokens elided.")?;
+    if messages.is_empty()
+        || tokens.is_empty()
+        || !messages.bytes().all(|byte| byte.is_ascii_digit())
+        || !tokens.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    Some((messages.parse().ok()?, tokens.parse().ok()?))
 }
 
 pub(super) fn context_percentage(input_tokens: u64, limit: u64) -> u64 {
