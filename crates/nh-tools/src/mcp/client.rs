@@ -103,6 +103,10 @@ impl McpClient {
                 SPEC_DEFAULT
             );
         }
+        reject_literal_link_local_destination(&config.name, "server", &config.url)?;
+        if let McpAuth::OAuth2 { token_url, .. } = &config.auth {
+            reject_literal_link_local_destination(&config.name, "OAuth token", token_url)?;
+        }
         // Explicit timeouts, never the hidden 30 s blocking default.
         let http = reqwest::blocking::Client::builder()
             .timeout(REQUEST_TIMEOUT)
@@ -171,9 +175,18 @@ impl McpClient {
         *self.unsupported_header_tools.lock().map_err(|_| {
             anyhow::anyhow!("MCP unsupported-tool state is unavailable after an internal panic")
         })? = unsupported;
+        entries.sort_by(|left, right| left.info.name.cmp(&right.info.name));
+        let (sorted, duplicate_entries) = without_duplicate_tool_names(entries);
+        let mut entries = sorted;
+        if duplicate_entries > 0 {
+            eprintln!(
+                "warning: mcp server \"{}\" advertised {duplicate_entries} tool entries with duplicate names; excluding every ambiguous entry",
+                self.config.name
+            );
+        }
         if entries.len() > MAX_TOOLS {
             eprintln!(
-                "warning: mcp server \"{}\" advertised {} tools; using the first {}",
+                "warning: mcp server \"{}\" advertised {} unambiguous tools; using the first {} in name order",
                 self.config.name,
                 entries.len(),
                 MAX_TOOLS
@@ -373,6 +386,42 @@ impl McpClient {
         }
         Ok(headers)
     }
+}
+
+fn reject_literal_link_local_destination(
+    server: &str,
+    kind: &str,
+    destination: &str,
+) -> anyhow::Result<()> {
+    if nh_vault::host_of(destination)
+        .as_deref()
+        .is_some_and(nh_vault::is_link_local_or_metadata)
+    {
+        bail!(
+            "mcp server \"{server}\": literal link-local or metadata {kind} destinations are not allowed"
+        );
+    }
+    Ok(())
+}
+
+fn without_duplicate_tool_names(entries: Vec<ToolEntry>) -> (Vec<ToolEntry>, usize) {
+    let mut unique = Vec::with_capacity(entries.len());
+    let mut duplicate_entries = 0_usize;
+    let mut index = 0_usize;
+    while index < entries.len() {
+        let name = &entries[index].info.name;
+        let mut end = index + 1;
+        while end < entries.len() && entries[end].info.name == *name {
+            end += 1;
+        }
+        if end == index + 1 {
+            unique.push(entries[index].clone());
+        } else {
+            duplicate_entries = duplicate_entries.saturating_add(end - index);
+        }
+        index = end;
+    }
+    (unique, duplicate_entries)
 }
 
 fn schema_uses_parameter_headers(value: &Value) -> bool {

@@ -1,11 +1,9 @@
 //! Transcript projection, scrolling, overflow markers, and wrapping.
 
-use super::fit_with_ellipsis;
 use crate::session::safe_line;
 use crate::state::{
     search_match_lines, search_match_position, App, Overlay, SearchMatchLine, TranscriptKind,
 };
-use crate::APPROVAL_LEGEND;
 use ratatui::{
     layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
@@ -28,7 +26,7 @@ pub(super) fn render_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) {
         return;
     }
     let (search_matches, selected_match) = active_search_matches(app);
-    let projection = chat_projection(app, &search_matches, selected_match, area.width);
+    let projection = chat_projection(app, &search_matches, selected_match);
     let requested_scroll = selected_match.map_or(app.scroll_back, |(source_index, _)| {
         scroll_back_for_source(&projection, source_index, area)
     });
@@ -302,7 +300,6 @@ fn chat_projection(
     app: &App,
     search_matches: &[SearchMatchLine],
     selected_match: Option<(usize, usize)>,
-    width: u16,
 ) -> ChatProjection {
     let mut rendered = Vec::new();
     let mut source_positions = Vec::with_capacity(app.transcript.len());
@@ -368,21 +365,15 @@ fn chat_projection(
             }
             TranscriptKind::Approval => {
                 source_positions.push(rendered.len());
-                let display = approval_display(
-                    &item.text,
-                    usize::from(width.saturating_sub(2)),
-                    ranges,
-                    selected_range,
-                );
                 rendered.push(ProjectedLine::plain(highlighted_transcript_line(
                     " ",
-                    &display.text,
+                    &item.text,
                     " ",
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD | Modifier::REVERSED),
-                    &display.ranges,
-                    display.selected_range,
+                    ranges,
+                    selected_range,
                 )));
             }
             TranscriptKind::Error => {
@@ -403,119 +394,6 @@ fn chat_projection(
         lines: rendered,
         source_positions,
     }
-}
-
-const APPROVAL_LABEL: &str = "approve: ";
-const APPROVAL_GAP: &str = "   ";
-
-struct ApprovalDisplay {
-    text: String,
-    ranges: Vec<std::ops::Range<usize>>,
-    selected_range: Option<usize>,
-}
-
-fn approval_display(
-    text: &str,
-    max_width: usize,
-    ranges: &[std::ops::Range<usize>],
-    selected_range: Option<usize>,
-) -> ApprovalDisplay {
-    if Line::from(text).width() <= max_width {
-        return ApprovalDisplay {
-            text: text.to_owned(),
-            ranges: ranges.to_vec(),
-            selected_range,
-        };
-    }
-
-    let suffix = format!("{APPROVAL_GAP}{APPROVAL_LEGEND}");
-    let Some(action) = text
-        .strip_suffix(&suffix)
-        .and_then(|head| head.strip_prefix(APPROVAL_LABEL))
-    else {
-        let fitted = fit_with_ellipsis(text, max_width);
-        let retained = retained_source_bytes(text, &fitted);
-        let (ranges, selected_range) = map_highlight_ranges(ranges, selected_range, |range| {
-            (range.end <= retained).then(|| range.clone())
-        });
-        return ApprovalDisplay {
-            text: fitted,
-            ranges,
-            selected_range,
-        };
-    };
-
-    let fixed = format!("{APPROVAL_LABEL}{APPROVAL_GAP}{APPROVAL_LEGEND}");
-    let fixed_width = Line::from(fixed.as_str()).width();
-    let original_suffix_start = APPROVAL_LABEL.len().saturating_add(action.len());
-    if fixed_width > max_width {
-        let fitted = fit_with_ellipsis(APPROVAL_LEGEND, max_width);
-        let retained = retained_source_bytes(APPROVAL_LEGEND, &fitted);
-        let original_legend_start = original_suffix_start.saturating_add(APPROVAL_GAP.len());
-        let (ranges, selected_range) = map_highlight_ranges(ranges, selected_range, |range| {
-            if range.start < original_legend_start {
-                return None;
-            }
-            let start = range.start - original_legend_start;
-            let end = range.end - original_legend_start;
-            (end <= retained).then_some(start..end)
-        });
-        return ApprovalDisplay {
-            text: fitted,
-            ranges,
-            selected_range,
-        };
-    }
-
-    let fitted_action = fit_with_ellipsis(action, max_width - fixed_width);
-    let retained_action = retained_source_bytes(action, &fitted_action);
-    let display_suffix_start = APPROVAL_LABEL.len().saturating_add(fitted_action.len());
-    let visible_original_end = APPROVAL_LABEL.len().saturating_add(retained_action);
-    let (ranges, selected_range) = map_highlight_ranges(ranges, selected_range, |range| {
-        if range.end <= visible_original_end {
-            Some(range.clone())
-        } else if range.start >= original_suffix_start {
-            Some(
-                display_suffix_start.saturating_add(range.start - original_suffix_start)
-                    ..display_suffix_start.saturating_add(range.end - original_suffix_start),
-            )
-        } else {
-            None
-        }
-    });
-    ApprovalDisplay {
-        text: format!("{APPROVAL_LABEL}{fitted_action}{APPROVAL_GAP}{APPROVAL_LEGEND}"),
-        ranges,
-        selected_range,
-    }
-}
-
-fn retained_source_bytes(source: &str, fitted: &str) -> usize {
-    source
-        .char_indices()
-        .map(|(start, character)| start.saturating_add(character.len_utf8()))
-        .take_while(|end| fitted.starts_with(&source[..*end]))
-        .last()
-        .unwrap_or(0)
-}
-
-fn map_highlight_ranges(
-    ranges: &[std::ops::Range<usize>],
-    selected_range: Option<usize>,
-    mut map: impl FnMut(&std::ops::Range<usize>) -> Option<std::ops::Range<usize>>,
-) -> (Vec<std::ops::Range<usize>>, Option<usize>) {
-    let mut mapped = Vec::new();
-    let mut mapped_selection = None;
-    for (range_index, range) in ranges.iter().enumerate() {
-        let Some(range) = map(range) else {
-            continue;
-        };
-        if selected_range == Some(range_index) {
-            mapped_selection = Some(mapped.len());
-        }
-        mapped.push(range);
-    }
-    (mapped, mapped_selection)
 }
 
 fn highlighted_transcript_line(

@@ -57,6 +57,7 @@ fn policy(dialect: ThinkingDialect, preserve_reasoning: bool, quirk: bool) -> Op
         preserve_reasoning,
         preserve_when_thinking: false,
         empty_reasoning_on_tool_replay: quirk,
+        max_completion_tokens: false,
         max_out: None,
     }
 }
@@ -218,6 +219,10 @@ fn body_nests_tools_and_tool_calls() {
     assert_eq!(body["model"], "mock-model");
     assert_eq!(body["tools"][0]["type"], "function");
     assert_eq!(body["tools"][0]["function"]["name"], "read_file");
+    assert_eq!(
+        serde_json::to_string(&body["tools"]).unwrap(),
+        r#"[{"function":{"description":"read a file","name":"read_file","parameters":{"type":"object"}},"type":"function"}]"#
+    );
     assert_eq!(body["messages"][0]["tool_calls"][0]["type"], "function");
     assert_eq!(
         body["messages"][0]["tool_calls"][0]["function"]["name"],
@@ -406,6 +411,37 @@ fn glm_dialect_disables_thinking_or_sends_normalized_effort() {
     let body = build_body(&request, policy(ThinkingDialect::GlmHm, false, false));
     assert_eq!(body["thinking"]["type"], "disabled");
     assert!(body.get("reasoning_effort").is_none());
+}
+
+#[test]
+fn glm_53_dialect_forces_thinking_and_replays_reasoning_at_every_effort() {
+    for (effort, expected) in [
+        (ThinkingEffort::None, "low"),
+        (ThinkingEffort::Low, "low"),
+        (ThinkingEffort::High, "high"),
+        (ThinkingEffort::Max, "max"),
+    ] {
+        let mut request = req(vec![ChatMessage {
+            reasoning_content: Some("preserved chain".into()),
+            tool_calls: Some(vec![tool_call("c1", "read_file", "{}")]),
+            ..msg("assistant", None)
+        }]);
+        request.thinking = effort;
+        let body = build_body(
+            &request,
+            policy(ThinkingDialect::GlmAlwaysThinkingEffort, true, false),
+        );
+        assert_eq!(body["thinking"]["type"], "enabled", "effort {effort:?}");
+        assert_eq!(
+            body["thinking"]["clear_thinking"], false,
+            "effort {effort:?}"
+        );
+        assert_eq!(body["reasoning_effort"], expected, "effort {effort:?}");
+        assert_eq!(
+            body["messages"][0]["reasoning_content"], "preserved chain",
+            "effort {effort:?}"
+        );
+    }
 }
 
 #[test]
@@ -1123,7 +1159,8 @@ fn snippet_uses_the_shared_scrubber_and_truncates() {
 #[test]
 fn resolve_effort_covers_every_posture_dialect_cell() {
     use ThinkingDialect::{
-        AlwaysThinking, AlwaysThinkingEffort, DeepseekNhm, GlmHm, KimiToggle, None as NoToggle,
+        AlwaysThinking, AlwaysThinkingEffort, DeepseekNhm, GlmAlwaysThinkingEffort, GlmHm,
+        KimiToggle, None as NoToggle,
     };
     use ThinkingEffort::{High, Low, Max, None as NoEffort};
     use ThinkingPosture::{Ceiling, Default, Floor};
@@ -1133,18 +1170,21 @@ fn resolve_effort_covers_every_posture_dialect_cell() {
         (Floor, KimiToggle, NoEffort),
         (Floor, AlwaysThinking, High),
         (Floor, AlwaysThinkingEffort, Low),
+        (Floor, GlmAlwaysThinkingEffort, Low),
         (Floor, GlmHm, NoEffort),
         (Floor, NoToggle, NoEffort),
         (Default, DeepseekNhm, NoEffort),
         (Default, KimiToggle, NoEffort),
         (Default, AlwaysThinking, High),
         (Default, AlwaysThinkingEffort, High),
+        (Default, GlmAlwaysThinkingEffort, Max),
         (Default, GlmHm, High),
         (Default, NoToggle, NoEffort),
         (Ceiling, DeepseekNhm, High),
         (Ceiling, KimiToggle, High),
         (Ceiling, AlwaysThinking, High),
         (Ceiling, AlwaysThinkingEffort, Max),
+        (Ceiling, GlmAlwaysThinkingEffort, Max),
         (Ceiling, GlmHm, High),
         (Ceiling, NoToggle, NoEffort),
     ];
@@ -1213,6 +1253,24 @@ fn explicit_effort_wins_but_stays_route_legal() {
             Wire::OpenAi,
         ),
         ThinkingEffort::None
+    );
+    assert_eq!(
+        resolve_effort(
+            Some(ThinkingEffort::None),
+            ThinkingPosture::Default,
+            ThinkingDialect::GlmAlwaysThinkingEffort,
+            Wire::OpenAi,
+        ),
+        ThinkingEffort::Low
+    );
+    assert_eq!(
+        resolve_effort(
+            None,
+            ThinkingPosture::Default,
+            ThinkingDialect::GlmAlwaysThinkingEffort,
+            Wire::OpenAi,
+        ),
+        ThinkingEffort::Max
     );
 }
 

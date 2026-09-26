@@ -57,6 +57,8 @@ fn creates_nosis_gitignore_and_catalog_then_is_idempotent() {
     assert!(tmp.path().join(".nosis").is_dir());
     let gi = fs::read_to_string(tmp.path().join(".nosis").join(".gitignore")).unwrap();
     assert!(gi.contains("receipts.jsonl"));
+    assert!(gi.contains("efficiency-v1.jsonl"));
+    assert!(gi.contains("observations/"));
     assert!(gi.contains("fleet/"));
     assert!(gi.contains("sessions/"));
     assert!(gi.contains("*.log"));
@@ -89,7 +91,14 @@ fn existing_gitignore_is_extended_without_reordering_and_second_init_is_idempote
 
     assert!(updated.starts_with("# user rule\ncustom-cache/\nfleet/\n"));
     assert_eq!(updated.matches("fleet/\n").count(), 1);
-    for required in ["receipts.jsonl", "sessions/", "*.log", "auth*"] {
+    for required in [
+        "receipts.jsonl",
+        "efficiency-v1.jsonl",
+        "observations/",
+        "sessions/",
+        "*.log",
+        "auth*",
+    ] {
         assert_eq!(
             updated.lines().filter(|line| *line == required).count(),
             1,

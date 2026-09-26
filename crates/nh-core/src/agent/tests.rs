@@ -302,7 +302,12 @@ fn agent_with_receipt_path(
     AgentLoop {
         client,
         tools: Vec::new(),
-        ctx: ToolCtx::new(dir.to_path_buf(), Box::new(|_| false)),
+        ctx: ToolCtx::new(
+            dir.to_path_buf(),
+            Box::new(|_| false),
+            permissive_test_guard(),
+            nh_vault::Scrubber::new(Vec::new()),
+        ),
         receipts: ReceiptWriter::for_path(dir, receipt_path, nh_vault::Scrubber::new(Vec::new())),
         model_id: "mock-model".into(),
         max_turns: 1,
@@ -314,6 +319,87 @@ fn agent_with_receipt_path(
             events.lock().unwrap().push(line.to_owned())
         })),
     }
+}
+
+fn permissive_test_guard() -> nh_tools::GuardFn {
+    Box::new(|access| match access {
+        nh_tools::Access::Exec(_) => nh_tools::Guard::Ask,
+        _ => nh_tools::Guard::Allow,
+    })
+}
+
+#[test]
+fn shell_notice_is_exact_and_preserves_the_immutable_law_suffix() {
+    assert_eq!(session_law_constitution("law bytes", false), "law bytes");
+
+    let denied = session_law_constitution("law bytes", true);
+    assert_eq!(
+        denied,
+        format!("{SHELL_UNAVAILABLE_SESSION_NOTICE}\n\nlaw bytes")
+    );
+    assert!(denied.ends_with("law bytes"));
+}
+
+#[test]
+fn restored_shell_capability_context_updates_only_when_the_latest_state_changes() {
+    let unavailable = message(
+        "system",
+        format!("identity\n\n{SHELL_UNAVAILABLE_SESSION_NOTICE}\n\nlaw"),
+    );
+    let available = message("system", SHELL_AVAILABLE_SESSION_NOTICE);
+
+    assert_eq!(
+        shell_capability_context_update(&[], true),
+        Some(SHELL_UNAVAILABLE_SESSION_NOTICE)
+    );
+    assert_eq!(shell_capability_context_update(&[], false), None);
+    assert_eq!(
+        shell_capability_context_update(std::slice::from_ref(&unavailable), false),
+        Some(SHELL_AVAILABLE_SESSION_NOTICE)
+    );
+    assert_eq!(
+        shell_capability_context_update(&[unavailable.clone(), available.clone()], true),
+        Some(SHELL_UNAVAILABLE_SESSION_NOTICE)
+    );
+    assert_eq!(
+        shell_capability_context_update(&[unavailable, available], false),
+        None
+    );
+}
+
+#[test]
+fn route_context_keeps_capability_corrections_current_and_unique() {
+    let unavailable = message(
+        "system",
+        format!("identity\n\n{SHELL_UNAVAILABLE_SESSION_NOTICE}\n\nlaw"),
+    );
+    let available = message("system", SHELL_AVAILABLE_SESSION_NOTICE);
+
+    assert_eq!(
+        capability_aware_route_context(&[], true, "current constitution", true),
+        None,
+        "an empty history must let the normal current constitution become the prefix"
+    );
+
+    let restored = capability_aware_route_context(
+        std::slice::from_ref(&unavailable),
+        true,
+        "new route constitution",
+        false,
+    )
+    .unwrap();
+    assert!(restored.starts_with("new route constitution\n\n"));
+    assert_eq!(restored.matches(SHELL_AVAILABLE_SESSION_NOTICE).count(), 1);
+
+    let denied = capability_aware_route_context(
+        &[unavailable, available],
+        true,
+        &format!("new identity\n\n{SHELL_UNAVAILABLE_SESSION_NOTICE}\n\nlaw"),
+        true,
+    )
+    .unwrap();
+    assert_eq!(denied.matches(SHELL_UNAVAILABLE_SESSION_NOTICE).count(), 1);
+    assert_eq!(denied.matches(SHELL_AVAILABLE_SESSION_NOTICE).count(), 0);
 }
 
 fn run_finish_reason(reason: &str) -> (String, Receipt, Vec<String>) {
@@ -599,8 +685,13 @@ fn cancellation_observed_after_provider_preserves_usage_and_runs_no_tool() {
         }),
         events,
     );
-    agent.ctx = ToolCtx::new(dir.path().to_path_buf(), Box::new(|_| false))
-        .with_cancel(Arc::clone(&cancel));
+    agent.ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(|_| false),
+        permissive_test_guard(),
+        nh_vault::Scrubber::new(Vec::new()),
+    )
+    .with_cancel(Arc::clone(&cancel));
     agent.tools = vec![Box::new(CountingTool(Arc::clone(&executions)))];
     let mut history = Vec::new();
 
@@ -738,8 +829,13 @@ fn cancellation_between_tools_skips_the_rest_and_keeps_history_replayable() {
         }),
         events,
     );
-    agent.ctx = ToolCtx::new(dir.path().to_path_buf(), Box::new(|_| false))
-        .with_cancel(Arc::clone(&cancel));
+    agent.ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(|_| false),
+        permissive_test_guard(),
+        nh_vault::Scrubber::new(Vec::new()),
+    )
+    .with_cancel(Arc::clone(&cancel));
     agent.tools = vec![
         Box::new(CancellingTool {
             cancel: Arc::clone(&cancel),
@@ -817,8 +913,13 @@ fn cancellation_from_progress_callback_stops_before_arbitrary_tool_execution() {
         Arc::new(Mutex::new(Vec::new())),
     );
     agent.max_turns = 2;
-    agent.ctx = ToolCtx::new(dir.path().to_path_buf(), Box::new(|_| false))
-        .with_cancel(Arc::clone(&cancel));
+    agent.ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(|_| false),
+        permissive_test_guard(),
+        nh_vault::Scrubber::new(Vec::new()),
+    )
+    .with_cancel(Arc::clone(&cancel));
     agent.tools = vec![Box::new(CountingTool(Arc::clone(&executions)))];
     agent.on_event = Some(Box::new(move |line| {
         if line.contains("count_tool") {
@@ -1372,6 +1473,191 @@ fn tolerant_edit_tier_is_visible_in_transcript_events_and_receipt() {
         .any(|line| line.contains("edit_file used indentation-flexible match")));
 }
 
+struct FactSequenceClient {
+    calls: Mutex<u8>,
+}
+
+impl ChatClient for FactSequenceClient {
+    fn complete(&self, _req: &ChatRequest) -> anyhow::Result<crate::wire::ChatResponse> {
+        let mut calls = self.calls.lock().unwrap();
+        let first = *calls == 0;
+        *calls += 1;
+        drop(calls);
+        let (message, finish_reason) = if first {
+            (
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: None,
+                    parts: None,
+                    tool_calls: Some(vec![
+                        ToolCallReq {
+                            id: "command-fact".into(),
+                            name: "fact_command".into(),
+                            arguments: "{}".into(),
+                        },
+                        ToolCallReq {
+                            id: "file-fact".into(),
+                            name: "fact_file".into(),
+                            arguments: "{}".into(),
+                        },
+                    ]),
+                    tool_call_id: None,
+                    reasoning_content: None,
+                },
+                FinishReason::ToolUse,
+            )
+        } else {
+            (
+                message("assistant", "everything passed"),
+                FinishReason::Stop,
+            )
+        };
+        Ok(crate::wire::ChatResponse {
+            message,
+            finish_reason,
+            usage: None,
+            retries: Default::default(),
+        })
+    }
+}
+
+struct FactTool {
+    name: &'static str,
+    output: &'static str,
+    audit: ToolAudit,
+}
+
+impl Tool for FactTool {
+    fn spec(&self) -> nh_tools::ToolSpec {
+        nh_tools::ToolSpec {
+            name: self.name.into(),
+            description: "typed fact fixture".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    fn execute(&self, _args: serde_json::Value, _ctx: &ToolCtx) -> anyhow::Result<String> {
+        Ok(self.output.into())
+    }
+
+    fn execute_with_audit(
+        &self,
+        _args: serde_json::Value,
+        _ctx: &ToolCtx,
+    ) -> anyhow::Result<nh_tools::ToolExecution> {
+        Ok(nh_tools::ToolExecution {
+            output: self.output.into(),
+            audit: vec![self.audit],
+        })
+    }
+}
+
+#[test]
+fn typed_facts_keep_nonzero_then_file_order_and_ignore_success_prose() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = agent_with_receipt_path(
+        dir.path(),
+        dir.path().join("receipts.jsonl"),
+        Box::new(FactSequenceClient {
+            calls: Mutex::new(0),
+        }),
+        Arc::clone(&events),
+    );
+    agent.max_turns = 2;
+    agent.tools = vec![
+        Box::new(FactTool {
+            name: "fact_command",
+            output: "all tests passed",
+            audit: ToolAudit::Command(CommandOutcome::Exited(Some(7))),
+        }),
+        Box::new(FactTool {
+            name: "fact_file",
+            output: "edited",
+            audit: ToolAudit::FilePublished(FileChangeKind::Edited),
+        }),
+    ];
+
+    let (answer, receipt) = agent.run("run then edit").unwrap();
+
+    assert_eq!(answer, "everything passed");
+    assert_eq!(receipt.outcome, Outcome::Pass);
+    let events = events.lock().unwrap();
+    let command = events
+        .iter()
+        .position(|line| line.contains("command exited 7"))
+        .expect("typed nonzero command fact is retained");
+    let file = events
+        .iter()
+        .position(|line| line.contains("file edit saved"))
+        .expect("typed file publication fact is emitted");
+    assert!(command < file, "events out of order: {events:?}");
+    assert!(
+        events.iter().all(|line| !line.contains("passed")),
+        "tool/model prose created a false success fact: {events:?}"
+    );
+}
+
+#[test]
+fn command_fact_projection_distinguishes_non_execution_and_incomplete_termination() {
+    let cases = [
+        (
+            ToolAudit::Command(CommandOutcome::Blocked),
+            "turn 3: command blocked before execution",
+        ),
+        (
+            ToolAudit::Command(CommandOutcome::Denied),
+            "turn 3: command denied before execution",
+        ),
+        (
+            ToolAudit::Command(CommandOutcome::CancelledBeforeStart),
+            "turn 3: command cancelled before execution",
+        ),
+        (
+            ToolAudit::Command(CommandOutcome::Exited(None)),
+            "turn 3: command exit status unavailable (execution only; result not verified)",
+        ),
+        (
+            ToolAudit::Command(CommandOutcome::Cancelled {
+                termination_complete: true,
+            }),
+            "turn 3: command cancelled",
+        ),
+        (
+            ToolAudit::Command(CommandOutcome::Cancelled {
+                termination_complete: false,
+            }),
+            "turn 3: command cancelled; process-tree termination incomplete",
+        ),
+        (
+            ToolAudit::Command(CommandOutcome::TimedOut {
+                termination_complete: true,
+            }),
+            "turn 3: command timed out",
+        ),
+        (
+            ToolAudit::Command(CommandOutcome::TimedOut {
+                termination_complete: false,
+            }),
+            "turn 3: command timed out; process-tree termination incomplete",
+        ),
+    ];
+
+    for (audit, expected) in cases {
+        assert_eq!(
+            tool_audit_progress_line(3, &audit).as_deref(),
+            Some(expected)
+        );
+    }
+}
+
+#[test]
+fn result_notices_distinguish_read_only_limits() {
+    assert!(result_notice(false).contains("not independently verified"));
+    assert!(!result_notice(false).contains("did not run commands"));
+    assert!(result_notice(true).contains("did not run commands or tests"));
+}
+
 struct ErrorEchoTool;
 
 impl Tool for ErrorEchoTool {
@@ -1400,8 +1686,12 @@ fn tool_error_is_scrubbed_before_entering_the_conversation() {
         events,
     );
     agent.tools = vec![Box::new(ErrorEchoTool)];
-    agent.ctx = ToolCtx::new(dir.path().to_path_buf(), Box::new(|_| false))
-        .with_scrubber(nh_vault::Scrubber::new(vec![LITERAL.to_string()]));
+    agent.ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(|_| false),
+        permissive_test_guard(),
+        nh_vault::Scrubber::new(vec![LITERAL.to_string()]),
+    );
 
     let run = agent.run_tool(&ToolCallReq {
         id: "error-echo".into(),
@@ -1435,8 +1725,9 @@ fn shell_alias_uses_the_real_exec_approval_gate() {
             approvals_seen.fetch_add(1, Ordering::SeqCst);
             false
         }),
-    )
-    .with_guard(Box::new(|_| nh_tools::Guard::Allow));
+        Box::new(|_| nh_tools::Guard::Allow),
+        nh_vault::Scrubber::new(Vec::new()),
+    );
 
     let run = agent.run_tool(&ToolCallReq {
         id: "alias-exec".into(),

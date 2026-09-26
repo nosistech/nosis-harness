@@ -87,6 +87,36 @@ fn policy(
     }
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_protective_path_rules_are_ascii_case_insensitive_without_widening_auto() {
+    let mut strict = policy(
+        Autonomy::Auto,
+        &["secret/**", "review/**"],
+        &["REVIEW/**"],
+        &["SECRET/**"],
+        &[],
+    );
+    strict.read_block = vec!["PRIVATE/**".into()];
+
+    assert!(matches!(
+        strict.write_verdict("secret/value.txt"),
+        Verdict::Block(_)
+    ));
+    assert_eq!(strict.write_verdict("review/value.txt"), Verdict::Ask);
+    assert!(matches!(
+        strict.read_verdict("private/value.txt"),
+        Verdict::Block(_)
+    ));
+
+    let auto_only = policy(Autonomy::Ask, &["PUBLIC/**"], &[], &[], &[]);
+    assert_eq!(
+        auto_only.write_verdict("public/value.txt"),
+        Verdict::Ask,
+        "case folding must not widen automatic write permission"
+    );
+}
+
 #[test]
 fn constitution_is_byte_stable_ordered_and_has_one_trailing_newline() {
     let sources = ConstitutionSources {
@@ -244,6 +274,31 @@ fn exec_verdict_blocks_first_token_or_whole_command_and_never_allows() {
     }
     assert_eq!(policy.exec_verdict("cargo test"), Verdict::Ask);
     assert_eq!(policy.exec_verdict("echo ready"), Verdict::Ask);
+}
+
+#[test]
+fn complete_shell_denial_requires_a_universal_exec_pattern() {
+    for pattern in ["*", "**"] {
+        let policy = policy(Autonomy::Auto, &[], &[], &[], &[pattern]);
+
+        assert!(policy.blocks_all_shell_commands(), "pattern: {pattern}");
+        assert!(policy.view().blocks_all_shell_commands());
+        for command in ["cargo test", "cmd /c echo ready", "/usr/bin/git status"] {
+            assert!(
+                matches!(policy.exec_verdict(command), Verdict::Block(_)),
+                "pattern {pattern:?} did not block {command:?}"
+            );
+        }
+    }
+
+    for patterns in [&[][..], &["cargo *"][..], &["git", "rm", "pytest"][..]] {
+        let policy = policy(Autonomy::Auto, &[], &[], &[], patterns);
+        assert!(
+            !policy.blocks_all_shell_commands(),
+            "patterns: {patterns:?}"
+        );
+        assert!(!policy.view().blocks_all_shell_commands());
+    }
 }
 
 #[test]

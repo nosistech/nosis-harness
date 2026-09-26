@@ -28,7 +28,7 @@ $Run = $Runs[0]
 $Response = @(& gh api "repos/$Repository/actions/runs/$($Run.id)/attempts/$($Run.run_attempt)/jobs?per_page=100")
 if ($LASTEXITCODE -ne 0) { throw 'Could not read CI job evidence; release candidate refused.' }
 $Jobs = (($Response -join "`n") | ConvertFrom-Json).jobs
-foreach ($RequiredName in @('Checks (windows-latest)', 'Checks (macos-latest)', 'Supply chain')) {
+foreach ($RequiredName in @('Checks (windows-latest)', 'Checks (macos-latest)', 'Supply chain', 'Public tree and secrets')) {
     $MatchingJobs = @($Jobs | Where-Object { $_.name -ceq $RequiredName })
     if ($MatchingJobs.Count -ne 1 -or $MatchingJobs[0].status -ne 'completed' -or
         $MatchingJobs[0].conclusion -ne 'success' -or $MatchingJobs[0].head_sha -cne $SourceCommit) {

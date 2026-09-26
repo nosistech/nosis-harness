@@ -1,0 +1,33 @@
+title = "Nosis public source secret scan"
+
+[extend]
+useDefault = true
+
+# Preserve all default detection rules. These exact, reviewed non-secret matches
+# also occur in old commits. No whole file, test directory or commit is excluded.
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "Keyboard shortcut text is not an API key"
+condition = "AND"
+paths = ['''^crates/nh-tui/src/keymap\.rs$''']
+regexTarget = "match"
+regexes = ['''^keys: "Shift\+Enter/Ctrl\+J"$''']
+
+[[rules.allowlists]]
+description = "Overlapping literal redaction fixture uses fixed alphabet/number sequences"
+condition = "AND"
+paths = ['''^crates/nh-vault/src/tests\.rs$''']
+regexTarget = "match"
+regexes = ['''^token=abc123def456 $''']
+
+[[rules.allowlists]]
+description = "URL normalization fixture contains a port and path, not credentials"
+condition = "AND"
+paths = [
+  '''^crates/nh-vault/src/(lib|tests)\.rs$''',
+  '''^crates/nh-cli/src/cmd_run(/tests)?\.rs$''',
+]
+regexTarget = "match"
+regexes = ['''^API\.DEEPSEEK\.COM:443/anthropic"$''']

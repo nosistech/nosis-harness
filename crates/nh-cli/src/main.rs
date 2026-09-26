@@ -91,6 +91,24 @@ enum Cmd {
         /// Attach a PNG or JPEG image (repeatable; maximum 4)
         #[arg(long, value_name = "PATH")]
         image: Vec<String>,
+        /// Expose only guarded read tools; provider costs and local receipts still apply
+        #[arg(long)]
+        read_only: bool,
+        /// Append local metadata-only efficiency records under .nosis (preview)
+        #[arg(long)]
+        measure_efficiency: bool,
+        /// Let read_file accept bounded start_line/line_count arguments (preview)
+        #[arg(long)]
+        enable_ranged_reads: bool,
+        /// Retain scrubbed large tool results for bounded retrieval during this run (preview)
+        #[arg(long)]
+        retain_observations: bool,
+        /// Experimental extractive context mode; requires retained observations
+        #[arg(long, value_enum)]
+        context_experiment: Option<cmd_run::ContextExperimentArg>,
+        /// Versioned shorter identity clause; all safety and project law remain
+        #[arg(long, value_enum)]
+        identity_prompt: Option<cmd_run::IdentityPromptArg>,
     },
     /// Chat with a model - /model and /provider switch routes mid-session
     Chat {
@@ -100,6 +118,9 @@ enum Cmd {
         /// Execution profile: frugal, balanced, or max-quality
         #[arg(long, default_value = "balanced")]
         profile: String,
+        /// Replace eager MCP schemas with fixed discovery and invocation tools (preview)
+        #[arg(long)]
+        mcp_discovery: bool,
     },
     /// Check the install and print what is wrong and how to fix it
     Doctor,
@@ -256,6 +277,12 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             autonomy,
             profile,
             image,
+            read_only,
+            measure_efficiency,
+            enable_ranged_reads,
+            retain_observations,
+            context_experiment,
+            identity_prompt,
         } => cmd_run::run(
             &task,
             model.as_deref(),
@@ -265,12 +292,25 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 autonomy,
                 profile: &profile,
                 images: &image,
+                read_only,
+                measure_efficiency,
+                enable_ranged_reads,
+                retain_observations,
+                context_experiment,
+                identity_prompt,
                 terminal_capability,
             },
         ),
-        Cmd::Chat { model, profile } => {
-            cmd_chat::run(model.as_deref(), &profile, terminal_capability)
-        }
+        Cmd::Chat {
+            model,
+            profile,
+            mcp_discovery,
+        } => cmd_chat::run(
+            model.as_deref(),
+            &profile,
+            mcp_discovery,
+            terminal_capability,
+        ),
         Cmd::Doctor => cmd_doctor::run(terminal_capability, forced_ascii),
         Cmd::Resume { session_id } => cmd_resume::run(session_id.as_deref(), terminal_capability),
         Cmd::Why { task, model } => {

@@ -14,6 +14,7 @@ use crate::cmd_run;
 const CURRENT_CATALOG: &str = include_str!("../../../catalog.toml");
 const CATALOG_V020: &str = include_str!("../catalog-history/v0.2.0.toml");
 const CATALOG_V021: &str = include_str!("../catalog-history/v0.2.1.toml");
+const CATALOG_V022_RC1: &str = include_str!("../catalog-history/v0.2.2.toml");
 const MAX_CATALOG_BYTES: usize = 1024 * 1024;
 const MAX_CONFIRM_BYTES: usize = 16;
 
@@ -34,6 +35,11 @@ const HISTORICAL_CATALOGS: &[HistoricalCatalog] = &[
         label: "v0.2.1 bundled catalog",
         backup_label: "v0.2.1",
         text: CATALOG_V021,
+    },
+    HistoricalCatalog {
+        label: "v0.2.2 or v0.3.0-rc.1 bundled catalog",
+        backup_label: "v0.2.2-or-v0.3.0-rc.1",
+        text: CATALOG_V022_RC1,
     },
 ];
 
@@ -704,6 +710,34 @@ mod tests {
             fs::read_to_string(root.path().join("catalog.toml.nh-backup-v0.2.1")).unwrap(),
             historical_crlf
         );
+    }
+
+    #[test]
+    fn latest_released_catalog_migrates_with_original_bytes_preserved() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("catalog.toml");
+        fs::write(&path, CATALOG_V022_RC1).unwrap();
+        let mut ui = TestUi::new(Answer::Yes);
+
+        migrate_with(&path, &mut ui, || Ok(())).unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), CURRENT_CATALOG);
+        assert_eq!(
+            fs::read_to_string(
+                root.path()
+                    .join("catalog.toml.nh-backup-v0.2.2-or-v0.3.0-rc.1")
+            )
+            .unwrap(),
+            CATALOG_V022_RC1
+        );
+        for id in [
+            "mimo-v2.6-flash",
+            "mimo-v2.6-pro",
+            "glm-5.3",
+            "glm-5.3-flash",
+        ] {
+            assert!(ui.output.contains(&format!("- {id}: added")), "{id}");
+        }
     }
 
     #[test]

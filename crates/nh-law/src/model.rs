@@ -2,7 +2,7 @@
 //! SECURITY INVARIANT: policy verdicts check matching block rules before every weaker outcome;
 //! exec never returns Allow, and send hosts are ASCII-lowercased and stripped of one trailing dot.
 
-use crate::matcher::{exec_pattern_matches, first_match};
+use crate::matcher::{exec_pattern_matches, first_match, glob_matches};
 use std::collections::BTreeMap;
 
 /// Session autonomy. Repository law cannot set this value.
@@ -70,13 +70,14 @@ pub struct ConstitutionSources {
 
 impl Policy {
     /// Decide whether a normalized, forward-slashed relative path may be written.
+    /// Windows protective path rules use ASCII case-insensitive matching.
     pub fn write_verdict(&self, rel_path: &str) -> Verdict {
-        if let Some(pattern) = first_match(&self.write_block, rel_path) {
+        if let Some(pattern) = first_path_match(&self.write_block, rel_path) {
             return Verdict::Block(format!(
                 "protected path ({pattern}) - held even at max autonomy"
             ));
         }
-        if first_match(&self.write_ask, rel_path).is_some() {
+        if first_path_match(&self.write_ask, rel_path).is_some() {
             return Verdict::Ask;
         }
         if first_match(&self.write_auto, rel_path).is_some() {
@@ -89,8 +90,9 @@ impl Policy {
     }
 
     /// Decide whether a normalized, forward-slashed relative path may be read.
+    /// Windows protective path rules use ASCII case-insensitive matching.
     pub fn read_verdict(&self, rel_path: &str) -> Verdict {
-        if let Some(pattern) = first_match(&self.read_block, rel_path) {
+        if let Some(pattern) = first_path_match(&self.read_block, rel_path) {
             return Verdict::Block(format!("protected read ({pattern})"));
         }
         Verdict::Allow
@@ -127,6 +129,15 @@ impl Policy {
         Verdict::Ask
     }
 
+    /// Whether the compiled policy proves that every shell command is blocked.
+    ///
+    /// This intentionally recognizes only universal patterns. More complex rule
+    /// combinations remain available-and-approval-gated rather than hiding a tool
+    /// that the policy has not proved unusable.
+    pub fn blocks_all_shell_commands(&self) -> bool {
+        blocks_all_shell_commands(&self.exec_block)
+    }
+
     pub fn autonomy(&self) -> Autonomy {
         self.autonomy
     }
@@ -141,4 +152,31 @@ impl Policy {
             block_commands: self.exec_block.clone(),
         }
     }
+}
+
+fn first_path_match<'a>(patterns: &'a [String], path: &str) -> Option<&'a str> {
+    if let Some(pattern) = first_match(patterns, path) {
+        return Some(pattern);
+    }
+    if cfg!(windows) {
+        let folded_path = path.to_ascii_lowercase();
+        return patterns
+            .iter()
+            .find(|pattern| glob_matches(&pattern.to_ascii_lowercase(), &folded_path))
+            .map(String::as_str);
+    }
+    None
+}
+
+impl PolicyView {
+    /// Whether the projected policy proves that every shell command is blocked.
+    pub fn blocks_all_shell_commands(&self) -> bool {
+        blocks_all_shell_commands(&self.block_commands)
+    }
+}
+
+fn blocks_all_shell_commands(patterns: &[String]) -> bool {
+    patterns
+        .iter()
+        .any(|pattern| matches!(pattern.as_str(), "*" | "**"))
 }

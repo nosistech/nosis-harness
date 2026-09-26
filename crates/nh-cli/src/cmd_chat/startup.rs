@@ -14,7 +14,7 @@ use nh_core::terminal_capability::TerminalCapability;
 use nh_core::wire::ChatClient;
 use nh_law::{Law, LoadOptions, Policy};
 use nh_routes::{EffectiveExecutionPolicy, Profiles, ResolvedRoute, RouteClass, RouteResolver};
-use nh_tools::{builtin_tools, Tool, ToolCtx};
+use nh_tools::{builtin_tools_for_policy, Tool, ToolCtx};
 use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, SecretRegistry};
 
 use super::{
@@ -88,9 +88,10 @@ struct InitialConnection {
 pub(super) fn open(
     model: Option<&str>,
     profile: &str,
+    mcp_discovery: bool,
     terminal_capability: TerminalCapability,
 ) -> anyhow::Result<ChatSession> {
-    open_session(model, profile, None, terminal_capability)
+    open_session(model, profile, None, mcp_discovery, terminal_capability)
 }
 
 pub(super) fn reopen(
@@ -104,6 +105,7 @@ pub(super) fn reopen(
         Some(&route_id),
         &profile,
         Some(restored),
+        false,
         terminal_capability,
     )
 }
@@ -122,6 +124,7 @@ fn open_session(
     model: Option<&str>,
     profile: &str,
     restored: Option<RestoredSession>,
+    mcp_discovery: bool,
     terminal_capability: TerminalCapability,
 ) -> anyhow::Result<ChatSession> {
     let startup = Startup::load(model, profile, restored.is_some())?;
@@ -129,7 +132,13 @@ fn open_session(
         &startup.law.policy,
         startup.resolver.routes_with_modality("image"),
     );
-    open_prepared(startup, restored, connect, chat_tools, terminal_capability)
+    open_prepared(
+        startup,
+        restored,
+        connect,
+        move |root, policy, scrubber| chat_tools(root, policy, scrubber, mcp_discovery),
+        terminal_capability,
+    )
 }
 
 fn open_prepared<F>(
@@ -164,12 +173,14 @@ where
     let registry_scrubber = initial.key_literals.scrubber();
     let scrubber: SharedScrubber = Arc::new(RwLock::new(registry_scrubber.clone()));
     let (tools, mcp_warnings) = load_tools(&root, &law.policy, &scrubber);
+    let shell_unavailable = law.policy.blocks_all_shell_commands();
 
     let approve_scrubber = Arc::clone(&scrubber);
     let event_scrubber = Arc::clone(&scrubber);
     let policy = law.policy.clone();
     let law_constitution = law.constitution;
-    let current_constitution = cmd_run::agent_constitution(&law_constitution, &route);
+    let current_constitution =
+        cmd_run::agent_constitution(&law_constitution, &route, shell_unavailable);
     let last_request_usage = LastRequestUsage::default();
     let agent = AgentLoop {
         client: last_request_usage.wrap(initial.client),
@@ -179,9 +190,9 @@ where
             Box::new(move |action| {
                 cmd_run::approve_on_stdin(&scrub_approval_line(&approve_scrubber, action))
             }),
-        )
-        .with_scrubber(registry_scrubber.clone())
-        .with_guard(nh_tools::policy_guard(policy)),
+            nh_tools::policy_guard(policy),
+            registry_scrubber.clone(),
+        ),
         receipts: ReceiptWriter::project(root.clone(), registry_scrubber.clone()),
         model_id: route.model_id().to_owned(),
         max_turns: 20,
@@ -213,11 +224,17 @@ where
         .and_then(|message| message.content.as_deref())
         .is_some_and(|recorded| !recorded.ends_with(&law_constitution));
     let pending_route_context = restored.as_ref().and_then(|saved| {
-        saved
+        let route_changed = saved
             .turns
             .last()
-            .is_some_and(|turn| turn.route_id != saved.route_id)
-            .then(|| super::route_context_message(current_constitution.clone()))
+            .is_some_and(|turn| turn.route_id != saved.route_id);
+        nh_core::agent::capability_aware_route_context(
+            &saved.history,
+            route_changed,
+            &current_constitution,
+            shell_unavailable,
+        )
+        .map(super::route_context_message)
     });
     let mut session = ChatSession {
         terminal_capability,
@@ -253,6 +270,7 @@ where
             .is_some_and(|saved| saved.dropped_torn_tail),
         constitution_changed,
         pending_route_context,
+        shell_unavailable,
     };
     let event = if let Some(saved) = &restored {
         super::restore_session_totals(&mut session, &saved.turns)?;
@@ -303,7 +321,7 @@ pub(super) fn reopen_with_test_dependencies(
         startup,
         Some(restored),
         connect,
-        |_, _, _| (builtin_tools(), Vec::new()),
+        |_, policy, _| (builtin_tools_for_policy(policy), Vec::new()),
         TerminalCapability::Unicode,
     )
 }
@@ -364,11 +382,18 @@ fn chat_tools(
     root: &std::path::Path,
     policy: &Policy,
     scrubber: &SharedScrubber,
+    mcp_discovery: bool,
 ) -> (Vec<Box<dyn Tool>>, Vec<String>) {
     let mut warnings = Vec::new();
-    let mut tools = builtin_tools();
+    let mut tools = builtin_tools_for_policy(policy);
     let home = nh_law::user_home_dir();
-    tools.extend(load_mcp(root, home.as_deref(), policy, &mut warnings));
+    tools.extend(load_mcp(
+        root,
+        home.as_deref(),
+        policy,
+        mcp_discovery,
+        &mut warnings,
+    ));
     for warning in &warnings {
         eprintln!("warning: {}", scrub_line(scrubber, warning));
     }

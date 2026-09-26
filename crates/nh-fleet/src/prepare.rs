@@ -313,6 +313,7 @@ pub(super) fn effort_for(dialect: ThinkingDialect) -> ThinkingEffort {
         ThinkingDialect::AlwaysThinking
         | ThinkingDialect::AlwaysThinkingEffort
         | ThinkingDialect::GlmHm => ThinkingEffort::High,
+        ThinkingDialect::GlmAlwaysThinkingEffort => ThinkingEffort::Max,
         ThinkingDialect::DeepseekNhm | ThinkingDialect::KimiToggle | ThinkingDialect::None => {
             ThinkingEffort::None
         }

@@ -7,6 +7,24 @@ use std::path::Path;
 
 /// SECURITY INVARIANT: each complete line is locked, flushed, and synced before return.
 pub(crate) fn append_locked_line(path: &Path, line: &str) -> anyhow::Result<()> {
+    append_locked_line_inner(path, line, None, false)
+}
+
+/// Append one complete line while refusing growth beyond `max_bytes`.
+pub(crate) fn append_locked_line_bounded(
+    path: &Path,
+    line: &str,
+    max_bytes: u64,
+) -> anyhow::Result<()> {
+    append_locked_line_inner(path, line, Some(max_bytes), true)
+}
+
+fn append_locked_line_inner(
+    path: &Path,
+    line: &str,
+    max_bytes: Option<u64>,
+    nonblocking_lock: bool,
+) -> anyhow::Result<()> {
     // read(true): Windows LockFileEx requires read/write DATA access on the
     // handle; a pure append-only handle (FILE_APPEND_DATA) fails file.lock()
     // with ACCESS_DENIED. Append semantics are preserved.
@@ -16,8 +34,28 @@ pub(crate) fn append_locked_line(path: &Path, line: &str) -> anyhow::Result<()> 
         .append(true)
         .open(path)
         .with_context(|| format!("could not open {}", path.display()))?;
-    file.lock()
-        .with_context(|| format!("could not lock {}", path.display()))?;
+    if nonblocking_lock {
+        file.try_lock()
+            .with_context(|| format!("could not acquire {} without waiting", path.display()))?;
+    } else {
+        file.lock()
+            .with_context(|| format!("could not lock {}", path.display()))?;
+    }
+    if let Some(max_bytes) = max_bytes {
+        let current = file
+            .metadata()
+            .with_context(|| format!("could not inspect {}", path.display()))?
+            .len();
+        let appended = u64::try_from(line.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        if current.saturating_add(appended) > max_bytes {
+            anyhow::bail!(
+                "{} reached its {max_bytes}-byte growth limit",
+                path.display()
+            );
+        }
+    }
     writeln!(file, "{line}").with_context(|| format!("could not write {}", path.display()))?;
     file.flush()
         .with_context(|| format!("could not flush {}", path.display()))?;

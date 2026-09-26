@@ -1251,6 +1251,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "getrandom 0.2.17",
  "nh-core",
  "nh-fleet",
  "nh-law",
@@ -1346,11 +1347,13 @@ name = "nh-tools"
 version = "0.3.0-rc.1"
 dependencies = [
  "anyhow",
+ "getrandom 0.2.17",
  "nh-law",
  "nh-vault",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "toml",
 ]

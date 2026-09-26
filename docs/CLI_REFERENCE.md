@@ -3,6 +3,9 @@
 Generated from the current source build. Unreleased commands may not exist in the
 latest downloadable package. Run `nh --help` to check your installed version.
 For a learning path, start with [three small tasks](TUTORIALS.md).
+Reasoning defaults vary by route and can be `max`. On GLM 5.3 routes,
+`--think none` becomes `low`; reasoning stays enabled and can incur charges.
+See [model updates](MODEL_UPDATES.md) before selecting those routes.
 
 ## nh
 
@@ -201,14 +204,34 @@ Arguments:
   <TASK>  The task, in plain words
 
 Options:
-      --ascii <ASCII>          Force one-column ASCII fallback glyphs on or off (default: decide from stdout) [possible values: on, off]
-      --model <MODEL>          Model id override; otherwise use the saved model or bundled default
-      --max-turns <MAX_TURNS>  Max agent turns before giving up with a timeout receipt [default: 20]
-      --think <THINK>          Thinking effort (default picked per route dialect) [possible values: none, low, high, max]
-      --autonomy <AUTONOMY>    Session autonomy override (default comes from law files) [possible values: ask, auto]
-      --profile <PROFILE>      Execution profile: frugal, balanced, or max-quality [default: balanced]
-      --image <PATH>           Attach a PNG or JPEG image (repeatable; maximum 4)
-  -h, --help                   Print help
+      --ascii <ASCII>
+          Force one-column ASCII fallback glyphs on or off (default: decide from stdout) [possible values: on, off]
+      --model <MODEL>
+          Model id override; otherwise use the saved model or bundled default
+      --max-turns <MAX_TURNS>
+          Max agent turns before giving up with a timeout receipt [default: 20]
+      --think <THINK>
+          Thinking effort (default picked per route dialect) [possible values: none, low, high, max]
+      --autonomy <AUTONOMY>
+          Session autonomy override (default comes from law files) [possible values: ask, auto]
+      --profile <PROFILE>
+          Execution profile: frugal, balanced, or max-quality [default: balanced]
+      --image <PATH>
+          Attach a PNG or JPEG image (repeatable; maximum 4)
+      --read-only
+          Expose only guarded read tools; provider costs and local receipts still apply
+      --measure-efficiency
+          Append local metadata-only efficiency records under .nosis (preview)
+      --enable-ranged-reads
+          Let read_file accept bounded start_line/line_count arguments (preview)
+      --retain-observations
+          Retain scrubbed large tool results for bounded retrieval during this run (preview)
+      --context-experiment <CONTEXT_EXPERIMENT>
+          Experimental extractive context mode; requires retained observations [possible values: extractive-v1]
+      --identity-prompt <IDENTITY_PROMPT>
+          Versioned shorter identity clause; all safety and project law remain [possible values: compact-v1]
+  -h, --help
+          Print help
 ```
 
 ## nh chat
@@ -222,6 +245,7 @@ Options:
       --ascii <ASCII>      Force one-column ASCII fallback glyphs on or off (default: decide from stdout) [possible values: on, off]
       --model <MODEL>      Model id override; otherwise use the saved model or bundled default
       --profile <PROFILE>  Execution profile: frugal, balanced, or max-quality [default: balanced]
+      --mcp-discovery      Replace eager MCP schemas with fixed discovery and invocation tools (preview)
   -h, --help               Print help
 ```
 

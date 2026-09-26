@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use chrono::{DateTime, FixedOffset, Utc};
-use nh_core::agent::{AgentLoop, AgentRunError, MAX_TASK_BYTES};
+use nh_core::agent::{result_notice, AgentLoop, AgentRunError, MAX_TASK_BYTES};
 use nh_core::receipt::Receipt;
 use nh_core::session_ledger::{RestoredSession, RestoredTurn, SessionEvent, SessionLedger};
 use nh_core::terminal_capability::TerminalCapability;
@@ -135,6 +135,7 @@ struct ChatSession {
     dropped_torn_tail: bool,
     constitution_changed: bool,
     pending_route_context: Option<ChatMessage>,
+    shell_unavailable: bool,
 }
 
 const CHAT_HELP: &str = "commands: /image <path> (PNG or JPEG; max 4 for the next message), \
@@ -143,9 +144,15 @@ const CHAT_HELP: &str = "commands: /image <path> (PNG or JPEG; max 4 for the nex
 pub fn run(
     model: Option<&str>,
     profile: &str,
+    mcp_discovery: bool,
     terminal_capability: TerminalCapability,
 ) -> anyhow::Result<()> {
-    run_session(startup::open(model, profile, terminal_capability)?)
+    run_session(startup::open(
+        model,
+        profile,
+        mcp_discovery,
+        terminal_capability,
+    )?)
 }
 
 pub(crate) fn resume(
@@ -178,6 +185,15 @@ fn run_session(mut session: ChatSession) -> anyhow::Result<()> {
             "chat started: {} on {} - /help lists commands",
             scrub_line(&session.scrubber, session.ledger.session_id()),
             scrub_line(&session.scrubber, session.route.id())
+        );
+    }
+    if session.shell_unavailable {
+        eprintln!(
+            "{}",
+            scrub_line(
+                &session.scrubber,
+                nh_core::agent::SHELL_UNAVAILABLE_SESSION_NOTICE,
+            )
         );
     }
     let mut next_line = || {
@@ -361,6 +377,7 @@ fn run_task(s: &mut ChatSession, task: &str, out: &mut dyn Write, err: &mut dyn 
     match result {
         Ok((answer, receipt)) => {
             let _ = writeln!(out, "{}", scrub_text(&s.scrubber, &answer));
+            let _ = writeln!(err, "{}", display_line(s, result_notice(false)));
             project_turn_meter(s, Some(&receipt), at, err);
         }
         Err(error) => {
@@ -490,9 +507,18 @@ fn switch_to(s: &mut ChatSession, route: ResolvedRoute, out: &mut dyn Write, err
             s.active_profile = execution_policy.profile;
             // Preserve the sealed prefix. The next task records the new route
             // context as part of that turn's append-only history delta.
-            let constitution = cmd_run::agent_constitution(&s.law_constitution, &route);
-            s.pending_route_context =
-                (!s.history.is_empty()).then(|| route_context_message(constitution.clone()));
+            let constitution =
+                cmd_run::agent_constitution(&s.law_constitution, &route, s.shell_unavailable);
+            let route_changed = s.route.id() != route.id();
+            if route_changed {
+                s.pending_route_context = nh_core::agent::capability_aware_route_context(
+                    &s.history,
+                    true,
+                    &constitution,
+                    s.shell_unavailable,
+                )
+                .map(route_context_message);
+            }
             s.agent.constitution = Some(constitution);
             s.agent.context_limit = route.context();
             s.route = route;
@@ -819,11 +845,16 @@ fn load_mcp(
     root: &Path,
     home: Option<&Path>,
     policy: &nh_law::Policy,
+    discovery: bool,
     warnings: &mut Vec<String>,
 ) -> Vec<Box<dyn Tool>> {
     let configs = cmd_run::load_and_vet_mcp_configs(root, home, policy, warnings);
     let send_allowed = |host: &str| !matches!(policy.send_verdict(host), nh_law::Verdict::Block(_));
-    let set = nh_tools::mcp::mcp_tools(&configs, &send_allowed);
+    let set = if discovery {
+        nh_tools::mcp::mcp_discovery_tools(&configs, &send_allowed)
+    } else {
+        nh_tools::mcp::mcp_tools(&configs, &send_allowed)
+    };
     warnings.extend(set.warnings);
     set.tools
 }

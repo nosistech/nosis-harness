@@ -1,16 +1,19 @@
 //! `nh setup` - a guided, default-deny first run for one project folder.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, BufRead, IsTerminal as _, Write as _};
 use std::path::Path;
 
+use chrono::{DateTime, Utc};
 use nh_core::terminal_capability::TerminalCapability;
-use nh_routes::{RouteClass, RouteResolver};
+use nh_routes::{money, PriceConfidence, ResolvedRoute, RouteClass, RouteResolver};
 use nh_vault::{KeyringVault, Scrubber};
 
-use crate::{cmd_chat, cmd_doctor, cmd_init, cmd_key, cmd_run, cmd_why, model_preference};
+use crate::{cmd_doctor, cmd_init, cmd_key, cmd_run, cmd_why, model_preference};
 
 const MAX_PROMPT_BYTES: usize = 256;
+const FIRST_TASK: &str = "List the top-level files and read README if present, then explain this project's purpose, main parts, and one likely next step. Do not edit files or run commands.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SetupRoute {
@@ -18,6 +21,8 @@ struct SetupRoute {
     provider: String,
     model_id: String,
     vault_entry: String,
+    modalities: String,
+    price: String,
 }
 
 enum PromptInput {
@@ -46,7 +51,7 @@ trait SetupActions {
     fn save_model(&mut self, route: &str) -> anyhow::Result<()>;
     fn key_exists(&mut self, entry: &str) -> anyhow::Result<bool>;
     fn add_key(&mut self, entry: &str) -> anyhow::Result<()>;
-    fn chat(&mut self, route: &str) -> anyhow::Result<()>;
+    fn read_only_overview(&mut self, route: &str) -> anyhow::Result<()>;
 }
 
 struct ConsoleUi {
@@ -106,15 +111,11 @@ impl SetupActions for SystemActions {
         }
         let resolver = RouteResolver::from_toml(&catalog)?;
         let mut routes = Vec::new();
+        let at = Utc::now();
         for id in resolver.available() {
             let route = resolver.resolve(&id)?;
             if route.class() == RouteClass::Api {
-                routes.push(SetupRoute {
-                    id,
-                    provider: route.provider().to_owned(),
-                    model_id: route.model_id().to_owned(),
-                    vault_entry: route.vault_entry().to_owned(),
-                });
+                routes.push(setup_route(&route, self.terminal_capability, at));
             }
         }
         if routes.is_empty() {
@@ -139,9 +140,81 @@ impl SetupActions for SystemActions {
         cmd_key::add(entry)
     }
 
-    fn chat(&mut self, route: &str) -> anyhow::Result<()> {
-        cmd_chat::run(Some(route), "balanced", self.terminal_capability)
+    fn read_only_overview(&mut self, route: &str) -> anyhow::Result<()> {
+        let (task, model, options) = first_task_request(route, self.terminal_capability);
+        cmd_run::run(task, model, options)
     }
+}
+
+fn first_task_request(
+    route: &str,
+    terminal_capability: TerminalCapability,
+) -> (&'static str, Option<&str>, cmd_run::RunOptions<'static>) {
+    (
+        FIRST_TASK,
+        Some(route),
+        cmd_run::RunOptions {
+            max_turns: 4,
+            think: None,
+            autonomy: None,
+            profile: "balanced",
+            images: &[],
+            read_only: true,
+            measure_efficiency: false,
+            enable_ranged_reads: false,
+            retain_observations: false,
+            context_experiment: None,
+            identity_prompt: None,
+            terminal_capability,
+        },
+    )
+}
+
+fn setup_route(
+    route: &ResolvedRoute,
+    terminal_capability: TerminalCapability,
+    at: DateTime<Utc>,
+) -> SetupRoute {
+    SetupRoute {
+        id: route.id().to_owned(),
+        provider: route.provider().to_owned(),
+        model_id: route.model_id().to_owned(),
+        vault_entry: route.vault_entry().to_owned(),
+        modalities: route.modality().join("+"),
+        price: setup_price(route, terminal_capability, at),
+    }
+}
+
+fn setup_price(
+    route: &ResolvedRoute,
+    terminal_capability: TerminalCapability,
+    at: DateTime<Utc>,
+) -> String {
+    let Some(quote) = route.price_at(at) else {
+        return "price unknown".to_owned();
+    };
+    let input = money(quote.cache_miss, quote.currency);
+    let output = money(quote.output, quote.currency);
+    let input = terminal_capability.render_text(&input);
+    let output = terminal_capability.render_text(&output);
+    let has_peak_schedule = route.price().is_some_and(|price| price.peak.is_some());
+    let mut notes = Vec::new();
+    if quote.peak {
+        notes.push("current peak rate");
+    } else if has_peak_schedule {
+        notes.push("current off-peak rate");
+    }
+    match quote.confidence {
+        PriceConfidence::Confirmed => {}
+        PriceConfidence::Reported => notes.push("reported price"),
+        PriceConfidence::VerifyLive => notes.push("verify live price"),
+    }
+    let note = if notes.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", notes.join("; "))
+    };
+    format!("input {input}/1M, output {output}/1M{note}")
 }
 
 fn initialize_project(root: &Path) -> anyhow::Result<Vec<String>> {
@@ -242,16 +315,53 @@ fn guide(
         )
     })?;
     ui.line("")?;
-    ui.line("Choose a model for this chat session:")?;
-    for (index, route) in routes.iter().enumerate() {
-        let detail = if route.id == route.model_id {
-            route.provider.clone()
-        } else {
-            format!("{}; provider model {}", route.provider, route.model_id)
-        };
-        ui.line(&format!("  {}. {} ({detail})", index + 1, route.id))?;
+    let providers = routes
+        .iter()
+        .map(|route| route.provider.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    ui.line("Choose a provider:")?;
+    ui.line("  1. All models")?;
+    for (index, provider) in providers.iter().enumerate() {
+        ui.line(&format!("  {}. {provider}", index + 2))?;
     }
-    let Some(selected) = select_route(ui, &routes)? else {
+    let Some(provider_index) = select_number(
+        ui,
+        "Provider number (blank or skip to stop): ",
+        providers.len() + 1,
+        "provider",
+    )?
+    else {
+        ui.line("Setup stopped before provider selection. No provider request was sent.")?;
+        ui.line(&format!(
+            "Run setup later: {}",
+            command_line(executable, &["setup"])
+        ))?;
+        return Ok(());
+    };
+    let selected_provider = provider_index
+        .checked_sub(1)
+        .and_then(|index| providers.get(index))
+        .copied();
+    let visible_routes = routes
+        .iter()
+        .filter(|route| selected_provider.is_none_or(|provider| route.provider == provider))
+        .collect::<Vec<_>>();
+    ui.line("Choose a model:")?;
+    ui.line(
+        "Prices are catalog estimates per million tokens, may be stale, and the provider bill is authoritative.",
+    )?;
+    for (index, route) in visible_routes.iter().enumerate() {
+        ui.line(&route_line(index + 1, route))?;
+    }
+    let Some(route_index) = select_number(
+        ui,
+        "Model number (blank or skip to stop): ",
+        visible_routes.len(),
+        "model",
+    )?
+    else {
         ui.line("Setup stopped before model selection. No provider request was sent.")?;
         ui.line(&format!(
             "Run setup later: {}",
@@ -259,6 +369,7 @@ fn guide(
         ))?;
         return Ok(());
     };
+    let selected = visible_routes[route_index];
 
     ui.line(&format!("Selected model: {}", selected.id))?;
     match ask_yes_no(
@@ -275,7 +386,9 @@ fn guide(
             return Ok(());
         }
     }
-    ui.line("This preview compares prices. Your selected model stays the same.")?;
+    ui.line(
+        "This keyless preview compares catalog prices. It is not an AI response, and your selected model stays the same.",
+    )?;
     match ask_yes_no(
         ui,
         "Open the nh why preview now? (no key or provider call) [y/N] ",
@@ -323,10 +436,14 @@ fn guide(
             ),
         )? {
             Answer::Yes => actions.add_key(&selected.vault_entry)?,
-            Answer::No => ui.line(&format!(
-                "Add it later: {}",
-                command_line(executable, &["key", "add", &selected.vault_entry])
-            ))?,
+            Answer::No => {
+                ui.line("Setup complete. No provider request was sent.")?;
+                ui.line(&format!(
+                    "Add the key when ready: {}",
+                    command_line(executable, &["key", "add", &selected.vault_entry])
+                ))?;
+                return Ok(());
+            }
             Answer::Cancel => {
                 stop_after_init(ui)?;
                 return Ok(());
@@ -334,14 +451,24 @@ fn guide(
         }
     }
 
-    match ask_yes_no(
-        ui,
-        &format!(
-            "Start chat with {} now? Your messages may incur provider charges. [y/N] ",
-            selected.id
-        ),
-    )? {
-        Answer::Yes => actions.chat(&selected.id),
+    ui.line("Recommended first task: a read-only overview of this project (maximum 4 turns).")?;
+    ui.line(&format!(
+        "If you continue, permitted project file content is sent to {}; provider charges may apply. Nosis will not edit files or run commands.",
+        selected.provider
+    ))?;
+    match ask_yes_no(ui, "Run the read-only project overview now? [y/N] ")? {
+        Answer::Yes => match actions.read_only_overview(&selected.id) {
+            Ok(()) => {
+                ui.line("Read-only overview finished. Review important claims yourself.")?;
+                print_next_commands(ui, executable, selected)?;
+                Ok(())
+            }
+            Err(error) => {
+                ui.line("The read-only overview stopped with an error. You can return with:")?;
+                print_next_commands(ui, executable, selected)?;
+                Err(error)
+            }
+        },
         Answer::No => {
             ui.line("Setup complete. No provider request was sent.")?;
             print_next_commands(ui, executable, selected)?;
@@ -368,6 +495,21 @@ fn print_next_commands(
         command_line(executable, &["why", "--model", &route.id])
     ))?;
     ui.line(&format!(
+        "Run the read-only overview later: {}",
+        command_line(
+            executable,
+            &[
+                "run",
+                FIRST_TASK,
+                "--model",
+                &route.id,
+                "--read-only",
+                "--max-turns",
+                "4",
+            ],
+        )
+    ))?;
+    ui.line(&format!(
         "Start chat later: {}",
         command_line(executable, &["chat", "--model", &route.id])
     ))
@@ -389,12 +531,26 @@ fn ask_yes_no(ui: &mut dyn SetupUi, prompt: &str) -> anyhow::Result<Answer> {
     }
 }
 
-fn select_route<'a>(
+fn route_line(index: usize, route: &SetupRoute) -> String {
+    let model = if route.id == route.model_id {
+        String::new()
+    } else {
+        format!("; provider model {}", route.model_id)
+    };
+    format!(
+        "  {index}. {} ({}{model}; {}; {})",
+        route.id, route.provider, route.modalities, route.price
+    )
+}
+
+fn select_number(
     ui: &mut dyn SetupUi,
-    routes: &'a [SetupRoute],
-) -> anyhow::Result<Option<&'a SetupRoute>> {
+    prompt: &str,
+    count: usize,
+    noun: &str,
+) -> anyhow::Result<Option<usize>> {
     loop {
-        match ui.prompt("Model number (blank or skip to stop): ")? {
+        match ui.prompt(prompt)? {
             PromptInput::Eof | PromptInput::TooLong => return Ok(None),
             PromptInput::Line(line) => {
                 let value = line.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
@@ -402,13 +558,12 @@ fn select_route<'a>(
                     return Ok(None);
                 }
                 if let Ok(index) = value.parse::<usize>() {
-                    if let Some(route) = index.checked_sub(1).and_then(|index| routes.get(index)) {
-                        return Ok(Some(route));
+                    if let Some(index) = index.checked_sub(1).filter(|index| *index < count) {
+                        return Ok(Some(index));
                     }
                 }
                 ui.line(&format!(
-                    "Enter a model number from 1 to {}, or skip.",
-                    routes.len()
+                    "Enter a {noun} number from 1 to {count}, or skip."
                 ))?;
             }
         }
@@ -524,6 +679,7 @@ mod tests {
     struct TestActions {
         routes: Vec<SetupRoute>,
         key_present: bool,
+        overview_error: bool,
         calls: Vec<String>,
     }
 
@@ -536,15 +692,20 @@ mod tests {
                         provider: "provider-one".to_owned(),
                         model_id: "provider-model".to_owned(),
                         vault_entry: "provider-one".to_owned(),
+                        modalities: "text+image".to_owned(),
+                        price: "input $0.10/1M, output $0.20/1M".to_owned(),
                     },
                     SetupRoute {
                         id: "second-route".to_owned(),
                         provider: "provider-two".to_owned(),
                         model_id: "second-route".to_owned(),
                         vault_entry: "provider-two".to_owned(),
+                        modalities: "text".to_owned(),
+                        price: "price unknown".to_owned(),
                     },
                 ],
                 key_present,
+                overview_error: false,
                 calls: Vec::new(),
             }
         }
@@ -586,8 +747,11 @@ mod tests {
             Ok(())
         }
 
-        fn chat(&mut self, route: &str) -> anyhow::Result<()> {
-            self.calls.push(format!("chat:{route}"));
+        fn read_only_overview(&mut self, route: &str) -> anyhow::Result<()> {
+            self.calls.push(format!("read-only-overview:{route}"));
+            if self.overview_error {
+                anyhow::bail!("synthetic overview failure");
+            }
             Ok(())
         }
     }
@@ -623,8 +787,8 @@ mod tests {
     }
 
     #[test]
-    fn selected_route_reaches_preview_and_chat_while_existing_key_is_preserved() {
-        let mut ui = TestUi::with_lines(&["y", "2", "n", "y", "y"]);
+    fn provider_filter_dispatches_selected_read_only_overview_with_existing_key() {
+        let mut ui = TestUi::with_lines(&["y", "3", "1", "n", "y", "y"]);
         let mut actions = TestActions::new(true);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
@@ -637,17 +801,115 @@ mod tests {
                 "routes",
                 "preview:second-route",
                 "key-exists:provider-two",
-                "chat:second-route",
+                "read-only-overview:second-route",
             ]
         );
         assert!(!actions.calls.iter().any(|call| call.starts_with("add-key")));
         assert!(ui.output.contains("will not be replaced"));
-        assert!(ui.output.contains("provider model provider-model"));
+        assert!(ui.output.contains("Choose a provider:"));
+        assert!(ui
+            .output
+            .contains("second-route (provider-two; text; price unknown)"));
+        assert!(!ui.output.contains("first-route (provider-one"));
+        assert!(ui.output.contains("permitted project file content is sent"));
+        assert!(ui.output.contains("will not edit files or run commands"));
+    }
+
+    #[test]
+    fn first_task_request_preserves_selected_route_and_safety_options() {
+        let (task, model, options) =
+            first_task_request("selected-route", TerminalCapability::AsciiFallback);
+
+        assert_eq!(
+            task,
+            "List the top-level files and read README if present, then explain this project's purpose, main parts, and one likely next step. Do not edit files or run commands."
+        );
+        assert_eq!(model, Some("selected-route"));
+        assert_eq!(options.max_turns, 4);
+        assert!(options.think.is_none());
+        assert!(options.autonomy.is_none());
+        assert_eq!(options.profile, "balanced");
+        assert!(options.images.is_empty());
+        assert!(options.read_only);
+        assert!(!options.measure_efficiency);
+        assert!(!options.enable_ranged_reads);
+        assert!(!options.retain_observations);
+        assert_eq!(
+            options.terminal_capability,
+            TerminalCapability::AsciiFallback
+        );
+    }
+
+    #[test]
+    fn overview_failure_prints_return_commands_and_preserves_the_error() {
+        let mut ui = TestUi::with_lines(&["y", "3", "1", "n", "n", "y"]);
+        let mut actions = TestActions::new(true);
+        actions.overview_error = true;
+
+        let error = guide(&project(), &executable(), &mut ui, &mut actions).unwrap_err();
+
+        assert!(error.to_string().contains("synthetic overview failure"));
+        assert!(actions
+            .calls
+            .contains(&"read-only-overview:second-route".to_owned()));
+        assert!(ui
+            .output
+            .contains("read-only overview stopped with an error"));
+        assert!(ui.output.contains("Compare prices:"));
+        assert!(ui.output.contains("Run the read-only overview later:"));
+        assert!(ui.output.contains("Start chat later:"));
+    }
+
+    #[test]
+    fn all_models_option_lists_every_route_without_a_hidden_default() {
+        let mut ui = TestUi::with_lines(&["y", "1", "2", "n", "n", "n"]);
+        let mut actions = TestActions::new(true);
+
+        guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
+
+        assert!(ui.output.contains("1. All models"));
+        assert!(ui.output.contains("first-route (provider-one; provider model provider-model; text+image; input $0.10/1M, output $0.20/1M)"));
+        assert!(ui
+            .output
+            .contains("second-route (provider-two; text; price unknown)"));
+        assert!(actions
+            .calls
+            .contains(&"key-exists:provider-two".to_owned()));
+        assert!(!actions
+            .calls
+            .iter()
+            .any(|call| call.starts_with("read-only-overview")));
+    }
+
+    #[test]
+    fn invalid_provider_and_model_choices_retry_before_selection() {
+        let mut ui = TestUi::with_lines(&["y", "9", "3", "8", "1", "n", "n", "n"]);
+        let mut actions = TestActions::new(true);
+
+        guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
+
+        assert!(ui.output.contains("Enter a provider number from 1 to 3"));
+        assert!(ui.output.contains("Enter a model number from 1 to 1"));
+        assert!(actions
+            .calls
+            .contains(&"key-exists:provider-two".to_owned()));
+    }
+
+    #[test]
+    fn provider_cancel_stops_before_model_or_preference_actions() {
+        let mut ui = TestUi::with_lines(&["y", ""]);
+        let mut actions = TestActions::new(false);
+
+        guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
+
+        assert_eq!(actions.calls, ["init", "doctor", "routes"]);
+        assert!(ui.output.contains("stopped before provider selection"));
+        assert!(!ui.output.contains("Choose a model:"));
     }
 
     #[test]
     fn selected_model_is_saved_only_after_explicit_opt_in() {
-        let mut ui = TestUi::with_lines(&["y", "2", "y", "n", "n"]);
+        let mut ui = TestUi::with_lines(&["y", "3", "1", "y", "n", "n"]);
         let mut actions = TestActions::new(true);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
@@ -656,13 +918,32 @@ mod tests {
             .calls
             .contains(&"save-model:second-route".to_owned()));
         assert!(!actions.calls.iter().any(|call| call.starts_with("preview")));
-        assert!(!actions.calls.iter().any(|call| call.starts_with("chat")));
+        assert!(!actions
+            .calls
+            .iter()
+            .any(|call| call.starts_with("read-only-overview")));
         assert!(ui.output.contains("Explicit --model still wins"));
     }
 
     #[test]
+    fn default_decline_never_writes_a_model_preference() {
+        let mut ui = TestUi::with_lines(&["y", "2", "1", "", "n", "n"]);
+        let mut actions = TestActions::new(true);
+
+        guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
+
+        assert!(!actions
+            .calls
+            .iter()
+            .any(|call| call.starts_with("save-model")));
+        assert!(actions
+            .calls
+            .contains(&"key-exists:provider-one".to_owned()));
+    }
+
+    #[test]
     fn eof_at_save_prompt_stops_before_optional_actions() {
-        let mut ui = TestUi::with_lines(&["y", "1"]);
+        let mut ui = TestUi::with_lines(&["y", "2", "1"]);
         let mut actions = TestActions::new(false);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
@@ -672,37 +953,38 @@ mod tests {
     }
 
     #[test]
-    fn no_key_path_stays_offline_and_prints_portable_next_commands() {
-        let mut ui = TestUi::with_lines(&["y", "1", "n", "y", "n", "n"]);
+    fn no_key_path_stays_offline_and_prints_portable_key_command() {
+        let mut ui = TestUi::with_lines(&["y", "2", "1", "n", "y", "n"]);
         let mut actions = TestActions::new(false);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
 
         assert!(actions.calls.contains(&"preview:first-route".to_owned()));
         assert!(!actions.calls.iter().any(|call| call.starts_with("add-key")));
-        assert!(!actions.calls.iter().any(|call| call.starts_with("chat")));
+        assert!(!actions
+            .calls
+            .iter()
+            .any(|call| call.starts_with("read-only-overview")));
         assert!(ui.output.contains("No provider request was sent"));
+        assert!(!ui
+            .output
+            .contains("Run the read-only project overview now?"));
         let expected = if cfg!(windows) {
-            [
-                "Add it later: & 'C:/portable/Nosis Harness/nh.exe' 'key' 'add' 'provider-one'",
-                "Compare prices: & 'C:/portable/Nosis Harness/nh.exe' 'why' '--model' 'first-route'",
-                "Start chat later: & 'C:/portable/Nosis Harness/nh.exe' 'chat' '--model' 'first-route'",
-            ]
+            "Add the key when ready: & 'C:/portable/Nosis Harness/nh.exe' 'key' 'add' 'provider-one'"
         } else {
-            [
-                "Add it later: 'C:/portable/Nosis Harness/nh.exe' 'key' 'add' 'provider-one'",
-                "Compare prices: 'C:/portable/Nosis Harness/nh.exe' 'why' '--model' 'first-route'",
-                "Start chat later: 'C:/portable/Nosis Harness/nh.exe' 'chat' '--model' 'first-route'",
-            ]
+            "Add the key when ready: 'C:/portable/Nosis Harness/nh.exe' 'key' 'add' 'provider-one'"
         };
-        for line in expected {
-            assert!(ui.output.contains(line), "missing {line:?}: {}", ui.output);
-        }
+        assert!(
+            ui.output.contains(expected),
+            "missing {expected:?}: {}",
+            ui.output
+        );
+        assert!(ui.output.contains("not an AI response"));
     }
 
     #[test]
-    fn eof_at_optional_preview_stops_before_key_or_chat() {
-        let mut ui = TestUi::with_lines(&["y", "1", "n"]);
+    fn eof_at_optional_preview_stops_before_key_or_provider_run() {
+        let mut ui = TestUi::with_lines(&["y", "2", "1", "n"]);
         let mut actions = TestActions::new(false);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
@@ -712,7 +994,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_model_choice_stops_before_selection_actions() {
+    fn oversized_provider_choice_stops_before_selection_actions() {
         let mut ui = TestUi::with_lines(&["y"]);
         ui.input.push_back(PromptInput::TooLong);
         let mut actions = TestActions::new(false);
@@ -720,12 +1002,14 @@ mod tests {
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
 
         assert_eq!(actions.calls, ["init", "doctor", "routes"]);
-        assert!(ui.output.contains("Setup stopped before model selection"));
+        assert!(ui
+            .output
+            .contains("Setup stopped before provider selection"));
     }
 
     #[test]
-    fn oversized_preview_answer_stops_before_key_or_chat() {
-        let mut ui = TestUi::with_lines(&["y", "1", "n"]);
+    fn oversized_preview_answer_stops_before_key_or_provider_run() {
+        let mut ui = TestUi::with_lines(&["y", "2", "1", "n"]);
         ui.input.push_back(PromptInput::TooLong);
         let mut actions = TestActions::new(false);
 
@@ -736,8 +1020,8 @@ mod tests {
     }
 
     #[test]
-    fn eof_at_key_prompt_stops_before_key_or_chat() {
-        let mut ui = TestUi::with_lines(&["y", "1", "n", "n"]);
+    fn eof_at_key_prompt_stops_before_key_or_provider_run() {
+        let mut ui = TestUi::with_lines(&["y", "2", "1", "n", "n"]);
         let mut actions = TestActions::new(false);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
@@ -746,13 +1030,16 @@ mod tests {
             .calls
             .contains(&"key-exists:provider-one".to_owned()));
         assert!(!actions.calls.iter().any(|call| call.starts_with("add-key")));
-        assert!(!actions.calls.iter().any(|call| call.starts_with("chat")));
+        assert!(!actions
+            .calls
+            .iter()
+            .any(|call| call.starts_with("read-only-overview")));
         assert!(ui.output.contains("Setup stopped"));
     }
 
     #[test]
-    fn eof_at_chat_prompt_stops_without_starting_chat() {
-        let mut ui = TestUi::with_lines(&["y", "1", "n", "n"]);
+    fn eof_at_overview_prompt_stops_without_a_provider_run() {
+        let mut ui = TestUi::with_lines(&["y", "2", "1", "n", "n"]);
         let mut actions = TestActions::new(true);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
@@ -760,19 +1047,26 @@ mod tests {
         assert!(actions
             .calls
             .contains(&"key-exists:provider-one".to_owned()));
-        assert!(!actions.calls.iter().any(|call| call.starts_with("chat")));
+        assert!(!actions
+            .calls
+            .iter()
+            .any(|call| call.starts_with("read-only-overview")));
         assert!(ui.output.contains("Setup stopped"));
     }
 
     #[test]
     fn key_prompt_calls_existing_hidden_key_path_only_after_yes() {
-        let mut ui = TestUi::with_lines(&["y", "1", "n", "n", "y", "n"]);
+        let mut ui = TestUi::with_lines(&["y", "2", "1", "n", "n", "y", "n"]);
         let mut actions = TestActions::new(false);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
 
         assert!(actions.calls.contains(&"add-key:provider-one".to_owned()));
-        assert!(!actions.calls.iter().any(|call| call.starts_with("chat")));
+        assert!(!actions
+            .calls
+            .iter()
+            .any(|call| call.starts_with("read-only-overview")));
+        assert!(ui.output.contains("Start chat later:"));
     }
 
     #[test]
@@ -799,7 +1093,7 @@ mod tests {
 
     #[test]
     fn unsafe_vault_entry_never_reaches_key_actions() {
-        let mut ui = TestUi::with_lines(&["y", "1", "n", "n"]);
+        let mut ui = TestUi::with_lines(&["y", "2", "1", "n", "n"]);
         let mut actions = TestActions::new(false);
         actions.routes[0].vault_entry = "unsafe\nentry".to_owned();
 
@@ -820,6 +1114,47 @@ mod tests {
         } else {
             assert_eq!(quoted, "'owner'\"'\"'s model'");
         }
+    }
+
+    #[test]
+    fn console_output_escapes_control_characters() {
+        let ui = ConsoleUi::new();
+        let displayed = ui.safe("provider\nspoof\r\x1b[2K");
+
+        assert!(!displayed.chars().any(char::is_control));
+        assert!(displayed.contains("provider\\nspoof\\r\\u{1b}[2K"));
+    }
+
+    #[test]
+    fn bundled_route_summary_uses_catalog_modality_and_clock_price() {
+        let resolver = RouteResolver::from_toml(include_str!("../../../catalog.toml")).unwrap();
+        let route = resolver
+            .available()
+            .into_iter()
+            .filter_map(|id| resolver.resolve(&id).ok())
+            .find(|route| route.class() == RouteClass::Api && route.price().is_some())
+            .unwrap();
+        let at = DateTime::parse_from_rfc3339("2026-09-21T01:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let quote = route.price_at(at).unwrap();
+        let input = money(quote.cache_miss, quote.currency);
+        let output = money(quote.output, quote.currency);
+
+        let setup = setup_route(&route, TerminalCapability::AsciiFallback, at);
+
+        assert_eq!(setup.id, route.id());
+        assert_eq!(setup.modalities, route.modality().join("+"));
+        assert!(
+            setup.price.contains(&format!("input {input}/1M")),
+            "{}",
+            setup.price
+        );
+        assert!(
+            setup.price.contains(&format!("output {output}/1M")),
+            "{}",
+            setup.price
+        );
     }
 
     #[cfg(unix)]

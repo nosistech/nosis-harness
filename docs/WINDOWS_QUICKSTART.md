@@ -3,6 +3,11 @@
 This guide accompanies the portable Windows x64 package. You do not need Rust,
 Visual Studio, or the Visual C++ Redistributable to run it.
 
+For the published version, download the ZIP from the
+[v0.2.2 release](https://github.com/nosistech/nosis-harness/releases/tag/v0.2.2).
+The minimum path is: verify the download, extract it, open your project in a
+terminal and run setup. Adding Nosis to PATH is optional.
+
 ## Check the download
 
 This package is unsigned. Windows may show **Windows protected your PC**
@@ -12,13 +17,16 @@ and compare its SHA-256 with the accompanying `SHA256SUMS` before choosing
 **More info**, then **Run anyway**. If Windows blocks it without that option,
 follow your organization's policy; do not disable Windows protection.
 
-To calculate the ZIP's checksum, use its actual filename:
+In the folder containing the download, open a terminal and calculate the checksums
+of Nosis ZIP files. Compare the row for the file you downloaded:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\nh-VERSION-windows-x64.zip
+Get-FileHash -Algorithm SHA256 .\nh-*-windows-x64.zip
 ```
 
 The checksum detects a changed download. It is not a publisher signature.
+If antivirus reports a malware detection, stop and report it; do not add an
+exclusion or treat that as the ordinary unknown-publisher warning above.
 Local preview builds are for review and are not published releases.
 Future releases that include build attestations can also be checked using the
 [release verification guide](https://github.com/nosistech/nosis-harness/blob/main/docs/RELEASE_VERIFICATION.md).
@@ -55,6 +63,8 @@ For v0.2.2 or later, start the guided setup from your project folder:
 Use your actual executable path. If `nh` is on PATH, just run `nh setup` or `nh`.
 The guide confirms the folder, checks the installation, and lets you choose a cloud
 model. It offers a free price preview, secure key entry, and an optional chat.
+Current unreleased source offers a read-only first task instead; the downloaded
+v0.2.2 does not enforce read-only task permissions.
 Existing configuration and keys are preserved; missing ignore entries may be added.
 Press Enter to decline a yes/no question, or type `cancel` to stop.
 
@@ -88,5 +98,5 @@ with the new bundled catalog; the guided setup guide explains the steps. Never t
 a changed catalog without reviewing its provider destinations.
 v0.3.0-rc.1 candidate builds also offer an explicit `nh catalog migrate` command for
 recognized older bundled catalogs. This command is not in v0.2.2; see the current
-[guided setup guide](https://github.com/nosistech/nosis-harness/blob/main/docs/GETTING_STARTED.md)
+[configuration guide](https://github.com/nosistech/nosis-harness/blob/main/docs/CONFIGURATION.md)
 for its consent, backup and recovery behavior.

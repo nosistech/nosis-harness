@@ -11,7 +11,7 @@ function gh {
     if ($global:ReleaseCiFixtureScenario -eq 'api-error') { $global:LASTEXITCODE = 1; return '' }
     if ($Endpoint -like '*/jobs?*') {
         $Jobs = @('Checks (windows-latest)', 'Checks (ubuntu-latest)',
-            'Checks (macos-latest)', 'Supply chain') | ForEach-Object {
+            'Checks (macos-latest)', 'Supply chain', 'Public tree and secrets') | ForEach-Object {
             @{ name = $_; status = 'completed'; conclusion = 'success'; head_sha = $global:ReleaseCiFixtureCommit }
         }
         if ($global:ReleaseCiFixtureScenario -eq 'missing-job') { $Jobs = $Jobs[0..2] }
@@ -27,6 +27,8 @@ function gh {
         if ($global:ReleaseCiFixtureScenario -eq 'windows-cancelled') { $Jobs[0].conclusion = 'cancelled' }
         if ($global:ReleaseCiFixtureScenario -eq 'macos-cancelled') { $Jobs[2].conclusion = 'cancelled' }
         if ($global:ReleaseCiFixtureScenario -eq 'supply-chain-cancelled') { $Jobs[3].conclusion = 'cancelled' }
+        if ($global:ReleaseCiFixtureScenario -eq 'public-tree-cancelled') { $Jobs[4].conclusion = 'cancelled' }
+        if ($global:ReleaseCiFixtureScenario -eq 'public-tree-missing') { $Jobs = $Jobs[0..3] }
         @{ jobs = @($Jobs) } | ConvertTo-Json -Depth 5 -Compress
         return
     }
@@ -55,7 +57,7 @@ function gh {
 foreach ($Case in @('pass', 'linux-cancelled', 'manual-ci', 'api-error', 'no-run', 'wrong-source', 'fork',
         'pull-request', 'incomplete', 'new-failure', 'missing-job', 'skipped-job', 'wrong-job-source',
         'empty-jobs', 'duplicate-job', 'malformed-runs', 'windows-cancelled',
-        'macos-cancelled', 'supply-chain-cancelled')) {
+        'macos-cancelled', 'supply-chain-cancelled', 'public-tree-cancelled', 'public-tree-missing')) {
     $global:ReleaseCiFixtureScenario = $Case
     $Rejected = $false
     try { & "$PSScriptRoot/verify-release-ci.ps1" -SourceCommit $global:ReleaseCiFixtureCommit | Out-Null }

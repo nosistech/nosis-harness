@@ -1,115 +1,110 @@
-# Guided setup
+# Your first task with Nosis
 
-Guided setup is available in v0.2.2 and later. For download verification and portable
-installation, start with the [Windows quickstart](WINDOWS_QUICKSTART.md).
+Install using the [Windows quickstart](WINDOWS_QUICKSTART.md), then return here.
+Follow the four steps below with the published v0.2.2 download. Differences in
+unreleased builds are collected at the end.
 
-## Start in your project
+You need a provider API key for an AI answer. This is a private access code from
+the company supplying your model; a chat-app subscription may not include API
+access or credit. You can explore setup without one. The no-key price preview
+does not contact a model or produce an AI answer.
 
-Open a terminal in the folder you want Nosis to work on, then run:
+## 1. Open your project
+
+In File Explorer, open the project folder and choose **Open in Terminal**.
+For your first attempt, use a practice folder without sensitive files. Add a short
+`README.md` describing a project you know; the first question below will read it.
 
 ```powershell
 nh setup
 ```
 
-Running `nh` without arguments opens the same guide. Use `nh --help` to list commands.
-
-For a portable copy that is not on PATH, use the executable's full path:
+If that command is not found, use the executable's actual path, for example:
 
 ```powershell
 & 'C:\Users\you\Apps\Nosis\nh.exe' setup
 ```
 
-Setup confirms the project folder before it creates configuration. It preserves
-existing configuration and Git hooks; missing ignore entries may be added. Choose a
-cloud model from the trusted catalog;
-Nosis does not switch providers for you.
+Run setup in an interactive terminal. Piped answers cannot authorize setup.
 
-Press Enter at a yes/no question to decline. Type `cancel`, `q`, or `quit` to stop. Changes already
-confirmed, such as creating project configuration, remain when you stop.
+## 2. Follow setup
 
-You can try a route and cost explanation without an API key. This preview makes
-no model request and does not run the task. Prices are estimates from the catalog.
+Confirm the displayed folder. Choose a provider you have API access to and a model
+you want to try. Nosis does not silently select another provider for you.
 
-## Connect when you are ready
+If you already have provider API access, use that provider for your first task.
+This avoids creating another account just to try Nosis. Model prices are rates,
+not a task's total price: `1M` means one million tokens, or pieces of text. Prices
+can change, and a cheaper rate does not guarantee a cheaper result.
 
-You need an API key from the provider you choose. A subscription to a provider's
-chat app may not include API credit. Setup offers a hidden key prompt and stores
-the key in the operating system credential store. Do not paste keys into task
-messages, shell commands, or project files.
+You can inspect a price preview without a key. It is an estimate, not an AI answer.
+To connect, obtain an API key from the provider's own API dashboard and enter it
+only at Nosis's hidden key prompt. It is stored in the OS credential store.
+Existing keys are retained. Never paste a key into a task or shell command.
 
-If a key is already stored for the selected route, setup keeps it and skips key entry.
+Use your provider's official instructions to create the key, then return to Nosis:
+[DeepSeek](https://api-docs.deepseek.com/),
+[Kimi](https://platform.kimi.ai/docs/overview),
+[MiMo](https://mimo.mi.com/docs/), or
+[GLM / Z.AI](https://docs.z.ai/guides/overview/quick-start).
+You do not need to run their programming examples to use Nosis.
 
-Starting a chat is a separate choice. Cloud requests send task context to the
-selected provider and may incur charges. Review each shell command before you
-approve it. Setup does not change your approval policy.
+Press Enter to decline a yes/no question. Type `cancel` to stop. Changes you already
+confirmed remain; existing configuration and Git hooks are preserved, while missing
+ignore entries may be added.
 
-In v0.2.2, your model choice applies to the chat opened by setup. Follow the displayed
-command to start another session with that model.
+## 3. Complete one small task
 
-## Remember your choice (v0.3.0-rc.1 candidate)
+In published v0.2.2, setup can open chat. Ask a narrow question such as:
 
-The current source build offers a separate, default-no question to remember the
-selected model. Answering yes saves only the route ID in `~/.nosis/model`, where
-`~` is your user home directory. The preference applies across projects. It does
-not store a key, approve a destination or change permissions, budgets or profiles.
-
-```powershell
-nh model show
-nh model set deepseek-v4-flash
-nh model clear
+```text
+Read README.md and explain this project's purpose in three sentences. Do not edit files or run commands.
 ```
 
-For `run`, `chat`, `tui` and `profile`, explicit `--model` wins over the preference;
-without either, the existing built-in default applies. Scripts that need a fixed
-route should always pass `--model`. A saved route must exist in the currently
-trusted catalog; an invalid or stale preference stops with recovery instructions.
-Clearing it restores the built-in default. Resume retains the session's route;
-`why` still treats `--model` as an optional comparison.
+Choose a file that exists in your practice project. This instruction alone does
+not remove tools in v0.2.2; file edits still follow policy. Decline unexpected shell
+commands. Task text and file content can be sent to the provider and incur charges.
 
-If a saved-model update is interrupted and recovery files remain, Nosis refuses to
-use a default in place of the missing preference. Follow the recovery message and
-choose explicitly with `nh model set <id>`. Preference updates have a brief
-absent-file window and are not crash-atomic.
-For an oversized file, symlink or other refused preference path, inspect
-`~/.nosis/model` manually before repairing it; management commands will not blindly
-replace an unsafe file. Explicit `--model <id>` remains available for a session.
+**Done when:** the answer identifies the actual project and agrees with the file.
+Check that yourself; the model can be wrong. For an editing task with executable
+checks, continue with the [practice project](../examples/practice-tasks/README.md).
+Its files are separate from the portable download; follow its file-download steps.
 
-## Upgrade your project catalog (v0.3.0-rc.1 candidate)
+## 4. Return later
 
-If an updated binary rejects an older bundled catalog, run `nh catalog migrate`
-in an interactive terminal. Review the affected path, provider/model/capability/
-price changes and credential destinations before answering yes. Enter declines.
-Only recognized historical bundled catalogs are eligible. LF/CRLF line-ending
-differences are accepted; other modifications or custom catalogs are refused and
-preserved for manual review. The backup retains the original file's exact bytes.
+Use the command setup prints for your selected model. In chat, `/quit` exits.
+Run `nh doctor` if something stops working; it reports configuration without
+printing key values. It does not test whether your provider account accepts calls.
 
-Migration retains a versioned `catalog.toml.nh-backup-*` file beside the catalog.
-An existing backup is never overwritten. Close other Nosis instances and editors
-touching the catalog during migration. The source is rechecked before removal,
-and replacement/rollback will not overwrite a newly created destination. There
-is a brief absent-file window, and this is not crash-atomic or complete protection
-against concurrent writers. If interrupted, inspect the backup and reported path
-before restoring it; do not overwrite another process's new catalog.
-If an attempt leaves a backup and then fails, resolve the reported cause and move
-the reviewed backup to another safe name before retrying. Keep the backup contents.
+| Problem | Next action |
+| --- | --- |
+| `nh` is not found | Use the full executable path or reopen the terminal after changing user PATH |
+| Credential store unavailable | Run `nh doctor` and resolve the credential-store error. Do not save your key in a file as a workaround |
+| No API key | Rerun setup and use the hidden key prompt |
+| Provider rejects the request | Check that provider's API access and credit; `doctor` only confirms stored configuration |
+| Provider times out | Inspect files before retrying; earlier actions may have completed |
+| Catalog is untrusted | Follow [catalog upgrade guidance](CONFIGURATION.md); do not grant trust just to dismiss the error |
 
-The migration requires filesystem hard-link support and fails closed without it.
-On a copied or portable FAT/exFAT project, use a supported filesystem or review and
-replace the catalog manually with a retained backup. Never grant trust merely to
-dismiss an upgrade error.
+If the saved API key is wrong or expired, replace it at the hidden prompt with
+`nh key add <entry>`, using the credential entry shown by setup or doctor. This
+updates that entry; you do not need to delete it first. Rerunning setup preserves
+an existing key, so it will not repair an invalid key by itself.
 
-## If setup stops
+Plain chat accepts one line per message. For pasting or editing a multiline task,
+use `nh tui --model <route-id>` and see the [terminal controls](TERMINAL_GUIDE.md).
+Use the model ID printed by setup. In the current candidate/source composer,
+pasting does not send the task; review it and press Enter when ready.
 
-- If the project folder is wrong, cancel and open a terminal in the correct folder.
-- If the catalog is untrusted, review it before following the trust instructions.
-  This can also happen after an upgrade when a project still has an older bundled
-  catalog. Setup preserves that file; it does not automatically trust or replace
-  a repository's credential destinations. In v0.2.2, to use the new bundled catalog, keep
-  a backup of the old file outside the project, then remove the project's
-  `catalog.toml` and rerun setup. Do this only if you intend to replace its routes.
-- If the credential store is unavailable, use `nh doctor` to inspect the setup.
-  Do not save the key in a file as a workaround.
-- Run setup in an interactive terminal. Piped answers cannot authorize setup.
+## Additional controls
 
-For explicitly configured local models, see the [local models guide](LOCAL_MODELS.md).
-For complete practice tasks and expected results, see [three small tasks](TUTORIALS.md).
+**Using a candidate or source build?** Current unreleased setup groups models by
+provider, shows catalog input/output prices and includes **All models**. It also
+offers a read-only first task. When `nh run --help` lists `--read-only`, use
+[enforced read-only tasks](READ_ONLY.md) to remove editing and command tools for
+that task. Those protections are not in the published v0.2.2 download.
+
+[Remember a model or upgrade a catalog](CONFIGURATION.md) in candidate/source builds.
+For v0.2.2 catalog replacement, retain a backup outside the project before intentionally
+removing the old `catalog.toml` and rerunning setup; review provider destinations first.
+For local inference, follow [local models](LOCAL_MODELS.md).
+For keyboard help and change review, see [terminal controls](TERMINAL_GUIDE.md).

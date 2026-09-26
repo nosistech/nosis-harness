@@ -5,7 +5,74 @@ use std::thread;
 use std::time::Instant;
 
 fn ctx_with(workdir: &Path, approve: bool) -> ToolCtx {
-    ToolCtx::new(workdir.to_path_buf(), Box::new(move |_| approve))
+    ToolCtx::new(
+        workdir.to_path_buf(),
+        Box::new(move |_| approve),
+        permissive_test_guard(),
+        empty_test_scrubber(),
+    )
+}
+
+fn permissive_test_guard() -> GuardFn {
+    Box::new(|access| match access {
+        Access::Read(_) | Access::Write(_) | Access::Send(_) => Guard::Allow,
+        Access::Exec(_) => Guard::Ask,
+    })
+}
+
+fn empty_test_scrubber() -> nh_vault::Scrubber {
+    nh_vault::Scrubber::new(Vec::new())
+}
+
+fn observation_context(
+    workdir: &Path,
+    runtime_parent: &Path,
+    approve: bool,
+    scrubber: nh_vault::Scrubber,
+) -> (ToolCtx, ObservationSession) {
+    std::fs::create_dir_all(runtime_parent).unwrap();
+    let ctx = ToolCtx::new(
+        workdir.to_path_buf(),
+        Box::new(move |_| approve),
+        permissive_test_guard(),
+        scrubber,
+    );
+    let session = ObservationSession::create(runtime_parent, &ctx).unwrap();
+    let ctx = ctx.with_observation_session(session.clone()).unwrap();
+    (ctx, session)
+}
+
+fn observation_handle(output: &str) -> String {
+    output
+        .split("handle=")
+        .nth(1)
+        .and_then(|suffix| suffix.split(';').next())
+        .expect("retained output must expose one opaque handle")
+        .to_owned()
+}
+
+fn observation_tool(session: &ObservationSession) -> Box<dyn Tool> {
+    builtin_tools_with_features(ToolFeatures {
+        ranged_reads: false,
+        observation_session: Some(session.clone()),
+    })
+    .into_iter()
+    .find(|tool| tool.spec().name == "read_observation")
+    .expect("observation-enabled registry must include read_observation")
+}
+
+fn only_observation_file(runtime_parent: &Path) -> PathBuf {
+    let session_dir = std::fs::read_dir(runtime_parent)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.is_dir())
+        .expect("one observation session directory");
+    let files = std::fs::read_dir(session_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(files.len(), 1, "expected exactly one retained observation");
+    files.into_iter().next().unwrap()
 }
 
 #[test]
@@ -20,6 +87,68 @@ fn policy_guard_keeps_bundled_read_blocks() {
     ));
 }
 
+#[cfg(windows)]
+#[test]
+fn bundled_policy_blocks_existing_uppercase_secret_paths_on_windows() {
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::create_dir(repo.path().join(".GIT")).unwrap();
+    std::fs::create_dir(repo.path().join("nested")).unwrap();
+    for path in [".GIT/HEAD", ".ENV", "nested/B.PEM"] {
+        std::fs::write(repo.path().join(path), "private").unwrap();
+    }
+    let law = nh_law::load(repo.path(), &nh_law::LoadOptions { cli_autonomy: None });
+    let ctx = ToolCtx::new(
+        repo.path().to_path_buf(),
+        Box::new(|_| panic!("protected paths must not reach approval")),
+        policy_guard(law.policy),
+        empty_test_scrubber(),
+    );
+
+    for path in [".GIT/HEAD", ".ENV", "nested/B.PEM"] {
+        let read = ReadFile.execute(json!({"path": path}), &ctx).unwrap();
+        assert!(read.starts_with("blocked by law:"), "{path}: {read}");
+
+        let edit = EditFile
+            .execute(
+                json!({"path": path, "old_string": "private", "new_string": "changed"}),
+                &ctx,
+            )
+            .unwrap();
+        assert!(edit.starts_with("blocked by law:"), "{path}: {edit}");
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join(path)).unwrap(),
+            "private"
+        );
+    }
+}
+
+#[test]
+fn read_only_guard_preserves_read_policy_and_blocks_other_access() {
+    let guard = read_only_guard(Box::new(|access| match access {
+        Access::Read("private.txt") => Guard::Block("operator read restriction".into()),
+        _ => Guard::Allow,
+    }));
+
+    assert!(matches!(guard(&Access::Read("public.txt")), Guard::Allow));
+    match guard(&Access::Read("private.txt")) {
+        Guard::Block(reason) => assert_eq!(reason, "operator read restriction"),
+        _ => panic!("the existing read restriction must remain effective"),
+    }
+    for access in [
+        Access::Write("change.txt"),
+        Access::Exec("echo change"),
+        Access::Send("remote-tool"),
+    ] {
+        match guard(&access) {
+            Guard::Block(reason) => assert_eq!(
+                reason,
+                "read-only run blocks writes, commands, and remote tools"
+            ),
+            _ => panic!("read-only access was not blocked"),
+        }
+    }
+}
+
 #[cfg(unix)]
 fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, link)
@@ -28,6 +157,16 @@ fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
 #[cfg(windows)]
 fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::windows::fs::symlink_dir(target, link)
+}
+
+#[cfg(unix)]
+fn symlink_file(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn symlink_file(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(target, link)
 }
 
 fn png_bytes() -> Vec<u8> {
@@ -126,11 +265,12 @@ fn load_image_refuses_law_block_before_reading() {
             approvals_seen.fetch_add(1, Ordering::SeqCst);
             true
         }),
-    )
-    .with_guard(Box::new(|access| match access {
-        Access::Read("blocked.png") => Guard::Block("protected image".into()),
-        _ => Guard::Allow,
-    }));
+        Box::new(|access| match access {
+            Access::Read("blocked.png") => Guard::Block("protected image".into()),
+            _ => Guard::Allow,
+        }),
+        empty_test_scrubber(),
+    );
 
     let error = load_image("blocked.png", &ctx).unwrap_err().to_string();
 
@@ -251,19 +391,162 @@ fn specs_have_expected_names_and_required_args() {
 }
 
 #[test]
+fn policy_filtered_registry_omits_shell_only_for_proven_complete_denial() {
+    fn loaded_policy(block: &str) -> nh_law::Policy {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir(repo.path().join(".nosis")).unwrap();
+        std::fs::write(
+            repo.path().join(".nosis/law.toml"),
+            format!("[exec]\nblock = [{block:?}]\n"),
+        )
+        .unwrap();
+        nh_law::load(repo.path(), &nh_law::LoadOptions { cli_autonomy: None }).policy
+    }
+
+    let denied = builtin_tools_for_policy(&loaded_policy("*"))
+        .into_iter()
+        .map(|tool| tool.spec().name)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        denied,
+        [
+            "read_file",
+            "write_file",
+            "edit_file",
+            "grep_files",
+            "glob_files"
+        ]
+    );
+
+    let partial = builtin_tools_for_policy(&loaded_policy("cargo *"))
+        .into_iter()
+        .map(|tool| tool.spec().name)
+        .collect::<Vec<_>>();
+    assert_eq!(partial.last().map(String::as_str), Some("exec_shell"));
+}
+
+#[test]
+fn read_only_registry_has_exactly_the_three_local_read_tools() {
+    let names = read_only_tools()
+        .iter()
+        .map(|tool| tool.spec().name)
+        .collect::<Vec<_>>();
+
+    assert_eq!(names, ["read_file", "glob_files", "grep_files"]);
+}
+
+#[test]
+fn observation_tool_is_opt_in_and_short_results_stay_identical() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = dir.path().join("runtime");
+    std::fs::write(
+        dir.path().join("short.txt"),
+        "short\rresult\twith caf\u{e9} \u{6f22}\u{5b57} \x1b[31mred\x1b[0m and bell\x07",
+    )
+    .unwrap();
+    let default = ReadFile
+        .execute(json!({"path": "short.txt"}), &ctx_with(dir.path(), true))
+        .unwrap();
+    let (ctx, session) = observation_context(
+        dir.path(),
+        &runtime,
+        true,
+        nh_vault::Scrubber::new(Vec::new()),
+    );
+    let observed = ReadFile
+        .execute(json!({"path": "short.txt"}), &ctx)
+        .unwrap();
+    assert_eq!(observed, default);
+
+    let tools = read_only_tools_with_features(ToolFeatures {
+        ranged_reads: false,
+        observation_session: Some(session),
+    });
+    let names = tools
+        .iter()
+        .map(|tool| tool.spec().name)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        ["read_file", "glob_files", "grep_files", "read_observation"]
+    );
+    let spec = tools.last().unwrap().spec();
+    assert_eq!(
+        spec.parameters["required"],
+        json!(["handle", "char_offset", "char_count"])
+    );
+    assert_eq!(spec.parameters["properties"]["char_offset"]["minimum"], 0);
+    assert_eq!(spec.parameters["properties"]["char_count"]["maximum"], 6000);
+}
+
+#[test]
+fn read_only_guard_stops_accidentally_registered_mutators_before_approval() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("note.txt"), "before").unwrap();
+    let approvals = Arc::new(AtomicUsize::new(0));
+    let approvals_seen = Arc::clone(&approvals);
+    let ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(move |_| {
+            approvals_seen.fetch_add(1, Ordering::SeqCst);
+            true
+        }),
+        read_only_guard(Box::new(|_| Guard::Allow)),
+        empty_test_scrubber(),
+    );
+    let blocked = "blocked by law: read-only run blocks writes, commands, and remote tools";
+
+    assert_eq!(
+        WriteFile
+            .execute(
+                json!({"path": "created.txt", "content": "unexpected"}),
+                &ctx,
+            )
+            .unwrap(),
+        blocked
+    );
+    assert_eq!(
+        EditFile
+            .execute(
+                json!({"path": "note.txt", "old_string": "before", "new_string": "after"}),
+                &ctx,
+            )
+            .unwrap(),
+        blocked
+    );
+    assert_eq!(
+        ExecShell
+            .execute(json!({"command": "echo unexpected > marker.txt"}), &ctx)
+            .unwrap(),
+        blocked
+    );
+    assert_eq!(approvals.load(Ordering::SeqCst), 0);
+    assert!(!dir.path().join("created.txt").exists());
+    assert!(!dir.path().join("marker.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("note.txt")).unwrap(),
+        "before"
+    );
+}
+
+#[test]
 fn write_file_creates_a_new_file_without_temp_artifacts() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("src");
     std::fs::create_dir(&source).unwrap();
 
-    let result = WriteFile
-        .execute(
+    let execution = WriteFile
+        .execute_with_audit(
             json!({"path": "src/new_module.rs", "content": "pub fn new() {}\n"}),
             &ctx_with(dir.path(), true),
         )
         .unwrap();
 
-    assert_eq!(result, "created src/new_module.rs (16 bytes)");
+    assert_eq!(execution.output, "created src/new_module.rs (16 bytes)");
+    assert_eq!(
+        execution.audit,
+        vec![ToolAudit::FilePublished(FileChangeKind::Created)]
+    );
     assert_eq!(
         std::fs::read_to_string(source.join("new_module.rs")).unwrap(),
         "pub fn new() {}\n"
@@ -478,15 +761,17 @@ fn write_file_case_folds_guard_paths_and_still_allows_normal_creation() {
             approvals_seen.fetch_add(1, Ordering::SeqCst);
             true
         }),
-    )
-    .with_guard(Box::new(|access| match access {
-        Access::Write(path)
-            if nh_law::glob_matches(".git/**", path) || nh_law::glob_matches("**/.env*", path) =>
-        {
-            Guard::Block("protected creation path".into())
-        }
-        _ => Guard::Allow,
-    }));
+        Box::new(|access| match access {
+            Access::Write(path)
+                if nh_law::glob_matches(".git/**", path)
+                    || nh_law::glob_matches("**/.env*", path) =>
+            {
+                Guard::Block("protected creation path".into())
+            }
+            _ => Guard::Allow,
+        }),
+        empty_test_scrubber(),
+    );
 
     for path in [".GIT/x", ".ENV", ".Env.local"] {
         let result = WriteFile
@@ -522,11 +807,12 @@ fn write_file_lowercase_ask_beats_typed_allow_and_denial_is_ok_shaped() {
             actions_seen.lock().unwrap().push(action.to_owned());
             false
         }),
-    )
-    .with_guard(Box::new(|access| match access {
-        Access::Write("notes/new.txt") => Guard::Ask,
-        _ => Guard::Allow,
-    }));
+        Box::new(|access| match access {
+            Access::Write("notes/new.txt") => Guard::Ask,
+            _ => Guard::Allow,
+        }),
+        empty_test_scrubber(),
+    );
 
     let result = WriteFile
         .execute(json!({"path": "Notes/New.txt", "content": "no"}), &ctx)
@@ -535,6 +821,30 @@ fn write_file_lowercase_ask_beats_typed_allow_and_denial_is_ok_shaped() {
     assert_eq!(result, "user denied: create Notes/New.txt");
     assert_eq!(*actions.lock().unwrap(), ["create Notes/New.txt"]);
     assert!(!dir.path().join("Notes/New.txt").exists());
+}
+
+#[test]
+fn exec_cancellation_before_approval_is_typed_as_not_started() {
+    let dir = tempfile::tempdir().unwrap();
+    let cancel = Arc::new(AtomicBool::new(true));
+    let ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(|_| panic!("pre-cancelled command must not ask for approval")),
+        Box::new(|_| panic!("pre-cancelled command must not consult the guard")),
+        empty_test_scrubber(),
+    )
+    .with_cancel(cancel);
+
+    let execution = ExecShell
+        .execute_with_audit(json!({"command": "echo should-not-run > marker.txt"}), &ctx)
+        .unwrap();
+
+    assert_eq!(execution.output, "turn cancelled before command execution");
+    assert_eq!(
+        execution.audit,
+        vec![ToolAudit::Command(CommandOutcome::CancelledBeforeStart)]
+    );
+    assert!(!dir.path().join("marker.txt").exists());
 }
 
 #[test]
@@ -553,11 +863,12 @@ fn cancellation_after_approval_stops_file_and_shell_mutations() {
                 cancel_on_approval.store(true, Ordering::Release);
                 true
             }),
+            Box::new(|access| match access {
+                Access::Write(_) | Access::Exec(_) => Guard::Ask,
+                _ => Guard::Allow,
+            }),
+            empty_test_scrubber(),
         )
-        .with_guard(Box::new(|access| match access {
-            Access::Write(_) | Access::Exec(_) => Guard::Ask,
-            _ => Guard::Allow,
-        }))
         .with_cancel(Arc::clone(&cancel))
     };
 
@@ -585,12 +896,16 @@ fn cancellation_after_approval_stops_file_and_shell_mutations() {
 
     cancel.store(false, Ordering::Release);
     let executed = ExecShell
-        .execute(
+        .execute_with_audit(
             json!({"command": "echo should-not-run > marker.txt"}),
             &make_ctx(),
         )
         .unwrap();
-    assert_eq!(executed, "turn cancelled before command execution");
+    assert_eq!(executed.output, "turn cancelled before command execution");
+    assert_eq!(
+        executed.audit,
+        vec![ToolAudit::Command(CommandOutcome::CancelledBeforeStart)]
+    );
     assert!(!dir.path().join("marker.txt").exists());
     assert_eq!(approvals.load(Ordering::SeqCst), 3);
     assert!(std::fs::read_dir(dir.path()).unwrap().all(|entry| {
@@ -616,11 +931,12 @@ fn write_file_labels_name_real_destination_and_requested_directory_alias() {
             actions_seen.lock().unwrap().push(action.to_owned());
             true
         }),
-    )
-    .with_guard(Box::new(|access| match access {
-        Access::Write(_) => Guard::Ask,
-        _ => Guard::Allow,
-    }));
+        Box::new(|access| match access {
+            Access::Write(_) => Guard::Ask,
+            _ => Guard::Allow,
+        }),
+        empty_test_scrubber(),
+    );
 
     let result = WriteFile
         .execute(json!({"path": "alias/new.txt", "content": "hello"}), &ctx)
@@ -652,11 +968,12 @@ fn write_file_approval_omits_requested_clause_for_real_directory() {
             actions_seen.lock().unwrap().push(action.to_owned());
             true
         }),
-    )
-    .with_guard(Box::new(|access| match access {
-        Access::Write(_) => Guard::Ask,
-        _ => Guard::Allow,
-    }));
+        Box::new(|access| match access {
+            Access::Write(_) => Guard::Ask,
+            _ => Guard::Allow,
+        }),
+        empty_test_scrubber(),
+    );
 
     let result = WriteFile
         .execute(json!({"path": "dir/new.txt", "content": "hello"}), &ctx)
@@ -757,12 +1074,13 @@ fn glob_files_excludes_blocked_and_ask_files_without_approval() {
             approvals_seen.fetch_add(1, Ordering::SeqCst);
             true
         }),
-    )
-    .with_guard(Box::new(|access| match access {
-        Access::Read("asked.txt") => Guard::Ask,
-        Access::Read("blocked.txt") => Guard::Block("protected".into()),
-        _ => Guard::Allow,
-    }));
+        Box::new(|access| match access {
+            Access::Read("asked.txt") => Guard::Ask,
+            Access::Read("blocked.txt") => Guard::Block("protected".into()),
+            _ => Guard::Allow,
+        }),
+        empty_test_scrubber(),
+    );
 
     let result = GlobFiles.execute(json!({"pattern": "**"}), &ctx).unwrap();
     let lines: Vec<&str> = result.lines().collect();
@@ -928,12 +1246,13 @@ fn grep_files_excludes_law_files_without_prompting_and_discloses_pruning() {
             approvals_seen.fetch_add(1, Ordering::SeqCst);
             true
         }),
-    )
-    .with_guard(Box::new(|access| match access {
-        Access::Read("asked.txt") => Guard::Ask,
-        Access::Read("blocked.txt") => Guard::Block("protected".into()),
-        _ => Guard::Allow,
-    }));
+        Box::new(|access| match access {
+            Access::Read("asked.txt") => Guard::Ask,
+            Access::Read("blocked.txt") => Guard::Block("protected".into()),
+            _ => Guard::Allow,
+        }),
+        empty_test_scrubber(),
+    );
 
     let result = GrepFiles
         .execute(json!({"pattern": "needle"}), &ctx)
@@ -1069,6 +1388,590 @@ fn read_edit_round_trip() {
 }
 
 #[test]
+fn ranged_read_is_operator_enabled_and_preserves_path_only_behavior() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("note.txt"), "one\ntwo\nthree\n").unwrap();
+    let ctx = ctx_with(dir.path(), true);
+
+    let mut default_tools = read_only_tools();
+    let default_spec = default_tools.remove(0).spec();
+    let direct_spec = ReadFile.spec();
+    assert_eq!(default_spec.name, direct_spec.name);
+    assert_eq!(default_spec.description, direct_spec.description);
+    assert_eq!(default_spec.parameters, direct_spec.parameters);
+    assert!(default_spec.parameters["properties"]["start_line"].is_null());
+    assert_eq!(
+        default_tools.len(),
+        2,
+        "default registry must retain the other read-only tools"
+    );
+
+    let disabled = ReadFile
+        .execute(
+            json!({"path": "note.txt", "start_line": 2, "line_count": 1}),
+            &ctx,
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(disabled.contains("operator must pass --enable-ranged-reads"));
+
+    let mut enabled_tools = read_only_tools_with_features(ToolFeatures {
+        ranged_reads: true,
+        ..ToolFeatures::default()
+    });
+    let ranged = enabled_tools.remove(0);
+    let ranged_spec = ranged.spec();
+    assert_eq!(ranged_spec.name, "read_file");
+    assert_eq!(ranged_spec.parameters["required"], json!(["path"]));
+    assert_eq!(
+        ranged_spec.parameters["properties"]["start_line"]["maximum"],
+        MAX_RANGED_START_LINE
+    );
+    assert_eq!(
+        ranged_spec.parameters["properties"]["line_count"]["maximum"],
+        MAX_RANGED_LINE_COUNT
+    );
+    assert_eq!(
+        ranged.execute(json!({"path": "note.txt"}), &ctx).unwrap(),
+        ReadFile.execute(json!({"path": "note.txt"}), &ctx).unwrap()
+    );
+}
+
+#[test]
+fn ranged_read_returns_requested_unicode_crlf_lines_and_truthful_eof() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("note.txt"),
+        "one\r\ncaf\u{e9}\r\n\u{4f60}\u{597d}\r\nfour\r\n",
+    )
+    .unwrap();
+    let ctx = ctx_with(dir.path(), true);
+
+    assert_eq!(
+        RangedReadFile
+            .execute(
+                json!({"path": "note.txt", "start_line": 2, "line_count": 2}),
+                &ctx,
+            )
+            .unwrap(),
+        "lines 2-3 of note.txt:\ncaf\u{e9}\r\n\u{4f60}\u{597d}\r\n"
+    );
+    assert_eq!(
+        RangedReadFile
+            .execute(
+                json!({"path": "note.txt", "start_line": 3, "line_count": 5}),
+                &ctx,
+            )
+            .unwrap(),
+        "lines 3-4 of note.txt (EOF reached):\n\u{4f60}\u{597d}\r\nfour\r\n"
+    );
+
+    let error = RangedReadFile
+        .execute(
+            json!({"path": "note.txt", "start_line": 5, "line_count": 1}),
+            &ctx,
+        )
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        error,
+        "start_line 5 is past end of file (4 lines): note.txt"
+    );
+}
+
+#[test]
+fn ranged_read_rejects_incomplete_invalid_and_excessive_ranges() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("note.txt"), "one\ntwo\n").unwrap();
+    let ctx = ctx_with(dir.path(), true);
+    let cases = [
+        (
+            json!({"path": "note.txt", "start_line": 1}),
+            "start_line and line_count must be supplied together",
+        ),
+        (
+            json!({"path": "note.txt", "line_count": 1}),
+            "start_line and line_count must be supplied together",
+        ),
+        (
+            json!({"path": "note.txt", "start_line": 0, "line_count": 1}),
+            "start_line must be a positive whole number",
+        ),
+        (
+            json!({"path": "note.txt", "start_line": 1, "line_count": -1}),
+            "line_count must be a positive whole number",
+        ),
+        (
+            json!({"path": "note.txt", "start_line": "1", "line_count": 1}),
+            "start_line must be a positive whole number",
+        ),
+        (
+            json!({"path": "note.txt", "start_line": MAX_RANGED_START_LINE + 1, "line_count": 1}),
+            "start_line exceeds the 100000-line scan limit",
+        ),
+        (
+            json!({"path": "note.txt", "start_line": 1, "line_count": MAX_RANGED_LINE_COUNT + 1}),
+            "line_count exceeds the 1000-line result limit",
+        ),
+    ];
+
+    for (args, expected) in cases {
+        let error = RangedReadFile.execute(args, &ctx).unwrap_err().to_string();
+        assert_eq!(error, expected);
+    }
+}
+
+#[test]
+fn ranged_read_rejects_binary_large_file_and_oversized_line() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("binary.dat"), b"text\0payload").unwrap();
+    let large = std::fs::File::create(dir.path().join("large.txt")).unwrap();
+    large.set_len(MAX_RANGED_FILE_BYTES + 1).unwrap();
+    std::fs::write(
+        dir.path().join("long-line.txt"),
+        vec![b'x'; MAX_RANGED_LINE_BYTES + 1],
+    )
+    .unwrap();
+    let ctx = ctx_with(dir.path(), true);
+
+    let cases = [
+        ("binary.dat", "file looks binary"),
+        ("large.txt", "file is too large for a ranged read"),
+        (
+            "long-line.txt",
+            "line 1 exceeds the 65536-byte ranged-read limit",
+        ),
+    ];
+    for (path, expected) in cases {
+        let error = RangedReadFile
+            .execute(
+                json!({"path": path, "start_line": 1, "line_count": 1}),
+                &ctx,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "got: {error}");
+    }
+}
+
+#[test]
+fn ranged_read_preserves_guard_denial_and_cancellation_boundaries() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("protected.txt"), "private\n").unwrap();
+    let approvals = Arc::new(AtomicUsize::new(0));
+    let approvals_seen = Arc::clone(&approvals);
+    let blocked_ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(move |_| {
+            approvals_seen.fetch_add(1, Ordering::SeqCst);
+            true
+        }),
+        Box::new(|access| match access {
+            Access::Read("protected.txt") => Guard::Block("protected fixture".into()),
+            _ => Guard::Allow,
+        }),
+        empty_test_scrubber(),
+    );
+    assert_eq!(
+        RangedReadFile
+            .execute(
+                json!({"path": "protected.txt", "start_line": 1, "line_count": 1}),
+                &blocked_ctx,
+            )
+            .unwrap(),
+        "blocked by law: protected fixture"
+    );
+    assert_eq!(approvals.load(Ordering::SeqCst), 0);
+
+    let denied_ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(|action| {
+            assert_eq!(action, "read protected.txt");
+            false
+        }),
+        Box::new(|_| Guard::Ask),
+        empty_test_scrubber(),
+    );
+    assert_eq!(
+        RangedReadFile
+            .execute(
+                json!({"path": "protected.txt", "start_line": 1, "line_count": 1}),
+                &denied_ctx,
+            )
+            .unwrap(),
+        "user denied: read protected.txt"
+    );
+
+    let cancelled = Arc::new(AtomicBool::new(true));
+    let cancelled_ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(|_| panic!("cancelled reads must not ask for approval")),
+        Box::new(|_| panic!("cancelled reads must not consult the guard")),
+        empty_test_scrubber(),
+    )
+    .with_cancel(cancelled);
+    assert_eq!(
+        RangedReadFile
+            .execute(
+                json!({"path": "protected.txt", "start_line": 1, "line_count": 1}),
+                &cancelled_ctx,
+            )
+            .unwrap(),
+        "turn cancelled before file read"
+    );
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancel_during_approval = Arc::clone(&cancelled);
+    let after_approval_ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(move |_| {
+            cancel_during_approval.store(true, Ordering::Release);
+            true
+        }),
+        Box::new(|_| Guard::Ask),
+        empty_test_scrubber(),
+    )
+    .with_cancel(cancelled);
+    assert_eq!(
+        RangedReadFile
+            .execute(
+                json!({"path": "protected.txt", "start_line": 1, "line_count": 1}),
+                &after_approval_ctx,
+            )
+            .unwrap(),
+        "turn cancelled before file read"
+    );
+}
+
+#[test]
+fn ranged_read_rejects_symlink_escape() {
+    let dir = tempfile::tempdir().unwrap();
+    let workdir = dir.path().join("project");
+    std::fs::create_dir(&workdir).unwrap();
+    let outside = dir.path().join("outside.txt");
+    std::fs::write(&outside, "outside\n").unwrap();
+    if let Err(error) = symlink_file(&outside, &workdir.join("alias.txt")) {
+        if matches!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported
+        ) {
+            eprintln!("skipping symlink fixture: {error}");
+            return;
+        }
+        panic!("could not create symlink fixture: {error}");
+    }
+
+    let error = RangedReadFile
+        .execute(
+            json!({"path": "alias.txt", "start_line": 1, "line_count": 1}),
+            &ctx_with(&workdir, true),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("escapes the working directory"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn retained_observation_recovers_middle_without_recursive_capture_and_cleans_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = dir.path().join("runtime");
+    let content = format!(
+        "HEAD\n{}\nMIDDLE-EVIDENCE\n{}\nTAIL",
+        "a".repeat(18_000),
+        "b".repeat(18_000)
+    );
+    std::fs::write(dir.path().join("large.txt"), &content).unwrap();
+    let (ctx, session) = observation_context(
+        dir.path(),
+        &runtime,
+        true,
+        nh_vault::Scrubber::new(Vec::new()),
+    );
+
+    let inline = ReadFile
+        .execute(json!({"path": "large.txt"}), &ctx)
+        .unwrap();
+    assert!(inline.contains("observation retained: handle=obs_"));
+    assert!(
+        inline.contains(&format!("scrubbed_bytes={}", content.len())),
+        "got: {inline}"
+    );
+    assert!(inline.contains("source tool limits may already have truncated this result"));
+    assert!(!inline.contains("MIDDLE-EVIDENCE"));
+    let handle = observation_handle(&inline);
+    assert_eq!(handle.len(), 36);
+    assert!(handle[4..].bytes().all(|byte| byte.is_ascii_hexdigit()));
+    let before = std::fs::read_dir(
+        std::fs::read_dir(&runtime)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path(),
+    )
+    .unwrap()
+    .count();
+    let offset = u64::try_from(content.find("MIDDLE-EVIDENCE").unwrap()).unwrap();
+    let recovered = observation_tool(&session)
+        .execute(
+            json!({
+                "handle": &handle,
+                "char_offset": offset,
+                "char_count": 15
+            }),
+            &ctx,
+        )
+        .unwrap();
+    assert!(recovered.ends_with("\nMIDDLE-EVIDENCE"), "got: {recovered}");
+    let after = std::fs::read_dir(
+        std::fs::read_dir(&runtime)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path(),
+    )
+    .unwrap()
+    .count();
+    assert_eq!(
+        after, before,
+        "retrieval must not recursively retain itself"
+    );
+
+    session.cleanup().unwrap();
+    assert_eq!(std::fs::read_dir(runtime).unwrap().count(), 0);
+}
+
+#[test]
+fn retained_observation_scrubs_before_persisting_and_rejects_tampering() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = dir.path().join("runtime");
+    const SECRET: &str = "fixture-literal-observation-value";
+    let content = format!("{}\n{SECRET}\n{}", "a".repeat(17_000), "b".repeat(17_000));
+    let (ctx, session) = observation_context(
+        dir.path(),
+        &runtime,
+        true,
+        nh_vault::Scrubber::new(vec![SECRET.to_owned()]),
+    );
+
+    let inline = render_tool_result(content, &ctx);
+    let handle = observation_handle(&inline);
+    let path = only_observation_file(&runtime);
+    let stored = std::fs::read_to_string(&path).unwrap();
+    assert!(!stored.contains(SECRET));
+    assert!(stored.contains("[REDACTED]"));
+    let mut tampered = stored.into_bytes();
+    tampered[0] = if tampered[0] == b'x' { b'y' } else { b'x' };
+    std::fs::write(&path, tampered).unwrap();
+
+    let error = observation_tool(&session)
+        .execute(
+            json!({"handle": &handle, "char_offset": 0, "char_count": 20}),
+            &ctx,
+        )
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "retained observation failed digest verification");
+}
+
+#[test]
+fn observation_character_ranges_are_unicode_safe_bounded_and_cancellable() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = dir.path().join("runtime");
+    let content = format!("{}END \u{1f642}\u{e9}\u{6f22}", "x".repeat(33_000));
+    let total_chars = u64::try_from(content.chars().count()).unwrap();
+    let (ctx, session) = observation_context(
+        dir.path(),
+        &runtime,
+        true,
+        nh_vault::Scrubber::new(Vec::new()),
+    );
+    let inline = render_tool_result(content, &ctx);
+    let handle = observation_handle(&inline);
+    let tool = observation_tool(&session);
+
+    let recovered = tool
+        .execute(
+            json!({
+                "handle": &handle,
+                "char_offset": total_chars - 3,
+                "char_count": 10
+            }),
+            &ctx,
+        )
+        .unwrap();
+    assert!(recovered.contains("(end reached):\n\u{1f642}\u{e9}\u{6f22}"));
+    for (args, expected) in [
+        (
+            json!({"handle": &handle, "char_offset": total_chars, "char_count": 1}),
+            "is at or past end of observation",
+        ),
+        (
+            json!({"handle": &handle, "char_offset": 0, "char_count": 0}),
+            "char_count must be a positive whole number",
+        ),
+        (
+            json!({"handle": &handle, "char_offset": -1, "char_count": 1}),
+            "char_offset must be a non-negative whole number",
+        ),
+    ] {
+        let error = tool.execute(args, &ctx).unwrap_err().to_string();
+        assert!(error.contains(expected), "got: {error}");
+    }
+
+    let cancelled = Arc::new(AtomicBool::new(true));
+    let cancelled_ctx = ctx.with_cancel(cancelled);
+    assert_eq!(
+        tool.execute(
+            json!({"handle": &handle, "char_offset": 0, "char_count": 1}),
+            &cancelled_ctx,
+        )
+        .unwrap(),
+        "turn cancelled before observation read"
+    );
+}
+
+#[test]
+fn observation_handles_are_exact_session_and_boundary_capabilities() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime_a = dir.path().join("runtime-a");
+    let runtime_b = dir.path().join("runtime-b");
+    let (ctx_a, session_a) = observation_context(
+        dir.path(),
+        &runtime_a,
+        true,
+        nh_vault::Scrubber::new(Vec::new()),
+    );
+    let (ctx_b, session_b) = observation_context(
+        dir.path(),
+        &runtime_b,
+        true,
+        nh_vault::Scrubber::new(Vec::new()),
+    );
+    let inline = render_tool_result("x".repeat(33_000), &ctx_a);
+    let handle = observation_handle(&inline);
+    let tool_a = observation_tool(&session_a);
+    let tool_b = observation_tool(&session_b);
+
+    let fake = tool_a
+        .execute(
+            json!({"handle": "../../catalog.toml", "char_offset": 0, "char_count": 1}),
+            &ctx_a,
+        )
+        .unwrap_err()
+        .to_string();
+    assert_eq!(fake, "unknown observation handle for this session");
+    let crossed = tool_b
+        .execute(
+            json!({"handle": &handle, "char_offset": 0, "char_count": 1}),
+            &ctx_b,
+        )
+        .unwrap_err()
+        .to_string();
+    assert_eq!(crossed, "unknown observation handle for this session");
+    let wrong_boundary = tool_a
+        .execute(
+            json!({"handle": &handle, "char_offset": 0, "char_count": 1}),
+            &ctx_b,
+        )
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        wrong_boundary,
+        "observation handle is not valid for this tool boundary"
+    );
+    let changed_ctx = ctx_a.with_guard(permissive_test_guard());
+    let changed_boundary = tool_a
+        .execute(
+            json!({"handle": &handle, "char_offset": 0, "char_count": 1}),
+            &changed_ctx,
+        )
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        changed_boundary,
+        "observation handle is not valid for this tool boundary"
+    );
+}
+
+#[test]
+fn retained_observation_rejects_final_symlink_without_reading_outside() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = dir.path().join("runtime");
+    let outside = dir.path().join("outside.txt");
+    std::fs::write(&outside, "outside sentinel").unwrap();
+    let (ctx, session) = observation_context(
+        dir.path(),
+        &runtime,
+        true,
+        nh_vault::Scrubber::new(Vec::new()),
+    );
+    let inline = render_tool_result("x".repeat(33_000), &ctx);
+    let handle = observation_handle(&inline);
+    let path = only_observation_file(&runtime);
+    std::fs::remove_file(&path).unwrap();
+    if let Err(error) = symlink_file(&outside, &path) {
+        if matches!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported
+        ) {
+            eprintln!("skipping symlink fixture: {error}");
+            return;
+        }
+        panic!("could not create symlink fixture: {error}");
+    }
+
+    let error = observation_tool(&session)
+        .execute(
+            json!({"handle": &handle, "char_offset": 0, "char_count": 1}),
+            &ctx,
+        )
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "retained observation path is not a regular file");
+    assert_eq!(
+        std::fs::read_to_string(outside).unwrap(),
+        "outside sentinel"
+    );
+}
+
+#[test]
+fn observation_mode_keeps_denied_shell_from_running_or_creating_a_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = dir.path().join("runtime");
+    let marker = dir.path().join("must-not-exist.txt");
+    let (ctx, _session) = observation_context(
+        dir.path(),
+        &runtime,
+        false,
+        nh_vault::Scrubber::new(Vec::new()),
+    );
+    let command = if cfg!(windows) {
+        "echo unexpected>must-not-exist.txt"
+    } else {
+        "echo unexpected > must-not-exist.txt"
+    };
+
+    let output = ExecShell
+        .execute(json!({"command": command}), &ctx)
+        .unwrap();
+
+    assert_eq!(output, format!("user denied: {command}"));
+    assert!(!marker.exists());
+    let session_dir = std::fs::read_dir(runtime)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert_eq!(std::fs::read_dir(session_dir).unwrap().count(), 0);
+}
+
+#[test]
 fn edit_file_success_names_canonical_path_and_requested_directory_alias() {
     let dir = tempfile::tempdir().unwrap();
     let real = dir.path().join("real");
@@ -1085,11 +1988,12 @@ fn edit_file_success_names_canonical_path_and_requested_directory_alias() {
             actions_seen.lock().unwrap().push(action.to_owned());
             true
         }),
-    )
-    .with_guard(Box::new(|access| match access {
-        Access::Write(_) => Guard::Ask,
-        _ => Guard::Allow,
-    }));
+        Box::new(|access| match access {
+            Access::Write(_) => Guard::Ask,
+            _ => Guard::Allow,
+        }),
+        empty_test_scrubber(),
+    );
 
     let result = EditFile
         .execute(
@@ -1142,7 +2046,7 @@ fn read_uses_session_scrubber_for_literal_secrets() {
 }
 
 #[test]
-fn default_tool_context_still_scrubs_shapes_only() {
+fn explicit_empty_scrubber_still_scrubs_key_shapes() {
     let dir = tempfile::tempdir().unwrap();
     let shaped = "sk-fixture-abc123";
     let plain = "fixture-literal-abc123";
@@ -1334,7 +2238,10 @@ fn edit_uses_and_audits_whitespace_normalized_match() {
     );
     assert_eq!(
         execution.audit,
-        vec![ToolAudit::EditMatch(EditMatchTier::WhitespaceNormalized)]
+        vec![
+            ToolAudit::EditMatch(EditMatchTier::WhitespaceNormalized),
+            ToolAudit::FilePublished(FileChangeKind::Edited),
+        ]
     );
     assert_eq!(std::fs::read_to_string(path).unwrap(), "let answer = 42;\n");
 }
@@ -1362,7 +2269,10 @@ fn edit_uses_and_audits_indentation_flexible_match() {
     );
     assert_eq!(
         execution.audit,
-        vec![ToolAudit::EditMatch(EditMatchTier::IndentationFlexible)]
+        vec![
+            ToolAudit::EditMatch(EditMatchTier::IndentationFlexible),
+            ToolAudit::FilePublished(FileChangeKind::Edited),
+        ]
     );
     assert_eq!(
         std::fs::read_to_string(path).unwrap(),
@@ -1498,15 +2408,21 @@ fn exec_denied_never_runs_and_is_ok_shaped() {
     let ctx = ToolCtx::new(
         dir.path().to_path_buf(),
         Box::new(move |cmd| {
-            assert_eq!(cmd, "echo pwned > marker.txt");
+            assert_eq!(cmd, "exec echo pwned > marker.txt");
             calls_seen.fetch_add(1, Ordering::SeqCst);
             false
         }),
+        permissive_test_guard(),
+        empty_test_scrubber(),
     );
-    let result = ExecShell
-        .execute(json!({"command": "echo pwned > marker.txt"}), &ctx)
+    let execution = ExecShell
+        .execute_with_audit(json!({"command": "echo pwned > marker.txt"}), &ctx)
         .unwrap();
-    assert_eq!(result, "user denied: echo pwned > marker.txt");
+    assert_eq!(execution.output, "user denied: echo pwned > marker.txt");
+    assert_eq!(
+        execution.audit,
+        vec![ToolAudit::Command(CommandOutcome::Denied)]
+    );
     assert_eq!(
         calls.load(Ordering::SeqCst),
         1,
@@ -1519,6 +2435,30 @@ fn exec_denied_never_runs_and_is_ok_shaped() {
 }
 
 #[test]
+fn exec_blocked_fact_is_not_an_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(|_| panic!("blocked command must not ask for approval")),
+        Box::new(|access| match access {
+            Access::Exec(_) => Guard::Block("blocked command".into()),
+            _ => Guard::Allow,
+        }),
+        empty_test_scrubber(),
+    );
+
+    let execution = ExecShell
+        .execute_with_audit(json!({"command": "echo must-not-run"}), &ctx)
+        .unwrap();
+
+    assert_eq!(execution.output, "blocked by law: blocked command");
+    assert_eq!(
+        execution.audit,
+        vec![ToolAudit::Command(CommandOutcome::Blocked)]
+    );
+}
+
+#[test]
 fn exec_denial_scrubs_the_command_before_returning_it() {
     const LITERAL: &str = "header-value-fixture";
     let dir = tempfile::tempdir().unwrap();
@@ -1527,11 +2467,12 @@ fn exec_denial_scrubs_the_command_before_returning_it() {
     let ctx = ToolCtx::new(
         dir.path().to_path_buf(),
         Box::new(move |seen| {
-            assert_eq!(seen, expected_command);
+            assert_eq!(seen, format!("exec {expected_command}"));
             false
         }),
-    )
-    .with_scrubber(nh_vault::Scrubber::new(vec![LITERAL.to_string()]));
+        permissive_test_guard(),
+        nh_vault::Scrubber::new(vec![LITERAL.to_string()]),
+    );
 
     let result = ExecShell
         .execute(json!({"command": command}), &ctx)
@@ -1551,21 +2492,23 @@ fn exec_guard_allow_still_requires_explicit_approval() {
     let ctx = ToolCtx::new(
         dir.path().to_path_buf(),
         Box::new(move |seen_command| {
-            assert_eq!(seen_command, command);
+            assert_eq!(seen_command, format!("exec {command}"));
             approvals_seen.fetch_add(1, Ordering::SeqCst);
             false
         }),
-    )
-    .with_guard(Box::new(|access| match access {
-        Access::Exec(_) => Guard::Allow,
-        _ => Guard::Block("unexpected access".into()),
-    }));
+        Box::new(|access| match access {
+            Access::Exec(_) => Guard::Allow,
+            _ => Guard::Block("unexpected access".into()),
+        }),
+        empty_test_scrubber(),
+    );
 
     let result = ExecShell
-        .execute_with_timeout(
+        .execute_with_deadlines(
             json!({"command": command}),
             &ctx,
             Duration::from_millis(100),
+            Duration::from_millis(50),
         )
         .unwrap();
 
@@ -1581,11 +2524,23 @@ fn exec_guard_allow_still_requires_explicit_approval() {
 fn exec_echo_happy_path() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = ctx_with(dir.path(), true);
-    let result = ExecShell
-        .execute(json!({"command": "echo hello"}), &ctx)
+    let execution = ExecShell
+        .execute_with_audit(json!({"command": "echo hello"}), &ctx)
         .unwrap();
-    assert!(result.contains("exit code: 0"), "got: {result}");
-    assert!(result.contains("hello"), "got: {result}");
+    assert!(
+        execution.output.contains("exit code: 0"),
+        "got: {}",
+        execution.output
+    );
+    assert!(
+        execution.output.contains("hello"),
+        "got: {}",
+        execution.output
+    );
+    assert_eq!(
+        execution.audit,
+        vec![ToolAudit::Command(CommandOutcome::Exited(Some(0)))]
+    );
 }
 
 #[cfg(windows)]
@@ -1613,8 +2568,8 @@ fn exec_timeout_kills_child_and_prevents_late_marker() {
     };
 
     let started = Instant::now();
-    let result = ExecShell
-        .execute_with_deadlines(
+    let execution = ExecShell
+        .execute_with_deadlines_audited(
             json!({"command": command}),
             &ctx,
             Duration::from_millis(100),
@@ -1625,8 +2580,17 @@ fn exec_timeout_kills_child_and_prevents_late_marker() {
     thread::sleep(Duration::from_millis(1_200));
 
     assert!(
-        result.contains("command timed out after 100ms - killed"),
-        "got: {result}"
+        execution
+            .output
+            .contains("command timed out after 100ms - killed"),
+        "got: {}",
+        execution.output
+    );
+    assert_eq!(
+        execution.audit,
+        vec![ToolAudit::Command(CommandOutcome::TimedOut {
+            termination_complete: true,
+        })]
     );
     assert!(
         elapsed < Duration::from_secs(2),
@@ -1654,8 +2618,8 @@ fn exec_cancel_kills_child_without_claiming_a_timeout() {
     });
 
     let started = Instant::now();
-    let result = ExecShell
-        .execute_with_deadlines(
+    let execution = ExecShell
+        .execute_with_deadlines_audited(
             json!({"command": command}),
             &ctx,
             Duration::from_secs(5),
@@ -1667,10 +2631,21 @@ fn exec_cancel_kills_child_without_claiming_a_timeout() {
     thread::sleep(Duration::from_millis(1_200));
 
     assert!(
-        result.contains("command cancelled - killed"),
-        "got: {result}"
+        execution.output.contains("command cancelled - killed"),
+        "got: {}",
+        execution.output
     );
-    assert!(!result.contains("timed out"), "got: {result}");
+    assert!(
+        !execution.output.contains("timed out"),
+        "got: {}",
+        execution.output
+    );
+    assert_eq!(
+        execution.audit,
+        vec![ToolAudit::Command(CommandOutcome::Cancelled {
+            termination_complete: true,
+        })]
+    );
     assert!(
         elapsed < Duration::from_secs(2),
         "cancel waited for a descendant instead of killing its process tree: {elapsed:?}"
@@ -1894,10 +2869,18 @@ fn exec_stream_is_bounded_before_envelope_elision() {
 fn exec_reports_nonzero_exit_code() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = ctx_with(dir.path(), true);
-    let result = ExecShell
-        .execute(json!({"command": "exit 7"}), &ctx)
+    let execution = ExecShell
+        .execute_with_audit(json!({"command": "exit 7"}), &ctx)
         .unwrap();
-    assert!(result.contains("exit code: 7"), "got: {result}");
+    assert!(
+        execution.output.contains("exit code: 7"),
+        "got: {}",
+        execution.output
+    );
+    assert_eq!(
+        execution.audit,
+        vec![ToolAudit::Command(CommandOutcome::Exited(Some(7)))]
+    );
 }
 
 #[test]
@@ -1914,24 +2897,30 @@ fn protected_edit_is_ok_shaped_and_leaves_file_unchanged() {
     let protected = dir.path().join(".nosis").join("law.toml");
     std::fs::create_dir_all(protected.parent().unwrap()).unwrap();
     std::fs::write(&protected, "before").unwrap();
-    let ctx =
-        ToolCtx::new(dir.path().to_path_buf(), Box::new(|_| true)).with_guard(Box::new(|access| {
-            match access {
-                Access::Write(path) if *path == ".nosis/law.toml" => {
-                    Guard::Block("protected path (.nosis/**)".into())
-                }
-                _ => Guard::Allow,
+    let ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(|_| true),
+        Box::new(|access| match access {
+            Access::Write(path) if *path == ".nosis/law.toml" => {
+                Guard::Block("protected path (.nosis/**)".into())
             }
-        }));
+            _ => Guard::Allow,
+        }),
+        empty_test_scrubber(),
+    );
 
-    let result = EditFile
-        .execute(
+    let execution = EditFile
+        .execute_with_audit(
             json!({"path": ".nosis/law.toml", "old_string": "before", "new_string": "after"}),
             &ctx,
         )
         .unwrap();
 
-    assert_eq!(result, "blocked by law: protected path (.nosis/**)");
+    assert_eq!(
+        execution.output,
+        "blocked by law: protected path (.nosis/**)"
+    );
+    assert!(execution.audit.is_empty());
     assert_eq!(std::fs::read_to_string(protected).unwrap(), "before");
 }
 
@@ -1940,13 +2929,15 @@ fn protected_read_is_blocked_before_io_and_normal_source_is_allowed() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("src")).unwrap();
     std::fs::write(dir.path().join("src").join("lib.rs"), "pub fn safe() {}").unwrap();
-    let ctx =
-        ToolCtx::new(dir.path().to_path_buf(), Box::new(|_| true)).with_guard(Box::new(|access| {
-            match access {
-                Access::Read(".env") => Guard::Block("protected read (**/.env*)".into()),
-                _ => Guard::Allow,
-            }
-        }));
+    let ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(|_| true),
+        Box::new(|access| match access {
+            Access::Read(".env") => Guard::Block("protected read (**/.env*)".into()),
+            _ => Guard::Allow,
+        }),
+        empty_test_scrubber(),
+    );
 
     let blocked = ReadFile.execute(json!({"path": ".env"}), &ctx).unwrap();
     assert_eq!(blocked, "blocked by law: protected read (**/.env*)");
@@ -1971,13 +2962,15 @@ fn tool_result_redacts_key_shapes_before_egress() {
 #[test]
 fn protected_missing_edit_is_blocked_before_file_check() {
     let dir = tempfile::tempdir().unwrap();
-    let ctx =
-        ToolCtx::new(dir.path().to_path_buf(), Box::new(|_| true)).with_guard(Box::new(|access| {
-            match access {
-                Access::Write(".nosis/new.toml") => Guard::Block("protected path".into()),
-                _ => Guard::Allow,
-            }
-        }));
+    let ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(|_| true),
+        Box::new(|access| match access {
+            Access::Write(".nosis/new.toml") => Guard::Block("protected path".into()),
+            _ => Guard::Allow,
+        }),
+        empty_test_scrubber(),
+    );
 
     let result = EditFile
         .execute(
@@ -2002,11 +2995,12 @@ fn edit_ask_uses_normalized_relative_path_and_denial_is_ok_shaped() {
             approvals.lock().unwrap().push(action.to_string());
             false
         }),
-    )
-    .with_guard(Box::new(|access| match access {
-        Access::Write("note.txt") => Guard::Ask,
-        _ => Guard::Allow,
-    }));
+        Box::new(|access| match access {
+            Access::Write("note.txt") => Guard::Ask,
+            _ => Guard::Allow,
+        }),
+        empty_test_scrubber(),
+    );
 
     let result = EditFile
         .execute(
@@ -2030,7 +3024,7 @@ fn edit_ask_uses_normalized_relative_path_and_denial_is_ok_shaped() {
 }
 
 #[test]
-fn default_context_allows_edit_and_routes_exec_through_approval() {
+fn explicit_permissive_guard_allows_edit_and_routes_exec_through_approval() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("note.txt"), "before").unwrap();
     let approvals = Arc::new(AtomicUsize::new(0));
@@ -2041,6 +3035,8 @@ fn default_context_allows_edit_and_routes_exec_through_approval() {
             seen.fetch_add(1, Ordering::SeqCst);
             false
         }),
+        permissive_test_guard(),
+        empty_test_scrubber(),
     );
 
     let edited = EditFile
@@ -2069,8 +3065,9 @@ fn blocked_exec_never_runs_or_asks() {
             seen.fetch_add(1, Ordering::SeqCst);
             true
         }),
-    )
-    .with_guard(Box::new(|_| Guard::Block("blocked command".into())));
+        Box::new(|_| Guard::Block("blocked command".into())),
+        empty_test_scrubber(),
+    );
 
     let result = ExecShell
         .execute(json!({"command": "echo pwned > marker.txt"}), &ctx)

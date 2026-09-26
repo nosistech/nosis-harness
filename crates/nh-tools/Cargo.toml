@@ -11,9 +11,11 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+getrandom.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 toml.workspace = true
 nh-law = { path = "../nh-law", version = "0.3.0-rc.1" }
 nh-vault = { path = "../nh-vault", version = "0.3.0-rc.1" }

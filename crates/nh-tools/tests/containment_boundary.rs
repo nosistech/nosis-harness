@@ -4,7 +4,15 @@ use std::io::Write as _;
 use std::path::Path;
 
 fn tool_ctx(workdir: &Path) -> ToolCtx {
-    ToolCtx::new(workdir.to_path_buf(), Box::new(|_| true))
+    ToolCtx::new(
+        workdir.to_path_buf(),
+        Box::new(|_| true),
+        Box::new(|access| match access {
+            nh_tools::Access::Exec(_) => nh_tools::Guard::Ask,
+            _ => nh_tools::Guard::Allow,
+        }),
+        nh_vault::Scrubber::new(Vec::new()),
+    )
 }
 
 #[cfg(unix)]

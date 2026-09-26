@@ -128,7 +128,15 @@ fn agent(
     AgentLoop {
         client,
         tools: Vec::new(),
-        ctx: ToolCtx::new(dir.to_path_buf(), Box::new(|_| false)),
+        ctx: ToolCtx::new(
+            dir.to_path_buf(),
+            Box::new(|_| false),
+            Box::new(|access| match access {
+                nh_tools::Access::Exec(_) => nh_tools::Guard::Ask,
+                _ => nh_tools::Guard::Allow,
+            }),
+            nh_vault::Scrubber::new(Vec::new()),
+        ),
         receipts: ReceiptWriter::for_path(
             dir,
             dir.join("receipts.jsonl"),

@@ -228,6 +228,13 @@ fn bundled_deepseek_resolver(base_url: &str) -> RouteResolver {
     RouteResolver::from_toml(&catalog).unwrap()
 }
 
+fn bundled_mimo_resolver(base_url: &str) -> RouteResolver {
+    let local = format!("base_url = \"{base_url}\"");
+    let catalog = BUNDLED_CATALOG.replace("base_url = \"https://api.xiaomimimo.com/v1\"", &local);
+    assert_ne!(catalog, BUNDLED_CATALOG);
+    RouteResolver::from_toml(&catalog).unwrap()
+}
+
 const OPENAI_OK: &str = r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1}}"#;
 const ANTHROPIC_OK: &str = r#"{"content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":9,"output_tokens":4,"cache_read_input_tokens":2}}"#;
 
@@ -276,6 +283,7 @@ fn factory_openai_wire_posts_chat_completions_with_route_policy() {
     assert!(captured.body.get("reasoning_effort").is_none());
     assert_eq!(captured.body["messages"][1]["reasoning_content"], "");
     assert_eq!(captured.body["max_tokens"], 384_000);
+    assert!(captured.body.get("max_completion_tokens").is_none());
 }
 
 #[test]
@@ -428,6 +436,66 @@ fn deepseek_all_efforts_and_conditional_replay_reach_the_http_wire() {
         );
         assert_eq!(body["max_tokens"], 384_000);
     }
+}
+
+#[test]
+fn glm_53_forced_thinking_and_reasoning_replay_reach_the_http_wire() {
+    let (url, rx) = one_shot_server(200, OPENAI_OK.into());
+    let route = route(
+        &url,
+        Wire::OpenAi,
+        ThinkingDialect::GlmAlwaysThinkingEffort,
+        true,
+        &[],
+        Some(128_000),
+    );
+    let request = req(
+        vec![ChatMessage {
+            reasoning_content: Some("preserved chain".into()),
+            tool_calls: Some(vec![ToolCallReq {
+                id: "c1".into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            }]),
+            ..msg("assistant", None)
+        }],
+        ThinkingEffort::Max,
+    );
+
+    client(&route, None).complete(&request).unwrap();
+
+    let body = rx.recv().unwrap().body;
+    assert_eq!(body["thinking"]["type"], "enabled");
+    assert_eq!(body["thinking"]["clear_thinking"], false);
+    assert_eq!(body["reasoning_effort"], "max");
+    assert_eq!(body["messages"][0]["reasoning_content"], "preserved chain");
+    assert_eq!(body["max_tokens"], 128_000);
+}
+
+#[test]
+fn bundled_mimo_26_uses_documented_completion_token_cap_field() {
+    let (url, rx) = one_shot_server(200, OPENAI_OK.into());
+    let resolver = bundled_mimo_resolver(&url);
+    let route = resolver.resolve("mimo-v2.6-flash").unwrap();
+    let client = credential::connect_with_catalog(
+        &TestVault,
+        &route,
+        &[route.base_url().to_owned()],
+        Some(4_096),
+        &resolver,
+    )
+    .unwrap()
+    .0;
+    let mut request = req(vec![msg("user", Some("hi"))], ThinkingEffort::High);
+    request.model = route.model_id().to_owned();
+
+    client.complete(&request).unwrap();
+
+    let body = rx.recv().unwrap().body;
+    assert_eq!(body["model"], "mimo-v2.6-flash");
+    assert_eq!(body["max_completion_tokens"], 4_096);
+    assert!(body.get("max_tokens").is_none());
+    assert_eq!(body["thinking"]["type"], "enabled");
 }
 
 #[test]

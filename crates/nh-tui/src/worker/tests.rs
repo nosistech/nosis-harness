@@ -1,5 +1,17 @@
 use super::*;
 
+fn test_tool_ctx() -> ToolCtx {
+    ToolCtx::new(
+        PathBuf::from("."),
+        Box::new(|_| false),
+        Box::new(|access| match access {
+            nh_tools::Access::Exec(_) => nh_tools::Guard::Ask,
+            _ => nh_tools::Guard::Allow,
+        }),
+        Scrubber::new(Vec::new()),
+    )
+}
+
 fn worker_around(join: JoinHandle<()>, shutdown: Arc<AtomicBool>) -> Worker {
     let (commands, _command_rx) = mpsc::channel();
     let (_event_tx, events) = mpsc::channel();
@@ -11,6 +23,56 @@ fn worker_around(join: JoinHandle<()>, shutdown: Arc<AtomicBool>) -> Worker {
         shutdown,
         turn_cancel: Arc::new(AtomicBool::new(false)),
     }
+}
+
+#[test]
+fn approval_repeat_identity_fails_closed_after_scrubbing_or_mcp_summarizing() {
+    let first_secret = "fake-approval-secret-one";
+    let second_secret = "fake-approval-secret-two";
+    let scrubber = Arc::new(std::sync::RwLock::new(Scrubber::new(vec![
+        first_secret.into(),
+        second_secret.into(),
+    ])));
+    let request = |raw: &str| {
+        let (reply, _answers) = mpsc::channel();
+        approval_request(&scrubber, raw, reply)
+    };
+
+    let first = request(&format!("exec deploy {first_secret}"));
+    let second = request(&format!("exec deploy {second_secret}"));
+    assert_eq!(first.prompt, second.prompt);
+    assert_eq!(first.prompt, "exec deploy [REDACTED]");
+    assert!(first.repeat_key.is_none());
+    assert!(second.repeat_key.is_none());
+
+    let escaped = request("exec echo first\nsecond");
+    assert!(escaped.repeat_key.is_none());
+    assert_ne!(escaped.prompt, "exec echo first\nsecond");
+
+    for prompt in [
+        "read foo",
+        "create foo",
+        "edit foo",
+        "mcp server tool arguments",
+        "cargo test --workspace",
+    ] {
+        assert!(
+            request(prompt).repeat_key.is_none(),
+            "unnamespaced or summarized approval must not support repeat: {prompt}"
+        );
+    }
+
+    let local = request("exec cargo test --workspace");
+    assert_eq!(
+        local.repeat_key.as_deref(),
+        Some("exec cargo test --workspace")
+    );
+
+    let shell_collision = request("exec edit foo");
+    let file_collision = request("edit foo");
+    assert_eq!(shell_collision.repeat_key.as_deref(), Some("exec edit foo"));
+    assert!(file_collision.repeat_key.is_none());
+    assert_ne!(shell_collision.prompt, file_collision.prompt);
 }
 
 #[test]
@@ -28,7 +90,7 @@ fn apply_new_credential_refreshes_every_scrubber() {
     let mut agent = AgentLoop {
         client: Box::new(PanicClient),
         tools: Vec::new(),
-        ctx: ToolCtx::new(PathBuf::from("."), Box::new(|_| false)),
+        ctx: test_tool_ctx(),
         receipts: ReceiptWriter::for_path(
             PathBuf::from("."),
             PathBuf::from("unused-receipts.jsonl"),
@@ -85,6 +147,7 @@ fn worker_drop_unblocks_a_parked_approval() {
     event_tx
         .send(AgentEvent::Approval(ApprovalRequest {
             prompt: "parked".into(),
+            repeat_key: None,
             reply,
         }))
         .unwrap();
@@ -262,7 +325,7 @@ fn tracked_tool_emits_exact_start_and_finish_events() {
     let (events, received) = mpsc::channel();
     let mut tools = tracked_tools(vec![Box::new(TestTool)], &events);
     let tool = tools.remove(0);
-    let ctx = ToolCtx::new(PathBuf::from("."), Box::new(|_| false));
+    let ctx = test_tool_ctx();
 
     assert_eq!(tool.execute(ToolArgs::default(), &ctx).unwrap(), "done");
     match received.recv().unwrap() {
@@ -310,10 +373,7 @@ fn tracked_tool_preserves_inner_audit_metadata() {
     let mut tools = tracked_tools(vec![Box::new(AuditedTool)], &events);
     let execution = tools
         .remove(0)
-        .execute_with_audit(
-            ToolArgs::default(),
-            &ToolCtx::new(PathBuf::from("."), Box::new(|_| false)),
-        )
+        .execute_with_audit(ToolArgs::default(), &test_tool_ctx())
         .unwrap();
 
     assert_eq!(

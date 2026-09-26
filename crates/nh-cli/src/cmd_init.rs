@@ -6,9 +6,16 @@ use std::path::{Path, PathBuf};
 
 /// .nosis/.gitignore: runtime artifacts and auth material never reach git.
 const GITIGNORE: &str =
-    "# nosis-harness runtime artifacts - never commit\nreceipts.jsonl\nfleet/\nsessions/\n*.log\nauth*\n";
-const REQUIRED_GITIGNORE_LINES: &[&str] =
-    &["receipts.jsonl", "fleet/", "sessions/", "*.log", "auth*"];
+    "# nosis-harness runtime artifacts - never commit\nreceipts.jsonl\nefficiency-v1.jsonl\nobservations/\nfleet/\nsessions/\n*.log\nauth*\n";
+const REQUIRED_GITIGNORE_LINES: &[&str] = &[
+    "receipts.jsonl",
+    "efficiency-v1.jsonl",
+    "observations/",
+    "fleet/",
+    "sessions/",
+    "*.log",
+    "auth*",
+];
 
 /// Starter route catalog for repos that have none, so `nh run` works right after
 /// `nh init`. Catalog stays DATA: this embeds the repo-root catalog.toml at build

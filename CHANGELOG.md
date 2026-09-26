@@ -9,6 +9,72 @@ commit passes local and remote gates.
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in local efficiency measurements and experimental ranged file reads for
+  `nh run`, with an offline task-cost report and comparison protocol. Billing gaps
+  remain explicit and correctness is judged separately from loop completion.
+- Optional session-bound retrieval for large scrubbed observations, plus run-only
+  extractive context and compact identity experiments. All default off; no overall
+  savings or unchanged model quality is claimed. `nh init` adds ignore entries for
+  the new local artifacts while preserving existing project rules.
+- Optional MCP schema discovery for new chat sessions, preserving original remote
+  tool approval and trust checks. Registries sort tool names and reject ambiguous
+  duplicates; local measurement can report schema drift without recording prompts.
+- Provider-first guided setup with catalog price and capability summaries, an
+  explicit all-models option, and an optional bounded read-only first task.
+  Declining key entry ends setup without offering a provider request.
+- Shorter beginner instructions, an audit map, and installation and usability
+  checklists that distinguish observed results from work still to be verified.
+- Tool-reported file publication and command outcome messages, plus a reminder to
+  inspect and check results. Timeline completion is labeled `completed`; it is not
+  a task-correctness verdict. Historical receipts do not record verification.
+- Read-only `nh run` tasks with guarded local reading and searching. Editing,
+  shell execution and remote tools are unavailable to the model. Normal provider
+  charges and local receipt writes still apply.
+- MiMo 2.6 Flash/Pro and GLM 5.3/Flash routes, with provider-specific reasoning
+  handling and migration from the previously bundled catalog. Existing explicit
+  model choices are preserved.
+- Three small practice tasks with Python acceptance checks and instructions for
+  comparing completed work, cost and required intervention across assistants.
+
+### Changed
+
+- Outbound MCP client setup rejects literal link-local addresses, including the
+  common IPv4 metadata endpoint, for
+  both server and OAuth token destinations before connecting. Loopback and LAN
+  configuration remain supported; this does not provide DNS-level isolation.
+- Full-screen help now wraps and scrolls in smaller terminals. Shortcut hints
+  prioritize Help and current actions; the header shows a fitted project name,
+  with the folder path in Help. F1 closes Help without stopping work or approving
+  a hidden request. Stop/close hints reflect the active state.
+- Full-screen approval requests wrap and can be scrolled while waiting. Repeat
+  approval is limited to identical, untransformed shell commands in this session.
+  Redacted/escaped requests, file actions and remote MCP calls cannot reuse a rule.
+- Run, chat and TUI omit the shell tool when session policy proves all commands
+  blocked, and explain the limit. Resumed sessions receive capability corrections
+  without rewriting history; partial restrictions retain existing approvals.
+- Beginner guides now link to a separate configuration and catalog-upgrade reference.
+- File staging, creation and edit-publication helpers are grouped in one module
+  for easier auditing, with their existing behavior and concurrency limits retained.
+- Tool contexts require an explicit policy guard and output scrubber at construction,
+  removing an implicit permissive default for future callers. This changes the
+  `ToolCtx::new` Rust API signature.
+
+### Fixed
+
+- Plain run/chat approvals require the fresh code shown for that request; queued
+  `y/yes`, stale codes, piped input and random-generation failure cannot approve.
+- Full-screen approvals use F2 (once), F3 (eligible repeat) and F4 (decline), so
+  ordinary typing or pasted text cannot approve a newly arriving request. Draft
+  editing and queuing remain available while waiting.
+- Windows protected-path rules also check ASCII case variants of paths and rule
+  patterns, closing a bypass for existing uppercase files. Unix path matching
+  keeps its prior case-sensitive behavior.
+- MiMo routes and Kimi K3 send the requested output ceiling through their documented
+  `max_completion_tokens` field. Other routes retain their existing cap field.
+  Requested token ceilings are not a guarantee of a fixed final bill.
+
 ## [0.3.0-rc.1] - 2026-09-22
 
 ### Added

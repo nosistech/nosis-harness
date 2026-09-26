@@ -7,6 +7,11 @@ commands in your terminal, and task messages inside Nosis when instructed.
 Examples 1 and 2 work with v0.2.2. Commands marked **v0.3.0-rc.1 candidate** require that source build; they are not in the downloadable v0.2.2 package.
 Output panels illustrate what to look for, not a recorded model response or exact price.
 
+For a small bug fix with executable acceptance checks, use the
+[practice project](../examples/practice-tasks/README.md). The unreleased source build
+also supports [read-only tasks](READ_ONLY.md) for asking about files without giving
+the model editing or command-execution tools.
+
 ## 1. Try a preview without a key or a charge
 
 Create a new practice folder outside your existing Git repositories, somewhere you
@@ -58,11 +63,10 @@ nh setup
 
 In setup, confirm the displayed folder, choose a model, and enter a key only at
 the hidden key prompt. Start chat only when you are ready for a paid request.
-Then type this message at the Nosis prompt:
+Then paste this single-line message at the Nosis prompt:
 
 ```text
-In README.md, change "smal" to "small". Make no other edits.
-Afterward, ask to run git diff --check and explain the change.
+In README.md, change "smal" to "small". Make no other edits. Afterward, ask to run git diff --check and explain the change.
 ```
 
 Read any proposed command before approving it. Shell approval defaults to **no**.
@@ -90,8 +94,9 @@ file changes, and the final check reports no whitespace errors. Inspect extra
 changes before accepting them. Nosis does not automatically undo a completed edit.
 `git diff` does not display untracked files, so always inspect `git status` too.
 
-If the key is rejected, check the provider/account with `nh doctor` and update the
-vault entry using `nh key add <entry>`. Never paste a key into the conversation.
+If the key is rejected, check API access and credit with the provider. `nh doctor`
+checks local configuration, not whether the provider accepts requests. Replace an
+invalid vault entry using `nh key add <entry>`. Never paste a key into the conversation.
 If the provider times out, inspect the files before repeating the task: cancellation
 does not undo earlier tools, and an in-flight request may still incur charges.
 

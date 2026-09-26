@@ -1,9 +1,9 @@
 //! Approved shell execution with bounded capture, timeout, and process-tree termination.
 
 use crate::{
-    cancelled_before, is_allowed_env_var, render_tool_result, str_arg, Access, ExecShell, Guard,
-    Tool, ToolCtx, ToolSpec, DRAIN_GRACE, EXEC_TIMEOUT, KILL_VERIFY_GRACE, MAX_TOOL_READ_BYTES,
-    TOOL_BUFFER_BYTES,
+    cancelled_before, is_allowed_env_var, render_tool_result, str_arg, Access, CommandOutcome,
+    ExecShell, Guard, Tool, ToolAudit, ToolCtx, ToolExecution, ToolSpec, DRAIN_GRACE, EXEC_TIMEOUT,
+    KILL_VERIFY_GRACE, MAX_TOOL_READ_BYTES, TOOL_BUFFER_BYTES,
 };
 use anyhow::Context as _;
 use serde_json::json;
@@ -39,6 +39,14 @@ impl Tool for ExecShell {
 
     fn execute(&self, args: serde_json::Value, ctx: &ToolCtx) -> anyhow::Result<String> {
         self.execute_with_timeout(args, ctx, EXEC_TIMEOUT)
+    }
+
+    fn execute_with_audit(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolCtx,
+    ) -> anyhow::Result<ToolExecution> {
+        self.execute_with_timeout_audited(args, ctx, EXEC_TIMEOUT)
     }
 }
 
@@ -152,6 +160,13 @@ pub(super) fn timeout_label(timeout: Duration) -> String {
         format!("{}s", timeout.as_secs())
     } else {
         format!("{}ms", timeout.as_millis())
+    }
+}
+
+fn command_execution(content: String, outcome: CommandOutcome, ctx: &ToolCtx) -> ToolExecution {
+    ToolExecution {
+        output: render_tool_result(content, ctx),
+        audit: vec![ToolAudit::Command(outcome)],
     }
 }
 
@@ -298,6 +313,15 @@ impl ExecShell {
         self.execute_with_deadlines(args, ctx, timeout, DRAIN_GRACE)
     }
 
+    pub(super) fn execute_with_timeout_audited(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolCtx,
+        timeout: Duration,
+    ) -> anyhow::Result<ToolExecution> {
+        self.execute_with_deadlines_audited(args, ctx, timeout, DRAIN_GRACE)
+    }
+
     pub(super) fn execute_with_deadlines(
         &self,
         args: serde_json::Value,
@@ -305,21 +329,51 @@ impl ExecShell {
         timeout: Duration,
         drain_grace: Duration,
     ) -> anyhow::Result<String> {
+        self.execute_with_deadlines_audited(args, ctx, timeout, drain_grace)
+            .map(|execution| execution.output)
+    }
+
+    pub(super) fn execute_with_deadlines_audited(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolCtx,
+        timeout: Duration,
+        drain_grace: Duration,
+    ) -> anyhow::Result<ToolExecution> {
         let command = str_arg(&args, "command")?;
         if let Some(cancelled) = cancelled_before("command execution", ctx) {
-            return Ok(cancelled);
+            return Ok(command_execution(
+                cancelled,
+                CommandOutcome::CancelledBeforeStart,
+                ctx,
+            ));
         }
         if let Guard::Block(reason) = (ctx.guard)(&Access::Exec(command)) {
-            return Ok(render_tool_result(format!("blocked by law: {reason}"), ctx));
+            return Ok(command_execution(
+                format!("blocked by law: {reason}"),
+                CommandOutcome::Blocked,
+                ctx,
+            ));
         }
         // SECURITY INVARIANT: this boundary requires explicit approval for every non-blocked exec,
         // regardless of which non-Block verdict the guard returned.
-        if !(ctx.approve)(command) {
+        // Namespace the approval identity so a shell command such as `edit foo`
+        // cannot collide with another tool's human-readable approval prompt.
+        let approval_prompt = format!("exec {command}");
+        if !(ctx.approve)(&approval_prompt) {
             // Ok-shaped so the model can read the denial and adapt, not crash the turn.
-            return Ok(render_tool_result(format!("user denied: {command}"), ctx));
+            return Ok(command_execution(
+                format!("user denied: {command}"),
+                CommandOutcome::Denied,
+                ctx,
+            ));
         }
         if let Some(cancelled) = cancelled_before("command execution", ctx) {
-            return Ok(cancelled);
+            return Ok(command_execution(
+                cancelled,
+                CommandOutcome::CancelledBeforeStart,
+                ctx,
+            ));
         }
         #[cfg(windows)]
         let mut cmd = {
@@ -397,35 +451,56 @@ impl ExecShell {
             render_bounded_output(stdout_drain.finish(drain_deadline, drain_grace), "stdout");
         let stderr =
             render_bounded_output(stderr_drain.finish(drain_deadline, drain_grace), "stderr");
-        let content = match termination {
+        let (content, outcome) = match termination {
             Some(Termination::Reaped { reason, .. }) => match reason {
-                TerminationReason::Timeout(timeout) => format!(
-                    "command timed out after {} - killed\nstdout:\n{stdout}\nstderr:\n{stderr}",
-                    timeout_label(timeout)
+                TerminationReason::Timeout(timeout) => (
+                    format!(
+                        "command timed out after {} - killed\nstdout:\n{stdout}\nstderr:\n{stderr}",
+                        timeout_label(timeout)
+                    ),
+                    CommandOutcome::TimedOut {
+                        termination_complete: true,
+                    },
                 ),
-                TerminationReason::Cancelled => {
-                    format!("command cancelled - killed\nstdout:\n{stdout}\nstderr:\n{stderr}")
-                }
+                TerminationReason::Cancelled => (
+                    format!("command cancelled - killed\nstdout:\n{stdout}\nstderr:\n{stderr}"),
+                    CommandOutcome::Cancelled {
+                        termination_complete: true,
+                    },
+                ),
             },
             Some(Termination::Incomplete { detail, reason }) => match reason {
-                TerminationReason::Timeout(timeout) => format!(
-                    "command timed out after {} - termination incomplete: {detail}\nstdout:\n{stdout}\nstderr:\n{stderr}",
-                    timeout_label(timeout)
+                TerminationReason::Timeout(timeout) => (
+                    format!(
+                        "command timed out after {} - termination incomplete: {detail}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+                        timeout_label(timeout)
+                    ),
+                    CommandOutcome::TimedOut {
+                        termination_complete: false,
+                    },
                 ),
-                TerminationReason::Cancelled => format!(
-                    "command cancelled - termination incomplete: {detail}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+                TerminationReason::Cancelled => (
+                    format!(
+                        "command cancelled - termination incomplete: {detail}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+                    ),
+                    CommandOutcome::Cancelled {
+                        termination_complete: false,
+                    },
                 ),
             },
             None => {
                 let status = status
                     .ok_or_else(|| anyhow::anyhow!("command completed without an exit status"))?;
-                let code = status
-                    .code()
-                    .map(|c| c.to_string())
+                let code = status.code();
+                let display = code
+                    .map(|code| code.to_string())
                     .unwrap_or_else(|| "killed by signal".into());
-                format!("exit code: {code}\nstdout:\n{stdout}\nstderr:\n{stderr}")
+                (
+                    format!("exit code: {display}\nstdout:\n{stdout}\nstderr:\n{stderr}"),
+                    CommandOutcome::Exited(code),
+                )
             }
         };
-        Ok(render_tool_result(content, ctx))
+        Ok(command_execution(content, outcome, ctx))
     }
 }

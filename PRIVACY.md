@@ -74,6 +74,10 @@ their own policies.
 The MCP server is a **preview** and **must not be exposed on a public interface**. This is
 not a restriction that lapses on a date.
 
+When the server generates a token, it prints that token for the local client to
+use. Treat it as a live credential: omit it from screenshots, shared terminal
+logs and support reports. A token loaded from a vault entry is not printed.
+
 ## Provider policies
 
 Each provider has its own data-retention policy. `nh` does not control provider-side

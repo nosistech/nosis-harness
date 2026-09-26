@@ -18,7 +18,7 @@ use crate::wire::{
 use context::{
     compact_history, compaction_input_tokens, context_percentage, plain_msg, COMPACT_AT,
 };
-use nh_tools::{EditMatchTier, Tool, ToolAudit, ToolCtx};
+use nh_tools::{CommandOutcome, EditMatchTier, FileChangeKind, Tool, ToolAudit, ToolCtx};
 
 pub const MAX_TASK_BYTES: usize = 64 * 1024;
 
@@ -32,6 +32,16 @@ pub fn validate_task(task: &str) -> anyhow::Result<()> {
         anyhow::bail!("task is too large - maximum is {MAX_TASK_BYTES} bytes");
     }
     Ok(())
+}
+
+/// Frontend notice for a normal response. Tool facts report only observed
+/// execution; neither those facts nor model prose independently verify a task.
+pub fn result_notice(read_only: bool) -> &'static str {
+    if read_only {
+        "Result not independently verified; read-only mode did not run commands or tests. Inspect the project and check the result."
+    } else {
+        "Result not independently verified. Inspect changes and run the relevant checks."
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,9 +170,88 @@ pub const TOOL_RESULT_STATE_RULE: &str =
      non-zero exit as a failure; never claim that such a command succeeded, is running, or \
      continued in the background.";
 
+pub const SHELL_UNAVAILABLE_SESSION_NOTICE: &str = "The local shell tool is unavailable in this session; other permitted work can still complete. Tests require independent verification.";
+pub const SHELL_AVAILABLE_SESSION_NOTICE: &str =
+    "The local shell tool is available in this session, subject to the current policy and explicit approval.";
+
+/// Return a capability correction only when restored history describes a
+/// different shell state. An available session with no prior marker needs no
+/// extra context because availability is the longstanding default.
+pub fn shell_capability_context_update(
+    history: &[ChatMessage],
+    shell_unavailable: bool,
+) -> Option<&'static str> {
+    let last_state = history.iter().rev().find_map(|message| {
+        if message.role != "system" {
+            return None;
+        }
+        let content = message.content.as_deref()?;
+        let unavailable = content.rfind(SHELL_UNAVAILABLE_SESSION_NOTICE);
+        let available = content.rfind(SHELL_AVAILABLE_SESSION_NOTICE);
+        match (unavailable, available) {
+            (Some(unavailable), Some(available)) => Some(unavailable > available),
+            (Some(_), None) => Some(true),
+            (None, Some(_)) => Some(false),
+            (None, None) => None,
+        }
+    });
+    match (last_state, shell_unavailable) {
+        (Some(true), false) => Some(SHELL_AVAILABLE_SESSION_NOTICE),
+        (Some(false), true) | (None, true) => Some(SHELL_UNAVAILABLE_SESSION_NOTICE),
+        (Some(true), true) | (Some(false), false) | (None, false) => None,
+    }
+}
+
+/// Build append-only route context without losing a pending shell-capability
+/// correction derived from sealed history.
+pub fn capability_aware_route_context(
+    history: &[ChatMessage],
+    route_changed: bool,
+    constitution: &str,
+    shell_unavailable: bool,
+) -> Option<String> {
+    if history.is_empty() {
+        return None;
+    }
+    let capability_update = shell_capability_context_update(history, shell_unavailable);
+    if route_changed {
+        let mut context = constitution.to_owned();
+        if capability_update == Some(SHELL_AVAILABLE_SESSION_NOTICE) {
+            context.push_str("\n\n");
+            context.push_str(SHELL_AVAILABLE_SESSION_NOTICE);
+        }
+        Some(context)
+    } else {
+        capability_update.map(str::to_owned)
+    }
+}
+
+/// Add the shell-capability notice ahead of the immutable law while preserving
+/// the law as the exact suffix used by resume compatibility checks.
+pub fn session_law_constitution(law_constitution: &str, shell_unavailable: bool) -> String {
+    if shell_unavailable {
+        format!("{SHELL_UNAVAILABLE_SESSION_NOTICE}\n\n{law_constitution}")
+    } else {
+        law_constitution.to_owned()
+    }
+}
+
 pub fn identity_constitution(law_constitution: &str, route_id: &str, provider: &str) -> String {
     format!(
         "You are nosis, an autonomous coding harness. You are running on the model route '{route_id}' via {provider}. If asked what model or assistant you are, answer 'nosis on {route_id}'; never claim to be Claude, GPT, or any other assistant.\n\n{TOOL_RESULT_STATE_RULE}\n\n{law_constitution}"
+    )
+}
+
+/// Versioned shorter identity clause for an explicit run-only prompt experiment.
+/// The route/provider identity, false-state rule, and complete law suffix are
+/// identical in meaning and placement to [`identity_constitution`].
+pub fn compact_identity_constitution_v1(
+    law_constitution: &str,
+    route_id: &str,
+    provider: &str,
+) -> String {
+    format!(
+        "You are nosis, an autonomous coding harness on route '{route_id}' via {provider}. If asked your model or identity, answer 'nosis on {route_id}'; never claim another assistant identity.\n\n{TOOL_RESULT_STATE_RULE}\n\n{law_constitution}"
     )
 }
 
@@ -756,6 +845,11 @@ impl AgentLoop {
                                 "turn {turns}: edit_file used indentation-flexible match"
                             ));
                         }
+                        ToolAudit::FilePublished(_) | ToolAudit::Command(_) => {
+                            if let Some(line) = tool_audit_progress_line(turns, audit) {
+                                self.emit(&line);
+                            }
+                        }
                     }
                 }
                 push_message(
@@ -1002,6 +1096,40 @@ fn finish_tool_run(output: String, repair_notes: Vec<String>, audit: Vec<ToolAud
         repair_notes,
         audit,
     }
+}
+
+fn tool_audit_progress_line(turn: u32, audit: &ToolAudit) -> Option<String> {
+    let fact = match audit {
+        ToolAudit::EditMatch(_) => return None,
+        ToolAudit::FilePublished(FileChangeKind::Created) => "file created".to_owned(),
+        ToolAudit::FilePublished(FileChangeKind::Edited) => "file edit saved".to_owned(),
+        ToolAudit::Command(CommandOutcome::Exited(Some(code))) => {
+            format!("command exited {code} (execution only; result not verified)")
+        }
+        ToolAudit::Command(CommandOutcome::Exited(None)) => {
+            "command exit status unavailable (execution only; result not verified)".to_owned()
+        }
+        ToolAudit::Command(CommandOutcome::Blocked) => {
+            "command blocked before execution".to_owned()
+        }
+        ToolAudit::Command(CommandOutcome::Denied) => "command denied before execution".to_owned(),
+        ToolAudit::Command(CommandOutcome::CancelledBeforeStart) => {
+            "command cancelled before execution".to_owned()
+        }
+        ToolAudit::Command(CommandOutcome::Cancelled {
+            termination_complete: true,
+        }) => "command cancelled".to_owned(),
+        ToolAudit::Command(CommandOutcome::Cancelled {
+            termination_complete: false,
+        }) => "command cancelled; process-tree termination incomplete".to_owned(),
+        ToolAudit::Command(CommandOutcome::TimedOut {
+            termination_complete: true,
+        }) => "command timed out".to_owned(),
+        ToolAudit::Command(CommandOutcome::TimedOut {
+            termination_complete: false,
+        }) => "command timed out; process-tree termination incomplete".to_owned(),
+    };
+    Some(format!("turn {turn}: {fact}"))
 }
 
 /// "turn 2: edit_file src/lib.rs" - name plus the key argument, kept short.

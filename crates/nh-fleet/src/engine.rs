@@ -423,9 +423,9 @@ pub(super) fn run_one_task(
             )));
             false
         }),
-    )
-    .with_scrubber(runtime.key_literals.scrubber())
-    .with_guard(nh_tools::policy_guard(policy));
+        nh_tools::policy_guard(policy),
+        runtime.key_literals.scrubber(),
+    );
     let progress_events = events.clone();
     let progress_task_id = job.task_id.clone();
     let progress_scrubber = runtime.key_literals.scrubber();

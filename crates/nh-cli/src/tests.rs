@@ -116,6 +116,12 @@ fn parses_run_with_defaults() {
             autonomy,
             profile,
             image,
+            read_only,
+            measure_efficiency,
+            enable_ranged_reads,
+            retain_observations,
+            context_experiment,
+            identity_prompt,
         } => {
             assert_eq!(task, "fix the failing test");
             assert_eq!(model, None);
@@ -124,6 +130,12 @@ fn parses_run_with_defaults() {
             assert_eq!(autonomy, None, "no --autonomy = law-file default");
             assert_eq!(profile, "balanced");
             assert!(image.is_empty());
+            assert!(!read_only);
+            assert!(!measure_efficiency);
+            assert!(!enable_ranged_reads);
+            assert!(!retain_observations);
+            assert_eq!(context_experiment, None);
+            assert_eq!(identity_prompt, None);
         }
         _ => panic!("expected run"),
     }
@@ -150,6 +162,12 @@ fn parses_run_with_overrides() {
             autonomy,
             profile,
             image,
+            read_only,
+            measure_efficiency,
+            enable_ranged_reads,
+            retain_observations,
+            context_experiment,
+            identity_prompt,
         } => {
             assert_eq!(task, "review the diff");
             assert_eq!(model.as_deref(), Some("deepseek-v4-pro"));
@@ -158,9 +176,62 @@ fn parses_run_with_overrides() {
             assert_eq!(autonomy, None);
             assert_eq!(profile, "balanced");
             assert!(image.is_empty());
+            assert!(!read_only);
+            assert!(!measure_efficiency);
+            assert!(!enable_ranged_reads);
+            assert!(!retain_observations);
+            assert_eq!(context_experiment, None);
+            assert_eq!(identity_prompt, None);
         }
         _ => panic!("expected run"),
     }
+}
+
+#[test]
+fn parses_explicit_efficiency_ranged_read_and_observation_flags() {
+    let cli = Cli::try_parse_from([
+        "nh",
+        "run",
+        "inspect a file",
+        "--measure-efficiency",
+        "--enable-ranged-reads",
+        "--retain-observations",
+    ])
+    .unwrap();
+
+    assert!(matches!(
+        cli.cmd,
+        Cmd::Run {
+            measure_efficiency: true,
+            enable_ranged_reads: true,
+            retain_observations: true,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn parses_explicit_context_and_identity_experiments() {
+    let cli = Cli::try_parse_from([
+        "nh",
+        "run",
+        "inspect a project",
+        "--retain-observations",
+        "--context-experiment",
+        "extractive-v1",
+        "--identity-prompt",
+        "compact-v1",
+    ])
+    .unwrap();
+
+    assert!(matches!(
+        cli.cmd,
+        Cmd::Run {
+            context_experiment: Some(cmd_run::ContextExperimentArg::ExtractiveV1),
+            identity_prompt: Some(cmd_run::IdentityPromptArg::CompactV1),
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -201,6 +272,37 @@ fn run_help_discovers_supported_image_formats_and_limit() {
     assert!(help.contains("--image <PATH>"), "got: {help}");
     assert!(help.contains("PNG or JPEG"), "got: {help}");
     assert!(help.contains("maximum 4"), "got: {help}");
+}
+
+#[test]
+fn parses_read_only_run_and_help_states_its_limits() {
+    use clap::CommandFactory as _;
+
+    let cli = Cli::try_parse_from([
+        "nh",
+        "run",
+        "review the project",
+        "--read-only",
+        "--autonomy",
+        "auto",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.cmd,
+        Cmd::Run {
+            read_only: true,
+            autonomy: Some(cmd_run::AutonomyArg::Auto),
+            ..
+        }
+    ));
+
+    let mut command = Cli::command();
+    let run = command.find_subcommand_mut("run").expect("run subcommand");
+    let help = run.render_long_help().to_string();
+    assert!(help.contains("--read-only"), "got: {help}");
+    assert!(help.contains("guarded read tools"), "got: {help}");
+    assert!(help.contains("provider costs"), "got: {help}");
+    assert!(help.contains("local receipts"), "got: {help}");
 }
 
 #[test]
@@ -266,9 +368,14 @@ fn parses_profile_overrides_on_live_commands() {
 fn parses_chat_without_an_explicit_model() {
     let cli = Cli::try_parse_from(["nh", "chat"]).unwrap();
     match cli.cmd {
-        Cmd::Chat { model, profile } => {
+        Cmd::Chat {
+            model,
+            profile,
+            mcp_discovery,
+        } => {
             assert_eq!(model, None);
             assert_eq!(profile, "balanced");
+            assert!(!mcp_discovery);
         }
         _ => panic!("expected chat"),
     }
@@ -314,12 +421,29 @@ fn run_max_turns_has_a_human_sized_inclusive_upper_bound() {
 fn parses_chat_with_model_override() {
     let cli = Cli::try_parse_from(["nh", "chat", "--model", "kimi-k2.6"]).unwrap();
     match cli.cmd {
-        Cmd::Chat { model, profile } => {
+        Cmd::Chat {
+            model,
+            profile,
+            mcp_discovery,
+        } => {
             assert_eq!(model.as_deref(), Some("kimi-k2.6"));
             assert_eq!(profile, "balanced");
+            assert!(!mcp_discovery);
         }
         _ => panic!("expected chat"),
     }
+}
+
+#[test]
+fn parses_chat_mcp_discovery_as_explicit_opt_in() {
+    let cli = Cli::try_parse_from(["nh", "chat", "--mcp-discovery"]).unwrap();
+    assert!(matches!(
+        cli.cmd,
+        Cmd::Chat {
+            mcp_discovery: true,
+            ..
+        }
+    ));
 }
 
 #[test]

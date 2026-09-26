@@ -12,8 +12,21 @@ use std::time::Duration;
 
 mod edit;
 mod exec;
+mod file_publication;
 pub mod mcp;
+mod observation;
+mod ranged_read;
 mod search;
+
+use file_publication::{
+    create_edit_temp_file, create_temp_file, publish_create_only, publish_edit, CreatePublication,
+    EditPublication,
+};
+use observation::ReadObservation;
+use ranged_read::RangedReadFile;
+
+#[cfg(test)]
+use file_publication::{publish_create_only_with, publish_edit_with};
 
 #[cfg(test)]
 use exec::{
@@ -22,9 +35,10 @@ use exec::{
 };
 
 pub use mcp::{
-    load_mcp_config, mcp_tools, McpAuth, McpClient, McpServerConfig, McpToolInfo, McpToolset,
-    McpTrust,
+    load_mcp_config, mcp_discovery_tools, mcp_tools, McpAuth, McpClient, McpServerConfig,
+    McpToolInfo, McpToolset, McpTrust,
 };
+pub use observation::{ObservationRetainer, ObservationSession, RetainedObservation};
 pub use search::{GlobFiles, GrepFiles};
 
 /// What a tool is about to do. Write paths are normalized and workdir-relative.
@@ -62,6 +76,17 @@ pub fn policy_guard(policy: nh_law::Policy) -> GuardFn {
     })
 }
 
+/// Compose the run-only read-only boundary with the repository policy.
+/// Read decisions remain policy-owned; every mutating or remote access is blocked.
+pub fn read_only_guard(inner: GuardFn) -> GuardFn {
+    Box::new(move |access| match access {
+        Access::Read(_) => inner(access),
+        Access::Write(_) | Access::Exec(_) | Access::Send(_) => {
+            Guard::Block("read-only run blocks writes, commands, and remote tools".into())
+        }
+    })
+}
+
 /// OpenAI-function-shaped tool description, serialized into requests.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolSpec {
@@ -90,8 +115,26 @@ impl EditMatchTier {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileChangeKind {
+    Created,
+    Edited,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandOutcome {
+    Exited(Option<i32>),
+    Blocked,
+    Denied,
+    CancelledBeforeStart,
+    Cancelled { termination_complete: bool },
+    TimedOut { termination_complete: bool },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolAudit {
     EditMatch(EditMatchTier),
+    FilePublished(FileChangeKind),
+    Command(CommandOutcome),
 }
 
 #[derive(Debug)]
@@ -111,41 +154,47 @@ impl ToolExecution {
 
 pub struct ToolCtx {
     pub workdir: PathBuf,
-    /// Approval gate: called with a human-readable action description before any exec.
+    /// Approval gate: called with a short, namespaced action description before mutation.
     /// Returning false denies the action. UX: the description shown to the user must be
-    /// short, concrete, and scannable (the command itself, not prose around it).
+    /// concrete and scannable.
     pub approve: Box<dyn Fn(&str) -> bool + Send + Sync>,
     pub guard: GuardFn,
     pub scrubber: nh_vault::Scrubber,
     pub cancel: Arc<AtomicBool>,
+    boundary: Arc<()>,
+    observation_session: Option<ObservationSession>,
 }
 
 impl ToolCtx {
-    /// Default guard preserves M0/M1 behavior: edits proceed and exec asks.
-    pub fn new(workdir: PathBuf, approve: Box<dyn Fn(&str) -> bool + Send + Sync>) -> Self {
+    /// Construct a tool boundary with an explicit policy guard and output scrubber.
+    pub fn new(
+        workdir: PathBuf,
+        approve: Box<dyn Fn(&str) -> bool + Send + Sync>,
+        guard: GuardFn,
+        scrubber: nh_vault::Scrubber,
+    ) -> Self {
         Self {
             workdir,
             approve,
-            guard: Box::new(|access| match access {
-                Access::Read(_) => Guard::Allow,
-                Access::Write(_) => Guard::Allow,
-                Access::Exec(_) => Guard::Ask,
-                Access::Send(_) => Guard::Allow,
-            }),
-            scrubber: nh_vault::Scrubber::new(Vec::new()),
+            guard,
+            scrubber,
             cancel: Arc::new(AtomicBool::new(false)),
+            boundary: Arc::new(()),
+            observation_session: None,
         }
     }
 
-    /// Install a policy-backed guard.
+    /// Replace the explicitly supplied guard.
     pub fn with_guard(mut self, guard: GuardFn) -> Self {
         self.guard = guard;
+        self.reset_boundary();
         self
     }
 
-    /// Install the session scrubber so literal vault keys cannot leave through tools.
+    /// Replace the explicitly supplied session scrubber.
     pub fn with_scrubber(mut self, scrubber: nh_vault::Scrubber) -> Self {
         self.scrubber = scrubber;
+        self.reset_boundary();
         self
     }
 
@@ -153,6 +202,41 @@ impl ToolCtx {
     pub fn with_cancel(mut self, cancel: Arc<AtomicBool>) -> Self {
         self.cancel = cancel;
         self
+    }
+
+    /// Bind a run-only retained-observation registry to this exact guard/scrubber boundary.
+    pub fn with_observation_session(mut self, session: ObservationSession) -> anyhow::Result<Self> {
+        if !session.matches(&self) {
+            anyhow::bail!("observation session was created for a different tool boundary");
+        }
+        self.observation_session = Some(session);
+        Ok(self)
+    }
+
+    pub(crate) fn boundary(&self) -> &Arc<()> {
+        &self.boundary
+    }
+
+    pub(crate) fn observation_session(&self) -> Option<&ObservationSession> {
+        self.observation_session.as_ref()
+    }
+
+    /// Clone a scrubber-bound handle for retaining context in this run.
+    pub fn observation_retainer(&self) -> Option<ObservationRetainer> {
+        self.observation_session
+            .as_ref()
+            .map(|session| session.retainer(self.scrubber.clone()))
+    }
+
+    pub(crate) fn has_observation_session(&self, session: &ObservationSession) -> bool {
+        self.observation_session
+            .as_ref()
+            .is_some_and(|active| active.same_session(session))
+    }
+
+    fn reset_boundary(&mut self) {
+        self.boundary = Arc::new(());
+        self.observation_session = None;
     }
 }
 
@@ -167,6 +251,13 @@ pub trait Tool: Send + Sync {
 
 /// args: {"path": string} - read file relative to workdir, refuse escapes above workdir.
 pub struct ReadFile;
+
+/// Operator-selected tool behavior. Repository content cannot enable these flags.
+#[derive(Default, Clone)]
+pub struct ToolFeatures {
+    pub ranged_reads: bool,
+    pub observation_session: Option<ObservationSession>,
+}
 
 /// args: {"path", "content"} - create one new file without replacing an existing path
 /// or creating parent directories.
@@ -191,6 +282,10 @@ const MAX_IMAGE_BYTES: usize = 3_670_016;
 const MAX_TOOL_RESULT_CHARS: usize = 32_000;
 /// Maximum bytes retained from any one file or child-process stream before elision.
 const MAX_TOOL_READ_BYTES: usize = 2 * 1024 * 1024;
+const MAX_RANGED_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_RANGED_LINE_BYTES: usize = 64 * 1024;
+const MAX_RANGED_START_LINE: u64 = 100_000;
+const MAX_RANGED_LINE_COUNT: u64 = 1_000;
 /// Bytes checked at the start of a file before treating it as text.
 const BINARY_SNIFF_BYTES: u64 = 8 * 1024;
 const TOOL_BUFFER_BYTES: usize = 8 * 1024;
@@ -244,6 +339,41 @@ impl ToolResultEnvelope {
 /// SECURITY INVARIANT: tool results pass through the session scrubber before
 /// they can enter the conversation.
 pub(crate) fn render_tool_result(content: String, ctx: &ToolCtx) -> String {
+    let Some(session) = ctx.observation_session() else {
+        return render_tool_result_without_observation(content, ctx);
+    };
+    let scrubbed = ctx.scrubber.scrub(&content);
+    let chars = scrubbed.chars().count();
+    if chars <= MAX_TOOL_RESULT_CHARS {
+        return scrubbed;
+    }
+    match session.capture(&scrubbed) {
+        Ok(captured) => {
+            const INLINE_CHARS: usize = 4_000;
+            let head_chars = INLINE_CHARS / 2;
+            let tail_chars = INLINE_CHARS - head_chars;
+            let head = scrubbed.chars().take(head_chars).collect::<String>();
+            let mut tail = scrubbed.chars().rev().take(tail_chars).collect::<Vec<_>>();
+            tail.reverse();
+            let tail = tail.into_iter().collect::<String>();
+            format!(
+                "{head}\n...[+{} chars omitted from inline excerpt; observation retained: handle={}; scrubbed_bytes={}; chars={}; source tool limits may already have truncated this result; use read_observation {{\"handle\":\"{}\",\"char_offset\":0,\"char_count\":6000}}]\n{tail}",
+                chars.saturating_sub(INLINE_CHARS),
+                captured.handle,
+                captured.bytes,
+                captured.chars,
+                captured.handle,
+            )
+        }
+        Err(error) => format!(
+            "[full observation unavailable: {}]\n{}",
+            error.label(),
+            ToolResultEnvelope::new(content, &ctx.scrubber).render()
+        ),
+    }
+}
+
+pub(crate) fn render_tool_result_without_observation(content: String, ctx: &ToolCtx) -> String {
     ToolResultEnvelope::new(content, &ctx.scrubber).render()
 }
 
@@ -317,11 +447,9 @@ fn normalize_lexically(path: &Path) -> PathBuf {
 /// The returned guard path uses the same resolved path, made relative and joined
 /// with `/` on every platform.
 ///
-/// The write-hold remains sound with case-sensitive globs on case-insensitive
-/// filesystems because `EditFile` only mutates existing files: `canonicalize`
-/// returns their real on-disk case for the guard (for example, `.GIT/config`
-/// becomes `.git/config`). Missing paths retain typed case only in the lexical
-/// branch, then fail with "file not found" before any write.
+/// Protective path-policy matching is ASCII case-insensitive on Windows, so
+/// an existing path's preserved spelling cannot bypass a block or approval rule.
+/// Missing edit paths still fail with "file not found" before any write.
 ///
 /// `WriteFile` closes the missing-path case-folding bypass in
 /// `creation_guard_verdict`: it checks both the typed relative path and its
@@ -538,6 +666,9 @@ impl Tool for ReadFile {
     }
 
     fn execute(&self, args: serde_json::Value, ctx: &ToolCtx) -> anyhow::Result<String> {
+        if args.get("start_line").is_some() || args.get("line_count").is_some() {
+            bail!("ranged read_file is disabled - the operator must pass --enable-ranged-reads");
+        }
         let path = str_arg(&args, "path")?;
         let (resolved, relative) = resolve_in_workdir(&ctx.workdir, path)?;
         match (ctx.guard)(&Access::Read(&relative)) {
@@ -595,255 +726,6 @@ impl Tool for ReadFile {
     }
 }
 
-/// SECURITY INVARIANT: temporary files are created exclusively in the destination directory.
-fn create_temp_file(
-    parent: &Path,
-    prefix: &str,
-    nonce: u128,
-    path_label: &str,
-) -> anyhow::Result<(PathBuf, std::fs::File)> {
-    create_temp_file_with_privacy(parent, prefix, nonce, path_label, false)
-}
-
-fn create_edit_temp_file(
-    parent: &Path,
-    prefix: &str,
-    nonce: u128,
-    path_label: &str,
-) -> anyhow::Result<(PathBuf, std::fs::File)> {
-    create_temp_file_with_privacy(parent, prefix, nonce, path_label, true)
-}
-
-fn create_temp_file_with_privacy(
-    parent: &Path,
-    prefix: &str,
-    nonce: u128,
-    path_label: &str,
-    private_on_unix: bool,
-) -> anyhow::Result<(PathBuf, std::fs::File)> {
-    let mut attempt = 0_u16;
-    loop {
-        if attempt == 1000 {
-            bail!("could not create temporary file for {path_label}");
-        }
-        let candidate = parent.join(format!(
-            "{prefix}{}-{nonce}-{attempt}.tmp",
-            std::process::id()
-        ));
-        let mut options = std::fs::OpenOptions::new();
-        options.create_new(true).write(true);
-        #[cfg(unix)]
-        if private_on_unix {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        #[cfg(not(unix))]
-        let _ = private_on_unix;
-        match options.open(&candidate) {
-            Ok(file) => return Ok((candidate, file)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                attempt += 1;
-            }
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("could not create temporary file for {path_label}"))
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CreatePublication {
-    Published,
-    DestinationExists,
-}
-
-fn remove_staged_file(temp_path: &Path, path_label: &str) -> anyhow::Result<()> {
-    match std::fs::remove_file(temp_path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => bail!("could not clean temporary file for {path_label}: {error}"),
-    }
-}
-
-/// Publish a synced sibling staging file without ever replacing `destination`.
-///
-/// `before_publish` exists only so tests can place a competing file at the exact
-/// publication boundary. Production passes a no-op closure.
-fn publish_create_only_with(
-    temp_path: &Path,
-    destination: &Path,
-    path_label: &str,
-    before_publish: impl FnOnce() -> anyhow::Result<()>,
-) -> anyhow::Result<CreatePublication> {
-    if let Err(error) = before_publish() {
-        return match remove_staged_file(temp_path, path_label) {
-            Ok(()) => Err(error),
-            Err(cleanup) => Err(anyhow::anyhow!("{error}; additionally, {cleanup}")),
-        };
-    }
-
-    match std::fs::hard_link(temp_path, destination) {
-        Ok(()) => {
-            if let Err(cleanup) = remove_staged_file(temp_path, path_label) {
-                bail!("created {path_label}, but temporary-file cleanup failed: {cleanup}");
-            }
-            Ok(CreatePublication::Published)
-        }
-        Err(error) => {
-            let destination_exists = error.kind() == std::io::ErrorKind::AlreadyExists
-                || std::fs::symlink_metadata(destination).is_ok();
-            let cleanup = remove_staged_file(temp_path, path_label);
-            if destination_exists {
-                return match cleanup {
-                    Ok(()) => Ok(CreatePublication::DestinationExists),
-                    Err(cleanup) => Err(anyhow::anyhow!(
-                        "refused: {path_label} already exists; additionally, {cleanup}"
-                    )),
-                };
-            }
-            let failure = anyhow::anyhow!(
-                "could not atomically create {path_label} without replacing an existing path: {error} - check permissions, free space, and filesystem hard-link support"
-            );
-            match cleanup {
-                Ok(()) => Err(failure),
-                Err(cleanup) => Err(anyhow::anyhow!("{failure}; additionally, {cleanup}")),
-            }
-        }
-    }
-}
-
-fn publish_create_only(
-    temp_path: &Path,
-    destination: &Path,
-    path_label: &str,
-) -> anyhow::Result<CreatePublication> {
-    publish_create_only_with(temp_path, destination, path_label, || Ok(()))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EditPublication {
-    Published,
-    Conflict,
-    Cancelled,
-}
-
-fn edit_target_still_matches(
-    destination: &Path,
-    expected: &[u8],
-    expected_metadata: &std::fs::Metadata,
-    path_label: &str,
-) -> anyhow::Result<bool> {
-    let current_metadata = match std::fs::symlink_metadata(destination) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("could not recheck {path_label} before editing"))
-        }
-    };
-    if !current_metadata.file_type().is_file()
-        || current_metadata.len() != expected_metadata.len()
-        || current_metadata.permissions().readonly() != expected_metadata.permissions().readonly()
-    {
-        return Ok(false);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        if current_metadata.permissions().mode() != expected_metadata.permissions().mode() {
-            return Ok(false);
-        }
-    }
-    if let (Ok(expected_modified), Ok(current_modified)) =
-        (expected_metadata.modified(), current_metadata.modified())
-    {
-        if current_modified != expected_modified {
-            return Ok(false);
-        }
-    }
-
-    let mut current = Vec::with_capacity(expected.len().min(TOOL_BUFFER_BYTES));
-    std::fs::File::open(destination)
-        .with_context(|| format!("could not recheck {path_label} before editing"))?
-        .take((MAX_TOOL_READ_BYTES + 1) as u64)
-        .read_to_end(&mut current)
-        .with_context(|| format!("could not recheck {path_label} before editing"))?;
-    Ok(current.len() <= MAX_TOOL_READ_BYTES && current == expected)
-}
-
-/// Best-effort edit conflict detection. The comparison catches cooperative edits
-/// before publication, but an external writer can still race the final rename.
-fn publish_edit_with(
-    temp_path: &Path,
-    destination: &Path,
-    expected: &[u8],
-    expected_metadata: &std::fs::Metadata,
-    path_label: &str,
-    before_check: impl FnOnce() -> anyhow::Result<()>,
-    cancelled_after_check: impl FnOnce() -> bool,
-) -> anyhow::Result<EditPublication> {
-    if let Err(error) = before_check() {
-        return match remove_staged_file(temp_path, path_label) {
-            Ok(()) => Err(error),
-            Err(cleanup) => Err(anyhow::anyhow!("{error}; additionally, {cleanup}")),
-        };
-    }
-    let unchanged =
-        match edit_target_still_matches(destination, expected, expected_metadata, path_label) {
-            Ok(unchanged) => unchanged,
-            Err(error) => {
-                return match remove_staged_file(temp_path, path_label) {
-                    Ok(()) => Err(error),
-                    Err(cleanup) => Err(anyhow::anyhow!("{error}; additionally, {cleanup}")),
-                };
-            }
-        };
-    if !unchanged {
-        return match remove_staged_file(temp_path, path_label) {
-            Ok(()) => Ok(EditPublication::Conflict),
-            Err(cleanup) => Err(anyhow::anyhow!(
-                "refused: {path_label} changed since it was read; additionally, {cleanup}"
-            )),
-        };
-    }
-    if cancelled_after_check() {
-        return match remove_staged_file(temp_path, path_label) {
-            Ok(()) => Ok(EditPublication::Cancelled),
-            Err(cleanup) => Err(anyhow::anyhow!(
-                "turn cancelled before file edit; additionally, {cleanup}"
-            )),
-        };
-    }
-    if let Err(error) = std::fs::rename(temp_path, destination) {
-        let failure = anyhow::anyhow!("could not replace {path_label}: {error}");
-        return match remove_staged_file(temp_path, path_label) {
-            Ok(()) => Err(failure),
-            Err(cleanup) => Err(anyhow::anyhow!("{failure}; additionally, {cleanup}")),
-        };
-    }
-    Ok(EditPublication::Published)
-}
-
-fn publish_edit(
-    temp_path: &Path,
-    destination: &Path,
-    expected: &[u8],
-    expected_metadata: &std::fs::Metadata,
-    path_label: &str,
-    cancelled_after_check: impl FnOnce() -> bool,
-) -> anyhow::Result<EditPublication> {
-    publish_edit_with(
-        temp_path,
-        destination,
-        expected,
-        expected_metadata,
-        path_label,
-        || Ok(()),
-        cancelled_after_check,
-    )
-}
-
 impl Tool for WriteFile {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
@@ -867,10 +749,15 @@ impl Tool for WriteFile {
     }
 
     fn execute(&self, args: serde_json::Value, ctx: &ToolCtx) -> anyhow::Result<String> {
+        self.execute_with_audit(args, ctx)
+            .map(|execution| execution.output)
+    }
+
+    fn execute_with_audit(&self, args: ToolArgs, ctx: &ToolCtx) -> anyhow::Result<ToolExecution> {
         let path = str_arg(&args, "path")?;
         let content = str_arg(&args, "content")?;
         if let Some(cancelled) = cancelled_before("file creation", ctx) {
-            return Ok(cancelled);
+            return Ok(ToolExecution::plain(cancelled));
         }
         let (resolved, relative) = resolve_in_workdir(&ctx.workdir, path)?;
         let parent = resolved.parent().ok_or_else(|| {
@@ -901,37 +788,43 @@ impl Tool for WriteFile {
 
         let verdict = creation_guard_verdict(ctx, &relative, actual_relative.as_deref());
         if let Guard::Block(reason) = &verdict {
-            return Ok(render_tool_result(format!("blocked by law: {reason}"), ctx));
+            return Ok(ToolExecution::plain(render_tool_result(
+                format!("blocked by law: {reason}"),
+                ctx,
+            )));
         }
 
         if initially_exists || path_exists_without_following(&destination, path)? {
-            return Ok(render_tool_result(
+            return Ok(ToolExecution::plain(render_tool_result(
                 format!("refused: {path} already exists - use edit_file to change it"),
                 ctx,
-            ));
+            )));
         }
         if content.len() > MAX_TOOL_READ_BYTES {
             bail!("content too large to write safely (> {MAX_TOOL_READ_BYTES} bytes)");
         }
         if !parent_is_dir {
-            return Ok(render_tool_result(
+            return Ok(ToolExecution::plain(render_tool_result(
                 format!(
                     "refused: parent directory does not exist: {} - create it first",
                     parent_label(&relative)
                 ),
                 ctx,
-            ));
+            )));
         }
         let actual_relative = actual_relative.as_deref().unwrap_or(&relative);
         let destination_label = destination_label(actual_relative, &relative);
         if matches!(verdict, Guard::Ask) {
             let action = format!("create {destination_label}");
             if !(ctx.approve)(&action) {
-                return Ok(render_tool_result(format!("user denied: {action}"), ctx));
+                return Ok(ToolExecution::plain(render_tool_result(
+                    format!("user denied: {action}"),
+                    ctx,
+                )));
             }
         }
         if let Some(cancelled) = cancelled_before("file creation", ctx) {
-            return Ok(cancelled);
+            return Ok(ToolExecution::plain(cancelled));
         }
 
         let destination_parent = destination.parent().ok_or_else(|| {
@@ -967,21 +860,28 @@ impl Tool for WriteFile {
         }
         if let Some(cancelled) = cancelled_before("file creation", ctx) {
             let _ = std::fs::remove_file(&temp_path);
-            return Ok(cancelled);
+            return Ok(ToolExecution::plain(cancelled));
         }
 
-        if publish_create_only(&temp_path, &destination, path)?
-            == CreatePublication::DestinationExists
-        {
-            return Ok(render_tool_result(
-                format!("refused: {path} already exists - use edit_file to change it"),
-                ctx,
+        let cleanup_error = match publish_create_only(&temp_path, &destination, path)? {
+            CreatePublication::DestinationExists => {
+                return Ok(ToolExecution::plain(render_tool_result(
+                    format!("refused: {path} already exists - use edit_file to change it"),
+                    ctx,
+                )))
+            }
+            CreatePublication::Published { cleanup_error } => cleanup_error,
+        };
+        let mut output = format!("created {destination_label} ({} bytes)", content.len());
+        if let Some(cleanup_error) = cleanup_error {
+            output.push_str(&format!(
+                "; file was created, but temporary-file cleanup failed: {cleanup_error}"
             ));
         }
-        Ok(render_tool_result(
-            format!("created {destination_label} ({} bytes)", content.len()),
-            ctx,
-        ))
+        Ok(ToolExecution {
+            output: render_tool_result(output, ctx),
+            audit: vec![ToolAudit::FilePublished(FileChangeKind::Created)],
+        })
     }
 }
 
@@ -1171,22 +1071,81 @@ impl Tool for EditFile {
             || format!("edited {destination_label}"),
             |tier| format!("edited {destination_label} using {} match", tier.label()),
         );
+        let mut audit = tier
+            .into_iter()
+            .map(ToolAudit::EditMatch)
+            .collect::<Vec<_>>();
+        audit.push(ToolAudit::FilePublished(FileChangeKind::Edited));
         Ok(ToolExecution {
             output: render_tool_result(output, ctx),
-            audit: tier.into_iter().map(ToolAudit::EditMatch).collect(),
+            audit,
         })
     }
 }
 
 pub fn builtin_tools() -> Vec<Box<dyn Tool>> {
-    vec![
-        Box::new(ReadFile),
+    builtin_tools_with_features(ToolFeatures::default())
+}
+
+/// Built-in tools filtered by capabilities that the immutable session policy
+/// proves unavailable. Shell execution remains approval-gated whenever present.
+pub fn builtin_tools_for_policy(policy: &nh_law::Policy) -> Vec<Box<dyn Tool>> {
+    builtin_tools_with_features_for_policy(ToolFeatures::default(), policy)
+}
+
+pub fn builtin_tools_with_features(features: ToolFeatures) -> Vec<Box<dyn Tool>> {
+    build_builtin_tools(features, true)
+}
+
+/// Feature-enabled built-ins with the same policy capability filtering as
+/// [`builtin_tools_for_policy`].
+pub fn builtin_tools_with_features_for_policy(
+    features: ToolFeatures,
+    policy: &nh_law::Policy,
+) -> Vec<Box<dyn Tool>> {
+    build_builtin_tools(features, !policy.blocks_all_shell_commands())
+}
+
+fn build_builtin_tools(features: ToolFeatures, include_shell: bool) -> Vec<Box<dyn Tool>> {
+    let mut tools: Vec<Box<dyn Tool>> = vec![
+        read_tool(features.ranged_reads),
         Box::new(WriteFile),
         Box::new(EditFile),
         Box::new(GrepFiles),
         Box::new(GlobFiles),
-        Box::new(ExecShell),
-    ]
+    ];
+    if include_shell {
+        tools.push(Box::new(ExecShell));
+    }
+    if let Some(session) = features.observation_session {
+        tools.push(Box::new(ReadObservation::new(session)));
+    }
+    tools
+}
+
+/// The exact tool registry exposed by `nh run --read-only`.
+pub fn read_only_tools() -> Vec<Box<dyn Tool>> {
+    read_only_tools_with_features(ToolFeatures::default())
+}
+
+pub fn read_only_tools_with_features(features: ToolFeatures) -> Vec<Box<dyn Tool>> {
+    let mut tools: Vec<Box<dyn Tool>> = vec![
+        read_tool(features.ranged_reads),
+        Box::new(GlobFiles),
+        Box::new(GrepFiles),
+    ];
+    if let Some(session) = features.observation_session {
+        tools.push(Box::new(ReadObservation::new(session)));
+    }
+    tools
+}
+
+fn read_tool(ranged_reads: bool) -> Box<dyn Tool> {
+    if ranged_reads {
+        Box::new(RangedReadFile)
+    } else {
+        Box::new(ReadFile)
+    }
 }
 
 #[cfg(test)]

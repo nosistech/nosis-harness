@@ -82,6 +82,33 @@ in flight in a crate, do not edit that crate - coordinate first.
   MCP surface) explicitly in the PR description so they get a security-minded review.
 - By contributing you agree your contribution is licensed under the [MIT License](LICENSE).
 
+## Keep the public repository clean
+
+Keep source in `crates/`, user guides in `docs/`, small runnable examples in
+`examples/`, and development checks in `scripts/`. Build output, Python caches,
+`.env` variants, credentials, runtime `.nosis/` records and internal working notes
+are not public source. Ignore rules do not protect a file that is already tracked.
+
+Stage specific files and inspect `git diff --cached` before committing. Then run:
+
+```sh
+python scripts/check-public-tree.py
+gitleaks git --staged --redact=100 --no-banner
+```
+
+CI checks public paths and runs the pinned Gitleaks scanner. Scanner findings must
+be investigated; never suppress a whole source or test directory just to get green
+checks. A passing scan is evidence, not proof that every possible secret is absent.
+Before pushing, review the outgoing commit history as well as the current tree.
+Push an explicit reviewed branch; local backup/original refs can contain private
+history and must not be published with `--all`, `--mirror` or automatic tag pushes.
+
+## Installation and usability evidence
+
+Use the [installation checklist](docs/INSTALLATION_CHECK.md) and
+[new-user study protocol](docs/USABILITY_CHECK.md) to record actual observations.
+Leave unobserved results pending; passing code checks do not prove usability.
+
 ## Reporting security issues
 
 Do **not** open a public issue for a vulnerability. See [SECURITY.md](SECURITY.md) and

@@ -206,6 +206,13 @@ fn mcp_client(config: McpServerConfig) -> McpClient {
     McpClient::new(config).expect("test HTTP clients initialize")
 }
 
+fn permissive_test_guard() -> crate::GuardFn {
+    Box::new(|access| match access {
+        crate::Access::Exec(_) => crate::Guard::Ask,
+        _ => crate::Guard::Allow,
+    })
+}
+
 fn approving_ctx(answer: bool) -> (ToolCtx, Arc<Mutex<Vec<String>>>) {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let record = Arc::clone(&seen);
@@ -215,6 +222,8 @@ fn approving_ctx(answer: bool) -> (ToolCtx, Arc<Mutex<Vec<String>>>) {
             record.lock().unwrap().push(description.to_string());
             answer
         }),
+        permissive_test_guard(),
+        nh_vault::Scrubber::new(Vec::new()),
     );
     (ctx, seen)
 }
@@ -234,6 +243,14 @@ fn count_method(mock: &MockServer, method: &str) -> usize {
         .iter()
         .filter(|r| r.body["method"] == json!(method))
         .count()
+}
+
+fn named_tool<'a>(set: &'a McpToolset, name: &str) -> &'a dyn Tool {
+    set.tools
+        .iter()
+        .find(|tool| tool.spec().name == name)
+        .map(AsRef::as_ref)
+        .unwrap_or_else(|| panic!("missing tool {name}"))
 }
 
 fn authorization_bearer(request: &Recorded) -> Option<&str> {
@@ -461,6 +478,61 @@ fn public_config_with_legacy_spec_is_rejected_before_network() {
 }
 
 #[test]
+fn client_rejects_literal_link_local_destinations_before_network() {
+    for url in [
+        "http://marker-user@169.254.169.254/mcp?marker-query=1",
+        "http://169.254.42.7/mcp",
+        "http://[fe80::1]/mcp",
+        "http://[::ffff:169.254.169.254]/mcp",
+    ] {
+        let error = McpClient::new(config(url, McpTrust::Ask))
+            .err()
+            .expect("literal metadata destination is rejected")
+            .to_string();
+        assert!(
+            error.contains("literal link-local or metadata server"),
+            "{error}"
+        );
+        assert!(!error.contains("169.254"), "destination leaked: {error}");
+        assert!(!error.contains("marker-user"), "userinfo leaked: {error}");
+        assert!(!error.contains("marker-query"), "query leaked: {error}");
+    }
+
+    let mut oauth = config("http://127.0.0.1:9/mcp", McpTrust::Ask);
+    oauth.auth = McpAuth::OAuth2 {
+        token_url: "http://marker-user@169.254.169.254/token?marker-query=1".into(),
+        client_id: "client".into(),
+        vault_entry: "mock-oauth".into(),
+    };
+    let error = McpClient::new(oauth)
+        .err()
+        .expect("literal metadata token destination is rejected")
+        .to_string();
+    assert!(
+        error.contains("literal link-local or metadata OAuth token"),
+        "{error}"
+    );
+    assert!(!error.contains("169.254"), "destination leaked: {error}");
+    assert!(!error.contains("marker-user"), "userinfo leaked: {error}");
+    assert!(!error.contains("marker-query"), "query leaked: {error}");
+}
+
+#[test]
+fn client_keeps_explicit_loopback_and_private_lan_destinations() {
+    for url in [
+        "http://127.0.0.1:9/mcp",
+        "http://[::1]:9/mcp",
+        "http://10.2.3.4:9/mcp",
+        "http://192.168.50.7:9/mcp",
+    ] {
+        assert!(
+            McpClient::new(config(url, McpTrust::Ask)).is_ok(),
+            "explicit local destination should remain configurable: {url}"
+        );
+    }
+}
+
+#[test]
 fn handle_passes_back_as_ordinary_argument() {
     let mock = start_mock(full_responder);
     let client = mcp_client(config(&mock.url, McpTrust::Ask));
@@ -548,7 +620,7 @@ fn tools_list_is_truncated_to_the_tool_count_cap() {
         let tools = (0..MAX_TOOLS + 1)
             .map(|index| {
                 json!({
-                    "name": format!("tool-{index}"),
+                    "name": format!("tool-{index:04}"),
                     "description": "fixture",
                     "inputSchema": { "type": "object" }
                 })
@@ -561,10 +633,13 @@ fn tools_list_is_truncated_to_the_tool_count_cap() {
     let tools = client.list_tools().unwrap();
 
     assert_eq!(tools.len(), MAX_TOOLS);
-    assert_eq!(tools.first().map(|tool| tool.name.as_str()), Some("tool-0"));
+    assert_eq!(
+        tools.first().map(|tool| tool.name.as_str()),
+        Some("tool-0000")
+    );
     assert_eq!(
         tools.last().map(|tool| tool.name.as_str()),
-        Some("tool-511")
+        Some("tool-0511")
     );
 }
 
@@ -1259,6 +1334,341 @@ fn adapters_are_namespaced_and_described() {
 }
 
 #[test]
+fn server_listing_is_sorted_and_duplicate_names_are_rejected_before_cap() {
+    let mock = start_mock(|request| {
+        let mut tools = (0..MAX_TOOLS)
+            .rev()
+            .map(|index| {
+                json!({
+                    "name": format!("tool_{index:04}"),
+                    "inputSchema": { "type": "object" }
+                })
+            })
+            .collect::<Vec<_>>();
+        tools.push(json!({ "name": "ambiguous", "inputSchema": { "type": "object" } }));
+        tools.push(json!({ "name": "ambiguous", "inputSchema": { "type": "array" } }));
+        rpc_result(request, json!({ "tools": tools }))
+    });
+
+    let tools = mcp_client(config(&mock.url, McpTrust::Ask))
+        .list_tools()
+        .unwrap();
+    let names = tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(names.len(), MAX_TOOLS);
+    assert_eq!(names.first(), Some(&"tool_0000"));
+    assert_eq!(names.last(), Some(&"tool_0511"));
+    assert!(!names.contains(&"ambiguous"));
+}
+
+#[test]
+fn global_exposed_name_collisions_reject_every_ambiguous_adapter() {
+    let left = start_mock(|request| {
+        rpc_result(
+            request,
+            json!({ "tools": [{ "name": "b__c", "inputSchema": { "type": "object" } }] }),
+        )
+    });
+    let right = start_mock(|request| {
+        rpc_result(
+            request,
+            json!({ "tools": [{ "name": "c", "inputSchema": { "type": "object" } }] }),
+        )
+    });
+    let mut left_config = config(&left.url, McpTrust::Ask);
+    left_config.name = "a".into();
+    let mut right_config = config(&right.url, McpTrust::Ask);
+    right_config.name = "a__b".into();
+
+    let set = mcp_tools(&[right_config, left_config], &|_| true);
+
+    assert!(set.tools.is_empty());
+    assert!(set
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("excluded 2 tools") && warning.contains("ambiguous")));
+}
+
+#[test]
+fn fixed_discovery_finds_then_invokes_through_original_approval_adapter() {
+    let mock = start_mock(full_responder);
+    let set = mcp_discovery_tools(&[config(&mock.url, McpTrust::Ask)], &|_| true);
+    let specs = set.tools.iter().map(|tool| tool.spec()).collect::<Vec<_>>();
+    assert_eq!(
+        specs
+            .iter()
+            .map(|spec| spec.name.as_str())
+            .collect::<Vec<_>>(),
+        ["mcp_discover", "mcp_invoke"]
+    );
+    let discover = named_tool(&set, "mcp_discover");
+    let invoke = named_tool(&set, "mcp_invoke");
+    let (denying, approvals) = approving_ctx(false);
+
+    let unknown = invoke
+        .execute(
+            json!({ "name": "mcp__mock__missing", "arguments": {} }),
+            &denying,
+        )
+        .unwrap();
+    assert!(unknown.contains("unknown MCP tool"), "got: {unknown}");
+
+    let before = invoke
+        .execute(
+            json!({ "name": "mcp__mock__shout", "arguments": { "text": "hi" } }),
+            &denying,
+        )
+        .unwrap();
+    assert!(before.contains("run mcp_discover first"), "got: {before}");
+    assert_eq!(count_method(&mock, "tools/call"), 0);
+
+    let result: Value = serde_json::from_str(
+        &discover
+            .execute(json!({ "query": "shout" }), &denying)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(result["returned"], 1);
+    assert_eq!(result["tools"][0]["name"], "mcp__mock__shout");
+    assert_eq!(result["tools"][0]["remote_name"], "shout");
+    assert_eq!(result["tools"][0]["server"], "mock");
+    assert_eq!(result["tools"][0]["status"], "available");
+    assert_eq!(
+        result["tools"][0]["parameters"]["properties"]["text"]["type"],
+        "string"
+    );
+
+    let denied = invoke
+        .execute(
+            json!({ "name": "mcp__mock__shout", "arguments": { "text": "hi" } }),
+            &denying,
+        )
+        .unwrap();
+    assert_eq!(denied, "user denied: mcp mock shout");
+    assert_eq!(approvals.lock().unwrap().len(), 1);
+    assert_eq!(count_method(&mock, "tools/call"), 0);
+
+    let (approving, _) = approving_ctx(true);
+    let invoked = invoke
+        .execute(
+            json!({ "name": "mcp__mock__shout", "arguments": { "text": "hi" } }),
+            &approving,
+        )
+        .unwrap();
+    assert_eq!(invoked, "posted");
+    assert_eq!(count_method(&mock, "tools/call"), 1);
+}
+
+#[test]
+fn discovery_is_sorted_paginated_and_independent_of_server_order() {
+    let a = start_mock(|request| {
+        rpc_result(
+            request,
+            json!({ "tools": [
+                { "name": "three", "description": "third", "inputSchema": { "type": "object" } },
+                { "name": "one", "description": "first", "inputSchema": { "type": "object" } }
+            ] }),
+        )
+    });
+    let z = start_mock(|request| {
+        rpc_result(
+            request,
+            json!({ "tools": [
+                { "name": "two", "description": "second", "inputSchema": { "type": "object" } },
+                { "name": "zero", "description": "zeroth", "inputSchema": { "type": "object" } }
+            ] }),
+        )
+    });
+    let mut a_config = config(&a.url, McpTrust::Ask);
+    a_config.name = "a".into();
+    let mut z_config = config(&z.url, McpTrust::Ask);
+    z_config.name = "z".into();
+
+    let set = mcp_discovery_tools(&[z_config, a_config], &|_| true);
+    let discover = named_tool(&set, "mcp_discover");
+    let (ctx, _) = approving_ctx(true);
+    let first: Value =
+        serde_json::from_str(&discover.execute(json!({ "limit": 2 }), &ctx).unwrap()).unwrap();
+    let second: Value = serde_json::from_str(
+        &discover
+            .execute(json!({ "offset": 2, "limit": 2 }), &ctx)
+            .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        first["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["mcp__a__one", "mcp__a__three"]
+    );
+    assert_eq!(first["next_offset"], 2);
+    assert_eq!(
+        second["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["mcp__z__two", "mcp__z__zero"]
+    );
+    assert!(second["next_offset"].is_null());
+}
+
+#[test]
+fn oversized_discovery_schema_is_visible_but_never_invokable() {
+    let properties = (0..100)
+        .map(|index| {
+            (
+                format!("field_{index:03}"),
+                json!({ "type": "string", "description": "x".repeat(100) }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let mock = start_mock(move |request| {
+        rpc_result(
+            request,
+            json!({ "tools": [{
+                "name": "huge",
+                "description": "large schema",
+                "inputSchema": { "type": "object", "properties": properties }
+            }] }),
+        )
+    });
+    let set = mcp_discovery_tools(&[config(&mock.url, McpTrust::Auto)], &|_| true);
+    let (ctx, _) = approving_ctx(true);
+    let discovered: Value = serde_json::from_str(
+        &named_tool(&set, "mcp_discover")
+            .execute(json!({}), &ctx)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        discovered["tools"][0]["status"],
+        "unavailable_metadata_too_large"
+    );
+    assert!(discovered["tools"][0]["parameters"].is_null());
+
+    let refused = named_tool(&set, "mcp_invoke")
+        .execute(json!({ "name": "mcp__mock__huge", "arguments": {} }), &ctx)
+        .unwrap();
+    assert!(refused.contains("run mcp_discover first"), "got: {refused}");
+    assert_eq!(count_method(&mock, "tools/call"), 0);
+}
+
+#[test]
+fn discovery_structurally_scrubs_schema_before_encoding() {
+    let literal = "fixture-secret-\"quoted\\path";
+    let secret_key = literal.to_string();
+    let secret_value = literal.to_string();
+    let mock = start_mock(move |request| {
+        rpc_result(
+            request,
+            json!({ "tools": [{
+                "name": "safe",
+                "description": secret_value,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        secret_key.clone(): { "type": "string", "description": secret_key }
+                    }
+                }
+            }] }),
+        )
+    });
+    let set = mcp_discovery_tools(&[config(&mock.url, McpTrust::Ask)], &|_| true);
+    let (ctx, _) = approving_ctx(true);
+    let ctx = ctx.with_scrubber(nh_vault::Scrubber::new(vec![literal.to_string()]));
+
+    let output = named_tool(&set, "mcp_discover")
+        .execute(json!({}), &ctx)
+        .unwrap();
+    let decoded: Value = serde_json::from_str(&output).unwrap();
+
+    assert!(!output.contains(literal));
+    assert_eq!(decoded["tools"][0]["description"], "[REDACTED]");
+    assert!(decoded["tools"][0]["parameters"]["properties"]
+        .get("[REDACTED]")
+        .is_some());
+}
+
+#[test]
+fn deferred_invocation_rechecks_send_guard_cancellation_and_scrubs_result() {
+    const LITERAL: &str = "mcp-deferred-result-fixture";
+    let mock = start_mock(|request| match request.body["method"].as_str() {
+        Some("tools/list") => rpc_result(request, mock_tools_result(None)),
+        Some("tools/call") => rpc_result(
+            request,
+            json!({ "content": [{ "type": "text", "text": LITERAL }] }),
+        ),
+        _ => rpc_result(request, Value::Null),
+    });
+    let set = mcp_discovery_tools(&[config(&mock.url, McpTrust::Auto)], &|_| true);
+    let discover = named_tool(&set, "mcp_discover");
+    let invoke = named_tool(&set, "mcp_invoke");
+    let (ctx, _) = approving_ctx(true);
+    discover.execute(json!({ "query": "peek" }), &ctx).unwrap();
+
+    let (blocked, _) = approving_ctx(true);
+    let blocked = blocked.with_guard(Box::new(|access| match access {
+        crate::Access::Send(_) => crate::Guard::Block("revoked".into()),
+        _ => crate::Guard::Allow,
+    }));
+    assert_eq!(
+        invoke
+            .execute(
+                json!({ "name": "mcp__mock__peek", "arguments": {} }),
+                &blocked,
+            )
+            .unwrap(),
+        "blocked by law: revoked"
+    );
+    assert_eq!(count_method(&mock, "tools/call"), 0);
+
+    let cancel = Arc::new(AtomicBool::new(true));
+    let (cancelled, _) = approving_ctx(true);
+    let cancelled = cancelled.with_cancel(cancel);
+    assert_eq!(
+        invoke
+            .execute(
+                json!({ "name": "mcp__mock__peek", "arguments": {} }),
+                &cancelled,
+            )
+            .unwrap(),
+        "turn cancelled before MCP tool call"
+    );
+    assert_eq!(count_method(&mock, "tools/call"), 0);
+
+    let (allowed, _) = approving_ctx(true);
+    let allowed = allowed.with_scrubber(nh_vault::Scrubber::new(vec![LITERAL.to_string()]));
+    let output = invoke
+        .execute(
+            json!({ "name": "mcp__mock__peek", "arguments": {} }),
+            &allowed,
+        )
+        .unwrap();
+    assert_eq!(output, "[REDACTED]");
+    assert_eq!(count_method(&mock, "tools/call"), 1);
+}
+
+#[test]
+fn discovery_mode_reports_blocked_server_without_contact_or_wrapper_tools() {
+    let mock = start_mock(full_responder);
+    let set = mcp_discovery_tools(&[config(&mock.url, McpTrust::Block)], &|_| true);
+
+    assert!(set.tools.is_empty());
+    assert_eq!(set.warnings.len(), 1);
+    assert!(set.warnings[0].contains("blocked by .nosis/mcp.toml"));
+    assert!(mock.recorded.lock().unwrap().is_empty());
+}
+
+#[test]
 fn unsafe_or_oversized_remote_tool_names_are_never_offered() {
     let oversized = "x".repeat(54);
     let mock = start_mock(move |request| {
@@ -1447,6 +1857,8 @@ fn cancellation_after_approval_stops_mcp_call_before_network_send() {
             cancel_on_approval.store(true, Ordering::Release);
             true
         }),
+        permissive_test_guard(),
+        nh_vault::Scrubber::new(Vec::new()),
     )
     .with_cancel(cancel);
 

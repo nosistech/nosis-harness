@@ -332,6 +332,36 @@ fn render_buffer(app: &App, width: u16, height: u16) -> ratatui::buffer::Buffer 
     terminal.backend().buffer().clone()
 }
 
+fn rendered_help_pages(app: &mut App, width: u16, height: u16) -> String {
+    let mut pages = Vec::new();
+    for _ in 0..64 {
+        pages.push(buffer_text(&render_buffer(app, width, height)));
+        let before = app.help_scroll.get();
+        if before == app.help_max_scroll.get() {
+            break;
+        }
+        reduce_key(app, code_key(KeyCode::PageDown));
+        assert!(app.help_scroll.get() > before);
+    }
+    pages.join("\n")
+}
+
+fn rendered_waiting_transcript_pages(app: &mut App, width: u16, height: u16) -> String {
+    let mut pages = Vec::new();
+    for _ in 0..256 {
+        pages.push(buffer_text(&render_buffer(app, width, height)));
+        let before = app.scroll_back;
+        if before == app.max_scroll.get() {
+            break;
+        }
+        reduce_key(app, code_key(KeyCode::PageUp));
+        assert!(app.scroll_back > before);
+        assert_eq!(app.status, Status::Waiting);
+        assert!(app.pending_approval.is_some());
+    }
+    pages.join("\n")
+}
+
 fn buffer_rows(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
     let width = usize::from(buffer.area.width);
     buffer
@@ -403,6 +433,19 @@ fn approval(prompt: &str) -> (AgentEvent, Receiver<bool>) {
     (
         AgentEvent::Approval(ApprovalRequest {
             prompt: prompt.into(),
+            repeat_key: Some(prompt.into()),
+            reply,
+        }),
+        answers,
+    )
+}
+
+fn approval_once(prompt: &str) -> (AgentEvent, Receiver<bool>) {
+    let (reply, answers) = mpsc::channel();
+    (
+        AgentEvent::Approval(ApprovalRequest {
+            prompt: prompt.into(),
+            repeat_key: None,
             reply,
         }),
         answers,
@@ -612,11 +655,8 @@ fn budget_reached_hint_bar_omits_enter_send() {
     let app = test_app(Some(0));
     assert!(app.budget_reached());
     let rendered = buffer_text(&render_buffer(&app, 90, 20));
-    assert!(
-        rendered
-            .contains("/ commands   ↑↓ scroll   Ctrl+F search   Ctrl+C interrupt / clear / exit"),
-        "got: {rendered}"
-    );
+    assert!(rendered.contains("F1 help"), "got: {rendered}");
+    assert!(rendered.contains("/ commands"), "got: {rendered}");
     assert!(!rendered.contains("Enter send"), "got: {rendered}");
 }
 
@@ -625,70 +665,302 @@ fn idle_hint_bar_keeps_enter_send() {
     let app = test_app(None);
     assert!(!app.budget_reached());
     let rendered = buffer_text(&render_buffer(&app, 90, 20));
-    assert!(
-        rendered.contains(
-            "/ commands   ↑↓ scroll   Ctrl+F search   Enter send   Ctrl+C interrupt / clear / exit"
-        ),
-        "got: {rendered}"
-    );
+    assert!(rendered.contains("F1 help"), "got: {rendered}");
+    assert!(rendered.contains("Enter send"), "got: {rendered}");
 }
 
 #[test]
-fn help_overlay_and_hint_bar_render_from_the_same_binding_table() {
+fn help_overlay_renders_binding_details_and_hint_bar_renders_state_actions() {
     let mut app = test_app(None);
     let base = buffer_text(&render_buffer(&app, 100, 24));
-    let expected_hint = key_hint_line(false, false);
+    let expected_hint = key_hint_line(false, false, false, false, 98);
     assert!(base.contains(&expected_hint), "got: {base}");
     assert!(!base.contains("Ctrl+P"), "got: {base}");
     assert!(!base.contains("Ctrl+N"), "got: {base}");
 
+    let (event, _answer) = approval("exec cargo test --workspace");
+    apply_event(&mut app, event);
+    assert_eq!(app.status, Status::Waiting);
     assert_eq!(
         reduce_key(&mut app, code_key(KeyCode::F(1))),
         UiAction::None
     );
     assert_eq!(app.overlay, Overlay::Help);
-    let help = buffer_text(&render_buffer(&app, 100, 24));
-    assert!(help.contains("Help · read-only"), "got: {help}");
-    assert!(help.contains("Keys for the current state"), "got: {help}");
+    let rendered_help = rendered_help_pages(&mut app, 100, 24);
+    let help = rendered_help
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(help.contains("Help"), "got: {help}");
+    assert!(
+        help.contains("Esc stop + close · ↑/↓ scroll · PgUp/PgDn page"),
+        "got: {help}"
+    );
     assert!(help.contains("Ctrl+P"), "got: {help}");
     assert!(help.contains("Ctrl+N"), "got: {help}");
-    for binding in visible_key_bindings(false, false) {
-        let description = format!("{}{}", binding.action, binding.detail);
+    for binding in visible_key_bindings(false, true) {
         assert!(
             help.contains(binding.keys),
-            "missing {:?}: {help}",
+            "missing key {:?}: {help}",
             binding.keys
         );
-        assert!(
-            help.contains(&description),
-            "missing {description:?}: {help}"
+        let detail = format!(
+            "{}  {}{}",
+            binding.display_keys(TerminalCapability::Unicode),
+            binding.action,
+            binding.detail
         );
+        let wrapped = wrap_help_line(&detail, 72);
+        assert_eq!(wrapped.concat(), detail);
+        for line in wrapped {
+            assert!(
+                rendered_help.contains(&line),
+                "missing detail line {line:?}: {rendered_help}"
+            );
+        }
     }
 }
 
 #[test]
-fn f1_help_renders_at_eighty_columns_and_a_smaller_terminal() {
-    for (width, height) in [(80, 20), (40, 10)] {
+fn f1_help_pages_all_controls_at_normal_and_small_terminal_sizes() {
+    for (width, height) in [(80, 24), (60, 15)] {
         let mut app = test_app(None);
         assert_eq!(
             reduce_key(&mut app, code_key(KeyCode::F(1))),
             UiAction::None
         );
 
-        let help = buffer_text(&render_buffer(&app, width, height));
+        let first = buffer_text(&render_buffer(&app, width, height));
 
         assert_eq!(app.overlay, Overlay::Help);
-        assert!(help.contains("Help"), "{width}x{height}: {help}");
-        assert!(help.contains("Keys for"), "{width}x{height}: {help}");
-        assert!(help.contains("commands"), "{width}x{height}: {help}");
-        assert!(help.contains("scroll"), "{width}x{height}: {help}");
-        if width == 80 {
-            assert!(
-                help.contains("Shift+Enter/Ctrl+J"),
-                "{width}x{height}: {help}"
-            );
-        }
+        assert!(first.contains("Help"), "{width}x{height}: {first}");
+        assert!(first.contains("Esc close"), "{width}x{height}: {first}");
+        assert!(
+            first.contains("PgUp/PgDn page"),
+            "{width}x{height}: {first}"
+        );
+        let all = rendered_help_pages(&mut app, width, height);
+        assert!(
+            all.contains("Shift+Enter/Ctrl+J"),
+            "{width}x{height}: {all}"
+        );
+        assert!(all.contains("F2 / F3 / F4"), "{width}x{height}: {all}");
+
+        reduce_key(&mut app, code_key(KeyCode::End));
+        let old_max = app.help_max_scroll.get();
+        assert_eq!(app.help_scroll.get(), old_max);
+        let _ = render_buffer(&app, 80, 24);
+        assert!(app.help_scroll.get() <= app.help_max_scroll.get());
+        assert_eq!(reduce_key(&mut app, code_key(KeyCode::Esc)), UiAction::None);
+        assert_eq!(app.overlay, Overlay::None);
     }
+}
+
+#[test]
+fn narrow_hint_bar_prioritizes_help_and_the_current_state_actions() {
+    let width_31 = key_hint_line(false, true, true, true, 31);
+    let width_43 = key_hint_line(false, true, true, true, 43);
+    let width_60 = key_hint_line(false, true, true, true, 60);
+    assert_eq!(width_31, "F1 help   Esc stop   F4 decline");
+    assert_eq!(width_43, width_31);
+    assert_eq!(
+        width_60,
+        "F1 help   Esc stop   F4 decline   F2 approve   F3 repeat"
+    );
+    for hints in [&width_31, &width_43, &width_60] {
+        assert!(hints.contains("F4 decline"), "got: {hints}");
+        assert!(
+            !hints.contains("F3 repeat") || hints.contains("F2 approve"),
+            "repeat must never outrank approve: {hints}"
+        );
+    }
+
+    let idle = buffer_text(&render_buffer(&test_app(None), 60, 15));
+    assert!(idle.contains("F1 help"), "got: {idle}");
+    assert!(idle.contains("Enter send"), "got: {idle}");
+
+    let mut working = test_app(None);
+    working.status = Status::Working;
+    let working = buffer_text(&render_buffer(&working, 60, 15));
+    assert!(working.contains("F1 help"), "got: {working}");
+    assert!(working.contains("Esc stop"), "got: {working}");
+    assert!(working.contains("Enter queue"), "got: {working}");
+
+    let mut repeat_app = test_app(None);
+    repeat_app.status = Status::Working;
+    let (event, _answer) = approval("exec cargo test --workspace");
+    apply_event(&mut repeat_app, event);
+    let approval = buffer_text(&render_buffer(&repeat_app, 60, 15));
+    for hint in [
+        "F1 help",
+        "Esc stop",
+        "F2 approve",
+        "F3 repeat",
+        "F4 decline",
+    ] {
+        assert!(approval.contains(hint), "missing {hint:?}: {approval}");
+    }
+
+    let mut once_app = test_app(None);
+    once_app.status = Status::Working;
+    let (event, _answer) = approval_once("edit src/lib.rs");
+    apply_event(&mut once_app, event);
+    let once = buffer_text(&render_buffer(&once_app, 60, 15));
+    for hint in ["F1 help", "Esc stop", "F2 approve", "F4 decline"] {
+        assert!(once.contains(hint), "missing {hint:?}: {once}");
+    }
+    assert!(!once.contains("F3 repeat"), "got: {once}");
+}
+
+#[test]
+fn help_escape_preserves_stop_semantics_while_idle_escape_only_closes() {
+    let mut idle = test_app(None);
+    reduce_key(&mut idle, code_key(KeyCode::F(1)));
+    let _ = render_buffer(&idle, 60, 15);
+    assert_eq!(
+        reduce_key(&mut idle, code_key(KeyCode::Esc)),
+        UiAction::None
+    );
+    assert_eq!(idle.overlay, Overlay::None);
+    assert_eq!(idle.status, Status::Idle);
+
+    let mut working = test_app(None);
+    working.status = Status::Working;
+    reduce_key(&mut working, code_key(KeyCode::F(1)));
+    let help = buffer_text(&render_buffer(&working, 60, 15));
+    assert!(help.contains("Esc stop + close"), "got: {help}");
+    assert_eq!(
+        reduce_key(&mut working, code_key(KeyCode::Esc)),
+        UiAction::Interrupt
+    );
+    assert_eq!(working.overlay, Overlay::None);
+    assert_eq!(working.status, Status::FinishingInterrupted);
+}
+
+#[test]
+fn f1_closes_help_without_interrupting_work_or_forwarding_approval_keys() {
+    for status in [Status::Working, Status::Waiting] {
+        let mut app = test_app(None);
+        app.status = Status::Working;
+        let waiting = status == Status::Waiting;
+        if waiting {
+            let (event, answer) = approval("cargo test");
+            apply_event(&mut app, event);
+            assert_eq!(app.status, Status::Waiting);
+            assert_eq!(answer.try_recv(), Err(TryRecvError::Empty));
+        }
+
+        reduce_key(&mut app, code_key(KeyCode::F(1)));
+        assert_eq!(app.overlay, Overlay::Help);
+        let help = buffer_text(&render_buffer(&app, 60, 15));
+        assert!(help.contains("F1 close"), "got: {help}");
+        if waiting {
+            assert_eq!(
+                reduce_key(&mut app, code_key(KeyCode::F(2))),
+                UiAction::None
+            );
+            assert_eq!(
+                reduce_key(&mut app, code_key(KeyCode::F(3))),
+                UiAction::None
+            );
+            assert!(app.pending_approval.is_some());
+            assert!(app.session_allow.is_empty());
+        }
+        assert_eq!(
+            reduce_key(&mut app, code_key(KeyCode::F(1))),
+            UiAction::None
+        );
+        assert_eq!(app.overlay, Overlay::None);
+        assert_eq!(app.status, status);
+    }
+}
+
+#[test]
+fn every_overlay_labels_escape_as_stop_when_the_turn_is_active() {
+    let mut idle = test_app(None);
+    idle.overlay = Overlay::Search {
+        query: String::new(),
+        selected: 0,
+        original_scroll: 0,
+    };
+    let idle = buffer_text(&render_buffer(&idle, 80, 24));
+    assert!(idle.contains("Esc cancel"), "got: {idle}");
+    assert!(!idle.contains("Esc stop + close"), "got: {idle}");
+
+    for status in [Status::Working, Status::Waiting] {
+        let mut app = test_app(None);
+        app.status = status;
+        app.overlay = Overlay::Picker {
+            kind: PickerKind::Model,
+            selected: 0,
+            rows: vec![crate::state::PickerRow {
+                value: "test-route".into(),
+                label: "test route".into(),
+            }],
+        };
+        let picker = buffer_text(&render_buffer(&app, 80, 24));
+        assert!(picker.contains("Esc stop + close"), "got: {picker}");
+        assert!(!picker.contains("Esc cancel"), "got: {picker}");
+
+        app.overlay = Overlay::Search {
+            query: String::new(),
+            selected: 0,
+            original_scroll: 0,
+        };
+        let search = buffer_text(&render_buffer(&app, 80, 24));
+        assert!(search.contains("Esc stop + close"), "got: {search}");
+        assert!(!search.contains("Esc cancel"), "got: {search}");
+    }
+}
+
+#[test]
+fn project_identity_is_scrubbed_fitted_and_recoverable_from_help() {
+    let mut app = test_app(None);
+    app.project_root = Some(PathBuf::from(
+        "/workspace/very long unicode Ω 项目 project name that exceeds the header",
+    ));
+
+    let idle_header = buffer_rows(&render_buffer(&app, 60, 15))[0].clone();
+    assert!(idle_header.contains("○ IDLE"), "got: {idle_header}");
+    assert!(idle_header.contains("very"), "got: {idle_header}");
+
+    for (status, marker) in [
+        (Status::Working, "● WORKING"),
+        (Status::Waiting, "● WAITING ON YOU"),
+        (Status::Blocked("policy".into()), "● BLOCKED"),
+    ] {
+        app.status = status;
+        let header = buffer_rows(&render_buffer(&app, 60, 15))[0].clone();
+        assert!(header.contains(marker), "missing {marker:?}: {header}");
+        assert!(header.contains("test-route"), "route hidden: {header}");
+    }
+
+    app.status = Status::Idle;
+    reduce_key(&mut app, code_key(KeyCode::F(1)));
+    let help = rendered_help_pages(&mut app, 60, 15);
+    for visible in [
+        "Project:",
+        "workspace",
+        "unicode",
+        "Ω",
+        "项",
+        "目",
+        "exceeds",
+        "header",
+    ] {
+        assert!(help.contains(visible), "missing {visible:?}: {help}");
+    }
+}
+
+#[test]
+fn help_path_wrapping_preserves_repeated_spaces_and_wide_characters() {
+    let path = "Project: C:\\My  Project\\项目  notes";
+    let wrapped = wrap_help_line(path, 12);
+
+    assert_eq!(wrapped.concat(), path);
+    assert!(wrapped
+        .iter()
+        .all(|line| Line::from(line.as_str()).width() <= 12));
 }
 
 #[test]
@@ -697,19 +969,19 @@ fn esc_binding_reaches_both_key_surfaces_only_when_it_can_interrupt() {
         let mut app = test_app(None);
         app.status = status;
         let base = buffer_text(&render_buffer(&app, 120, 24));
-        assert!(!base.contains("Esc interrupt"), "got: {base}");
+        assert!(!base.contains("Esc stop"), "got: {base}");
         reduce_key(&mut app, code_key(KeyCode::F(1)));
-        let help = buffer_text(&render_buffer(&app, 120, 24));
-        assert!(!help.contains("Esc         interrupt"), "got: {help}");
+        let help = rendered_help_pages(&mut app, 120, 24);
+        assert!(!help.contains("Esc interrupt"), "got: {help}");
     }
 
     for status in [Status::Working, Status::Waiting] {
         let mut app = test_app(None);
         app.status = status;
         let base = buffer_text(&render_buffer(&app, 120, 24));
-        assert!(base.contains("Esc interrupt"), "got: {base}");
+        assert!(base.contains("Esc stop"), "got: {base}");
         reduce_key(&mut app, code_key(KeyCode::F(1)));
-        let help = buffer_text(&render_buffer(&app, 120, 24));
+        let help = rendered_help_pages(&mut app, 120, 24);
         assert!(
             help.contains("interrupt the turn; close overlays; decline approvals"),
             "got: {help}"
@@ -984,9 +1256,7 @@ fn failed_blocked_hint_bar_keeps_enter_send_when_budget_remains() {
 
     let rendered = buffer_text(&render_buffer(&app, 90, 20));
     assert!(
-        rendered.contains(
-            "/ commands   ↑↓ scroll   Ctrl+F search   Enter send   Ctrl+C interrupt / clear / exit"
-        ),
+        rendered.contains("F1 help") && rendered.contains("Enter send"),
         "got: {rendered}"
     );
 }
@@ -1132,9 +1402,7 @@ fn empty_state_and_key_strip_are_self_teaching_then_conversation_replaces_welcom
         "got: {fresh}"
     );
     assert!(
-        fresh.contains(
-            "/ commands   ↑↓ scroll   Ctrl+F search   Enter send   Ctrl+C interrupt / clear / exit"
-        ),
+        fresh.contains("F1 help") && fresh.contains("Enter send"),
         "got: {fresh}"
     );
 
@@ -1145,9 +1413,7 @@ fn empty_state_and_key_strip_are_self_teaching_then_conversation_replaces_welcom
     assert!(active.contains("❯ you"), "got: {active}");
     assert!(active.contains("   start"), "got: {active}");
     assert!(
-        active.contains(
-            "/ commands   ↑↓ scroll   Ctrl+F search   Enter send   Ctrl+C interrupt / clear / exit"
-        ),
+        active.contains("F1 help") && active.contains("Enter queue"),
         "got: {active}"
     );
 }
@@ -1170,7 +1436,7 @@ fn modal_frames_clear_transcript_for_every_overlay() {
             modal_area(terminal, 14),
             "Commands",
         ),
-        (Overlay::Help, modal_area(terminal, 22), "Help · read-only"),
+        (Overlay::Help, modal_area(terminal, 22), "Help"),
         (
             Overlay::TrustDial,
             modal_area(terminal, 8),
@@ -1332,9 +1598,17 @@ fn ascii_mode_preserves_model_answer_content() {
 
     apply_event(&mut app, AgentEvent::Answer(answer.into()));
 
-    let displayed = app.transcript.last().unwrap();
+    let displayed = app
+        .transcript
+        .iter()
+        .find(|line| line.kind == TranscriptKind::Answer)
+        .expect("model answer remains a distinct transcript entry");
     assert!(displayed.kind == TranscriptKind::Answer);
     assert_eq!(displayed.text, answer);
+
+    let notice = app.transcript.last().unwrap();
+    assert!(notice.kind == TranscriptKind::Progress);
+    assert_eq!(notice.text, nh_core::agent::result_notice(false));
 }
 
 #[test]
@@ -1452,10 +1726,7 @@ fn unicode_mode_preserves_existing_main_transcript_and_overlay_glyphs() {
     let overlay = render_buffer(&app, 100, 30);
     assert_plain_modal_ring(&overlay, modal_area(Rect::new(0, 0, 100, 30), 22));
     let overlay_text = buffer_text(&overlay);
-    assert!(
-        overlay_text.contains("Help \u{b7} read-only"),
-        "got: {overlay_text}"
-    );
+    assert!(overlay_text.contains("Help"), "got: {overlay_text}");
 }
 
 #[test]
@@ -1533,6 +1804,10 @@ fn reducer_drives_every_semaforo_transition() {
         apply_event(&mut app, AgentEvent::Answer("done".into())),
         &Status::Idle
     );
+    assert!(app.transcript.iter().any(|line| {
+        line.kind == TranscriptKind::Progress
+            && line.text.contains("Result not independently verified")
+    }));
 
     app.input = "second task".into();
     app.dispatch().unwrap();
@@ -1821,12 +2096,9 @@ fn approval_forwards_yes_and_no_then_returns_to_working() {
 #[test]
 fn approval_reducer_accepts_only_explicit_choices() {
     for (key, expected) in [
-        (KeyCode::Char('y'), true),
-        (KeyCode::Char('Y'), true),
-        (KeyCode::Char('a'), true),
-        (KeyCode::Char('A'), true),
-        (KeyCode::Char('n'), false),
-        (KeyCode::Char('N'), false),
+        (KeyCode::F(2), true),
+        (KeyCode::F(3), true),
+        (KeyCode::F(4), false),
     ] {
         let mut app = test_app(None);
         app.status = Status::Working;
@@ -1841,22 +2113,44 @@ fn approval_reducer_accepts_only_explicit_choices() {
         assert_eq!(app.input, "queued draft");
         assert!(app.pending_send);
     }
+}
 
+#[test]
+fn typing_paste_and_enter_across_approval_arrival_preserve_the_queued_draft() {
     let mut app = test_app(None);
     app.status = Status::Working;
-    type_text(&mut app, "queued draft");
-    reduce_key(&mut app, code_key(KeyCode::Enter));
-    let (event, answer) = approval("cargo test --workspace");
+    type_text(&mut app, "next ");
+    let (event, answer) = approval("exec cargo test --workspace");
     apply_event(&mut app, event);
+
+    type_text(&mut app, "yan");
     assert_eq!(
-        reduce_key(&mut app, code_key(KeyCode::Char('x'))),
+        reduce_input_event(&mut app, Event::Paste(" pasted".into())),
         UiAction::None
     );
+    assert_eq!(
+        reduce_key(&mut app, code_key(KeyCode::Enter)),
+        UiAction::None
+    );
+
     assert_eq!(answer.try_recv(), Err(TryRecvError::Empty));
     assert!(app.pending_approval.is_some());
     assert_eq!(app.status, Status::Waiting);
-    assert_eq!(app.input, "queued draft");
+    assert_eq!(app.input, "next yan pasted");
     assert!(app.pending_send);
+
+    reduce_key(&mut app, code_key(KeyCode::F(4)));
+    assert!(!answer.recv().unwrap());
+    assert_eq!(app.status, Status::Working);
+    assert_eq!(app.input, "next yan pasted");
+    assert!(app.pending_send);
+
+    let (_, first) = reduce_agent_event(&mut app, AgentEvent::Answer("finished".into()));
+    assert_eq!(first, UiAction::Dispatch("next yan pasted".into()));
+    assert!(app.input.is_empty());
+    assert!(!app.pending_send);
+    let (_, second) = reduce_agent_event(&mut app, AgentEvent::Answer("finished again".into()));
+    assert_eq!(second, UiAction::None);
 }
 
 #[test]
@@ -1930,15 +2224,53 @@ fn ctrl_c_declines_a_pending_approval_before_interrupting() {
 }
 
 #[test]
-fn approval_reducer_ignores_non_shift_modifiers() {
-    for character in ['a', 'y', 'n'] {
+fn approval_reducer_ignores_modified_function_keys() {
+    for (code, modifiers) in [
+        (KeyCode::F(2), KeyModifiers::SHIFT),
+        (KeyCode::F(3), KeyModifiers::CONTROL),
+        (KeyCode::F(4), KeyModifiers::ALT),
+    ] {
         let mut app = test_app(None);
         app.status = Status::Working;
-        let (event, answer) = approval("cargo test --workspace");
+        let (event, answer) = approval("exec cargo test --workspace");
         apply_event(&mut app, event);
 
-        let key = KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL);
+        let key = KeyEvent::new(code, modifiers);
         assert_eq!(reduce_key(&mut app, key), UiAction::None);
+        assert_eq!(answer.try_recv(), Err(TryRecvError::Empty));
+        assert!(app.pending_approval.is_some());
+        assert_eq!(app.status, Status::Waiting);
+    }
+
+    for character in ['a', 'y'] {
+        let mut app = test_app(None);
+        app.status = Status::Working;
+        let (event, answer) = approval("exec cargo test --workspace");
+        apply_event(&mut app, event);
+
+        assert_eq!(reduce_key(&mut app, ctrl_key(character)), UiAction::None);
+        assert_eq!(answer.try_recv(), Err(TryRecvError::Empty));
+        assert!(app.pending_approval.is_some());
+        assert_eq!(app.status, Status::Waiting);
+    }
+}
+
+#[test]
+fn non_press_approval_key_events_are_ignored() {
+    for (code, kind) in [
+        (KeyCode::F(2), crossterm::event::KeyEventKind::Repeat),
+        (KeyCode::F(4), crossterm::event::KeyEventKind::Release),
+    ] {
+        let mut app = test_app(None);
+        app.status = Status::Working;
+        let (event, answer) = approval("exec cargo test --workspace");
+        apply_event(&mut app, event);
+
+        let key = KeyEvent::new_with_kind(code, KeyModifiers::NONE, kind);
+        assert_eq!(
+            reduce_input_event(&mut app, Event::Key(key)),
+            UiAction::None
+        );
         assert_eq!(answer.try_recv(), Err(TryRecvError::Empty));
         assert!(app.pending_approval.is_some());
         assert_eq!(app.status, Status::Waiting);
@@ -1954,7 +2286,7 @@ fn approval_interlude_preserves_the_task_heartbeat_origin() {
     apply_event(&mut app, event);
 
     assert_eq!(app.working_since, Some(started));
-    reduce_key(&mut app, char_key('y'));
+    reduce_key(&mut app, code_key(KeyCode::F(2)));
     assert!(answer.recv().unwrap());
     assert_eq!(app.working_since, Some(started));
 
@@ -1964,20 +2296,12 @@ fn approval_interlude_preserves_the_task_heartbeat_origin() {
 
 #[test]
 fn approval_always_records_and_auto_approves_identical_action() {
-    let mut uppercase = test_app(None);
-    uppercase.status = Status::Working;
-    let (event, answer) = approval("cargo test");
-    apply_event(&mut uppercase, event);
-    reduce_key(&mut uppercase, char_key('A'));
-    assert!(answer.recv().unwrap());
-    assert_eq!(uppercase.session_allow, vec!["cargo test"]);
-
     let mut app = test_app(None);
     app.status = Status::Working;
-    let action = "cargo test --workspace";
+    let action = "exec cargo test --workspace";
     let (first, first_answer) = approval(action);
     apply_event(&mut app, first);
-    reduce_key(&mut app, char_key('a'));
+    reduce_key(&mut app, code_key(KeyCode::F(3)));
     assert!(first_answer.recv().unwrap());
     assert_eq!(app.session_allow, vec![action]);
 
@@ -1993,6 +2317,46 @@ fn approval_always_records_and_auto_approves_identical_action() {
 }
 
 #[test]
+fn ineligible_approval_cannot_save_or_match_a_session_repeat_rule() {
+    let mut app = test_app(None);
+    app.status = Status::Working;
+    let display = "exec deploy [REDACTED]";
+    let (first, first_answer) = approval_once(display);
+    apply_event(&mut app, first);
+
+    let rendered = buffer_text(&render_buffer(&app, 80, 24));
+    assert!(rendered.contains("[F2] approve once"), "got: {rendered}");
+    assert!(!rendered.contains("[F3]"), "got: {rendered}");
+    assert!(!rendered.contains("F3 repeat"), "got: {rendered}");
+    reduce_key(&mut app, code_key(KeyCode::F(3)));
+    assert_eq!(first_answer.try_recv(), Err(TryRecvError::Empty));
+    assert!(app.pending_approval.is_some());
+    assert!(app.session_allow.is_empty());
+    assert_eq!(app.status, Status::Waiting);
+    assert_eq!(
+        app.transcript.last().unwrap().text,
+        "repeat unavailable; choose F2 to approve once or F4 to decline"
+    );
+    reduce_key(&mut app, code_key(KeyCode::F(2)));
+    assert!(first_answer.recv().unwrap());
+
+    app.session_allow.push(display.into());
+    let (second, second_answer) = approval_once(display);
+    apply_event(&mut app, second);
+    assert_eq!(second_answer.try_recv(), Err(TryRecvError::Empty));
+    assert!(app.pending_approval.is_some());
+    assert_eq!(app.status, Status::Waiting);
+
+    reduce_key(&mut app, code_key(KeyCode::F(1)));
+    let help = rendered_help_pages(&mut app, 80, 24);
+    assert!(
+        help.contains("F2 / F4") && help.contains("repeat unavailable"),
+        "got: {help}"
+    );
+    assert!(!help.contains("F2 / F3 / F4"), "got: {help}");
+}
+
+#[test]
 fn approval_row_names_the_command_and_is_amber_reversed() {
     let mut app = test_app(None);
     app.status = Status::Working;
@@ -2001,12 +2365,21 @@ fn approval_row_names_the_command_and_is_amber_reversed() {
 
     let buffer = render_buffer(&app, 100, 20);
     let text = buffer_text(&buffer);
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let (x, y) = find_ascii_text(&buffer, "approve:");
     let cell = &buffer[(x, y)];
     assert!(
-        text.contains(
-            "approve: cargo test --workspace   [y] yes  [a] always  [n] no  [Esc] no + cancel turn"
-        ),
+        normalized.contains("approve: cargo test --workspace"),
+        "got: {text}"
+    );
+    assert!(normalized.contains("[F2] approve once"), "got: {text}");
+    assert!(
+        normalized.contains("[F3] repeat identical shell command this"),
+        "got: {text}"
+    );
+    assert!(normalized.contains("[F4] decline"), "got: {text}");
+    assert!(
+        normalized.contains("[Esc] decline + stop turn"),
         "got: {text}"
     );
     assert!(!APPROVAL_LEGEND.contains("interrupt"));
@@ -2029,24 +2402,65 @@ fn approval_row_keeps_the_full_action_and_visible_legend() {
 }
 
 #[test]
-fn approval_row_at_width_79_elides_the_action_before_the_legend() {
-    let mut app = test_app(None);
-    app.status = Status::Working;
-    let action = format!("exec {}", "x".repeat(700));
-    let (event, _answer) = approval(&action);
-    apply_event(&mut app, event);
+fn long_approval_wraps_without_loss_and_waiting_scroll_keeps_the_choice_pending() {
+    let markers = (0..80)
+        .map(|index| format!("approval-segment-{index:03}"))
+        .collect::<Vec<_>>();
+    let action = format!("exec {}", markers.join(" "));
 
-    let max_text_width = 79_usize - 2 - 2;
-    let fixed = format!("approve:    {APPROVAL_LEGEND}");
-    let fitted_action = fit_with_ellipsis(
-        &action,
-        max_text_width.saturating_sub(Line::from(fixed).width()),
-    );
-    let expected = format!("approve: {fitted_action}   {APPROVAL_LEGEND}");
-    let rendered = buffer_text(&render_buffer(&app, 79, 20));
+    for (width, height) in [(80, 24), (40, 20)] {
+        let mut app = test_app(None);
+        app.status = Status::Working;
+        let (event, answer) = approval(&action);
+        apply_event(&mut app, event);
 
-    assert!(rendered.contains(&expected), "got: {rendered}");
-    assert!(!rendered.contains(&action), "got: {rendered}");
+        let rendered = rendered_waiting_transcript_pages(&mut app, width, height);
+        let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+        for marker in &markers {
+            assert!(
+                rendered.contains(marker),
+                "{width}x{height} missing {marker:?}: {rendered}"
+            );
+        }
+        for legend in [
+            "[F2]",
+            "approve",
+            "once",
+            "[F3]",
+            "repeat",
+            "identical",
+            "shell",
+            "command",
+            "this",
+            "session",
+            "[F4]",
+            "decline",
+            "[Esc]",
+            "stop",
+            "turn",
+        ] {
+            assert!(
+                normalized.contains(legend),
+                "{width}x{height} missing {legend:?}: {rendered}"
+            );
+        }
+        let stored = app
+            .transcript
+            .iter()
+            .find(|line| line.kind == TranscriptKind::Approval)
+            .unwrap();
+        assert!(stored.text.contains(&action));
+        assert!(stored.text.contains(APPROVAL_LEGEND));
+        assert!(!stored.text.contains('…'));
+        assert_eq!(answer.try_recv(), Err(TryRecvError::Empty));
+
+        let before = app.scroll_back;
+        reduce_key(&mut app, code_key(KeyCode::PageDown));
+        assert!(app.scroll_back < before);
+        assert_eq!(answer.try_recv(), Err(TryRecvError::Empty));
+        reduce_key(&mut app, code_key(KeyCode::F(2)));
+        assert!(answer.recv().unwrap());
+    }
 }
 
 #[test]
@@ -2152,7 +2566,7 @@ fn unknown_billed_turn_refuses_session_money_and_token_numbers() {
     assert!(!hud.contains("in 0"), "got: {hud}");
     assert_eq!(timeline_row(&app.timeline[0]), "#1  fail  usage unknown");
     assert_eq!(
-        timeline_detail_lines(&app.timeline[0])[9],
+        timeline_detail_lines(&app.timeline[0])[10],
         "tokens: unavailable - usage unknown"
     );
 }
@@ -2175,8 +2589,8 @@ fn partial_timeline_usage_is_a_lower_bound_without_a_cache_claim() {
         Default::default(),
     );
 
-    assert_eq!(timeline_row(&entry), "#1  pass  ~10/~2 lower bound");
-    let detail = &timeline_detail_lines(&entry)[9];
+    assert_eq!(timeline_row(&entry), "#1  completed  ~10/~2 lower bound");
+    let detail = &timeline_detail_lines(&entry)[10];
     assert_eq!(detail, "tokens: ~10 in / ~2 out - lower bound");
     assert!(!detail.contains("cache"));
 }
@@ -2229,7 +2643,10 @@ fn completed_timeline_row_renders_measured_duration_without_an_estimate_marker()
 
     let rendered = buffer_text(&render_buffer(&app, 180, 20));
 
-    assert!(rendered.contains("#1  pass  1.234s"), "got: {rendered}");
+    assert!(
+        rendered.contains("#1  completed  1.234s"),
+        "got: {rendered}"
+    );
     assert!(rendered.contains("duration: 1.234s"), "got: {rendered}");
     assert!(!rendered.contains("~1.234s"), "got: {rendered}");
 }
@@ -2253,9 +2670,9 @@ fn completed_timeline_row_without_duration_omits_it_instead_of_rendering_zero() 
 
     let rendered = buffer_text(&render_buffer(&app, 180, 20));
 
-    assert!(
-        rendered.contains("#1  pass  usage unreported"),
-        "got: {rendered}"
+    assert_eq!(
+        timeline_row(&app.timeline[0]),
+        "#1  completed  usage unreported"
     );
     assert!(!rendered.contains("duration:"), "got: {rendered}");
     assert!(!rendered.contains("  0s"), "got: {rendered}");
@@ -2887,6 +3304,36 @@ fn working_state_keeps_all_scroll_keys_live_while_text_remains_editable() {
 }
 
 #[test]
+fn waiting_approval_keeps_multiline_navigation_and_transcript_paging_distinct() {
+    let mut app = test_app(None);
+    app.status = Status::Working;
+    app.max_scroll.set(20);
+    app.input = "top\nbottom".into();
+    let (event, answer) = approval("exec cargo test --workspace");
+    apply_event(&mut app, event);
+
+    reduce_key(&mut app, code_key(KeyCode::Up));
+    assert_eq!(app.input_cursor_index(), 3);
+    assert_eq!(app.scroll_back, 0);
+    reduce_key(&mut app, code_key(KeyCode::Down));
+    assert_eq!(app.input_cursor_index(), 7);
+    reduce_key(&mut app, code_key(KeyCode::PageUp));
+    assert_eq!(app.scroll_back, 5);
+    reduce_key(&mut app, code_key(KeyCode::PageDown));
+    assert_eq!(app.scroll_back, 0);
+    reduce_key(&mut app, code_key(KeyCode::End));
+    assert_eq!(app.input_cursor_index(), app.input.len());
+
+    app.input.clear();
+    app.input_cursor = None;
+    app.scroll_back = 5;
+    reduce_key(&mut app, code_key(KeyCode::End));
+    assert_eq!(app.scroll_back, 0);
+    assert_eq!(answer.try_recv(), Err(TryRecvError::Empty));
+    assert!(app.pending_approval.is_some());
+}
+
+#[test]
 fn wrapped_rows_matches_word_wrap_and_keeps_the_newest_line_reachable() {
     let lines = vec![Line::from("123456 123456 123456"), Line::from("newest")];
     assert_eq!(wrapped_rows(&lines, 10), 4);
@@ -3412,14 +3859,14 @@ fn ctrl_f_and_search_command_share_the_same_overlay_path() {
         } if query.is_empty()
     ));
     assert!(via_command.input.is_empty());
-    assert!(builtin_palette_entries()
+    assert!(builtin_palette_entries(false)
         .iter()
         .any(|entry| entry.name == "/search"));
 }
 
 #[test]
 fn palette_filter_is_pure_and_finds_exec_shell() {
-    let entries = builtin_palette_entries();
+    let entries = builtin_palette_entries(false);
     let before = entries.clone();
     let filtered = filter_palette(&entries, "ex");
 
@@ -3435,6 +3882,10 @@ fn palette_filter_is_pure_and_finds_exec_shell() {
     assert!(filter_palette(&entries, "timeline")
         .iter()
         .any(|entry| entry.name == "/timeline"));
+
+    let denied = builtin_palette_entries(true);
+    assert!(!denied.iter().any(|entry| entry.name == "exec_shell"));
+    assert!(denied.iter().any(|entry| entry.name == "read_file"));
 }
 
 #[test]
@@ -3942,9 +4393,9 @@ fn cost_hud_and_timeline_distinguish_absent_cache_from_measured_zero() {
         "done".into(),
         Default::default(),
     );
-    assert_eq!(timeline_row(&absent_entry), "#1  pass  20/2");
+    assert_eq!(timeline_row(&absent_entry), "#1  completed  20/2");
     assert_eq!(
-        timeline_detail_lines(&absent_entry)[9],
+        timeline_detail_lines(&absent_entry)[10],
         "tokens: 20 in / 2 out"
     );
 
@@ -3957,9 +4408,12 @@ fn cost_hud_and_timeline_distinguish_absent_cache_from_measured_zero() {
         "done".into(),
         Default::default(),
     );
-    assert_eq!(timeline_row(&measured_entry), "#1  pass  20/2/0 cache 0%");
     assert_eq!(
-        timeline_detail_lines(&measured_entry)[9],
+        timeline_row(&measured_entry),
+        "#1  completed  20/2/0 cache 0%"
+    );
+    assert_eq!(
+        timeline_detail_lines(&measured_entry)[10],
         "tokens: 20 in / 2 out / 0 cached | cache 0%"
     );
 }
@@ -4441,7 +4895,7 @@ fn default_compaction_keeps_timeline_and_hud_copy_exact() {
 
     assert_eq!(
         timeline_row(&app.timeline[0]),
-        "#1  pass  100000/50000/90000 cache 90%"
+        "#1  completed  100000/50000/90000 cache 90%"
     );
     assert_eq!(
         timeline_detail_lines(&app.timeline[0]),
@@ -4451,7 +4905,8 @@ fn default_compaction_keeps_timeline_and_hud_copy_exact() {
             "model: test-route",
             "task: plain",
             "kind: task",
-            "outcome: pass",
+            "execution outcome: completed",
+            "verification: not recorded",
             "agent turns: 3",
             "tool calls: 2",
             "failure class: none",
@@ -5204,8 +5659,8 @@ fn rendered_timeline_scrubs_every_receipt_and_answer_line() {
 #[test]
 fn identity_constitution_is_stable_and_names_the_route_honestly() {
     let route = test_route();
-    let first = identity_constitution("law bytes", &route);
-    let second = identity_constitution("law bytes", &route);
+    let first = identity_constitution("law bytes", &route, false);
+    let second = identity_constitution("law bytes", &route, false);
 
     assert_eq!(first, second);
     assert!(first.contains("test-route"), "got: {first}");
@@ -5216,6 +5671,10 @@ fn identity_constitution_is_stable_and_names_the_route_honestly() {
         "got: {first}"
     );
     assert!(first.ends_with("law bytes"), "got: {first}");
+
+    let denied = identity_constitution("law bytes", &route, true);
+    assert!(denied.contains(nh_core::agent::SHELL_UNAVAILABLE_SESSION_NOTICE));
+    assert!(denied.ends_with("law bytes"), "got: {denied}");
 }
 
 struct MockClient {
@@ -5228,6 +5687,7 @@ struct RecordedRequest {
     message_count: usize,
     system: String,
     history: Vec<(String, String)>,
+    tools: Vec<String>,
     effort: ThinkingEffort,
 }
 
@@ -5340,6 +5800,7 @@ impl ChatClient for RecordingClient {
                     )
                 })
                 .collect(),
+            tools: request.tools.iter().map(|tool| tool.name.clone()).collect(),
             effort: request.thinking,
         });
         let mut message = request.messages.last().cloned().expect("user message");
@@ -5771,7 +6232,7 @@ fn real_worker_and_ledger_replay_mark_a_measured_plus_unmetered_session() {
             .expect("the real turn should carry its measured duration"),
     );
     let row = timeline_row(&app.timeline[1]);
-    assert_eq!(row, format!("#2  pass  {duration}  usage unreported"));
+    assert_eq!(row, format!("#2  completed  {duration}  usage unreported"));
     assert!(!duration.contains('~'));
     let detail = timeline_detail_lines(&app.timeline[1]);
     assert!(detail.contains(&format!("duration: {duration}")));
@@ -6280,6 +6741,7 @@ fn restored_worker_sends_restored_history_on_first_request() {
     assert_eq!(restored.turns.len(), 1);
     let restored_message_count = restored.history.len();
     let restored_system = restored.history[0].content.clone().unwrap();
+    std::fs::write(root.join(".nosis/law.toml"), "[exec]\nblock = [\"*\"]\n").unwrap();
 
     let resumed_requests = Arc::new(Mutex::new(Vec::new()));
     let requests_for_connect = Arc::clone(&resumed_requests);
@@ -6308,6 +6770,10 @@ fn restored_worker_sends_restored_history_on_first_request() {
     .unwrap();
     resumed_worker
         .commands
+        .send(WorkerCommand::SwitchRoute(Box::new(test_route())))
+        .unwrap();
+    resumed_worker
+        .commands
         .send(WorkerCommand::Task("after interruption".into()))
         .unwrap();
     receive_completed_task(&resumed_worker, &mut test_app(None));
@@ -6315,14 +6781,101 @@ fn restored_worker_sends_restored_history_on_first_request() {
     assert_eq!(resumed_worker.shutdown(), WorkerShutdown::Clean);
     let requests = resumed_requests.lock().unwrap();
     assert_eq!(requests.len(), 1, "requests: {requests:#?}");
-    assert_eq!(requests[0].message_count, restored_message_count + 1);
+    assert_eq!(requests[0].message_count, restored_message_count + 2);
     assert_eq!(requests[0].system, restored_system);
     assert_eq!(requests[0].history[0].0, "system");
     assert_eq!(requests[0].history[0].1, restored_system);
     assert_eq!(requests[0].history[1].1, "before interruption");
     assert_eq!(requests[0].history[2].1, "ok");
+    assert_eq!(requests[0].history[3].0, "system");
+    assert_eq!(
+        requests[0].history[3].1,
+        nh_core::agent::SHELL_UNAVAILABLE_SESSION_NOTICE
+    );
+    assert_eq!(requests[0].history[4].1, "after interruption");
+    assert_eq!(
+        requests[0]
+            .history
+            .iter()
+            .filter(|(_, content)| {
+                content.contains(nh_core::agent::SHELL_UNAVAILABLE_SESSION_NOTICE)
+            })
+            .count(),
+        1,
+        "reselecting the current route must preserve one pending correction"
+    );
+    assert!(!requests[0].tools.iter().any(|tool| tool == "exec_shell"));
+    assert!(requests[0].tools.iter().any(|tool| tool == "edit_file"));
     drop(requests);
-    assert_eq!(read_session(&root, &session_id).unwrap().turns.len(), 2);
+    let denied_history = read_session(&root, &session_id).unwrap();
+    assert_eq!(denied_history.turns.len(), 2);
+
+    std::fs::remove_file(root.join(".nosis/law.toml")).unwrap();
+    let restored_requests = Arc::new(Mutex::new(Vec::new()));
+    let requests_for_connect = Arc::clone(&restored_requests);
+    let restored_connect: ConnectFn = Box::new(move |_, _| {
+        Ok((
+            Box::new(RecordingClient {
+                requests: Arc::clone(&requests_for_connect),
+            }),
+            nh_vault::secret("fake-worker-secret"),
+        ))
+    });
+    let law = nh_law::load(&root, &nh_law::LoadOptions { cli_autonomy: None });
+    let mut restored_worker = spawn_worker(WorkerConfig {
+        route: test_route(),
+        profiles: Profiles::bundled(),
+        active_profile: "balanced".into(),
+        budget: None,
+        law,
+        repo_root: root.clone(),
+        workdir: root.clone(),
+        scrubber: Arc::new(RwLock::new(Scrubber::new(Vec::new()))),
+        connect: restored_connect,
+        initial: None,
+        resume: Some(denied_history),
+    })
+    .unwrap();
+    restored_worker
+        .commands
+        .send(WorkerCommand::SwitchRoute(Box::new(
+            test_resolver().resolve("other-route").unwrap(),
+        )))
+        .unwrap();
+    restored_worker
+        .commands
+        .send(WorkerCommand::Task("after shell restoration".into()))
+        .unwrap();
+    receive_completed_task(&restored_worker, &mut test_app(None));
+    assert_eq!(restored_worker.shutdown(), WorkerShutdown::Clean);
+
+    let requests = restored_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "requests: {requests:#?}");
+    assert_eq!(requests[0].model, "other-route");
+    let route_context = requests[0]
+        .history
+        .iter()
+        .find(|(role, content)| role == "system" && content.contains("nosis on other-route"))
+        .expect("switched route context");
+    assert_eq!(
+        route_context
+            .1
+            .matches(nh_core::agent::SHELL_AVAILABLE_SESSION_NOTICE)
+            .count(),
+        1
+    );
+    assert_eq!(
+        requests[0]
+            .history
+            .iter()
+            .filter(|(_, content)| {
+                content.contains(nh_core::agent::SHELL_AVAILABLE_SESSION_NOTICE)
+            })
+            .count(),
+        1
+    );
+    assert!(requests[0].tools.iter().any(|tool| tool == "exec_shell"));
+    drop(requests);
     std::fs::remove_dir_all(root).unwrap();
 }
 

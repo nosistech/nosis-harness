@@ -263,7 +263,7 @@ fn test_session_from_catalog(
     let profiles = Profiles::bundled();
     let execution_policy = profiles.effective("balanced", &route);
     let law_constitution = "test constitution\n";
-    let constitution = cmd_run::agent_constitution(law_constitution, &route);
+    let constitution = cmd_run::agent_constitution(law_constitution, &route, false);
     let (client, literal) = connect(&route, execution_policy.output_cap).unwrap();
     let last_request_usage = LastRequestUsage::default();
     let mut key_literals = SecretRegistry::new();
@@ -284,7 +284,15 @@ fn test_session_from_catalog(
     let agent = AgentLoop {
         client: last_request_usage.wrap(client),
         tools: builtin_tools(),
-        ctx: ToolCtx::new(tmp.to_path_buf(), Box::new(|_| false)),
+        ctx: ToolCtx::new(
+            tmp.to_path_buf(),
+            Box::new(|_| false),
+            Box::new(|access| match access {
+                nh_tools::Access::Exec(_) => nh_tools::Guard::Ask,
+                _ => nh_tools::Guard::Allow,
+            }),
+            test_scrubber.clone(),
+        ),
         receipts: ReceiptWriter::for_path(tmp, tmp.join("receipts.jsonl"), test_scrubber.clone()),
         model_id: route.model_id().to_owned(),
         max_turns: 20,
@@ -329,6 +337,7 @@ fn test_session_from_catalog(
         dropped_torn_tail: false,
         constitution_changed: false,
         pending_route_context: None,
+        shell_unavailable: false,
     };
     (session, calls)
 }
@@ -710,6 +719,10 @@ fn footer_after_each_answer_has_route_peak_and_session_tokens() {
     assert!(
         err.contains("cost <¥0.0001 (≈<$0.0001) - saved 15% vs no-cache"),
         "turn cost on stderr: {err}"
+    );
+    assert!(
+        err.contains(result_notice(false)),
+        "verification notice on stderr: {err}"
     );
     assert_eq!(
         footer(&s),
@@ -1235,6 +1248,160 @@ fn chat_resume_round_trip_preserves_history_and_appends_same_ledger() {
             .count(),
         1,
         "resume must not mint a second ledger"
+    );
+}
+
+#[test]
+fn resumed_chat_tracks_shell_capability_transitions_without_duplicate_context() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut live, _) = test_session("deepseek-v4-flash", tmp.path());
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    run_task(&mut live, "before shell denial", &mut out, &mut err);
+    let restored = read_session(tmp.path(), "test-session").unwrap();
+    let old_history_len = restored.history.len();
+    std::fs::write(
+        tmp.path().join(".nosis/law.toml"),
+        "[exec]\nblock = [\"*\"]\n",
+    )
+    .unwrap();
+
+    let (mut reopened, _) = reopen_test_session(restored, tmp.path());
+    assert!(reopened.shell_unavailable);
+    assert!(!reopened
+        .agent
+        .tools
+        .iter()
+        .any(|tool| tool.spec().name == "exec_shell"));
+    assert!(reopened
+        .agent
+        .constitution
+        .as_deref()
+        .is_some_and(|content| {
+            content.contains(nh_core::agent::SHELL_UNAVAILABLE_SESSION_NOTICE)
+                && content.ends_with(reopened.law_constitution.as_str())
+        }));
+    assert_eq!(
+        reopened
+            .pending_route_context
+            .as_ref()
+            .and_then(|message| message.content.as_deref()),
+        Some(nh_core::agent::SHELL_UNAVAILABLE_SESSION_NOTICE)
+    );
+
+    run_task(&mut reopened, "after shell denial", &mut out, &mut err);
+    assert_eq!(
+        reopened.history[old_history_len].content.as_deref(),
+        Some(nh_core::agent::SHELL_UNAVAILABLE_SESSION_NOTICE)
+    );
+    assert_eq!(
+        reopened.history[old_history_len + 1].content.as_deref(),
+        Some("after shell denial")
+    );
+
+    let restored_again = read_session(tmp.path(), "test-session").unwrap();
+    let (reopened_again, _) = reopen_test_session(restored_again.clone(), tmp.path());
+    assert!(
+        reopened_again.pending_route_context.is_none(),
+        "the persisted notice must not be queued again"
+    );
+
+    std::fs::remove_file(tmp.path().join(".nosis/law.toml")).unwrap();
+    let (mut shell_restored, _) = reopen_test_session(restored_again, tmp.path());
+    assert!(!shell_restored.shell_unavailable);
+    assert!(shell_restored
+        .agent
+        .tools
+        .iter()
+        .any(|tool| tool.spec().name == "exec_shell"));
+    assert_eq!(
+        shell_restored
+            .pending_route_context
+            .as_ref()
+            .and_then(|message| message.content.as_deref()),
+        Some(nh_core::agent::SHELL_AVAILABLE_SESSION_NOTICE)
+    );
+    let pending_before_same_route = shell_restored
+        .pending_route_context
+        .as_ref()
+        .and_then(|message| message.content.clone());
+    let same_route = shell_restored
+        .resolver
+        .resolve(shell_restored.route.id())
+        .unwrap();
+    switch_to(&mut shell_restored, same_route, &mut out, &mut err);
+    assert_eq!(
+        shell_restored
+            .pending_route_context
+            .as_ref()
+            .and_then(|message| message.content.clone()),
+        pending_before_same_route,
+        "reselecting the current route must preserve a pending capability correction"
+    );
+
+    let sealed_history_len = shell_restored.history.len();
+    let next_route = shell_restored.resolver.resolve("kimi-k2.6").unwrap();
+    switch_to(&mut shell_restored, next_route, &mut out, &mut err);
+    let switched_context = shell_restored
+        .pending_route_context
+        .as_ref()
+        .and_then(|message| message.content.as_deref())
+        .unwrap();
+    assert!(switched_context.contains("nosis on kimi-k2.6"));
+    assert_eq!(
+        switched_context
+            .matches(nh_core::agent::SHELL_AVAILABLE_SESSION_NOTICE)
+            .count(),
+        1
+    );
+    run_task(
+        &mut shell_restored,
+        "after shell restoration",
+        &mut out,
+        &mut err,
+    );
+    assert_eq!(
+        shell_restored.history[sealed_history_len]
+            .content
+            .as_deref()
+            .unwrap()
+            .matches(nh_core::agent::SHELL_AVAILABLE_SESSION_NOTICE)
+            .count(),
+        1
+    );
+
+    let restored_available = read_session(tmp.path(), "test-session").unwrap();
+    let (available_again, _) = reopen_test_session(restored_available.clone(), tmp.path());
+    assert!(
+        available_again.pending_route_context.is_none(),
+        "the persisted availability correction must not be queued again"
+    );
+
+    std::fs::write(
+        tmp.path().join(".nosis/law.toml"),
+        "[exec]\nblock = [\"**\"]\n",
+    )
+    .unwrap();
+    let (mut denied_again, _) = reopen_test_session(restored_available, tmp.path());
+    assert_eq!(
+        denied_again
+            .pending_route_context
+            .as_ref()
+            .and_then(|message| message.content.as_deref()),
+        Some(nh_core::agent::SHELL_UNAVAILABLE_SESSION_NOTICE)
+    );
+    let next_route = denied_again.resolver.resolve("kimi-k2.6").unwrap();
+    switch_to(&mut denied_again, next_route, &mut out, &mut err);
+    let denied_context = denied_again
+        .pending_route_context
+        .as_ref()
+        .and_then(|message| message.content.as_deref())
+        .unwrap();
+    assert_eq!(
+        denied_context
+            .matches(nh_core::agent::SHELL_UNAVAILABLE_SESSION_NOTICE)
+            .count(),
+        1
     );
 }
 
@@ -1863,7 +2030,7 @@ fn missing_mcp_toml_means_no_tools_and_no_warnings() {
     let tmp = tempfile::tempdir().unwrap();
     let mut warnings = Vec::new();
     let law = nh_law::load(tmp.path(), &LoadOptions { cli_autonomy: None });
-    let tools = load_mcp(tmp.path(), None, &law.policy, &mut warnings);
+    let tools = load_mcp(tmp.path(), None, &law.policy, false, &mut warnings);
     assert!(tools.is_empty());
     assert!(warnings.is_empty(), "got: {warnings:?}");
 }
@@ -1875,7 +2042,7 @@ fn broken_mcp_toml_is_one_warning_and_chat_continues() {
     std::fs::write(tmp.path().join(".nosis").join("mcp.toml"), "not [ valid").unwrap();
     let mut warnings = Vec::new();
     let law = nh_law::load(tmp.path(), &LoadOptions { cli_autonomy: None });
-    let tools = load_mcp(tmp.path(), None, &law.policy, &mut warnings);
+    let tools = load_mcp(tmp.path(), None, &law.policy, false, &mut warnings);
     assert!(tools.is_empty());
     assert_eq!(warnings.len(), 1, "exactly one warning: {warnings:?}");
     assert!(

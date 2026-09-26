@@ -2,9 +2,9 @@
 
 use crate::session::safe_line;
 use crate::state::{AgentEvent, App, Status, TimelineEntry, TranscriptKind};
-use crate::APPROVAL_LEGEND;
+use crate::{APPROVAL_LEGEND, APPROVAL_ONCE_LEGEND};
 use chrono::{DateTime, TimeZone, Utc};
-use nh_core::agent::CompactionEvent;
+use nh_core::agent::{result_notice, CompactionEvent};
 use nh_core::cost::{
     compaction_cost, turn_cost, CompactionCostVerdict, TurnCostVerdict, PRICE_VERIFY_LIVE,
 };
@@ -15,7 +15,7 @@ use nh_routes::{ResolvedRoute, RouteClass, RouteResolver, LOCAL_METER_COPY};
 
 pub(super) fn outcome_name(outcome: Outcome) -> &'static str {
     match outcome {
-        Outcome::Pass => "pass",
+        Outcome::Pass => "completed",
         Outcome::Fail => "fail",
         Outcome::Partial => "partial",
         Outcome::Skip => "skip",
@@ -137,7 +137,8 @@ pub(super) fn timeline_detail_lines_for(
                 "task"
             }
         ),
-        format!("outcome: {}", outcome_name(entry.outcome)),
+        format!("execution outcome: {}", outcome_name(entry.outcome)),
+        "verification: not recorded".to_owned(),
         format!("agent turns: {}", entry.turns),
         format!("tool calls: {}", entry.tool_calls),
     ];
@@ -276,7 +277,11 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
             }
         }
         AgentEvent::Approval(request) => {
-            if app.session_allow.contains(&request.prompt) {
+            if request
+                .repeat_key
+                .as_ref()
+                .is_some_and(|key| app.session_allow.contains(key))
+            {
                 let _ = request.reply.send(true);
                 app.push_content_line(
                     &format!("auto-approved (session rule): {}", request.prompt),
@@ -284,7 +289,12 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
                 );
                 app.set_status(Status::Working, Utc::now());
             } else {
-                let line = format!("approve: {}   {APPROVAL_LEGEND}", request.prompt);
+                let legend = if request.repeat_key.is_some() {
+                    APPROVAL_LEGEND
+                } else {
+                    APPROVAL_ONCE_LEGEND
+                };
+                let line = format!("approve: {}   {legend}", request.prompt);
                 app.push_approval_line(&line);
                 app.pending_approval = Some(request);
                 app.set_status(Status::Waiting, Utc::now());
@@ -339,6 +349,7 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
             app.active_model = None;
             app.active_tool = None;
             app.push_text("", &answer, TranscriptKind::Answer);
+            app.push_line(result_notice(false), TranscriptKind::Progress);
             let status = if let Some(reason) = app.budget_block_reason() {
                 Status::Blocked(reason.into())
             } else {

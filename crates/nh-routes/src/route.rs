@@ -43,6 +43,8 @@ pub enum ThinkingDialect {
     AlwaysThinkingEffort,
     /// GLM thinking High/Max only.
     GlmHm,
+    /// GLM forced thinking with Low/High/Max effort; provider default is Max.
+    GlmAlwaysThinkingEffort,
     /// No effort toggle for this route.
     None,
 }
@@ -55,6 +57,7 @@ impl ThinkingDialect {
             Self::AlwaysThinking => "always-thinking",
             Self::AlwaysThinkingEffort => "always-thinking-effort",
             Self::GlmHm => "glm-hm",
+            Self::GlmAlwaysThinkingEffort => "glm-always-thinking-effort",
             Self::None => "none",
         }
     }

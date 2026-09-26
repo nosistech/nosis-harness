@@ -401,7 +401,11 @@ pub struct App {
     pub(super) scroll_back: usize,
     pub(super) max_scroll: Cell<usize>,
     pub(super) search_match_scroll: Cell<usize>,
+    pub(super) help_scroll: Cell<usize>,
+    pub(super) help_max_scroll: Cell<usize>,
+    pub(super) help_page_rows: Cell<usize>,
     pub(super) scrubber: SharedScrubber,
+    pub(super) project_root: Option<PathBuf>,
     pub(super) local_offset: FixedOffset,
     pub(super) policy_view: PolicyView,
     pub(super) palette_entries: Vec<PaletteEntry>,
@@ -438,7 +442,7 @@ impl App {
             route_timing_history,
             prompt_base_tokens,
         } = inputs;
-        let mut palette_entries = builtin_palette_entries();
+        let mut palette_entries = builtin_palette_entries(policy_view.blocks_all_shell_commands());
         palette_entries.extend(mcp_entries);
         let execution_policy = profiles.effective(&active_profile, &route);
         let typical_duration_ms = route_timing_history.typical_for(route.id());
@@ -478,7 +482,11 @@ impl App {
             scroll_back: 0,
             max_scroll: Cell::new(0),
             search_match_scroll: Cell::new(0),
+            help_scroll: Cell::new(0),
+            help_max_scroll: Cell::new(0),
+            help_page_rows: Cell::new(1),
             scrubber,
+            project_root: None,
             local_offset: *chrono::Local::now().offset(),
             policy_view,
             palette_entries,
@@ -762,14 +770,32 @@ impl App {
     }
 
     pub(super) fn answer_approval_with_rule(&mut self, approved: bool, always: bool) {
+        if approved
+            && always
+            && self
+                .pending_approval
+                .as_ref()
+                .is_some_and(|request| request.repeat_key.is_none())
+        {
+            self.push_line(
+                "repeat unavailable; choose F2 to approve once or F4 to decline",
+                TranscriptKind::Progress,
+            );
+            return;
+        }
         if let Some(request) = self.pending_approval.take() {
-            if approved && always && !self.session_allow.contains(&request.prompt) {
-                self.session_allow.push(request.prompt.clone());
+            if approved && always {
+                if let Some(key) = request
+                    .repeat_key
+                    .filter(|key| !self.session_allow.contains(key))
+                {
+                    self.session_allow.push(key);
+                }
             }
             let _ = request.reply.send(approved);
             self.push_line(
                 if approved && always {
-                    "approval: yes, always this session"
+                    "approval: yes, repeat identical shell command this session"
                 } else if approved {
                     "approval: yes"
                 } else {

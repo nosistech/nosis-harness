@@ -1,4 +1,4 @@
-//! One source of truth for the base-view key hints and contextual help.
+//! Binding table for contextual help plus compact, state-aware base-view hints.
 
 use std::borrow::Cow;
 
@@ -64,7 +64,7 @@ pub(super) const KEY_BINDINGS: &[KeyBinding] = &[
     KeyBinding {
         keys: "Enter",
         action: "send",
-        detail: " task; queue while working (not during approval)",
+        detail: " task; queue while working or waiting for approval",
         show_in_hint: true,
         hide_at_budget: true,
         working_only: false,
@@ -120,7 +120,7 @@ pub(super) const KEY_BINDINGS: &[KeyBinding] = &[
     KeyBinding {
         keys: "Ctrl+P",
         action: "recall",
-        detail: " previous prompt",
+        detail: " previous prompt outside approval",
         show_in_hint: false,
         hide_at_budget: false,
         working_only: false,
@@ -128,7 +128,7 @@ pub(super) const KEY_BINDINGS: &[KeyBinding] = &[
     KeyBinding {
         keys: "Ctrl+N",
         action: "recall",
-        detail: " next prompt or draft",
+        detail: " next prompt or draft outside approval",
         show_in_hint: false,
         hide_at_budget: false,
         working_only: false,
@@ -158,9 +158,10 @@ pub(super) const KEY_BINDINGS: &[KeyBinding] = &[
         working_only: true,
     },
     KeyBinding {
-        keys: "y / a / n",
+        keys: "F2 / F3 / F4",
         action: "answer",
-        detail: " approval yes / always / no",
+        detail:
+            " approval once / repeat identical shell command this session when offered / decline",
         show_in_hint: false,
         hide_at_budget: false,
         working_only: false,
@@ -180,22 +181,89 @@ pub(super) fn visible_key_bindings(
 pub(super) fn key_hint_line_for(
     terminal_capability: TerminalCapability,
     budget_reached: bool,
-    working: bool,
+    busy: bool,
+    approval: bool,
+    repeat_approval: bool,
+    can_stop: bool,
+    width: usize,
 ) -> String {
-    visible_key_bindings(budget_reached, working)
-        .filter(|binding| binding.show_in_hint)
-        .map(|binding| {
-            format!(
-                "{} {}",
-                binding.display_keys(terminal_capability),
+    let mut candidates = vec!["F1 help".to_owned()];
+    if approval {
+        if can_stop {
+            candidates.push("Esc stop".to_owned());
+        }
+        candidates.push("F4 decline".to_owned());
+        candidates.push("F2 approve".to_owned());
+        if repeat_approval {
+            candidates.push("F3 repeat".to_owned());
+        }
+        candidates.push(format!(
+            "{} scroll/edit",
+            terminal_capability.render_text("↑↓")
+        ));
+        candidates.push("PgUp/PgDn scroll".to_owned());
+    } else {
+        if can_stop {
+            candidates.push("Esc stop".to_owned());
+        }
+        if !budget_reached {
+            candidates.push(if busy {
+                "Enter queue".to_owned()
+            } else {
+                "Enter send".to_owned()
+            });
+        }
+        for binding in visible_key_bindings(budget_reached, can_stop).filter(|binding| {
+            binding.show_in_hint && !matches!(binding.keys, "Enter" | "?/F1" | "Esc")
+        }) {
+            let action = if binding.keys == "Ctrl+C" && can_stop {
+                "stop/exit"
+            } else if binding.keys == "Ctrl+C" {
+                "clear/exit"
+            } else {
                 binding.action
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("   ")
+            };
+            candidates.push(format!(
+                "{} {action}",
+                binding.display_keys(terminal_capability)
+            ));
+        }
+    }
+
+    let mut line = String::new();
+    for candidate in candidates {
+        let separator = if line.is_empty() { "" } else { "   " };
+        let fits = line
+            .chars()
+            .count()
+            .saturating_add(separator.len())
+            .saturating_add(candidate.chars().count())
+            <= width;
+        if fits {
+            line.push_str(separator);
+            line.push_str(&candidate);
+        } else if approval {
+            break;
+        }
+    }
+    line
 }
 
 #[cfg(test)]
-pub(super) fn key_hint_line(budget_reached: bool, working: bool) -> String {
-    key_hint_line_for(TerminalCapability::Unicode, budget_reached, working)
+pub(super) fn key_hint_line(
+    budget_reached: bool,
+    busy: bool,
+    approval: bool,
+    can_stop: bool,
+    width: usize,
+) -> String {
+    key_hint_line_for(
+        TerminalCapability::Unicode,
+        budget_reached,
+        busy,
+        approval,
+        approval,
+        can_stop,
+        width,
+    )
 }

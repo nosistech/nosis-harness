@@ -1,166 +1,106 @@
 # Nosis Harness
 
-**nh** is a metered terminal agent for open-weight models, written in Rust. It supports DeepSeek V4,
-Kimi K2.x, MiMo V2.5, GLM, and local runtimes that you configure.
+**Nosis (`nh`) helps you understand a project and make small, checkable changes.**
+It runs in your terminal and connects directly to your chosen DeepSeek, Kimi,
+MiMo or GLM API access, or an explicitly configured local runtime.
 
-You select the execution route. The program never selects one for you. The `nh why` command
-estimates the **cheapest capable API** route from the catalog, and it does not dispatch the task.
+You choose the model, approve shell commands and inspect reported usage. There is
+no Nosis account or Nosis-operated telemetry. Provider API charges can still apply.
+Relevant file content goes to the provider you select.
 
-Every accepted run writes a local receipt. The receipt records the token usage that the provider
-reported, and the cost that catalog prices give for that usage.
+## Start on Windows
 
-## What this program does on your computer
+**Recommended: follow the [Windows quickstart](docs/WINDOWS_QUICKSTART.md).**
+It covers downloading, checking and opening the portable program. No Rust, Node.js
+or Visual C++ Redistributable installation is needed.
 
-This section is for all readers.
+The published download is [v0.2.2](https://github.com/nosistech/nosis-harness/releases/tag/v0.2.2).
+It is unsigned, so Windows can show an unknown-publisher warning. The quickstart
+explains verification; do not disable Windows protection.
 
-- **It runs on your computer.** There is no account, no sign-up, and no server that we operate.
-- **It sends no usage data to us.** There is no telemetry. We cannot see what you do.
-- **It speaks only to the services that you configure.** These are your AI providers, and any tool
-  servers that you add yourself. It contacts nothing else. Price data ships with the program; it is
-  not fetched.
-- **Your API keys go into the operating system credential store.** The program does not write them
-  to files. It does not print them. It removes key-shaped text from what it shows you.
-- **It asks before it runs a command.** The default answer is no. Piped input cannot approve a
-  command for you.
-- **It shows the cost of each call.** When a provider does not report a number, the program says so.
-  It does not guess and it does not fill in a zero.
-- **Files stay on your computer.** Receipts and run records go into a local `.nosis/` folder that
-  you can delete at any time.
-- **The optional MCP server is off by default.** When you start it, it listens only on your own
-  machine and it needs a token.
-- **Windows is supported. macOS is in testing. Linux is not yet verified.** See
-  [Platform status](#platform-status) below. We do not claim what we have not tested.
-
-For the technical detail behind each point, read [SECURITY.md](./SECURITY.md) (the security model,
-the audits, and how to report a problem) and [PRIVACY.md](./PRIVACY.md) (what leaves your machine).
-
-## Install on Windows
-
-Download the [Windows x64 ZIP](https://github.com/nosistech/nosis-harness/releases/download/v0.2.2/nh-0.2.2-windows-x64.zip)
-from the [v0.2.2 release](https://github.com/nosistech/nosis-harness/releases/tag/v0.2.2).
-It includes `nh.exe`, the license, and a short setup guide. A standalone
-[`nh.exe`](https://github.com/nosistech/nosis-harness/releases/download/v0.2.2/nh.exe)
-is also available. No Rust toolchain or Visual C++ Redistributable is needed.
-
-The executable is unsigned. Windows may show **Windows protected your PC** and
-**Unknown publisher**. Before running it, check that the download came from this
-repository and compare its SHA-256 with
-[`SHA256SUMS`](https://github.com/nosistech/nosis-harness/releases/download/v0.2.2/SHA256SUMS):
+Once you have `nh.exe`, open a terminal in your project and run:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\nh-0.2.2-windows-x64.zip
+nh setup
 ```
 
-The checksum detects changed bytes; it is not a publisher signature. After checking
-the download, **More info**, then **Run anyway** proceeds past that Windows warning.
-Do not disable Windows protection if your organization's policy blocks the program.
+If `nh` is not on PATH, the quickstart shows how to call the executable directly.
+Setup confirms the folder, lets you choose a model and offers hidden API-key entry.
+You can stop after a no-key price preview, which makes no provider request.
 
-Extract the ZIP, open a terminal in its folder, and run:
+Then follow [your first task](docs/GETTING_STARTED.md) or the
+[practice tasks with independent checks](examples/practice-tasks/README.md).
+The practice files are separate from the portable download; that guide explains how to get them.
 
-```powershell
-.\nh.exe doctor
-```
+**WinGet:** the [submission](https://github.com/microsoft/winget-pkgs/pull/438174)
+is awaiting moderator approval as checked September 22, 2026. Use the portable
+download until catalog availability and installation are verified.
 
-This needs no API key and explains the remaining setup. To use `nh` from any project,
-add the folder containing `nh.exe` to your **user** PATH and open a new terminal.
-You can also call it by its full path. See the [Windows quickstart](docs/WINDOWS_QUICKSTART.md).
+## What is available in each version?
 
-**WinGet:** the [package submission](https://github.com/microsoft/winget-pkgs/pull/438174)
-is awaiting catalog approval. It is not available through `winget install` yet.
-Use the download above until the listing is accepted.
+| Version | Status and features |
+| --- | --- |
+| v0.2.2 | Published Windows download with guided setup, chat, TUI and explicit model selection |
+| v0.3.0-rc.1 | Existing unpublished candidate; adds remembered model choice, catalog migration and multiline TUI input, plus safety fixes |
+| Current working source | Unreleased work after rc.1, including read-only tasks and MiMo 2.6 / GLM 5.3 routes; absent from the published download and existing candidate |
 
-### Build from source
+The candidate and working source both report `0.3.0-rc.1`. In `nh run --help`,
+only the newer working source lists `--read-only`. See [model updates](docs/MODEL_UPDATES.md). New features
+are documented with their availability; see the [changelog](CHANGELOG.md).
 
-For source installation, use Rust **1.96.0 or newer** from [rustup.rs](https://rustup.rs):
+## Keep control of your work
+
+- Keys are stored in the OS credential store. Application output redacts known
+  key shapes and active credentials; keep other confidential material out of prompts.
+- Shell commands require explicit approval. Review the full command before agreeing.
+  Piped input cannot approve a command for you.
+- File edits follow policy and may proceed without a separate approval prompt.
+  Keep a Git checkpoint or backup and inspect the resulting changes.
+- [Read-only tasks](docs/READ_ONLY.md), in the unreleased source, disable model
+  editing, shell and remote tools. Provider requests and receipt writes still occur.
+- Usage and receipts stay locally in `.nosis/`. Unknown or incomplete usage is
+  labeled; estimates are not a spending cap or a provider bill. Runtime records grow
+  until you remove them; see the [privacy guide](PRIVACY.md).
+- An assistant finishing is not proof the result is correct. Inspect its changes
+  and run appropriate checks. Completed edits are not automatically undone.
+
+There is no operating-system sandbox. Read the [security boundaries](docs/SECURITY_MODEL.md)
+and [privacy guide](PRIVACY.md) before using sensitive projects.
+
+## Find the right guide
+
+The [documentation index](docs/README.md) lists all user and contributor guides.
+
+| I want to... | Guide |
+| --- | --- |
+| Install and run a first task | [Windows quickstart](docs/WINDOWS_QUICKSTART.md), [guided setup](docs/GETTING_STARTED.md) |
+| Learn by doing | [Tutorials](docs/TUTORIALS.md), [checked practice tasks](examples/practice-tasks/README.md) |
+| Use the full-screen interface | [Terminal controls](docs/TERMINAL_GUIDE.md) |
+| Remember a model or upgrade a catalog | [Configuration and upgrades](docs/CONFIGURATION.md) |
+| Measure task cost and test efficiency options | [Efficiency experiments](docs/EFFICIENCY.md), [evaluation protocol](examples/efficiency/README.md) |
+| Attach images or use a local model | [Images](docs/IMAGES.md), [local models](docs/LOCAL_MODELS.md) |
+| Inspect every command | [Command reference](docs/CLI_REFERENCE.md) or `nh --help` |
+| Audit or contribute | [Architecture](docs/ARCHITECTURE_OVERVIEW.md), [contributing](CONTRIBUTING.md), [security reporting](SECURITY.md) |
+
+Nosis does not claim better task results or lower completed-task costs than other
+assistants without comparable measurements. The practice checks can be used with
+other assistants too.
+
+## Platform status and source builds
+
+Windows is supported. macOS is in testing. Linux source builds have not completed
+end-to-end verification. Platform compilation alone is not a usability guarantee.
+
+To install the published source version with Rust 1.96.0 or newer:
 
 ```sh
 cargo install --locked --git https://github.com/nosistech/nosis-harness --tag v0.2.2 nh-cli
 ```
 
-The binary lands in `~/.cargo/bin`, which `rustup` already added to your `PATH`. Note that
-`cargo install` uses your default toolchain and does not read this repo's `rust-toolchain.toml`.
-Check `rustc --version` first if the build fails.
+For development, clone this repository and follow [CONTRIBUTING.md](CONTRIBUTING.md).
+The workspace has nine crates; routing prices are data in `catalog.toml`.
+Fleet and the [loopback-only MCP server](docs/MCP_PREVIEW.md) are advanced preview
+surfaces. Never expose the MCP server on a public interface. A local model endpoint
+can forward requests to the cloud; its address does not prove local or free inference.
 
-To work on the code instead, clone the repo and build in place. Here `rust-toolchain.toml` does
-apply, so `rustup` selects **1.96.0** for you:
-
-```sh
-cargo build --release
-```
-
-That binary lands at `target/release/nh` (`target\release\nh.exe` on Windows).
-
-## Quickstart
-
-New to terminal agents? Follow [three small tasks](docs/TUTORIALS.md), starting with
-a no-key preview. The [terminal guide](docs/TERMINAL_GUIDE.md) explains controls and
-change review; the [command reference](docs/CLI_REFERENCE.md) lists full help.
-The tutorials and terminal guide label v0.3.0-rc.1 candidate features that are not in the download above.
-
-Run [`nh setup`](docs/GETTING_STARTED.md) from your project folder for a guided path
-through project setup, model selection, a free preview, and secure key entry.
-Running `nh` without arguments opens the same guide. Version 0.2.2 also enables
-[DeepSeek Flash image input](docs/IMAGES.md) through the existing attachment commands.
-The command overview below describes the v0.3.0-rc.1 source candidate, including
-its budget, cancellation and resume corrections. The v0.2.2 download above does
-not include those corrections. See the changelog for version differences.
-
-- `nh init` - scaffold `.nosis/` in the current repo: the receipts dir, a `.gitignore`, a secret-pattern pre-commit hook, and the trusted bundled `catalog.toml`. A changed repository catalog is refused unless the operator has placed an exact reviewed copy at `~/.nosis/catalog.toml`. Existing Git hooks are preserved and reported for manual chaining.
-- `nh doctor` - report what is set up and what is not. It needs no API key. It names the running binary, whether `nh` is on your `PATH`, where the route catalog was read from, how many routes and providers are available, which key entries are stored, and where configuration lives. On Windows it also reports the console code page. It then lists only the things that are wrong, and each line states the fix. It never prints a key value. It exits 0 whenever it can produce a report, because it is a report and not a test.
-- `nh why "review the diff"` - explain the cheapest capable route for a rough token estimate of the task; add `--model <id>` to compare a specific route against it. It needs no API key, and it does not run the task. Prices come from the catalog that ships with the program.
-- `nh key add deepseek` - prompt for your DeepSeek API key and store it in the OS-native vault (never echoed, never written to files). For CI/headless use, the env fallback is `NH_<ENTRY>_KEY` with the entry uppercased - here, `NH_DEEPSEEK_KEY`.
-- `nh key remove deepseek` - remove that entry from the OS-native vault. Environment fallbacks must be unset separately.
-- Local Ollama and llama.cpp routes are user-filled, loopback-only, and selected only through
-  `--model` or `/model`; they never become cheapest-capable candidates. See
-  [Local models](./docs/LOCAL_MODELS.md) for setup, the Ollama truncation warning, model
-  verification, licensing, and hardware sizing.
-- `nh run "fix the failing test" --model deepseek-v4-flash` - run one agent task. Every shell command stops at a y/N approval prompt (default **deny**), and each turn is logged to `.nosis/receipts.jsonl`. Defaults: `--model deepseek-v4-flash`, `--max-turns 20`, `--profile balanced`. Optional: `--think none|low|high|max` (absent = per-route-dialect default: High on always-thinking dialects, None on non-thinking) `--autonomy ask|auto` (absent = the law-file default), and `--image <PATH>` to attach a PNG or JPEG (repeatable, maximum 4) on a route whose catalog entry declares image support.
-- `nh chat` - interactive session. `/model` and `/provider` switch routes mid-session (history and cumulative usage preserved); `/price` evaluates the catalog price at the current clock time and flags stale data.
-- **v0.3.0-rc.1 candidate source:** `nh model set <id>`, `show`, and `clear` manage an
-  opt-in user-wide model choice. For `run`, `chat`, `tui`, and `profile`, a saved
-  choice replaces the built-in default above; explicit `--model` always wins.
-  `nh catalog migrate` offers a reviewed upgrade for recognized older bundled
-  catalogs and retains a backup. See [guided setup](docs/GETTING_STARTED.md).
-- `nh profile` - list the execution profiles (frugal / balanced / max-quality) and their effective caps for a model.
-- `nh tui` - full-screen terminal UI (`--model <id>`, `--budget <tokens>`, `--profile <p>`).
-  The token budget stops new tasks after reported usage reaches it, or when usage becomes
-  unknown or incomplete. The active task can finish above the limit. This is not a spending cap.
-- `nh resume` - resume an interrupted chat or TUI session. Pass a session id, or omit it to list the interrupted sessions.
-  New TUI sessions retain their original budget. Older TUI sessions without a saved budget
-  setting require starting a new session with an explicit choice of limit.
-- `nh fleet run tasks.json` - run independent tasks in a durable, resumable worker fleet (`--max-workers <n>`, required `--budget <tokens>` unless `budget_tokens` is in the file, `--escalate`, `--defer-offpeak`). The observed-token budget stops new dispatch after completed receipts reach it; already-running calls can finish. Off-peak deferral activates only for a trusted route whose catalog entry currently defines peak windows. `nh fleet resume` picks up the latest incomplete run.
-- `nh mcp serve` - **PREVIEW**: serve the local MCP endpoint (default `--addr 127.0.0.1:8765`), loopback-only and bearer-token guarded (`--token-entry <entry>`). Tools: `why`, `route_cost`, and `receipts` (the metered-routing surface, with structured output), alongside `route_resolve`, budget-required `fleet_run`, and `fleet_status`. Do **not** expose it on a public interface - this is not a restriction that lapses on a date.
-  See the [MCP preview guide](./docs/MCP_PREVIEW.md) for compatibility, setup boundaries, and connection errors.
-
-## Platform status
-
-Windows is **supported**: CI is green and it is in daily use. macOS is **in testing**: CI is green,
-but no one has used it day to day. Linux **builds from source and is not yet verified**.
-
-## Privacy
-
-`nh` has no Nosis-operated telemetry, analytics, beacons, or crash reporting. Model requests go directly to the provider route you select; approved MCP calls and shell commands can create additional network traffic. Receipts are local by default. Exact boundaries and deletion steps are in [PRIVACY.md](./PRIVACY.md).
-
-A local model endpoint can forward requests to a cloud service. Its address alone does not
-prove that inference stays on your computer or that it is free. See the
-[local-model guide](./docs/LOCAL_MODELS.md) and the
-[cancellation and retry limits](./docs/SECURITY_MODEL.md#cancellation-retries-and-budgets).
-
-## Runtime files
-
-Apart from the configuration and Git hook created by an explicit `nh init`, the harness
-does not generate source code or caches of its own. Normal runs append the intentional,
-gitignored audit state in `.nosis/receipts.jsonl`; `nh chat` and `nh tui` additionally write
-resumable session transcripts to `.nosis/sessions/`, and Fleet uses `.nosis/fleet/`.
-These append-only records grow until the operator deletes them. Agent-requested edits and
-approved shell commands can change other workspace files by design.
-
-## License & contributing
-
-MIT © nosistech LLC - see [LICENSE](./LICENSE). Security policy and reporting: [SECURITY.md](./SECURITY.md). How to contribute (including the workspace gate): [CONTRIBUTING.md](./CONTRIBUTING.md). Release history: [CHANGELOG.md](./CHANGELOG.md).
-
-## Repository layout
-
-- `crates/`: the Rust workspace. Each crate has one responsibility.
-- `catalog.toml`: the route catalog. This file is data, not code.
-- `docs/`: the architecture overview, the security model, and the local-model guide.
+MIT license. See [LICENSE](LICENSE).

@@ -8,7 +8,7 @@ mod adapter;
 mod client;
 mod config;
 
-pub use adapter::{mcp_tools, McpToolset};
+pub use adapter::{mcp_discovery_tools, mcp_tools, McpToolset};
 pub use client::{McpClient, McpToolInfo};
 pub use config::{load_mcp_config, McpAuth, McpServerConfig, McpTrust};
 

@@ -223,12 +223,16 @@ fn parses_repo_catalog_with_all_class1_routes() {
             "glm-4.6v-flash",
             "glm-4.7-flash",
             "glm-5.2",
+            "glm-5.3",
+            "glm-5.3-flash",
             "kimi-k2.6",
             "kimi-k2.7-code",
             "kimi-k2.7-code-highspeed",
             "kimi-k3",
             "mimo-v2.5",
             "mimo-v2.5-pro",
+            "mimo-v2.6-flash",
+            "mimo-v2.6-pro",
         ]
     );
 }
@@ -302,6 +306,8 @@ fn shipped_image_routes_include_flash_but_not_pro() {
     let routes = resolver().routes_with_modality("image");
     assert!(routes.contains(&"deepseek-v4-flash".to_owned()));
     assert!(!routes.contains(&"deepseek-v4-pro".to_owned()));
+    assert!(routes.contains(&"glm-5.3-flash".to_owned()));
+    assert!(!routes.contains(&"glm-5.3".to_owned()));
 }
 
 #[test]
@@ -391,6 +397,7 @@ fn kimi_k3_has_verified_capacity_price_and_effort_control() {
     );
     assert_eq!(route.thinking_dialect().as_str(), "always-thinking-effort");
     assert!(route.preserve_reasoning());
+    assert!(route.has_quirk("max-completion-tokens"));
     assert_eq!(route.modality(), vec!["text", "image", "video"]);
     assert_eq!(route.context(), Some(1_048_576));
     assert_eq!(route.max_out(), Some(1_048_576));
@@ -426,9 +433,12 @@ fn mimo_routes_preserve_reasoning_with_route_specific_modalities() {
     for (id, expected_modality) in [
         ("mimo-v2.5", vec!["text", "image", "video", "audio"]),
         ("mimo-v2.5-pro", vec!["text"]),
+        ("mimo-v2.6-flash", vec!["text"]),
+        ("mimo-v2.6-pro", vec!["text"]),
     ] {
         let route = r.resolve(id).unwrap();
         assert!(route.preserve_reasoning(), "{id}");
+        assert!(route.has_quirk("max-completion-tokens"), "{id}");
         assert_eq!(
             route.thinking_dialect(),
             ThinkingDialect::KimiToggle,
@@ -436,6 +446,27 @@ fn mimo_routes_preserve_reasoning_with_route_specific_modalities() {
         );
         assert_eq!(route.modality(), expected_modality, "{id}");
         assert_eq!(route.context(), Some(1_000_000), "{id}");
+        assert_eq!(route.max_out(), Some(131_072), "{id}");
+    }
+}
+
+#[test]
+fn mimo_26_routes_have_confirmed_realtime_prices() {
+    let resolver = resolver();
+    for (id, cache_hit, cache_miss, output) in [
+        ("mimo-v2.6-flash", 0.0028, 0.14, 0.28),
+        ("mimo-v2.6-pro", 0.0036, 0.435, 0.87),
+    ] {
+        let quote = resolver
+            .resolve(id)
+            .unwrap()
+            .price_at(utc(2026, 9, 22, 12, 0, 0))
+            .unwrap();
+        assert_eq!(quote.currency, Currency::Usd, "{id}");
+        assert_eq!(quote.confidence, PriceConfidence::Confirmed, "{id}");
+        assert!(close(quote.cache_hit, cache_hit), "{id}");
+        assert!(close(quote.cache_miss, cache_miss), "{id}");
+        assert!(close(quote.output, output), "{id}");
     }
 }
 
@@ -444,6 +475,34 @@ fn glm_52_uses_glm_hm_dialect() {
     let route = resolver().resolve("glm-5.2").unwrap();
     assert_eq!(route.thinking_dialect(), ThinkingDialect::GlmHm);
     assert_eq!(route.max_out(), Some(128_000));
+}
+
+#[test]
+fn glm_53_routes_use_payg_forced_thinking_contract() {
+    let resolver = resolver();
+    for (id, modality, cache_hit, cache_miss, output) in [
+        ("glm-5.3", vec!["text"], 0.26, 1.40, 4.40),
+        ("glm-5.3-flash", vec!["text", "image"], 0.03, 0.15, 0.50),
+    ] {
+        let route = resolver.resolve(id).unwrap();
+        assert_eq!(route.base_url(), "https://api.z.ai/api/paas/v4", "{id}");
+        assert_eq!(route.context(), Some(1_000_000), "{id}");
+        assert_eq!(route.max_out(), Some(128_000), "{id}");
+        assert_eq!(route.modality(), modality, "{id}");
+        assert_eq!(
+            route.thinking_dialect(),
+            ThinkingDialect::GlmAlwaysThinkingEffort,
+            "{id}"
+        );
+        assert!(route.preserve_reasoning(), "{id}");
+
+        let quote = route.price_at(utc(2026, 9, 22, 12, 0, 0)).unwrap();
+        assert_eq!(quote.currency, Currency::Usd, "{id}");
+        assert_eq!(quote.confidence, PriceConfidence::Confirmed, "{id}");
+        assert!(close(quote.cache_hit, cache_hit), "{id}");
+        assert!(close(quote.cache_miss, cache_miss), "{id}");
+        assert!(close(quote.output, output), "{id}");
+    }
 }
 
 #[test]
@@ -759,7 +818,12 @@ fn free_glm_route_quotes_zero_without_expiry() {
 fn mimo_prices_are_confirmed_first_party() {
     // Plan B.3 pricing conflict resolved 2026-07-26 against mimo.mi.com/docs/pricing.
     let r = resolver();
-    for id in ["mimo-v2.5", "mimo-v2.5-pro"] {
+    for id in [
+        "mimo-v2.5",
+        "mimo-v2.5-pro",
+        "mimo-v2.6-flash",
+        "mimo-v2.6-pro",
+    ] {
         let route = r.resolve(id).unwrap();
         let quote = route.price_at(utc(2026, 7, 15, 12, 0, 0)).unwrap();
         assert_eq!(quote.confidence, PriceConfidence::Confirmed, "{id}");
@@ -1353,7 +1417,15 @@ fn available_by_provider_groups_and_sorts() {
             "kimi-k3",
         ]
     );
-    assert_eq!(map["mimo"], vec!["mimo-v2.5", "mimo-v2.5-pro"]);
+    assert_eq!(
+        map["mimo"],
+        vec![
+            "mimo-v2.5",
+            "mimo-v2.5-pro",
+            "mimo-v2.6-flash",
+            "mimo-v2.6-pro",
+        ]
+    );
 }
 
 // ---------------------------------------------------------------- banned strings
@@ -1396,9 +1468,11 @@ fn banned_prefix_resolve_gives_generic_error_listing_routes() {
 }
 
 #[test]
-fn mimo_v2_5_is_allowed() {
+fn supported_mimo_versions_are_allowed() {
     assert!(!is_banned("mimo-v2.5-pro"));
     assert!(!is_banned("mimo-v2.5"));
+    assert!(!is_banned("mimo-v2.6-flash"));
+    assert!(!is_banned("mimo-v2.6-pro"));
 }
 
 #[test]
@@ -1682,5 +1756,9 @@ fn display_strings_match_catalog_vocabulary() {
     assert_eq!(
         ThinkingDialect::AlwaysThinkingEffort.as_str(),
         "always-thinking-effort"
+    );
+    assert_eq!(
+        ThinkingDialect::GlmAlwaysThinkingEffort.as_str(),
+        "glm-always-thinking-effort"
     );
 }

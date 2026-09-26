@@ -90,6 +90,10 @@ pub fn resolve_effort(
                 ThinkingEffort::None | ThinkingEffort::Low => ThinkingEffort::Low,
                 ThinkingEffort::High | ThinkingEffort::Max => effort,
             },
+            ThinkingDialect::GlmAlwaysThinkingEffort => match effort {
+                ThinkingEffort::None | ThinkingEffort::Low => ThinkingEffort::Low,
+                ThinkingEffort::High | ThinkingEffort::Max => effort,
+            },
             ThinkingDialect::GlmHm => match effort {
                 ThinkingEffort::High | ThinkingEffort::Max => effort,
                 ThinkingEffort::Low => ThinkingEffort::High,
@@ -103,6 +107,7 @@ pub fn resolve_effort(
         ThinkingPosture::Floor => match dialect {
             ThinkingDialect::AlwaysThinking => ThinkingEffort::High,
             ThinkingDialect::AlwaysThinkingEffort => ThinkingEffort::Low,
+            ThinkingDialect::GlmAlwaysThinkingEffort => ThinkingEffort::Low,
             ThinkingDialect::DeepseekNhm
             | ThinkingDialect::KimiToggle
             | ThinkingDialect::GlmHm
@@ -112,6 +117,7 @@ pub fn resolve_effort(
             ThinkingDialect::AlwaysThinking
             | ThinkingDialect::AlwaysThinkingEffort
             | ThinkingDialect::GlmHm => ThinkingEffort::High,
+            ThinkingDialect::GlmAlwaysThinkingEffort => ThinkingEffort::Max,
             ThinkingDialect::DeepseekNhm | ThinkingDialect::KimiToggle | ThinkingDialect::None => {
                 ThinkingEffort::None
             }
@@ -122,6 +128,7 @@ pub fn resolve_effort(
             | ThinkingDialect::AlwaysThinking
             | ThinkingDialect::GlmHm => ThinkingEffort::High,
             ThinkingDialect::AlwaysThinkingEffort => ThinkingEffort::Max,
+            ThinkingDialect::GlmAlwaysThinkingEffort => ThinkingEffort::Max,
             ThinkingDialect::None => ThinkingEffort::None,
         },
     }
@@ -475,6 +482,7 @@ pub(crate) fn make_client(
                 preserve_when_thinking: route.preserve_when_thinking(),
                 empty_reasoning_on_tool_replay: route
                     .has_quirk("empty-reasoning-content-on-tool-replay"),
+                max_completion_tokens: route.has_quirk("max-completion-tokens"),
                 max_out,
             };
             Box::new(client)

@@ -124,9 +124,10 @@ fn parse_dialect(id: &str, s: &str) -> anyhow::Result<ThinkingDialect> {
         "always-thinking" => Ok(ThinkingDialect::AlwaysThinking),
         "always-thinking-effort" => Ok(ThinkingDialect::AlwaysThinkingEffort),
         "glm-hm" => Ok(ThinkingDialect::GlmHm),
+        "glm-always-thinking-effort" => Ok(ThinkingDialect::GlmAlwaysThinkingEffort),
         "none" => Ok(ThinkingDialect::None),
         other => Err(anyhow!(
-            "route '{id}': unknown thinking_dialect '{other}' - use deepseek-nhm, kimi-toggle, always-thinking, always-thinking-effort, glm-hm, or none"
+            "route '{id}': unknown thinking_dialect '{other}' - use deepseek-nhm, kimi-toggle, always-thinking, always-thinking-effort, glm-hm, glm-always-thinking-effort, or none"
         )),
     }
 }

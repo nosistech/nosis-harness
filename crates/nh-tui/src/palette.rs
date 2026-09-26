@@ -110,7 +110,7 @@ pub(super) fn mcp_state(config: &McpServerConfig, warnings: &[String]) -> McpSta
     }
 }
 
-pub(super) fn builtin_palette_entries() -> Vec<PaletteEntry> {
+pub(super) fn builtin_palette_entries(shell_unavailable: bool) -> Vec<PaletteEntry> {
     let commands = [
         (
             "/help",
@@ -170,15 +170,18 @@ pub(super) fn builtin_palette_entries() -> Vec<PaletteEntry> {
             action,
         })
         .collect();
-    entries.extend(builtin_tools().into_iter().map(|tool| {
+    entries.extend(builtin_tools().into_iter().filter_map(|tool| {
         let spec = tool.spec();
-        PaletteEntry {
+        if shell_unavailable && spec.name == "exec_shell" {
+            return None;
+        }
+        Some(PaletteEntry {
             kind: "tool",
             name: spec.name,
             description: spec.description,
             state: None,
             action: PaletteAction::Describe,
-        }
+        })
     }));
     entries
 }

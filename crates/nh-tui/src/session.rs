@@ -184,6 +184,8 @@ pub(super) fn run_tui_session(
     if let Ok((_, literal)) = &initial {
         install_literal(&scrubber, &mut SecretRegistry::new(), literal.clone());
     }
+    let shell_unavailable = law.policy.blocks_all_shell_commands();
+    let project_root = repo_root.clone();
     let policy_view = law.policy.view();
     let law_constitution = law.constitution.clone();
     let resume_for_app = resume.clone();
@@ -218,6 +220,13 @@ pub(super) fn run_tui_session(
         },
         (profiles, execution_policy.profile),
     );
+    app.project_root = Some(project_root);
+    if shell_unavailable {
+        app.push_line(
+            nh_core::agent::SHELL_UNAVAILABLE_SESSION_NOTICE,
+            TranscriptKind::Progress,
+        );
+    }
     if timing_history_unavailable {
         app.push_line(
             "typical timing unavailable - receipt history could not be read",
@@ -260,8 +269,13 @@ pub(super) fn finish_worker_shutdown(
 /// The honest-identity system prompt: names the real route + provider and forbids
 /// claiming to be Claude/GPT, then appends the law constitution. Shared with the CLI
 /// `run`/`chat` paths so every agent surface - not just the TUI - is honest.
-pub fn identity_constitution(law_constitution: &str, route: &ResolvedRoute) -> String {
-    nh_core::agent::identity_constitution(law_constitution, route.id(), route.provider())
+pub fn identity_constitution(
+    law_constitution: &str,
+    route: &ResolvedRoute,
+    shell_unavailable: bool,
+) -> String {
+    let session_law = nh_core::agent::session_law_constitution(law_constitution, shell_unavailable);
+    nh_core::agent::identity_constitution(&session_law, route.id(), route.provider())
 }
 
 pub(super) fn install_literal(

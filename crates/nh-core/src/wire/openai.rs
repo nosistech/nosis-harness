@@ -26,6 +26,7 @@ pub(super) struct OpenAiPolicy {
     pub(super) preserve_reasoning: bool,
     pub(super) preserve_when_thinking: bool,
     pub(super) empty_reasoning_on_tool_replay: bool,
+    pub(super) max_completion_tokens: bool,
     pub(super) max_out: Option<u64>,
 }
 
@@ -36,6 +37,7 @@ impl Default for OpenAiPolicy {
             preserve_reasoning: false,
             preserve_when_thinking: false,
             empty_reasoning_on_tool_replay: false,
+            max_completion_tokens: false,
             max_out: None,
         }
     }
@@ -217,8 +219,13 @@ pub(super) fn build_body(request: &ChatRequest, policy: OpenAiPolicy) -> serde_j
     let mut body = serde_json::json!({
         "model": request.model,
         "messages": messages,
-        "max_tokens": policy.max_out.unwrap_or(DEFAULT_MAX_TOKENS),
     });
+    let max_tokens_field = if policy.max_completion_tokens {
+        "max_completion_tokens"
+    } else {
+        "max_tokens"
+    };
+    body[max_tokens_field] = serde_json::json!(policy.max_out.unwrap_or(DEFAULT_MAX_TOKENS));
     // [VERIFY-LIVE §7] Provider-specific output_config effort mapping remains live-pending.
     if !request.tools.is_empty() {
         body["tools"] = request
@@ -272,7 +279,9 @@ fn thinking_is_active(dialect: ThinkingDialect, effort: ThinkingEffort) -> bool 
     match dialect {
         ThinkingDialect::DeepseekNhm => effort != ThinkingEffort::None,
         ThinkingDialect::GlmHm | ThinkingDialect::KimiToggle => effort != ThinkingEffort::None,
-        ThinkingDialect::AlwaysThinking | ThinkingDialect::AlwaysThinkingEffort => true,
+        ThinkingDialect::AlwaysThinking
+        | ThinkingDialect::AlwaysThinkingEffort
+        | ThinkingDialect::GlmAlwaysThinkingEffort => true,
         ThinkingDialect::None => false,
     }
 }
@@ -316,6 +325,18 @@ fn apply_thinking(body: &mut serde_json::Value, policy: OpenAiPolicy, effort: Th
                 ThinkingEffort::High => "high",
                 ThinkingEffort::Max => "max",
             };
+            body["reasoning_effort"] = serde_json::Value::String(effort.into());
+        }
+        ThinkingDialect::GlmAlwaysThinkingEffort => {
+            let effort = match effort {
+                ThinkingEffort::None | ThinkingEffort::Low => "low",
+                ThinkingEffort::High => "high",
+                ThinkingEffort::Max => "max",
+            };
+            body["thinking"] = serde_json::json!({
+                "type": "enabled",
+                "clear_thinking": false,
+            });
             body["reasoning_effort"] = serde_json::Value::String(effort.into());
         }
         ThinkingDialect::GlmHm => match effort {

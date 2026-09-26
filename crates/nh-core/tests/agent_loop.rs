@@ -154,7 +154,15 @@ fn agent_in(
     AgentLoop {
         client,
         tools,
-        ctx: ToolCtx::new(dir.to_path_buf(), Box::new(|_| true)),
+        ctx: ToolCtx::new(
+            dir.to_path_buf(),
+            Box::new(|_| true),
+            Box::new(|access| match access {
+                nh_tools::Access::Exec(_) => nh_tools::Guard::Ask,
+                _ => nh_tools::Guard::Allow,
+            }),
+            nh_vault::Scrubber::new(Vec::new()),
+        ),
         receipts: ReceiptWriter::project(
             dir,
             nh_vault::Scrubber::new(vec![FAKE_SECRET.to_string()]),

@@ -27,6 +27,8 @@ use ratatui::{
 
 const BLOCKED_REASON_MAX_CHARS: usize = 32;
 const HEADER_TITLE_GAP: usize = 1;
+const MIN_STATUS_TITLE_WIDTH: usize = 16;
+const MIN_PROJECT_TITLE_WIDTH: usize = 8;
 const MAX_COMPOSER_ROWS: u16 = 5;
 const BLOCKED_LABEL: &str = "● BLOCKED";
 const ASCII_BORDER_SET: border::Set<'static> = border::Set {
@@ -101,6 +103,19 @@ pub(super) fn main_block(app: &App, width: u16) -> Block<'static> {
         app,
         &format!(" {} · effort: {} ", app.route.id(), effort_name(app.effort)),
     );
+    let reserved_project_width = if app.project_root.is_some() {
+        MIN_PROJECT_TITLE_WIDTH
+    } else {
+        0
+    };
+    let route_label = fit_with_ellipsis(
+        &route_label,
+        usize::from(width)
+            .saturating_sub(2)
+            .saturating_sub(HEADER_TITLE_GAP)
+            .saturating_sub(MIN_STATUS_TITLE_WIDTH)
+            .saturating_sub(reserved_project_width),
+    );
     let blocked_reason_width = blocked_reason_width(width, &route_label, app);
     let (status, status_style) = match (&app.status, &app.active_tool, &app.active_model) {
         (Status::Working, Some(tool), _) => tool_status_chip(&tool.name, tool.started_at, now),
@@ -118,7 +133,12 @@ pub(super) fn main_block(app: &App, width: u16) -> Block<'static> {
             app.typical_duration_ms,
         ),
     };
-    let left_title = left_title(app, &status, status_style);
+    let route_width = Line::from(route_label.clone()).width();
+    let left_width = usize::from(width)
+        .saturating_sub(route_width)
+        .saturating_sub(HEADER_TITLE_GAP)
+        .saturating_sub(2);
+    let left_title = left_title(app, &status, status_style, left_width);
     let route_title =
         Line::from(Span::styled(route_label, Style::default().fg(Color::Cyan))).right_aligned();
 
@@ -132,8 +152,13 @@ pub(super) fn main_block(app: &App, width: u16) -> Block<'static> {
     .title_top(route_title)
 }
 
-fn left_title(app: &App, status: &str, status_style: Style) -> Line<'static> {
-    Line::from(vec![
+fn left_title(
+    app: &App,
+    status: &str,
+    status_style: Style,
+    available_width: usize,
+) -> Line<'static> {
+    let mut spans = vec![
         Span::styled(
             display_line(app, " nosis "),
             Style::default()
@@ -144,9 +169,36 @@ fn left_title(app: &App, status: &str, status_style: Style) -> Line<'static> {
             display_line(app, "· "),
             Style::default().fg(Color::DarkGray),
         ),
-        Span::styled(display_line(app, status), status_style),
-        Span::raw(display_line(app, " ")),
-    ])
+    ];
+    let status = display_line(app, status);
+    let fixed_width = Line::from(spans.clone())
+        .width()
+        .saturating_add(Line::from(status.clone()).width())
+        .saturating_add(1);
+    if let Some(root) = &app.project_root {
+        let project = root
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .map_or_else(
+                || root.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+        let project = display_line(app, &project);
+        let project_width = available_width.saturating_sub(fixed_width.saturating_add(3));
+        if project_width >= 3 && !project.is_empty() {
+            spans.push(Span::styled(
+                fit_with_ellipsis(&project, project_width),
+                Style::default().fg(Color::Gray),
+            ));
+            spans.push(Span::styled(
+                display_line(app, " · "),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+    }
+    spans.push(Span::styled(status, status_style));
+    spans.push(Span::raw(display_line(app, " ")));
+    Line::from(spans)
 }
 
 pub(super) fn render_key_hints(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -155,7 +207,13 @@ pub(super) fn render_key_hints(frame: &mut Frame<'_>, app: &App, area: Rect) {
         &key_hint_line_for(
             app.terminal_capability,
             app.budget_blocks_dispatch(),
+            matches!(app.status, Status::Working | Status::FinishingInterrupted),
+            matches!(app.status, Status::Waiting),
+            app.pending_approval
+                .as_ref()
+                .is_some_and(|request| request.repeat_key.is_some()),
             app.status.esc_interrupts_turn(),
+            usize::from(area.width),
         ),
     );
     frame.render_widget(
@@ -352,35 +410,80 @@ pub(super) fn render_help(frame: &mut Frame<'_>, app: &App, area: Rect) {
         frame,
         app,
         area,
-        " Help · read-only ",
-        "Keys for the current state",
+        " Help ",
+        "F1 close · Esc close · ↑/↓ scroll · PgUp/PgDn page",
     );
-    let lines: Vec<Line<'static>> = visible_key_bindings(
+    let width = usize::from(body.width.max(1));
+    let mut lines = Vec::new();
+    if let Some(root) = &app.project_root {
+        let project = display_line(app, &format!("Project: {}", root.display()));
+        lines.extend(
+            wrap_help_line(&project, width)
+                .into_iter()
+                .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::Gray)))),
+        );
+        lines.push(Line::default());
+    }
+    for binding in visible_key_bindings(
         app.budget_blocks_dispatch(),
         app.status.esc_interrupts_turn(),
-    )
-    .map(|binding| {
-        Line::from(vec![
-            Span::styled(
-                display_line(
-                    app,
-                    &format!("{:<18} ", binding.display_keys(app.terminal_capability)),
-                ),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                display_line(app, &format!("{}{}", binding.action, binding.detail)),
-                Style::default().fg(Color::White),
-            ),
-        ])
-    })
-    .collect();
+    ) {
+        let text = if binding.keys == "F2 / F3 / F4"
+            && app
+                .pending_approval
+                .as_ref()
+                .is_some_and(|request| request.repeat_key.is_none())
+        {
+            "F2 / F4  answer approval once / decline; repeat unavailable for this request"
+                .to_owned()
+        } else {
+            format!(
+                "{}  {}{}",
+                binding.display_keys(app.terminal_capability),
+                binding.action,
+                binding.detail
+            )
+        };
+        let line = display_line(app, &text);
+        lines.extend(wrap_help_line(&line, width).into_iter().map(Line::from));
+    }
+    let page_rows = usize::from(body.height.max(1));
+    let max_scroll = lines.len().saturating_sub(page_rows);
+    let scroll = app.help_scroll.get().min(max_scroll);
+    app.help_scroll.set(scroll);
+    app.help_max_scroll.set(max_scroll);
+    app.help_page_rows.set(page_rows);
     frame.render_widget(
-        Paragraph::new(lines).style(Style::default().fg(Color::White).bg(Color::Black)),
+        Paragraph::new(lines)
+            .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))
+            .style(Style::default().fg(Color::White).bg(Color::Black)),
         body,
     );
+}
+
+pub(super) fn wrap_help_line(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for character in text.chars() {
+        let character_width = Line::from(character.to_string()).width();
+        if !current.is_empty()
+            && Line::from(current.as_str())
+                .width()
+                .saturating_add(character_width)
+                > width
+        {
+            lines.push(std::mem::take(&mut current));
+        }
+        current.push(character);
+        if Line::from(current.as_str()).width() > width {
+            lines.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
 }
 
 pub(super) fn render_search(
@@ -723,8 +826,14 @@ pub(super) fn render_modal_shell(
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(inner);
+    let help = if app.status.esc_interrupts_turn() {
+        help.replace("Esc cancel", "Esc stop + close")
+            .replace("Esc close", "Esc stop + close")
+    } else {
+        help.to_owned()
+    };
     frame.render_widget(
-        Paragraph::new(display_line(app, help)).style(
+        Paragraph::new(display_line(app, &help)).style(
             Style::default()
                 .fg(Color::DarkGray)
                 .bg(Color::Black)
@@ -822,7 +931,7 @@ fn typical_duration_suffix(duration_ms: Option<u64>) -> String {
 fn blocked_reason_width(width: u16, route_label: &str, app: &App) -> usize {
     let title_width = usize::from(width.saturating_sub(2));
     let fixed_left_width =
-        left_title(app, &format!("{BLOCKED_LABEL} - "), Style::default()).width();
+        left_title(app, &format!("{BLOCKED_LABEL} - "), Style::default(), 0).width();
     title_width.saturating_sub(
         fixed_left_width
             .saturating_add(Line::from(route_label).width())

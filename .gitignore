@@ -6,8 +6,30 @@
 *.key
 *.pem
 .env
+.env.*
+*.p12
+*.pfx
+*.jks
+id_rsa
+id_ed25519
 .claude/
 .codex/
+.agents/
+.gitleaksignore
+
+# Local Python environments/caches and packaged build output.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.exe
+*.dll
+*.pdb
+*.dmp
+*.zip
+.DS_Store
+Thumbs.db
 
 # Internal working material. These directories stay on the maintainer's disk and
 # must never enter the public repository: they hold build logs, decision records,

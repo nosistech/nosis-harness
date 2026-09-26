@@ -1,8 +1,11 @@
 use super::*;
 use chrono::TimeZone;
-use nh_core::wire::{ChatClient, ChatRequest, ChatResponse, RetryExhausted};
+use nh_core::wire::{
+    ChatClient, ChatMessage, ChatRequest, ChatResponse, FinishReason, RetryExhausted, ToolCallReq,
+};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
 const PEAK_CATALOG: &str = r#"
@@ -26,6 +29,13 @@ const PEAK_CATALOG: &str = r#"
     timezone = "Asia/Shanghai"
     windows = ["09:00-12:00"]
 "#;
+
+fn permissive_test_guard() -> nh_tools::GuardFn {
+    Box::new(|access| match access {
+        nh_tools::Access::Exec(_) => nh_tools::Guard::Ask,
+        _ => nh_tools::Guard::Allow,
+    })
+}
 
 fn mcp_config(name: &str, url: &str, trust: McpTrust) -> McpServerConfig {
     McpServerConfig {
@@ -421,12 +431,27 @@ fn merged_mcp_server_with_unapproved_credential_is_dropped() {
 }
 
 #[test]
-fn yes_parsing_defaults_to_deny() {
-    assert!(is_yes("y\n"));
-    assert!(is_yes("  yes  \n"));
-    assert!(!is_yes("\n"));
-    assert!(!is_yes("n\n"));
-    assert!(!is_yes("whatever\n"));
+fn approval_codes_are_fixed_width_uppercase_hex() {
+    assert_eq!(encode_approval_code([0x00, 0xab, 0x10, 0xff]), "00AB10FF");
+}
+
+#[test]
+fn approval_code_match_removes_only_one_terminal_line_ending() {
+    let code = "A1B2C3D4";
+    assert!(approval_line_matches("A1B2C3D4\n", code));
+    assert!(approval_line_matches("A1B2C3D4\r\n", code));
+    for line in [
+        "A1B2C3D4",
+        "A1B2C3D4\n\n",
+        "A1B2C3D4\r\n\r\n",
+        " A1B2C3D4\n",
+        "A1B2C3D4 \n",
+        "a1b2c3d4\n",
+        "yes\n",
+        "\n",
+    ] {
+        assert!(!approval_line_matches(line, code), "accepted {line:?}");
+    }
 }
 
 #[test]
@@ -772,7 +797,12 @@ fn real_measured_then_unmetered_run_is_a_marked_lower_bound_and_refuses_cost() {
             calls: AtomicUsize::new(0),
         })),
         tools: builtin_tools(),
-        ctx: ToolCtx::new(tmp.path().to_path_buf(), Box::new(|_| false)),
+        ctx: ToolCtx::new(
+            tmp.path().to_path_buf(),
+            Box::new(|_| false),
+            permissive_test_guard(),
+            Scrubber::new(Vec::new()),
+        ),
         receipts: ReceiptWriter::for_path(
             tmp.path(),
             tmp.path().join("receipts.jsonl"),
@@ -967,7 +997,12 @@ fn failed_run_projects_the_real_agent_error_receipt_meter() {
     let mut agent = AgentLoop {
         client: Box::new(MeteredRunFailure),
         tools: Vec::new(),
-        ctx: ToolCtx::new(tmp.path().to_path_buf(), Box::new(|_| false)),
+        ctx: ToolCtx::new(
+            tmp.path().to_path_buf(),
+            Box::new(|_| false),
+            permissive_test_guard(),
+            Scrubber::new(Vec::new()),
+        ),
         receipts: ReceiptWriter::for_path(
             tmp.path(),
             tmp.path().join("receipts.jsonl"),
@@ -1425,15 +1460,18 @@ fn run_cost_marks_only_a_peak_boundary_crossing() {
 }
 
 #[test]
-fn non_terminal_stdin_cannot_approve_even_when_it_contains_yes() {
-    let mut input = std::io::Cursor::new(b"y\n".to_vec());
+fn non_terminal_stdin_cannot_approve_even_with_the_current_code() {
+    let mut input = std::io::Cursor::new(b"A1B2C3D4\n".to_vec());
     let mut stderr = Vec::new();
 
     assert!(!approve_with_io(
         "echo safe",
         false,
         &mut input,
-        &mut stderr
+        &mut stderr,
+        || -> Option<[u8; APPROVAL_CODE_BYTES]> {
+            panic!("non-terminal approval must not generate a code")
+        }
     ));
     assert_eq!(input.position(), 0, "piped input must not be consumed");
     let stderr = String::from_utf8(stderr).unwrap();
@@ -1442,14 +1480,122 @@ fn non_terminal_stdin_cannot_approve_even_when_it_contains_yes() {
 }
 
 #[test]
-fn terminal_stdin_keeps_the_existing_explicit_yes_path() {
-    let mut input = std::io::Cursor::new(b"yes\n".to_vec());
+fn terminal_stdin_requires_the_exact_current_code() {
+    let mut input = std::io::Cursor::new(b"A1B2C3D4\n".to_vec());
     let mut stderr = Vec::new();
 
-    assert!(approve_with_io("echo safe", true, &mut input, &mut stderr));
+    assert!(approve_with_io(
+        "echo safe",
+        true,
+        &mut input,
+        &mut stderr,
+        || Some([0xa1, 0xb2, 0xc3, 0xd4])
+    ));
     assert_eq!(
         String::from_utf8(stderr).unwrap(),
-        "  approve? echo safe  [y/N] "
+        "  approve? echo safe\n  To approve this request, type A1B2C3D4 and press Enter; anything else declines [default: no]: "
+    );
+}
+
+struct FailingApprovalWriter {
+    fail_write: bool,
+}
+
+impl std::io::Write for FailingApprovalWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.fail_write {
+            Err(std::io::Error::other("fixture write failure"))
+        } else {
+            Ok(buf.len())
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.fail_write {
+            Ok(())
+        } else {
+            Err(std::io::Error::other("fixture flush failure"))
+        }
+    }
+}
+
+#[test]
+fn prompt_io_failure_refuses_before_consuming_matching_input() {
+    for fail_write in [true, false] {
+        let mut input = std::io::Cursor::new(b"A1B2C3D4\n".to_vec());
+        let mut stderr = FailingApprovalWriter { fail_write };
+
+        assert!(!approve_with_io(
+            "echo safe",
+            true,
+            &mut input,
+            &mut stderr,
+            || Some([0xa1, 0xb2, 0xc3, 0xd4])
+        ));
+        assert_eq!(input.position(), 0, "prompt failure consumed input");
+    }
+}
+
+#[test]
+fn stale_code_from_a_prior_prompt_cannot_approve_a_new_request() {
+    let mut first_input = std::io::Cursor::new(b"A1B2C3D4\n".to_vec());
+    let mut first_stderr = Vec::new();
+    assert!(approve_with_io(
+        "first action",
+        true,
+        &mut first_input,
+        &mut first_stderr,
+        || Some([0xa1, 0xb2, 0xc3, 0xd4])
+    ));
+
+    let mut second_input = std::io::Cursor::new(b"A1B2C3D4\n".to_vec());
+    let mut second_stderr = Vec::new();
+    assert!(!approve_with_io(
+        "second action",
+        true,
+        &mut second_input,
+        &mut second_stderr,
+        || Some([0x12, 0x34, 0x56, 0x78])
+    ));
+    let second_stderr = String::from_utf8(second_stderr).unwrap();
+    assert!(
+        second_stderr.contains("second action"),
+        "got: {second_stderr}"
+    );
+    assert!(second_stderr.contains("12345678"), "got: {second_stderr}");
+    assert!(!second_stderr.contains("A1B2C3D4"), "got: {second_stderr}");
+}
+
+#[test]
+fn ordinary_pretyped_approval_lines_default_to_deny() {
+    for line in ["y\n", "yes\n", "\n", "A1B2C3D4 \n", "a1b2c3d4\n"] {
+        let mut input = std::io::Cursor::new(line.as_bytes());
+        let mut stderr = Vec::new();
+        assert!(
+            !approve_with_io("echo safe", true, &mut input, &mut stderr, || Some([
+                0xa1, 0xb2, 0xc3, 0xd4
+            ])),
+            "accepted {line:?}"
+        );
+    }
+}
+
+#[test]
+fn approval_fails_closed_when_fresh_randomness_is_unavailable() {
+    let mut input = std::io::Cursor::new(b"A1B2C3D4\n".to_vec());
+    let mut stderr = Vec::new();
+
+    assert!(!approve_with_io(
+        "echo safe",
+        true,
+        &mut input,
+        &mut stderr,
+        || None
+    ));
+    assert_eq!(input.position(), 0, "refusal must not consume input");
+    assert_eq!(
+        String::from_utf8(stderr).unwrap(),
+        "  approval refused: could not generate a fresh confirmation code\n"
     );
 }
 
@@ -1459,7 +1605,15 @@ fn command_too_large_to_display_is_refused() {
     let mut input = std::io::Cursor::new(b"yes\n".to_vec());
     let mut stderr = Vec::new();
 
-    assert!(!approve_with_io(&display, true, &mut input, &mut stderr));
+    assert!(!approve_with_io(
+        &display,
+        true,
+        &mut input,
+        &mut stderr,
+        || -> Option<[u8; APPROVAL_CODE_BYTES]> {
+            panic!("oversized approval must not generate a code")
+        }
+    ));
     assert_eq!(
         input.position(),
         0,
@@ -1480,25 +1634,287 @@ fn run_stdout_contains_only_the_answer_and_metering_uses_stderr() {
     let mut stderr = Vec::new();
     let meter = vec!["tokens 12 in / 7 out".to_owned(), "cost $0.01".to_owned()];
 
-    write_run_output(&mut stdout, &mut stderr, &scrubber, "the answer", &meter).unwrap();
+    write_run_output(
+        &mut stdout,
+        &mut stderr,
+        &scrubber,
+        "the answer",
+        &meter,
+        result_notice(false),
+    )
+    .unwrap();
 
     assert_eq!(String::from_utf8(stdout).unwrap(), "the answer\n");
     assert_eq!(
         String::from_utf8(stderr).unwrap(),
-        "tokens 12 in / 7 out\ncost $0.01\n"
+        format!(
+            "tokens 12 in / 7 out\ncost $0.01\n{}\n",
+            result_notice(false)
+        )
     );
+}
+
+type RequestLog = Arc<Mutex<Vec<ChatRequest>>>;
+
+struct HostileReadOnlyClient {
+    calls: AtomicUsize,
+    requests: RequestLog,
+}
+
+impl ChatClient for HostileReadOnlyClient {
+    fn complete(&self, request: &ChatRequest) -> anyhow::Result<ChatResponse> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.requests.lock().unwrap().push(request.clone());
+        if call == 0 {
+            return Ok(ChatResponse {
+                message: ChatMessage {
+                    role: "assistant".into(),
+                    content: None,
+                    parts: None,
+                    tool_calls: Some(vec![
+                        ToolCallReq {
+                            id: "read".into(),
+                            name: "read_file".into(),
+                            arguments: r#"{"path":"note.txt"}"#.into(),
+                        },
+                        ToolCallReq {
+                            id: "write".into(),
+                            name: "write_file".into(),
+                            arguments: r#"{"path":"created.txt","content":"unexpected"}"#.into(),
+                        },
+                        ToolCallReq {
+                            id: "edit".into(),
+                            name: "edit_file".into(),
+                            arguments:
+                                r#"{"path":"note.txt","old_string":"before","new_string":"after"}"#
+                                    .into(),
+                        },
+                        ToolCallReq {
+                            id: "exec".into(),
+                            name: "exec_shell".into(),
+                            arguments: r#"{"command":"echo unexpected > marker.txt"}"#.into(),
+                        },
+                        ToolCallReq {
+                            id: "alias".into(),
+                            name: "shell".into(),
+                            arguments: r#"{"command":"echo unexpected > alias-marker.txt"}"#.into(),
+                        },
+                        ToolCallReq {
+                            id: "mcp".into(),
+                            name: "mcp__remote__mutate".into(),
+                            arguments: "{}".into(),
+                        },
+                    ]),
+                    tool_call_id: None,
+                    reasoning_content: None,
+                },
+                finish_reason: FinishReason::ToolUse,
+                usage: None,
+                retries: Default::default(),
+            });
+        }
+        assert_eq!(call, 1, "agent should finish after the refusal turn");
+        Ok(ChatResponse {
+            message: ChatMessage {
+                role: "assistant".into(),
+                content: Some("read-only analysis complete".into()),
+                parts: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            finish_reason: FinishReason::Stop,
+            usage: None,
+            retries: Default::default(),
+        })
+    }
+}
+
+fn captured_tool_result(request: &ChatRequest, id: &str) -> String {
+    request
+        .messages
+        .iter()
+        .find(|message| message.role == "tool" && message.tool_call_id.as_deref() == Some(id))
+        .and_then(|message| message.content.clone())
+        .unwrap_or_else(|| panic!("missing result for tool call {id}"))
+}
+
+#[test]
+fn read_only_agent_refuses_hostile_tools_and_alias_without_side_effects() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("note.txt"), "before").unwrap();
+    let approvals = Arc::new(AtomicUsize::new(0));
+    let approvals_seen = Arc::clone(&approvals);
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = AgentLoop {
+        client: Box::new(HostileReadOnlyClient {
+            calls: AtomicUsize::new(0),
+            requests: Arc::clone(&requests),
+        }),
+        tools: read_only_tools(),
+        ctx: ToolCtx::new(
+            dir.path().to_path_buf(),
+            Box::new(move |_| {
+                approvals_seen.fetch_add(1, Ordering::SeqCst);
+                true
+            }),
+            read_only_guard(Box::new(|_| nh_tools::Guard::Allow)),
+            Scrubber::new(Vec::new()),
+        ),
+        receipts: ReceiptWriter::for_path(
+            dir.path(),
+            dir.path().join("receipts.jsonl"),
+            Scrubber::new(Vec::new()),
+        ),
+        model_id: "hostile-fixture".into(),
+        max_turns: 2,
+        thinking: ThinkingEffort::None,
+        profile: None,
+        constitution: Some(READ_ONLY_RUN_RULE.into()),
+        context_limit: None,
+        on_event: None,
+    };
+
+    let (answer, receipt) = agent.run("review without changing anything").unwrap();
+
+    assert_eq!(answer, "read-only analysis complete");
+    assert_eq!(receipt.tool_calls, 6);
+    assert_eq!(approvals.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("note.txt")).unwrap(),
+        "before"
+    );
+    for path in ["created.txt", "marker.txt", "alias-marker.txt"] {
+        assert!(
+            !dir.path().join(path).exists(),
+            "unexpected mutation: {path}"
+        );
+    }
+    assert!(dir.path().join("receipts.jsonl").exists());
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0]
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        ["read_file", "glob_files", "grep_files"]
+    );
+    assert_eq!(captured_tool_result(&requests[1], "read"), "before");
+    let available = "available tools: read_file, glob_files, grep_files";
+    for id in ["write", "edit", "exec", "mcp"] {
+        let result = captured_tool_result(&requests[1], id);
+        assert!(result.contains("unknown tool"), "got: {result}");
+        assert!(result.contains(available), "got: {result}");
+    }
+    let alias = captured_tool_result(&requests[1], "alias");
+    assert!(
+        alias.contains("mapped tool name 'shell' to 'exec_shell'"),
+        "got: {alias}"
+    );
+    assert!(alias.contains("unknown tool 'shell'"), "got: {alias}");
+    assert!(alias.contains(available), "got: {alias}");
 }
 
 #[test]
 fn run_constitution_contains_the_authoritative_tool_result_rule() {
     let resolver = RouteResolver::from_toml(PEAK_CATALOG).unwrap();
     let route = resolver.resolve("peak-route").unwrap();
-    let constitution = agent_constitution("law bytes", &route);
+    let constitution = agent_constitution("law bytes", &route, false);
 
     assert!(
         constitution.contains(nh_core::agent::TOOL_RESULT_STATE_RULE),
         "got: {constitution}"
     );
+}
+
+#[test]
+fn read_only_run_constitution_names_tools_and_honest_limits() {
+    let resolver = RouteResolver::from_toml(PEAK_CATALOG).unwrap();
+    let route = resolver.resolve("peak-route").unwrap();
+    let normal = run_constitution("law bytes", &route, false, false, None, false);
+    let read_only = run_constitution("law bytes", &route, true, false, None, false);
+    let retained = run_constitution("law bytes", &route, true, true, None, false);
+
+    assert!(!normal.contains("READ-ONLY RUN"));
+    for expected in [
+        "read_file, glob_files, and grep_files",
+        "Do not claim to edit files",
+        "sent to the selected provider",
+        "provider charges",
+        "local receipt writes",
+    ] {
+        assert!(read_only.contains(expected), "got: {read_only}");
+    }
+    assert!(retained.contains("read_file, glob_files, grep_files, and read_observation"));
+    assert!(!read_only.contains("read_observation"));
+}
+
+#[test]
+fn compact_identity_changes_only_the_identity_clause() {
+    let resolver = RouteResolver::from_toml(BUNDLED_CATALOG).unwrap();
+    let route = resolver.resolve("deepseek-v4-flash").unwrap();
+    let standard = run_constitution("law bytes", &route, true, true, None, false);
+    let compact = run_constitution(
+        "law bytes",
+        &route,
+        true,
+        true,
+        Some(IdentityPromptArg::CompactV1),
+        false,
+    );
+
+    let standard_suffix = standard.split_once("\n\n").unwrap().1;
+    let compact_suffix = compact.split_once("\n\n").unwrap().1;
+    assert_eq!(standard_suffix, compact_suffix);
+    assert!(compact.starts_with(
+        "You are nosis, an autonomous coding harness on route 'deepseek-v4-flash' via deepseek."
+    ));
+    assert!(compact.contains("answer 'nosis on deepseek-v4-flash'"));
+    assert!(compact.contains(nh_core::agent::TOOL_RESULT_STATE_RULE));
+    assert!(compact.contains(READ_ONLY_RUN_WITH_OBSERVATIONS_RULE));
+    assert!(compact.ends_with(READ_ONLY_RUN_WITH_OBSERVATIONS_RULE));
+    assert!(compact.len() < standard.len());
+}
+
+#[test]
+fn shell_denied_run_constitution_has_one_factual_notice_before_the_law() {
+    let resolver = RouteResolver::from_toml(PEAK_CATALOG).unwrap();
+    let route = resolver.resolve("peak-route").unwrap();
+    let constitution = run_constitution("law bytes", &route, false, false, None, true);
+
+    assert_eq!(
+        constitution
+            .matches(nh_core::agent::SHELL_UNAVAILABLE_SESSION_NOTICE)
+            .count(),
+        1
+    );
+    assert!(constitution.ends_with("law bytes"), "got: {constitution}");
+    assert!(constitution.contains("other permitted work can still complete"));
+    assert!(constitution.contains("Tests require independent verification"));
+    assert!(!constitution.contains("file changes can still complete"));
+
+    let read_only = run_constitution("law bytes", &route, true, false, None, true);
+    assert_eq!(
+        read_only
+            .matches(nh_core::agent::SHELL_UNAVAILABLE_SESSION_NOTICE)
+            .count(),
+        1
+    );
+    assert!(read_only.contains(READ_ONLY_RUN_RULE));
+    assert!(!read_only.contains("file changes can still complete"));
+}
+
+#[test]
+fn extractive_context_requires_recoverable_observations() {
+    let error = validate_context_experiment(Some(ContextExperimentArg::ExtractiveV1), false)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("requires --retain-observations"));
+    validate_context_experiment(Some(ContextExperimentArg::ExtractiveV1), true).unwrap();
+    validate_context_experiment(None, false).unwrap();
 }
 
 #[test]

@@ -170,7 +170,12 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
         return UiAction::None;
     }
     if key.code == KeyCode::F(1) {
-        app.overlay = Overlay::Help;
+        if app.overlay == Overlay::Help {
+            app.overlay = Overlay::None;
+        } else {
+            app.help_scroll.set(0);
+            app.overlay = Overlay::Help;
+        }
         return UiAction::None;
     }
     if app.overlay != Overlay::None {
@@ -180,19 +185,26 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
         && key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
         && app.input.is_empty()
     {
+        app.help_scroll.set(0);
         app.overlay = Overlay::Help;
         return UiAction::None;
     }
-    if matches!(app.status, Status::Waiting) {
-        if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
-            match key.code {
-                KeyCode::Char('y' | 'Y') => app.answer_approval(true),
-                KeyCode::Char('a' | 'A') => app.answer_approval_with_rule(true, true),
-                KeyCode::Char('n' | 'N') | KeyCode::Esc => app.answer_approval(false),
-                _ => {}
+    if matches!(app.status, Status::Waiting) && key.modifiers.is_empty() {
+        match key.code {
+            KeyCode::F(2) => {
+                app.answer_approval(true);
+                return UiAction::None;
             }
+            KeyCode::F(3) => {
+                app.answer_approval_with_rule(true, true);
+                return UiAction::None;
+            }
+            KeyCode::F(4) => {
+                app.answer_approval(false);
+                return UiAction::None;
+            }
+            _ => {}
         }
-        return UiAction::None;
     }
     if newline_key(key) {
         if insert_composer_char(app, '\n') {
@@ -200,7 +212,12 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
         }
         return UiAction::None;
     }
-    if let Some(toward_older) = prompt_history_key(key) {
+    let history_direction = if matches!(app.status, Status::Waiting) {
+        None
+    } else {
+        prompt_history_key(key)
+    };
+    if let Some(toward_older) = history_direction {
         if toward_older {
             app.recall_previous_prompt();
         } else {
@@ -228,7 +245,10 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
     if reduce_composer_navigation(app, key) {
         return UiAction::None;
     }
-    if matches!(app.status, Status::Working | Status::FinishingInterrupted) {
+    if matches!(
+        app.status,
+        Status::Working | Status::FinishingInterrupted | Status::Waiting
+    ) {
         match key.code {
             KeyCode::Up if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
                 scroll_transcript(app, 1, true);
@@ -241,6 +261,9 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
             }
             KeyCode::PageDown if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
                 scroll_transcript(app, 5, false);
+            }
+            KeyCode::End if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
+                app.scroll_back = 0;
             }
             KeyCode::Enter => {
                 app.pending_send = !app.input.trim().is_empty();
@@ -555,10 +578,12 @@ pub(super) fn push_input_char(input: &mut String, character: char) -> bool {
 }
 
 pub(super) fn reduce_paste(app: &mut App, text: &str) -> UiAction {
-    let working = matches!(app.status, Status::Working | Status::FinishingInterrupted);
-    if matches!(app.status, Status::Waiting)
-        || (working && app.overlay != Overlay::None)
-        || (!working && !matches!(app.overlay, Overlay::None | Overlay::CommandMenu { .. }))
+    let composing = matches!(
+        app.status,
+        Status::Working | Status::FinishingInterrupted | Status::Waiting
+    );
+    if (composing && app.overlay != Overlay::None)
+        || (!composing && !matches!(app.overlay, Overlay::None | Overlay::CommandMenu { .. }))
     {
         return UiAction::None;
     }
@@ -586,7 +611,7 @@ pub(super) fn reduce_paste(app: &mut App, text: &str) -> UiAction {
         app.end_prompt_history_recall();
     }
 
-    if working {
+    if composing {
         return UiAction::None;
     }
 
@@ -624,7 +649,11 @@ pub(super) fn reduce_overlay_key(app: &mut App, key: KeyEvent) -> UiAction {
         app.overlay = Overlay::None;
         return UiAction::None;
     }
-    if matches!(app.overlay, Overlay::Help | Overlay::TrustDial) {
+    if matches!(app.overlay, Overlay::Help) {
+        reduce_help_key(app, key);
+        return UiAction::None;
+    }
+    if matches!(app.overlay, Overlay::TrustDial) {
         return UiAction::None;
     }
 
@@ -683,6 +712,25 @@ pub(super) fn reduce_overlay_key(app: &mut App, key: KeyEvent) -> UiAction {
         return UiAction::None;
     };
     activate_palette_entry(app, entry)
+}
+
+fn reduce_help_key(app: &App, key: KeyEvent) {
+    if !key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
+        return;
+    }
+    let max_scroll = app.help_max_scroll.get();
+    let current = app.help_scroll.get().min(max_scroll);
+    let page = app.help_page_rows.get().saturating_sub(1).max(1);
+    let next = match key.code {
+        KeyCode::Up => current.saturating_sub(1),
+        KeyCode::Down => current.saturating_add(1).min(max_scroll),
+        KeyCode::PageUp => current.saturating_sub(page),
+        KeyCode::PageDown => current.saturating_add(page).min(max_scroll),
+        KeyCode::Home => 0,
+        KeyCode::End => max_scroll,
+        _ => return,
+    };
+    app.help_scroll.set(next);
 }
 
 pub(super) fn reduce_search_key(app: &mut App, key: KeyEvent) -> UiAction {

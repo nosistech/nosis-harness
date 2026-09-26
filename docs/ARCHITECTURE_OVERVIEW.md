@@ -34,6 +34,9 @@ and execution location are not inferred from the address.
 
 ## Internal Responsibility Boundaries
 
+For a task-oriented route through the enforcement points, use the
+[audit map](AUDIT_MAP.md).
+
 Crate roots expose the existing public API. Most retain only top-level orchestration or a small
 shared import boundary, and production responsibilities live in named modules. `nh-tools` and
 `nh-vault` are stated exceptions, described below:
@@ -56,11 +59,13 @@ shared import boundary, and production responsibilities live in named modules. `
 - `nh-law`: `load` for layered parsing/compilation, `matcher` for pure matching, and `model` for
   policy types and read-only views.
 - `nh-tools`: `edit` for indentation-flexible match location, `search` for the glob and grep
-  tools, `exec` for process execution, and `mcp::{adapter,client,config}` for outbound MCP;
+  tools, `file_publication` for staging, no-clobber creation and edit conflict checks,
+  `exec` for process execution, and `mcp::{adapter,client,config}` for outbound MCP;
   `mcp::client::oauth` owns token lifetime and refresh state; `mcp::client::response` validates
   correlated JSON and bounded SSE replies. The crate root is an exception to
-  the rule above: it holds the read, write and edit tool implementations together with the shared
-  workspace containment resolver and the creation guard.
+  the rule above: it holds the read, write and edit tool orchestration together with the shared
+  workspace containment resolver and the creation guard. Publication helpers have one
+  implementation in their named module; the extraction does not add OS isolation.
 - `nh-fleet`: `engine` owns workers and durable I/O, `scheduler` owns task state transitions,
   and `ledger`, `model`, and `prepare` own persistence, public types, and validated setup; the
   crate root owns run/resume orchestration.

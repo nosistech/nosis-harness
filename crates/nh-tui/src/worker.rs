@@ -19,7 +19,7 @@ use nh_core::wire::{
 };
 use nh_law::Law;
 use nh_routes::{Profiles, ResolvedRoute};
-use nh_tools::{builtin_tools, Tool, ToolArgs, ToolCtx, ToolExecution, ToolSpec};
+use nh_tools::{builtin_tools_for_policy, Tool, ToolArgs, ToolCtx, ToolExecution, ToolSpec};
 #[cfg(test)]
 use nh_vault::Scrubber;
 use nh_vault::{SecretRegistry, SecretValue};
@@ -174,7 +174,27 @@ fn apply_new_credential(
 /// One approval decision waiting for the main-thread UI.
 pub struct ApprovalRequest {
     pub prompt: String,
+    /// Secret-safe exact request identity. `None` disables session repeat.
+    pub repeat_key: Option<String>,
     pub reply: Sender<bool>,
+}
+
+fn approval_request(
+    scrubber: &SharedScrubber,
+    raw_prompt: &str,
+    reply: Sender<bool>,
+) -> ApprovalRequest {
+    let prompt = scrub_full_line(scrubber, raw_prompt);
+    // Only exec prompts carry a complete, namespaced identity. File prompts
+    // are human-readable summaries, MCP arguments can be truncated, and any
+    // redaction or escaping also prevents an exact identity comparison.
+    let repeat_key =
+        (prompt == raw_prompt && raw_prompt.starts_with("exec ")).then(|| prompt.clone());
+    ApprovalRequest {
+        prompt,
+        repeat_key,
+        reply,
+    }
 }
 
 pub(super) enum WorkerCommand {
@@ -348,6 +368,7 @@ struct WorkerSession {
     ledger_failed: bool,
     ledger_notice_sent: bool,
     pending_route_context: Option<ChatMessage>,
+    shell_unavailable: bool,
 }
 
 impl WorkerSession {
@@ -409,28 +430,31 @@ impl WorkerSession {
                 return false;
             }
             let (reply, answers) = mpsc::channel();
-            let request = ApprovalRequest {
-                prompt: scrub_full_line(&approval_scrubber, prompt),
-                reply,
-            };
+            let request = approval_request(&approval_scrubber, prompt, reply);
             if approval_events.send(AgentEvent::Approval(request)).is_err() {
                 return false;
             }
             wait_for_approval(&answers, &approval_shutdown)
         });
 
+        let shell_unavailable = law.policy.blocks_all_shell_commands();
+        let builtin_tools = builtin_tools_for_policy(&law.policy);
         let policy = law.policy.clone();
         let event_scrubber = Arc::clone(&scrubber);
         let progress_events = events.clone();
-        let ctx = ToolCtx::new(workdir, approve)
-            .with_scrubber(key_literals.scrubber())
-            .with_cancel(Arc::clone(&turn_cancel))
-            .with_guard(nh_tools::policy_guard(policy));
+        let ctx = ToolCtx::new(
+            workdir,
+            approve,
+            nh_tools::policy_guard(policy),
+            key_literals.scrubber(),
+        )
+        .with_cancel(Arc::clone(&turn_cancel));
         let law_constitution = law.constitution;
-        let current_constitution = identity_constitution(&law_constitution, &route);
+        let current_constitution =
+            identity_constitution(&law_constitution, &route, shell_unavailable);
         let agent = AgentLoop {
             client,
-            tools: tracked_tools(builtin_tools(), &events),
+            tools: tracked_tools(builtin_tools, &events),
             ctx,
             receipts: ReceiptWriter::project(repo_root.clone(), key_literals.scrubber()),
             model_id: route.model_id().to_owned(),
@@ -460,11 +484,17 @@ impl WorkerSession {
             .as_ref()
             .map_or_else(Vec::new, |saved| saved.history.clone());
         let pending_route_context = resume.as_ref().and_then(|saved| {
-            saved
+            let route_changed = saved
                 .turns
                 .last()
-                .is_some_and(|turn| turn.route_id != saved.route_id)
-                .then(|| route_context_message(current_constitution.clone()))
+                .is_some_and(|turn| turn.route_id != saved.route_id);
+            nh_core::agent::capability_aware_route_context(
+                &saved.history,
+                route_changed,
+                &current_constitution,
+                shell_unavailable,
+            )
+            .map(route_context_message)
         });
         let mut session_usage = None;
         if let Some(saved) = &resume {
@@ -515,6 +545,7 @@ impl WorkerSession {
             ledger_failed,
             ledger_notice_sent: ledger_failed,
             pending_route_context,
+            shell_unavailable,
         }
     }
 
@@ -603,11 +634,21 @@ impl WorkerSession {
                 );
                 self.agent.profile = Some(execution_policy.profile.clone());
                 self.active_profile = execution_policy.profile;
-                let constitution = identity_constitution(&self.law_constitution, &next_route);
+                let constitution = identity_constitution(
+                    &self.law_constitution,
+                    &next_route,
+                    self.shell_unavailable,
+                );
                 self.agent.constitution = Some(constitution.clone());
-                self.pending_route_context = (!self.history.is_empty()
-                    && previous_route != next_route_id)
-                    .then(|| route_context_message(constitution));
+                if previous_route != next_route_id {
+                    self.pending_route_context = nh_core::agent::capability_aware_route_context(
+                        &self.history,
+                        true,
+                        &constitution,
+                        self.shell_unavailable,
+                    )
+                    .map(route_context_message);
+                }
                 self.agent.context_limit = next_route.context();
                 self.route = *next_route;
                 let event = SessionEvent::RouteSwitched {
