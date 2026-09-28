@@ -94,9 +94,10 @@ jobs:
           } finally {
             $zip.Dispose()
           }
-          $expectedEntries = @("LICENSE", "START_HERE.md", "nh.exe") | Sort-Object
-          if (@(Compare-Object $expectedEntries $actualEntries).Count -ne 0) {
-            throw "The package ZIP does not contain exactly LICENSE, START_HERE.md, and nh.exe."
+          $expectedEntries = @("LICENSE", "START_HERE.md", "nh.exe",
+            "practice/README.md", "practice/WELCOME.txt", "practice/EXPECTED.txt") | Sort-Object
+          if (@(Compare-Object -CaseSensitive -SyncWindow 0 $expectedEntries $actualEntries).Count -ne 0) {
+            throw "The package ZIP does not match the executable, guide, license and practice allowlist."
           }
 
           $expectedChecksums = @(
@@ -121,6 +122,22 @@ jobs:
                 (Get-FileHash -LiteralPath $extractedPath -Algorithm SHA256).Hash) {
               throw "Extracted $name differs from the packaged loose file."
             }
+          }
+
+          # Verify the learning exercise against source, not just the loose copy.
+          foreach ($name in @('README.md', 'WELCOME.txt', 'EXPECTED.txt')) {
+            $sourcePath = Join-Path $env:GITHUB_WORKSPACE "examples/first-task/$name"
+            $extractedPath = Join-Path $smokeDir "practice/$name"
+            if ((Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash -cne
+                (Get-FileHash -LiteralPath $extractedPath -Algorithm SHA256).Hash) {
+              throw "Extracted practice/$name differs from the checked-out source."
+            }
+          }
+          $before = [IO.File]::ReadAllText((Join-Path $smokeDir 'practice/WELCOME.txt'))
+          $expected = [IO.File]::ReadAllText((Join-Path $smokeDir 'practice/EXPECTED.txt'))
+          if ([regex]::Matches($before, '\bsmal\b').Count -ne 1 -or
+              ($before -creplace '\bsmal\b', 'small') -cne $expected) {
+            throw 'The practice exercise must contain exactly the intended spelling change.'
           }
 
           $smokeExe = Join-Path $smokeDir "nh.exe"

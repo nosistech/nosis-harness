@@ -12,8 +12,8 @@ use crate::receipt::{
     CompactionStats, FailureClass, Outcome, Receipt, ReceiptKind, ReceiptWriter, RepairStats,
 };
 use crate::wire::{
-    ChatClient, ChatMessage, ChatRequest, ContentPart, FinishReason, RetryExhausted, RetryStats,
-    ThinkingEffort, ToolCallReq, Usage,
+    ChatClient, ChatMessage, ChatRequest, ContentPart, FinishReason, ProviderFailureKind,
+    RetryExhausted, RetryStats, ThinkingEffort, ToolCallReq, Usage,
 };
 use context::{
     compact_history, compaction_input_tokens, context_percentage, plain_msg, COMPACT_AT,
@@ -68,6 +68,12 @@ pub struct AgentRunError {
 impl AgentRunError {
     pub fn receipt(&self) -> &Receipt {
         &self.receipt
+    }
+
+    pub fn provider_failure_kind(&self) -> Option<ProviderFailureKind> {
+        self.source
+            .downcast_ref::<RetryExhausted>()
+            .map(|failure| failure.kind)
     }
 }
 

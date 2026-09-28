@@ -6,7 +6,7 @@ current source; the published download may not include them yet.
 
 | What you need | Guide |
 | --- | --- |
-| Learn with small, checkable tasks | [Tutorials](TUTORIALS.md), [practice files](../examples/practice-tasks/README.md) |
+| Learn with small, checkable tasks | [First text task](../examples/first-task/README.md), [tutorials](TUTORIALS.md), [Python practice](../examples/practice-tasks/README.md) |
 | Use chat or the full-screen interface | [Terminal controls and approvals](TERMINAL_GUIDE.md) |
 | Configure models and update a catalog | [Configuration](CONFIGURATION.md), [model updates](MODEL_UPDATES.md) |
 | Look up a command | [CLI reference](CLI_REFERENCE.md) |
@@ -17,6 +17,7 @@ current source; the published download may not include them yet.
 | Measure costs and experiments | [Efficiency](EFFICIENCY.md), [comparison protocol](../examples/efficiency/README.md) |
 | Verify a download or installation | [Build provenance](RELEASE_VERIFICATION.md), [installation checks](INSTALLATION_CHECK.md) |
 | Observe ease of use | [Newcomer checks](USABILITY_CHECK.md) |
+| Understand product decisions | [Why these features](DESIGN_CHOICES.md) |
 | Explore advanced preview features | [MCP preview](MCP_PREVIEW.md) |
 
 Source code lives in `crates/`, runnable examples in `examples/`, and development

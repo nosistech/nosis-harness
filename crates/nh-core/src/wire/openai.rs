@@ -139,7 +139,7 @@ impl ChatClient for OpenAiCompatClient {
                 match parse_response(&body) {
                     Ok(response) => AttemptResult::Success(response),
                     Err(error) => AttemptResult::Failure {
-                        outcome: AttemptOutcome::HttpStatus(status.as_u16()),
+                        outcome: AttemptOutcome::IncompleteResponse,
                         retry_after: None,
                         detail: error.to_string(),
                         usage: extract_usage(&body),

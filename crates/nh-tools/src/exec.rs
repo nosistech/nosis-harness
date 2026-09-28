@@ -2,8 +2,8 @@
 
 use crate::{
     cancelled_before, is_allowed_env_var, render_tool_result, str_arg, Access, CommandOutcome,
-    ExecShell, Guard, Tool, ToolAudit, ToolCtx, ToolExecution, ToolSpec, DRAIN_GRACE, EXEC_TIMEOUT,
-    KILL_VERIFY_GRACE, MAX_TOOL_READ_BYTES, TOOL_BUFFER_BYTES,
+    ExecShell, Guard, Tool, ToolAudit, ToolCtx, ToolExecution, ToolReviewItem, ToolSpec,
+    DRAIN_GRACE, EXEC_TIMEOUT, KILL_VERIFY_GRACE, MAX_TOOL_READ_BYTES, TOOL_BUFFER_BYTES,
 };
 use anyhow::Context as _;
 use serde_json::json;
@@ -163,10 +163,16 @@ pub(super) fn timeout_label(timeout: Duration) -> String {
     }
 }
 
-fn command_execution(content: String, outcome: CommandOutcome, ctx: &ToolCtx) -> ToolExecution {
+fn command_execution(
+    content: String,
+    command: &str,
+    outcome: CommandOutcome,
+    ctx: &ToolCtx,
+) -> ToolExecution {
     ToolExecution {
         output: render_tool_result(content, ctx),
         audit: vec![ToolAudit::Command(outcome)],
+        review: vec![ToolReviewItem::command(command, outcome, ctx)],
     }
 }
 
@@ -344,6 +350,7 @@ impl ExecShell {
         if let Some(cancelled) = cancelled_before("command execution", ctx) {
             return Ok(command_execution(
                 cancelled,
+                command,
                 CommandOutcome::CancelledBeforeStart,
                 ctx,
             ));
@@ -351,6 +358,7 @@ impl ExecShell {
         if let Guard::Block(reason) = (ctx.guard)(&Access::Exec(command)) {
             return Ok(command_execution(
                 format!("blocked by law: {reason}"),
+                command,
                 CommandOutcome::Blocked,
                 ctx,
             ));
@@ -364,6 +372,7 @@ impl ExecShell {
             // Ok-shaped so the model can read the denial and adapt, not crash the turn.
             return Ok(command_execution(
                 format!("user denied: {command}"),
+                command,
                 CommandOutcome::Denied,
                 ctx,
             ));
@@ -371,6 +380,7 @@ impl ExecShell {
         if let Some(cancelled) = cancelled_before("command execution", ctx) {
             return Ok(command_execution(
                 cancelled,
+                command,
                 CommandOutcome::CancelledBeforeStart,
                 ctx,
             ));
@@ -501,6 +511,6 @@ impl ExecShell {
                 )
             }
         };
-        Ok(command_execution(content, outcome, ctx))
+        Ok(command_execution(content, command, outcome, ctx))
     }
 }

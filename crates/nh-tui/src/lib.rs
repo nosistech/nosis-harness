@@ -43,7 +43,8 @@ use session::{
 };
 pub use session::{identity_constitution, run};
 pub use state::{
-    AgentEvent, App, McpState, PaletteEntry, Status, TimelineEntry, TimelineSummary, TuiConfig,
+    AgentEvent, App, McpState, PaletteEntry, RecoveryHint, Status, TimelineEntry, TimelineSummary,
+    TuiConfig,
 };
 #[cfg(test)]
 use state::{PaletteAction, TranscriptKind};

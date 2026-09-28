@@ -959,6 +959,7 @@ mod tests {
                         "bc123",
                     ]
                     .concat(),
+                    kind: crate::wire::ProviderFailureKind::RateLimited,
                     attempts: 3,
                     elapsed: std::time::Duration::from_millis(5),
                 })),
@@ -989,6 +990,7 @@ mod tests {
             Ok(ToolExecution {
                 output: "raw tool output must not be recorded".into(),
                 audit: vec![ToolAudit::Command(CommandOutcome::Exited(Some(7)))],
+                review: Vec::new(),
             })
         }
     }

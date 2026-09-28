@@ -19,6 +19,19 @@ of password entry. Obtain consent before taking notes or recording a session.
    decline. Do not use destructive commands to test a person's vigilance.
 6. Stop, return later and recover from one ordinary setup issue using the guide.
 
+For rc.3 source, begin with the bundled [text task](../examples/first-task/README.md)
+so programming tools are not a prerequisite. After the edit, ask the person to
+find `/review`, identify the affected file and explain what a command's exit code
+does and does not prove. Include an edit after a check and a declined command.
+Ask them to find an earlier turn, read long details in a narrow window and return
+to their draft. Missing or expired evidence must not be mistaken for no changes.
+
+For recovery, use harmless simulated failures or a disconnected practice setup.
+Observe whether the person can distinguish a key problem, provider limit and
+network failure, keep their draft, and choose the next action. Do not intentionally
+exhaust a paid account or alter antivirus/firewall settings to create a failure.
+Record whether queued text is unexpectedly sent after a failed task.
+
 For the full-screen interface, also observe these everyday interactions. Resize
 the window to 80 columns by 24 rows and then 60 by 15; ask the person to find Help,
 identify the project and return to their draft. Paste two harmless lines and check

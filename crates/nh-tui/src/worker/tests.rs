@@ -365,6 +365,13 @@ fn tracked_tool_preserves_inner_audit_metadata() {
                 audit: vec![nh_tools::ToolAudit::EditMatch(
                     nh_tools::EditMatchTier::IndentationFlexible,
                 )],
+                review: vec![nh_tools::ToolReviewItem::Command {
+                    command: nh_tools::ReviewText {
+                        text: "fixture command".into(),
+                        truncated: false,
+                    },
+                    outcome: nh_tools::CommandOutcome::Exited(Some(0)),
+                }],
             })
         }
     }
@@ -385,6 +392,58 @@ fn tracked_tool_preserves_inner_audit_metadata() {
     assert!(matches!(
         received.recv().unwrap(),
         AgentEvent::ToolStarted { .. }
+    ));
+    assert!(matches!(
+        received.recv().unwrap(),
+        AgentEvent::ToolReview(nh_tools::ToolReviewItem::Command { .. })
+    ));
+    assert!(matches!(
+        received.recv().unwrap(),
+        AgentEvent::ToolFinished { .. }
+    ));
+}
+
+#[test]
+fn tracked_tool_marks_review_incomplete_when_the_inner_tool_errors() {
+    struct FailingTool;
+
+    impl Tool for FailingTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "exec_shell".into(),
+                description: "test only".into(),
+                parameters: ToolArgs::default(),
+            }
+        }
+
+        fn execute(&self, _args: ToolArgs, _ctx: &ToolCtx) -> anyhow::Result<String> {
+            anyhow::bail!("failed after launch")
+        }
+
+        fn execute_with_audit(
+            &self,
+            _args: ToolArgs,
+            _ctx: &ToolCtx,
+        ) -> anyhow::Result<ToolExecution> {
+            anyhow::bail!("failed after launch")
+        }
+    }
+
+    let (events, received) = mpsc::channel();
+    let mut tools = tracked_tools(vec![Box::new(FailingTool)], &events);
+    let error = tools
+        .remove(0)
+        .execute_with_audit(ToolArgs::default(), &test_tool_ctx())
+        .unwrap_err();
+
+    assert_eq!(error.to_string(), "failed after launch");
+    assert!(matches!(
+        received.recv().unwrap(),
+        AgentEvent::ToolStarted { .. }
+    ));
+    assert!(matches!(
+        received.recv().unwrap(),
+        AgentEvent::ToolReviewIncomplete
     ));
     assert!(matches!(
         received.recv().unwrap(),

@@ -1,0 +1,3 @@
+Welcome to Nosis.
+This is a smal practice project.
+Change one thing, then check the result.

@@ -109,11 +109,54 @@ still a claim to verify. No new checks run automatically.
 | `/why` | Explain routing without sending another model task |
 | Ctrl+F or `/search` | Search the conversation |
 | `/timeline` | Inspect recorded turns; this does not restore files |
+| `/review` | rc.3 source: open the latest turn's observed file changes and command outcomes |
 | `/quit` | Exit |
 
 Use `git status --short`, `git diff`, and your project's tests after an editing task.
 The [practice walkthrough](TUTORIALS.md#2-make-one-small-change-and-inspect-it) shows
 how to compare a small change. File changes are not automatically rolled back.
+
+### Review a change (rc.3 source)
+
+After a task finishes, use `/review`. The timeline opens directly on the latest
+turn's details. PageUp/PageDown scroll; Enter returns to the turn list, where
+Up/Down and Enter select an earlier turn. When idle, Esc closes the view. While
+work is active, Esc stops the turn, including when an overlay is open.
+
+The view shows fragments actually published by built-in file tools and observed
+shell outcomes, in order. `-` shows the replaced fragment and `+` the replacement;
+a created file has only `+` lines. These are bounded excerpts, not a complete
+workspace diff. Scrubbing can hide sensitive text. Truncated or omitted details
+are labeled. A later external edit can make an excerpt stale.
+
+Commands that were blocked, declined, cancelled or timed out remain distinct from
+commands that exited normally. Exit code 0 is an execution result, not a verdict
+that the correct tests ran or the task is correct. A check before a later edit
+does not validate that later edit. Shell and remote tools may change files without
+producing file-change excerpts; use Git or another comparison for a full review.
+
+Details are kept only in the live process, with limits per task and across the
+session. Older details can expire, and they are not saved in receipts or restored
+by resume. The view labels missing evidence. It neither executes a command nor
+restores files, and its contents are not added to model context.
+
+### Recover from a failed task (rc.3 source)
+
+The full-screen interface gives a next action for credential, provider-limit,
+timeout, connection and response errors. Diagnostic commands such as `nh doctor`
+belong in another terminal, not in a task message. Doctor checks local configuration;
+it does not test the provider's live availability or your API credit.
+
+Your draft remains in the composer. A task that could not connect is restored
+there only if you have not already typed another draft. Failure or interruption
+does not send queued text automatically; inspect the files and press Enter when
+you deliberately want to continue. Existing bounded retries within a provider
+request still apply. A repeat request can incur charges even if the earlier one
+failed or timed out. Changing a key does not change your selected provider.
+
+Usage/budget stops remain in force. If usage is incomplete, review it before
+starting another session with an explicit budget choice. Recovery does not reset
+accounting, undo file effects or restore unsaved drafts after the process exits.
 
 For narrow windows, widen the terminal if a command or path is hard to read. For
 plain output, use `nh --ascii on chat --model <route-id>`; `NO_COLOR` disables color.

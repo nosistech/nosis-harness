@@ -137,10 +137,104 @@ pub enum ToolAudit {
     Command(CommandOutcome),
 }
 
+const REVIEW_PATH_BYTES: usize = 512;
+const REVIEW_FRAGMENT_BYTES: usize = 4 * 1024;
+
+/// Scrubbed, bounded text retained only for an in-process review surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewText {
+    pub text: String,
+    pub truncated: bool,
+}
+
+impl ReviewText {
+    fn new(value: &str, scrubber: &nh_vault::Scrubber, limit: usize) -> Self {
+        let scrubbed = scrubber.scrub(value);
+        if scrubbed.len() <= limit {
+            return Self {
+                text: scrubbed,
+                truncated: false,
+            };
+        }
+
+        let mut text = String::new();
+        for character in scrubbed.chars() {
+            if text.len().saturating_add(character.len_utf8()) > limit {
+                break;
+            }
+            text.push(character);
+        }
+        Self {
+            text,
+            truncated: true,
+        }
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        self.text.len()
+    }
+}
+
+/// Application-owned facts for a live, read-only review of observed tool work.
+/// These values are not receipts and are never replayed to a model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolReviewItem {
+    FileChange {
+        kind: FileChangeKind,
+        path: ReviewText,
+        before: Option<ReviewText>,
+        after: ReviewText,
+    },
+    Command {
+        command: ReviewText,
+        outcome: CommandOutcome,
+    },
+}
+
+impl ToolReviewItem {
+    fn file_change(
+        kind: FileChangeKind,
+        path: &str,
+        before: Option<&str>,
+        after: &str,
+        ctx: &ToolCtx,
+    ) -> Self {
+        Self::FileChange {
+            kind,
+            path: ReviewText::new(path, &ctx.scrubber, REVIEW_PATH_BYTES),
+            before: before.map(|text| ReviewText::new(text, &ctx.scrubber, REVIEW_FRAGMENT_BYTES)),
+            after: ReviewText::new(after, &ctx.scrubber, REVIEW_FRAGMENT_BYTES),
+        }
+    }
+
+    pub(crate) fn command(command: &str, outcome: CommandOutcome, ctx: &ToolCtx) -> Self {
+        Self::Command {
+            command: ReviewText::new(command, &ctx.scrubber, REVIEW_FRAGMENT_BYTES),
+            outcome,
+        }
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        match self {
+            Self::FileChange {
+                path,
+                before,
+                after,
+                ..
+            } => path
+                .retained_bytes()
+                .saturating_add(before.as_ref().map_or(0, ReviewText::retained_bytes))
+                .saturating_add(after.retained_bytes()),
+            Self::Command { command, .. } => command.retained_bytes(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ToolExecution {
     pub output: String,
     pub audit: Vec<ToolAudit>,
+    pub review: Vec<ToolReviewItem>,
 }
 
 impl ToolExecution {
@@ -148,6 +242,7 @@ impl ToolExecution {
         Self {
             output,
             audit: Vec::new(),
+            review: Vec::new(),
         }
     }
 }
@@ -881,6 +976,13 @@ impl Tool for WriteFile {
         Ok(ToolExecution {
             output: render_tool_result(output, ctx),
             audit: vec![ToolAudit::FilePublished(FileChangeKind::Created)],
+            review: vec![ToolReviewItem::file_change(
+                FileChangeKind::Created,
+                actual_relative,
+                None,
+                content,
+                ctx,
+            )],
         })
     }
 }
@@ -1079,6 +1181,13 @@ impl Tool for EditFile {
         Ok(ToolExecution {
             output: render_tool_result(output, ctx),
             audit,
+            review: vec![ToolReviewItem::file_change(
+                FileChangeKind::Edited,
+                &relative,
+                Some(&content[matched.range]),
+                &matched.replacement,
+                ctx,
+            )],
         })
     }
 }

@@ -73,10 +73,17 @@ $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $CargoConfigPath = Join-Path $RepoRoot ".cargo\config.toml"
 $LicensePath = Join-Path $RepoRoot "LICENSE"
 $QuickstartPath = Join-Path $RepoRoot "docs\WINDOWS_QUICKSTART.md"
+$PracticeSource = Join-Path $RepoRoot "examples\first-task"
+$PracticeNames = @('README.md', 'WELCOME.txt', 'EXPECTED.txt')
 
 foreach ($RequiredPath in @($CargoConfigPath, $LicensePath, $QuickstartPath)) {
     if (-not (Test-Path -LiteralPath $RequiredPath -PathType Leaf)) {
         throw "Required packaging input is missing: $RequiredPath"
+    }
+}
+foreach ($PracticeName in $PracticeNames) {
+    if (-not (Test-Path -LiteralPath (Join-Path $PracticeSource $PracticeName) -PathType Leaf)) {
+        throw "Required practice input is missing: $PracticeName"
     }
 }
 
@@ -287,8 +294,26 @@ $Quickstart
 
     $ArchiveName = "nh-$Version-windows-x64.zip"
     $ArchivePath = Join-Path $OutputPath $ArchiveName
+    $PracticeOutput = Join-Path $OutputPath 'practice'
+    New-Item -ItemType Directory -Path $PracticeOutput | Out-Null
+    foreach ($PracticeName in $PracticeNames) {
+        Copy-Item -LiteralPath (Join-Path $PracticeSource $PracticeName) -Destination $PracticeOutput
+    }
     $ArchiveInputs = @($PortableBinary, $OutputLicense, $OutputGuide)
     Compress-Archive -LiteralPath $ArchiveInputs -DestinationPath $ArchivePath -CompressionLevel Optimal
+    # Explicit ZIP entry names avoid Windows backslashes in nested paths.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $Archive = [System.IO.Compression.ZipFile]::Open($ArchivePath, 'Update')
+    try {
+        foreach ($PracticeName in $PracticeNames) {
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                $Archive, (Join-Path $PracticeOutput $PracticeName), "practice/$PracticeName",
+                [System.IO.Compression.CompressionLevel]::Optimal
+            ) | Out-Null
+        }
+    } finally {
+        $Archive.Dispose()
+    }
 
     $BinaryHash = (Get-FileHash -LiteralPath $PortableBinary -Algorithm SHA256).Hash.ToUpperInvariant()
     $ArchiveHash = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash.ToUpperInvariant()

@@ -15,8 +15,9 @@ use nh_core::session_ledger::{
     fold_session, list_sessions, read_session, SessionBudget, SessionEvent, Surface,
 };
 use nh_core::terminal_capability::TerminalCapability;
-use nh_core::wire::{ChatRequest, ChatResponse};
+use nh_core::wire::{ChatRequest, ChatResponse, ProviderFailureKind, RetryExhausted, RetryStats};
 use nh_routes::Currency;
+use nh_tools::{CommandOutcome, FileChangeKind, ReviewText, ToolReviewItem};
 use ratatui::{
     backend::TestBackend,
     layout::Rect,
@@ -1877,7 +1878,7 @@ fn working_enter_queues_an_editable_task_and_idle_dispatches_it_exactly_once() {
 }
 
 #[test]
-fn cancelled_turn_records_measured_cost_before_dispatching_the_queue() {
+fn cancelled_turn_records_cost_and_keeps_the_queue_for_deliberate_dispatch() {
     let mut app = meter_app();
     app.status = Status::FinishingInterrupted;
     app.input = "next task".into();
@@ -1904,8 +1905,10 @@ fn cancelled_turn_records_measured_cost_before_dispatching_the_queue() {
     );
 
     assert_eq!(previous, Status::FinishingInterrupted);
-    assert_eq!(action, UiAction::Dispatch("next task".into()));
-    assert_eq!(app.status, Status::Working);
+    assert_eq!(action, UiAction::None);
+    assert_eq!(app.status, Status::Idle);
+    assert_eq!(app.input, "next task");
+    assert!(app.pending_send);
     assert_eq!(app.timeline.len(), 1);
     assert_eq!(app.timeline[0].kind, ReceiptKind::CancelledTurn);
     assert_eq!(app.timeline[0].tokens(), Some((100, 20, Some(40))));
@@ -1913,6 +1916,14 @@ fn cancelled_turn_records_measured_cost_before_dispatching_the_queue() {
     assert!(app.transcript.iter().any(|line| line
         .text
         .contains("provider may still bill the completed request")));
+    assert!(app
+        .transcript
+        .iter()
+        .any(|line| line.text.contains("Nothing was sent automatically")));
+    assert_eq!(
+        reduce_key(&mut app, code_key(KeyCode::Enter)),
+        UiAction::Dispatch("next task".into())
+    );
 }
 
 #[test]
@@ -1960,6 +1971,122 @@ fn failed_turn_queue_prompts_for_enter_and_enter_dispatches() {
             .filter(|line| line.kind == TranscriptKind::Task)
             .count(),
         1
+    );
+}
+
+#[test]
+fn typed_rate_limit_recovery_keeps_the_draft_and_requires_enter() {
+    let mut app = test_app(None);
+    app.status = Status::Working;
+    app.input = "adjusted follow-up".into();
+    app.input_cursor = Some(8);
+    app.pending_send = true;
+
+    let (previous, action) = reduce_agent_event(
+        &mut app,
+        AgentEvent::RecoverableFailure {
+            reason: "provider returned HTTP 429".into(),
+            recovery: RecoveryHint::Provider {
+                kind: nh_core::wire::ProviderFailureKind::RateLimited,
+                key_entry: "test".into(),
+            },
+            retry_task: None,
+        },
+    );
+
+    assert_eq!(previous, Status::Working);
+    assert_eq!(action, UiAction::None);
+    assert_eq!(app.input, "adjusted follow-up");
+    assert_eq!(app.input_cursor, Some(8));
+    assert!(app.pending_send);
+    assert!(app
+        .transcript
+        .iter()
+        .any(|line| line.text.contains("check provider limits and credit")));
+    assert!(app
+        .transcript
+        .iter()
+        .any(|line| line.text.contains("No new task was sent automatically")));
+    assert_eq!(
+        reduce_key(&mut app, code_key(KeyCode::Enter)),
+        UiAction::Dispatch("adjusted follow-up".into())
+    );
+}
+
+#[test]
+fn typed_provider_recovery_is_kind_specific_without_parsing_error_text() {
+    let cases = [
+        (
+            ProviderFailureKind::Authentication,
+            "verify the test credential and provider access",
+        ),
+        (
+            ProviderFailureKind::Network,
+            "in another terminal, run nh doctor for local configuration",
+        ),
+        (
+            ProviderFailureKind::Timeout,
+            "the request may still be billed",
+        ),
+        (
+            ProviderFailureKind::Unavailable,
+            "check provider status and wait",
+        ),
+    ];
+    for (kind, expected) in cases {
+        let mut app = test_app(None);
+        app.status = Status::Working;
+        reduce_agent_event(
+            &mut app,
+            AgentEvent::RecoverableFailure {
+                reason: "same opaque provider failure".into(),
+                recovery: RecoveryHint::Provider {
+                    kind,
+                    key_entry: "test".into(),
+                },
+                retry_task: None,
+            },
+        );
+        assert!(
+            app.transcript
+                .iter()
+                .any(|line| line.text.contains(expected)),
+            "kind {kind:?} did not render {expected:?}: {:?}",
+            app.transcript
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn connection_recovery_restores_an_uncontested_task_without_sending_it() {
+    let mut app = test_app(None);
+    app.status = Status::Working;
+
+    let (_, action) = reduce_agent_event(
+        &mut app,
+        AgentEvent::RecoverableFailure {
+            reason: "credential unavailable".into(),
+            recovery: RecoveryHint::Connection {
+                key_entry: "test".into(),
+            },
+            retry_task: Some("original task".into()),
+        },
+    );
+
+    assert_eq!(action, UiAction::None);
+    assert_eq!(app.status, Status::Blocked("credential unavailable".into()));
+    assert_eq!(app.input, "original task");
+    assert!(!app.pending_send);
+    assert!(app
+        .transcript
+        .iter()
+        .any(|line| line.text.contains("nh key add test")));
+    assert_eq!(
+        reduce_key(&mut app, code_key(KeyCode::Enter)),
+        UiAction::Dispatch("original task".into())
     );
 }
 
@@ -2171,6 +2298,16 @@ fn escape_declines_approval_and_interrupts_the_turn_without_firing_the_queue() {
     assert_eq!(app.input, "queued draft");
     assert!(app.pending_send);
     assert!(app.pending_approval.is_none());
+    assert!(app
+        .transcript
+        .iter()
+        .all(|line| line.kind != TranscriptKind::Task));
+
+    let (previous, action) = reduce_agent_event(&mut app, AgentEvent::Answer("late answer".into()));
+    assert_eq!(previous, Status::FinishingInterrupted);
+    assert_eq!(action, UiAction::None);
+    assert_eq!(app.input, "queued draft");
+    assert!(app.pending_send);
     assert!(app
         .transcript
         .iter()
@@ -2637,18 +2774,24 @@ fn completed_timeline_row_renders_measured_duration_without_an_estimate_marker()
     );
     app.overlay = Overlay::Timeline {
         selected: 0,
-        inspecting: true,
+        inspecting: false,
         note: None,
     };
 
-    let rendered = buffer_text(&render_buffer(&app, 180, 20));
+    let list = buffer_text(&render_buffer(&app, 180, 20));
 
-    assert!(
-        rendered.contains("#1  completed  1.234s"),
-        "got: {rendered}"
-    );
-    assert!(rendered.contains("duration: 1.234s"), "got: {rendered}");
-    assert!(!rendered.contains("~1.234s"), "got: {rendered}");
+    assert!(list.contains("#1  completed  1.234s"), "got: {list}");
+    assert!(!list.contains("~1.234s"), "got: {list}");
+
+    app.overlay = Overlay::Timeline {
+        selected: 0,
+        inspecting: true,
+        note: None,
+    };
+    let detail = buffer_text(&render_buffer(&app, 180, 20));
+
+    assert!(detail.contains("duration: 1.234s"), "got: {detail}");
+    assert!(!detail.contains("~1.234s"), "got: {detail}");
 }
 
 #[test]
@@ -2748,6 +2891,359 @@ fn timeline_reducer_scrubs_and_enter_inspects_the_selected_turn() {
     }
     assert_eq!(app.timeline.len(), 2);
     assert!(app.input.is_empty());
+}
+
+#[test]
+fn live_review_keeps_chronology_and_does_not_call_zero_exit_verification() {
+    let mut app = test_app(None);
+    apply_event(
+        &mut app,
+        AgentEvent::ToolReview(ToolReviewItem::FileChange {
+            kind: FileChangeKind::Created,
+            path: ReviewText {
+                text: "first.txt".into(),
+                truncated: false,
+            },
+            before: None,
+            after: ReviewText {
+                text: "first".into(),
+                truncated: false,
+            },
+        }),
+    );
+    apply_event(
+        &mut app,
+        AgentEvent::ToolReview(ToolReviewItem::Command {
+            command: ReviewText {
+                text: "check first".into(),
+                truncated: false,
+            },
+            outcome: CommandOutcome::Exited(Some(0)),
+        }),
+    );
+    apply_event(
+        &mut app,
+        AgentEvent::ToolReview(ToolReviewItem::FileChange {
+            kind: FileChangeKind::Edited,
+            path: ReviewText {
+                text: "second.txt".into(),
+                truncated: false,
+            },
+            before: Some(ReviewText {
+                text: "old".into(),
+                truncated: false,
+            }),
+            after: ReviewText {
+                text: "new".into(),
+                truncated: false,
+            },
+        }),
+    );
+    apply_event(&mut app, timeline_event("review task", "done"));
+
+    let detail = timeline_detail_lines(&app.timeline[0]).join("\n");
+    let first_file = detail.find("file created: first.txt").unwrap();
+    let command = detail.find("command: check first").unwrap();
+    let second_file = detail.find("file edited: second.txt").unwrap();
+    assert!(
+        first_file < command && command < second_file,
+        "got: {detail}"
+    );
+    assert!(detail.contains("execution only; result not independently verified"));
+    assert!(detail.contains(
+        "final-state check: no completed command was recorded after the last built-in file publication"
+    ));
+}
+
+#[test]
+fn live_review_does_not_infer_final_state_after_an_unfinished_command() {
+    let mut app = test_app(None);
+    apply_event(
+        &mut app,
+        AgentEvent::ToolReview(ToolReviewItem::FileChange {
+            kind: FileChangeKind::Edited,
+            path: ReviewText {
+                text: "result.txt".into(),
+                truncated: false,
+            },
+            before: Some(ReviewText {
+                text: "old".into(),
+                truncated: false,
+            }),
+            after: ReviewText {
+                text: "new".into(),
+                truncated: false,
+            },
+        }),
+    );
+    apply_event(
+        &mut app,
+        AgentEvent::ToolReview(ToolReviewItem::Command {
+            command: ReviewText {
+                text: "slow-check".into(),
+                truncated: false,
+            },
+            outcome: CommandOutcome::TimedOut {
+                termination_complete: true,
+            },
+        }),
+    );
+    apply_event(&mut app, timeline_event("unfinished check", "stopped"));
+
+    let detail = timeline_detail_lines(&app.timeline[0]).join("\n");
+    assert!(detail.contains(
+        "final-state check: a later command started but did not complete; no final-state inference"
+    ));
+}
+
+#[test]
+fn live_review_does_not_infer_after_any_incomplete_process_tree_termination() {
+    let mut app = test_app(None);
+    apply_event(
+        &mut app,
+        AgentEvent::ToolReview(ToolReviewItem::Command {
+            command: ReviewText {
+                text: "earlier writer".into(),
+                truncated: false,
+            },
+            outcome: CommandOutcome::TimedOut {
+                termination_complete: false,
+            },
+        }),
+    );
+    apply_event(
+        &mut app,
+        AgentEvent::ToolReview(ToolReviewItem::FileChange {
+            kind: FileChangeKind::Edited,
+            path: ReviewText {
+                text: "result.txt".into(),
+                truncated: false,
+            },
+            before: Some(ReviewText {
+                text: "old".into(),
+                truncated: false,
+            }),
+            after: ReviewText {
+                text: "new".into(),
+                truncated: false,
+            },
+        }),
+    );
+    apply_event(
+        &mut app,
+        AgentEvent::ToolReview(ToolReviewItem::Command {
+            command: ReviewText {
+                text: "later check".into(),
+                truncated: false,
+            },
+            outcome: CommandOutcome::Exited(Some(0)),
+        }),
+    );
+    apply_event(&mut app, timeline_event("incomplete cleanup", "done"));
+
+    let detail = timeline_detail_lines(&app.timeline[0]).join("\n");
+    assert!(detail.contains(
+        "final-state check: process-tree termination was incomplete during this task; no final-state inference"
+    ));
+    assert!(!detail.contains("final-state check: a later command exited 0"));
+}
+
+#[test]
+fn live_review_marks_a_builtin_tool_error_as_incomplete() {
+    let mut app = test_app(None);
+    apply_event(&mut app, AgentEvent::ToolReviewIncomplete);
+    apply_event(&mut app, timeline_event("tool error", "done"));
+
+    let detail = timeline_detail_lines(&app.timeline[0]).join("\n");
+    assert!(detail.contains(
+        "review evidence incomplete - a built-in tool failed before an outcome could be retained"
+    ));
+    assert!(detail.contains(
+        "final-state check: evidence is incomplete because a built-in tool failed before an outcome could be retained; no final-state inference"
+    ));
+}
+
+#[test]
+fn review_overlay_scrolls_narrow_details_without_changing_the_draft() {
+    let mut app = test_app(None);
+    let long_fragment = (0..48)
+        .map(|line| format!("line-{line:02}"))
+        .chain(["tail-marker".to_owned()])
+        .collect::<Vec<_>>()
+        .join("\n");
+    apply_event(
+        &mut app,
+        AgentEvent::ToolReview(ToolReviewItem::FileChange {
+            kind: FileChangeKind::Created,
+            path: ReviewText {
+                text: "review.txt".into(),
+                truncated: false,
+            },
+            before: None,
+            after: ReviewText {
+                text: long_fragment,
+                truncated: false,
+            },
+        }),
+    );
+    apply_event(&mut app, timeline_event("review task", "done"));
+    app.input = "draft kept".into();
+    app.input_cursor = Some(5);
+    app.pending_send = true;
+    app.overlay = Overlay::Timeline {
+        selected: 0,
+        inspecting: true,
+        note: None,
+    };
+
+    let initial = buffer_text(&render_buffer(&app, 40, 20));
+    assert!(initial.contains("PgUp/PgDn scroll"), "got: {initial}");
+    assert!(app.timeline_max_scroll.get() > 0);
+    while app.timeline_scroll.get() < app.timeline_max_scroll.get() {
+        reduce_key(&mut app, code_key(KeyCode::PageDown));
+    }
+    assert_eq!(
+        app.timeline_scroll.get(),
+        app.timeline_max_scroll.get(),
+        "timeline paging must reach the final detail page"
+    );
+    let final_page = buffer_text(&render_buffer(&app, 40, 20));
+    assert!(
+        final_page.contains("tail-marker"),
+        "scroll={} max={} got: {final_page}",
+        app.timeline_scroll.get(),
+        app.timeline_max_scroll.get()
+    );
+    app.status = Status::Working;
+    let active = buffer_text(&render_buffer(&app, 80, 24));
+    assert!(active.contains("Esc stop + close"), "got: {active}");
+    app.status = Status::Idle;
+    reduce_key(&mut app, code_key(KeyCode::Esc));
+    assert_eq!(app.input, "draft kept");
+    assert_eq!(app.input_cursor, Some(5));
+    assert!(app.pending_send);
+}
+
+#[test]
+fn review_palette_activation_preserves_an_existing_draft() {
+    let mut app = test_app(None);
+    apply_event(&mut app, timeline_event("review task", "done"));
+    app.input = "draft kept".into();
+    app.input_cursor = Some(5);
+    app.pending_send = true;
+    app.overlay = Overlay::Palette {
+        filter: "review".into(),
+        selected: 0,
+        detail: None,
+    };
+
+    assert_eq!(
+        reduce_key(&mut app, code_key(KeyCode::Enter)),
+        UiAction::None
+    );
+    assert!(matches!(
+        app.overlay,
+        Overlay::Timeline {
+            inspecting: true,
+            ..
+        }
+    ));
+    assert_eq!(app.input, "draft kept");
+    assert_eq!(app.input_cursor, Some(5));
+    assert!(app.pending_send);
+}
+
+#[test]
+fn review_task_buffer_caps_items_and_reports_omissions() {
+    let mut app = test_app(None);
+    for index in 0..(crate::state::MAX_TASK_REVIEW_ITEMS + 3) {
+        apply_event(
+            &mut app,
+            AgentEvent::ToolReview(ToolReviewItem::Command {
+                command: ReviewText {
+                    text: format!("command {index}"),
+                    truncated: false,
+                },
+                outcome: CommandOutcome::Denied,
+            }),
+        );
+    }
+    apply_event(&mut app, timeline_event("bounded review", "done"));
+
+    let detail = timeline_detail_lines(&app.timeline[0]).join("\n");
+    assert!(detail.contains("3 additional review items omitted by the per-task cap"));
+    assert!(detail.contains(
+        "evidence is incomplete because later items may have been omitted; no final-state inference"
+    ));
+}
+
+#[test]
+fn review_session_buffer_expires_old_details_at_the_total_cap() {
+    let mut app = test_app(None);
+    for task in 0..6 {
+        for item in 0..crate::state::MAX_TASK_REVIEW_ITEMS {
+            apply_event(
+                &mut app,
+                AgentEvent::ToolReview(ToolReviewItem::Command {
+                    command: ReviewText {
+                        text: format!("task-{task}-item-{item}-{}", "x".repeat(4_000)),
+                        truncated: true,
+                    },
+                    outcome: CommandOutcome::Denied,
+                }),
+            );
+        }
+        apply_event(
+            &mut app,
+            timeline_event(&format!("bounded review {task}"), "done"),
+        );
+    }
+
+    assert!(app.timeline_review_bytes <= crate::state::MAX_SESSION_REVIEW_BYTES);
+    assert!(app
+        .timeline
+        .iter()
+        .any(|entry| matches!(entry.review, crate::state::TimelineReview::Expired { .. })));
+    assert!(matches!(
+        app.timeline.last().map(|entry| &entry.review),
+        Some(crate::state::TimelineReview::Live(_))
+    ));
+}
+
+#[test]
+fn review_alias_explains_that_resumed_details_are_not_persisted() {
+    let mut app = test_app(None);
+    app.resumed = true;
+    type_text(&mut app, "/review");
+    assert_eq!(
+        reduce_key(&mut app, code_key(KeyCode::Enter)),
+        UiAction::None
+    );
+
+    let rendered = buffer_text(&render_buffer(&app, 80, 24));
+    assert!(rendered.contains("review details are live-session only"));
+    assert!(rendered.contains("session history"), "got: {rendered}");
+    assert!(rendered.contains("not available here"), "got: {rendered}");
+}
+
+#[test]
+fn review_alias_explains_an_empty_fresh_session() {
+    let mut app = test_app(None);
+    type_text(&mut app, "/review");
+    assert_eq!(
+        reduce_key(&mut app, code_key(KeyCode::Enter)),
+        UiAction::None
+    );
+
+    let rendered = buffer_text(&render_buffer(&app, 80, 24));
+    assert!(
+        rendered.contains("no completed turns to review yet"),
+        "got: {rendered}"
+    );
+    assert!(
+        rendered.contains("after a turn finishes"),
+        "got: {rendered}"
+    );
 }
 
 #[test]
@@ -4906,12 +5402,17 @@ fn default_compaction_keeps_timeline_and_hud_copy_exact() {
             "task: plain",
             "kind: task",
             "execution outcome: completed",
-            "verification: not recorded",
+            "verification: live tool evidence below; correctness not independently verified",
             "agent turns: 3",
             "tool calls: 2",
             "failure class: none",
             "tokens: 100000 in / 50000 out / 90000 cached | cache 90%",
             "compacted: no",
+            "",
+            "OBSERVED BUILT-IN TOOL WORK",
+            "live session only - built-in tool fragments observed at completion; current files and other tool effects may differ",
+            "no built-in file publication or shell command outcome was retained",
+            "final-state check: no built-in file publication was retained; other tools may still have changed files",
             "",
             "answer: done",
         ]
@@ -5712,9 +6213,105 @@ struct BlockingMeasuredClient {
 
 struct FailingClient;
 
+struct RecoveringRateLimitClient {
+    calls: AtomicU64,
+    requests: CapturedRequestHistory,
+}
+
+struct AuthenticationClient {
+    reject: bool,
+    requests: CapturedRequestHistory,
+}
+
 impl ChatClient for FailingClient {
     fn complete(&self, _request: &ChatRequest) -> anyhow::Result<ChatResponse> {
         anyhow::bail!("provider failed after request")
+    }
+}
+
+impl ChatClient for RecoveringRateLimitClient {
+    fn complete(&self, request: &ChatRequest) -> anyhow::Result<ChatResponse> {
+        self.requests.lock().unwrap().push(
+            request
+                .messages
+                .iter()
+                .map(|message| {
+                    (
+                        message.role.clone(),
+                        message.content.clone().unwrap_or_default(),
+                    )
+                })
+                .collect(),
+        );
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(anyhow::Error::new(RetryExhausted {
+                stats: RetryStats {
+                    retries: 2,
+                    rate_limited: 3,
+                },
+                usage: None,
+                last_failure: "provider returned HTTP 429".into(),
+                kind: ProviderFailureKind::RateLimited,
+                attempts: 3,
+                elapsed: Duration::from_secs(6),
+            }));
+        }
+        let mut message = request.messages.last().cloned().expect("user message");
+        message.role = "assistant".into();
+        message.content = Some("recovered".into());
+        message.tool_calls = None;
+        message.tool_call_id = None;
+        message.reasoning_content = None;
+        Ok(ChatResponse {
+            message,
+            finish_reason: "stop".into(),
+            usage: Some(Usage {
+                prompt_tokens: 14,
+                completion_tokens: 2,
+                cached_tokens: Some(0),
+                evidence: UsageEvidence::Measured,
+            }),
+            retries: RetryStats::default(),
+        })
+    }
+}
+
+impl ChatClient for AuthenticationClient {
+    fn complete(&self, request: &ChatRequest) -> anyhow::Result<ChatResponse> {
+        self.requests.lock().unwrap().push(
+            request
+                .messages
+                .iter()
+                .map(|message| {
+                    (
+                        message.role.clone(),
+                        message.content.clone().unwrap_or_default(),
+                    )
+                })
+                .collect(),
+        );
+        if self.reject {
+            return Err(anyhow::Error::new(RetryExhausted {
+                stats: RetryStats::default(),
+                usage: None,
+                last_failure: "provider returned HTTP 401".into(),
+                kind: ProviderFailureKind::Authentication,
+                attempts: 1,
+                elapsed: Duration::from_millis(5),
+            }));
+        }
+        let mut message = request.messages.last().cloned().expect("user message");
+        message.role = "assistant".into();
+        message.content = Some("credential refreshed".into());
+        message.tool_calls = None;
+        message.tool_call_id = None;
+        message.reasoning_content = None;
+        Ok(ChatResponse {
+            message,
+            finish_reason: "stop".into(),
+            usage: None,
+            retries: RetryStats::default(),
+        })
     }
 }
 
@@ -5899,6 +6496,9 @@ fn receive_completed_task(worker: &Worker, app: &mut App) {
         match event {
             AgentEvent::Approval(_) => panic!("mock never asks for approval"),
             AgentEvent::Failed(reason) => panic!("worker failed: {reason}"),
+            AgentEvent::RecoverableFailure { reason, .. } => {
+                panic!("worker failed: {reason}")
+            }
             event => {
                 apply_event(app, event);
             }
@@ -5968,6 +6568,8 @@ fn worker_cancels_one_turn_after_measuring_it_then_runs_the_next_task() {
             AgentEvent::CancelledTurn(summary) => break summary,
             AgentEvent::Usage(_)
             | AgentEvent::Progress(_)
+            | AgentEvent::ToolReview(_)
+            | AgentEvent::ToolReviewIncomplete
             | AgentEvent::Compaction(_)
             | AgentEvent::ModelStarted { .. }
             | AgentEvent::ModelFinished { .. }
@@ -5977,6 +6579,9 @@ fn worker_cancels_one_turn_after_measuring_it_then_runs_the_next_task() {
             AgentEvent::Answer(_) => panic!("cancelled turn emitted an answer"),
             AgentEvent::Approval(_) => panic!("mock never asks for approval"),
             AgentEvent::Failed(reason) => panic!("worker failed: {reason}"),
+            AgentEvent::RecoverableFailure { reason, .. } => {
+                panic!("worker failed: {reason}")
+            }
         }
     };
     assert_eq!(cancelled.receipt.kind, ReceiptKind::CancelledTurn);
@@ -6009,6 +6614,8 @@ fn worker_cancels_one_turn_after_measuring_it_then_runs_the_next_task() {
             }
             AgentEvent::Usage(_)
             | AgentEvent::Progress(_)
+            | AgentEvent::ToolReview(_)
+            | AgentEvent::ToolReviewIncomplete
             | AgentEvent::Compaction(_)
             | AgentEvent::ModelStarted { .. }
             | AgentEvent::ModelFinished { .. }
@@ -6017,6 +6624,9 @@ fn worker_cancels_one_turn_after_measuring_it_then_runs_the_next_task() {
             AgentEvent::CancelledTurn(_) => panic!("next turn inherited cancellation"),
             AgentEvent::Approval(_) => panic!("mock never asks for approval"),
             AgentEvent::Failed(reason) => panic!("worker failed: {reason}"),
+            AgentEvent::RecoverableFailure { reason, .. } => {
+                panic!("worker failed: {reason}")
+            }
         }
     }
 
@@ -6154,6 +6764,195 @@ fn worker_error_projects_cores_real_receipt_and_unknown_meter() {
         Some(FailureClass::Verification)
     );
     assert!(app.timeline[0].usage.is_none());
+    assert_eq!(worker.shutdown(), WorkerShutdown::Clean);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn typed_provider_recovery_keeps_failed_history_for_the_deliberate_next_task() {
+    let root = temp_dir();
+    let requests: CapturedRequestHistory = Arc::new(Mutex::new(Vec::new()));
+    let client_requests = Arc::clone(&requests);
+    let connect: ConnectFn = Box::new(move |_, _| {
+        Ok((
+            Box::new(RecoveringRateLimitClient {
+                calls: AtomicU64::new(0),
+                requests: Arc::clone(&client_requests),
+            }),
+            nh_vault::secret("fake-key-recovery-history"),
+        ))
+    });
+    let law = nh_law::load(&root, &nh_law::LoadOptions { cli_autonomy: None });
+    let mut worker = spawn_worker(WorkerConfig {
+        route: test_route(),
+        profiles: Profiles::bundled(),
+        active_profile: "balanced".into(),
+        budget: None,
+        law,
+        repo_root: root.clone(),
+        workdir: root.clone(),
+        scrubber: Arc::new(RwLock::new(Scrubber::new(Vec::new()))),
+        connect,
+        initial: None,
+        resume: None,
+    })
+    .unwrap();
+
+    worker
+        .commands
+        .send(WorkerCommand::Task("first failed task".into()))
+        .unwrap();
+    let recovery = loop {
+        match worker.events.recv_timeout(Duration::from_secs(2)).unwrap() {
+            AgentEvent::RecoverableFailure {
+                recovery,
+                retry_task,
+                ..
+            } => break (recovery, retry_task),
+            AgentEvent::Approval(_) => panic!("mock never asks for approval"),
+            AgentEvent::Answer(_) => panic!("failed request emitted an answer"),
+            _ => {}
+        }
+    };
+    assert_eq!(
+        recovery,
+        (
+            RecoveryHint::Provider {
+                kind: ProviderFailureKind::RateLimited,
+                key_entry: "test".into(),
+            },
+            None,
+        )
+    );
+
+    worker
+        .commands
+        .send(WorkerCommand::Task("deliberate follow-up".into()))
+        .unwrap();
+    loop {
+        match worker.events.recv_timeout(Duration::from_secs(2)).unwrap() {
+            AgentEvent::Answer(answer) => {
+                assert_eq!(answer, "recovered");
+                break;
+            }
+            AgentEvent::RecoverableFailure { reason, .. } | AgentEvent::Failed(reason) => {
+                panic!("worker failed: {reason}")
+            }
+            AgentEvent::Approval(_) => panic!("mock never asks for approval"),
+            _ => {}
+        }
+    }
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1]
+            .iter()
+            .filter(|(role, _)| role == "user")
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![
+            ("user".into(), "first failed task".into()),
+            ("user".into(), "deliberate follow-up".into()),
+        ]
+    );
+    drop(requests);
+    assert_eq!(worker.shutdown(), WorkerShutdown::Clean);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn authentication_reconnects_only_when_the_user_deliberately_sends_the_next_task() {
+    let root = temp_dir();
+    let connects = Arc::new(AtomicU64::new(0));
+    let requests: CapturedRequestHistory = Arc::new(Mutex::new(Vec::new()));
+    let connects_for_client = Arc::clone(&connects);
+    let requests_for_client = Arc::clone(&requests);
+    let connect: ConnectFn = Box::new(move |_, _| {
+        let connection = connects_for_client.fetch_add(1, Ordering::SeqCst);
+        Ok((
+            Box::new(AuthenticationClient {
+                reject: connection == 0,
+                requests: Arc::clone(&requests_for_client),
+            }),
+            nh_vault::secret(if connection == 0 {
+                "fake-old-key-auth-recovery"
+            } else {
+                "fake-new-key-auth-recovery"
+            }),
+        ))
+    });
+    let law = nh_law::load(&root, &nh_law::LoadOptions { cli_autonomy: None });
+    let mut worker = spawn_worker(WorkerConfig {
+        route: test_route(),
+        profiles: Profiles::bundled(),
+        active_profile: "balanced".into(),
+        budget: None,
+        law,
+        repo_root: root.clone(),
+        workdir: root.clone(),
+        scrubber: Arc::new(RwLock::new(Scrubber::new(Vec::new()))),
+        connect,
+        initial: None,
+        resume: None,
+    })
+    .unwrap();
+
+    worker
+        .commands
+        .send(WorkerCommand::Task("task with rejected key".into()))
+        .unwrap();
+    loop {
+        match worker.events.recv_timeout(Duration::from_secs(2)).unwrap() {
+            AgentEvent::RecoverableFailure {
+                recovery:
+                    RecoveryHint::Provider {
+                        kind: ProviderFailureKind::Authentication,
+                        ..
+                    },
+                ..
+            } => break,
+            AgentEvent::Answer(_) => panic!("rejected credential emitted an answer"),
+            _ => {}
+        }
+    }
+    assert_eq!(connects.load(Ordering::SeqCst), 1);
+    assert!(worker
+        .events
+        .recv_timeout(Duration::from_millis(100))
+        .is_err());
+
+    worker
+        .commands
+        .send(WorkerCommand::Task("continue after key update".into()))
+        .unwrap();
+    loop {
+        match worker.events.recv_timeout(Duration::from_secs(2)).unwrap() {
+            AgentEvent::Answer(answer) => {
+                assert_eq!(answer, "credential refreshed");
+                break;
+            }
+            AgentEvent::RecoverableFailure { reason, .. } | AgentEvent::Failed(reason) => {
+                panic!("worker failed: {reason}")
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(connects.load(Ordering::SeqCst), 2);
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1]
+            .iter()
+            .filter(|(role, _)| role == "user")
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![
+            ("user".into(), "task with rejected key".into()),
+            ("user".into(), "continue after key update".into()),
+        ]
+    );
+    drop(requests);
     assert_eq!(worker.shutdown(), WorkerShutdown::Clean);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -6557,11 +7356,22 @@ fn keyless_switch_accepts_route_then_next_task_surfaces_add_key_line() {
         Status::Blocked(BUDGET_USAGE_UNAVAILABLE_REASON.into())
     );
     match worker.events.recv_timeout(Duration::from_secs(2)).unwrap() {
-        AgentEvent::Failed(reason) => {
+        AgentEvent::RecoverableFailure {
+            reason,
+            recovery,
+            retry_task,
+        } => {
             assert!(reason.contains("nh key add other"), "got: {reason}");
             assert!(reason.contains("receipt unavailable"), "got: {reason}");
+            assert_eq!(
+                recovery,
+                RecoveryHint::Connection {
+                    key_entry: "other".into()
+                }
+            );
+            assert!(retry_task.is_some());
         }
-        _ => panic!("keyless switched task must fail with one friendly line"),
+        _ => panic!("keyless switched task must return typed recovery"),
     }
     assert!(worker
         .events
@@ -6623,6 +7433,8 @@ fn worker_uses_injected_client_and_keeps_one_history_across_tasks() {
                 }
                 AgentEvent::Usage(_)
                 | AgentEvent::Progress(_)
+                | AgentEvent::ToolReview(_)
+                | AgentEvent::ToolReviewIncomplete
                 | AgentEvent::Compaction(_)
                 | AgentEvent::ModelStarted { .. }
                 | AgentEvent::ModelFinished { .. }
@@ -6631,6 +7443,9 @@ fn worker_uses_injected_client_and_keeps_one_history_across_tasks() {
                 AgentEvent::Approval(_) => panic!("mock never asks for approval"),
                 AgentEvent::CancelledTurn(_) => panic!("turn was not cancelled"),
                 AgentEvent::Failed(reason) => panic!("worker failed: {reason}"),
+                AgentEvent::RecoverableFailure { reason, .. } => {
+                    panic!("worker failed: {reason}")
+                }
             }
         }
     }
@@ -6937,6 +7752,8 @@ fn worker_profile_change_reconnects_with_clamp_and_records_next_turn() {
             AgentEvent::Usage(_)
             | AgentEvent::Answer(_)
             | AgentEvent::Progress(_)
+            | AgentEvent::ToolReview(_)
+            | AgentEvent::ToolReviewIncomplete
             | AgentEvent::Compaction(_)
             | AgentEvent::ModelStarted { .. }
             | AgentEvent::ModelFinished { .. }
@@ -6945,6 +7762,9 @@ fn worker_profile_change_reconnects_with_clamp_and_records_next_turn() {
             AgentEvent::Approval(_) => panic!("mock never asks for approval"),
             AgentEvent::CancelledTurn(_) => panic!("turn was not cancelled"),
             AgentEvent::Failed(reason) => panic!("worker failed: {reason}"),
+            AgentEvent::RecoverableFailure { reason, .. } => {
+                panic!("worker failed: {reason}")
+            }
         }
     };
     assert_eq!(
@@ -6990,12 +7810,23 @@ fn keyless_worker_starts_and_task_surfaces_the_add_key_line() {
         })
     ));
     match worker.events.recv_timeout(Duration::from_secs(2)).unwrap() {
-        AgentEvent::Failed(reason) => {
+        AgentEvent::RecoverableFailure {
+            reason,
+            recovery,
+            retry_task,
+        } => {
             assert!(reason.contains("nh key add test"), "got: {reason}");
             assert!(reason.contains("receipt unavailable"), "got: {reason}");
             assert!(!reason.chars().any(char::is_control), "got: {reason}");
+            assert_eq!(
+                recovery,
+                RecoveryHint::Connection {
+                    key_entry: "test".into()
+                }
+            );
+            assert_eq!(retry_task.as_deref(), Some("hello"));
         }
-        _ => panic!("keyless task must fail with one friendly line"),
+        _ => panic!("keyless task must return typed recovery"),
     }
     assert!(worker
         .events

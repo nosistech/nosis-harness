@@ -547,6 +547,22 @@ fn write_file_creates_a_new_file_without_temp_artifacts() {
         execution.audit,
         vec![ToolAudit::FilePublished(FileChangeKind::Created)]
     );
+    match execution.review.as_slice() {
+        [ToolReviewItem::FileChange {
+            kind,
+            path,
+            before,
+            after,
+        }] => {
+            assert_eq!(*kind, FileChangeKind::Created);
+            assert_eq!(path.text, "src/new_module.rs");
+            assert!(!path.truncated);
+            assert!(before.is_none());
+            assert_eq!(after.text, "pub fn new() {}\n");
+            assert!(!after.truncated);
+        }
+        other => panic!("unexpected review evidence: {other:?}"),
+    }
     assert_eq!(
         std::fs::read_to_string(source.join("new_module.rs")).unwrap(),
         "pub fn new() {}\n"
@@ -844,6 +860,12 @@ fn exec_cancellation_before_approval_is_typed_as_not_started() {
         execution.audit,
         vec![ToolAudit::Command(CommandOutcome::CancelledBeforeStart)]
     );
+    assert!(matches!(
+        execution.review.as_slice(),
+        [ToolReviewItem::Command { command, outcome }]
+            if command.text == "echo should-not-run > marker.txt"
+                && *outcome == CommandOutcome::CancelledBeforeStart
+    ));
     assert!(!dir.path().join("marker.txt").exists());
 }
 
@@ -2243,6 +2265,19 @@ fn edit_uses_and_audits_whitespace_normalized_match() {
             ToolAudit::FilePublished(FileChangeKind::Edited),
         ]
     );
+    match execution.review.as_slice() {
+        [ToolReviewItem::FileChange {
+            kind,
+            before: Some(before),
+            after,
+            ..
+        }] => {
+            assert_eq!(*kind, FileChangeKind::Edited);
+            assert_eq!(before.text, "let answer   =  41;");
+            assert_eq!(after.text, "let answer = 42;");
+        }
+        other => panic!("unexpected review evidence: {other:?}"),
+    }
     assert_eq!(std::fs::read_to_string(path).unwrap(), "let answer = 42;\n");
 }
 
@@ -2274,6 +2309,19 @@ fn edit_uses_and_audits_indentation_flexible_match() {
             ToolAudit::FilePublished(FileChangeKind::Edited),
         ]
     );
+    match execution.review.as_slice() {
+        [ToolReviewItem::FileChange {
+            kind,
+            before: Some(before),
+            after,
+            ..
+        }] => {
+            assert_eq!(*kind, FileChangeKind::Edited);
+            assert_eq!(before.text, "if ready {\n        run();\n    }");
+            assert_eq!(after.text, "if ready {\n        finish();\n    }");
+        }
+        other => panic!("unexpected review evidence: {other:?}"),
+    }
     assert_eq!(
         std::fs::read_to_string(path).unwrap(),
         "    if ready {\n        finish();\n    }\n"
@@ -2541,6 +2589,38 @@ fn exec_echo_happy_path() {
         execution.audit,
         vec![ToolAudit::Command(CommandOutcome::Exited(Some(0)))]
     );
+    assert!(matches!(
+        execution.review.as_slice(),
+        [ToolReviewItem::Command { command, outcome }]
+            if command.text == "echo hello"
+                && !command.truncated
+                && *outcome == CommandOutcome::Exited(Some(0))
+    ));
+}
+
+#[test]
+fn published_review_fragments_are_scrubbed_and_bounded_before_retention() {
+    let dir = tempfile::tempdir().unwrap();
+    let secret = "sensitive-review-fixture";
+    let content = format!("{secret}\n{}", "x".repeat(REVIEW_FRAGMENT_BYTES * 2));
+    let ctx = ToolCtx::new(
+        dir.path().to_path_buf(),
+        Box::new(|_| true),
+        permissive_test_guard(),
+        nh_vault::Scrubber::new(vec![secret.to_owned()]),
+    );
+
+    let execution = WriteFile
+        .execute_with_audit(json!({"path": "bounded.txt", "content": content}), &ctx)
+        .unwrap();
+
+    let [ToolReviewItem::FileChange { after, .. }] = execution.review.as_slice() else {
+        panic!("expected one file review item");
+    };
+    assert!(after.truncated);
+    assert!(after.retained_bytes() <= REVIEW_FRAGMENT_BYTES);
+    assert!(!after.text.contains(secret));
+    assert!(after.text.contains("[REDACTED]"));
 }
 
 #[cfg(windows)]

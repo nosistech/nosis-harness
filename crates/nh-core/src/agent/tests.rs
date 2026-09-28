@@ -276,6 +276,7 @@ impl ChatClient for RetryFailureClient {
                 evidence: UsageEvidence::Measured,
             }),
             last_failure: "provider returned HTTP 429 - rate limited".into(),
+            kind: crate::wire::ProviderFailureKind::RateLimited,
             attempts: 3,
             elapsed: Duration::from_secs(6),
         }))
@@ -1424,6 +1425,12 @@ fn retry_exhaustion_stats_and_salvaged_usage_reach_failed_receipt() {
     assert!(error
         .to_string()
         .contains("3 attempts over 6s; last provider failure"));
+    assert_eq!(
+        error
+            .downcast_ref::<AgentRunError>()
+            .and_then(AgentRunError::provider_failure_kind),
+        Some(crate::wire::ProviderFailureKind::RateLimited)
+    );
 
     let line = std::fs::read_to_string(receipt_path).unwrap();
     let receipt: Receipt = serde_json::from_str(line.trim()).unwrap();
@@ -1715,6 +1722,7 @@ impl Tool for AuditedEditTool {
         Ok(nh_tools::ToolExecution {
             output: "edited using indentation-flexible match".into(),
             audit: vec![ToolAudit::EditMatch(EditMatchTier::IndentationFlexible)],
+            review: Vec::new(),
         })
     }
 }
@@ -1826,6 +1834,7 @@ impl Tool for FactTool {
         Ok(nh_tools::ToolExecution {
             output: self.output.into(),
             audit: vec![self.audit],
+            review: Vec::new(),
         })
     }
 }

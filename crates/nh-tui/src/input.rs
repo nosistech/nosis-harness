@@ -5,7 +5,7 @@ mod commands;
 #[cfg(test)]
 pub(super) use commands::teaching_error;
 pub(super) use commands::{command_matches, execute_command_menu, explain_why};
-use commands::{resolved_route_action, set_profile};
+use commands::{open_timeline, resolved_route_action, set_profile};
 
 use crate::palette::filter_palette;
 use crate::state::{
@@ -127,9 +127,11 @@ pub(super) fn reduce_input_event(app: &mut App, input: Event) -> UiAction {
 
 pub(super) fn reduce_agent_event(app: &mut App, event: AgentEvent) -> (Status, UiAction) {
     let previous = app.status.clone();
+    let completed_normally = matches!(&event, AgentEvent::Answer(_));
     apply_event(app, event);
-    let action = if app.pending_send
-        && matches!(previous, Status::Working | Status::FinishingInterrupted)
+    let action = if completed_normally
+        && app.pending_send
+        && matches!(previous, Status::Working)
         && matches!(app.status, Status::Idle)
     {
         if app.input.starts_with('/') {
@@ -664,7 +666,18 @@ pub(super) fn reduce_overlay_key(app: &mut App, key: KeyEvent) -> UiAction {
         note,
     } = &mut app.overlay
     {
-        timeline_key(timeline_len, selected, inspecting, note, key);
+        timeline_key(
+            timeline_len,
+            selected,
+            inspecting,
+            note,
+            TimelineScroll {
+                position: &app.timeline_scroll,
+                max: app.timeline_max_scroll.get(),
+                page_rows: app.timeline_page_rows.get(),
+            },
+            key,
+        );
         return UiAction::None;
     }
 
@@ -898,18 +911,43 @@ pub(super) fn reduce_command_menu_key(app: &mut App, key: KeyEvent) -> UiAction 
     UiAction::None
 }
 
-pub(super) fn timeline_key(
+struct TimelineScroll<'a> {
+    position: &'a std::cell::Cell<usize>,
+    max: usize,
+    page_rows: usize,
+}
+
+fn timeline_key(
     entry_count: usize,
     selected: &mut usize,
     inspecting: &mut bool,
     note: &mut Option<String>,
+    scroll: TimelineScroll<'_>,
     key: KeyEvent,
 ) {
     match key.code {
+        KeyCode::PageUp if *inspecting => {
+            scroll.position.set(
+                scroll
+                    .position
+                    .get()
+                    .saturating_sub(scroll.page_rows.max(1)),
+            );
+        }
+        KeyCode::PageDown if *inspecting => {
+            scroll.position.set(
+                scroll
+                    .position
+                    .get()
+                    .saturating_add(scroll.page_rows.max(1))
+                    .min(scroll.max),
+            );
+        }
         KeyCode::Up => {
             *selected = selected.saturating_sub(1);
             *inspecting = false;
             *note = None;
+            scroll.position.set(0);
         }
         KeyCode::Down => {
             if entry_count > 0 {
@@ -917,11 +955,17 @@ pub(super) fn timeline_key(
             }
             *inspecting = false;
             *note = None;
+            scroll.position.set(0);
+        }
+        KeyCode::Enter if *inspecting => {
+            *inspecting = false;
+            scroll.position.set(0);
         }
         KeyCode::Enter if entry_count > 0 => {
             *selected = (*selected).min(entry_count - 1);
             *inspecting = true;
             *note = None;
+            scroll.position.set(0);
         }
         _ => {}
     }
@@ -983,11 +1027,11 @@ pub(super) fn activate_palette_entry(app: &mut App, entry: PaletteEntry) -> UiAc
             UiAction::None
         }
         PaletteAction::Timeline => {
-            app.overlay = Overlay::Timeline {
-                selected: app.timeline.len().saturating_sub(1),
-                inspecting: false,
-                note: None,
-            };
+            open_timeline(app, false);
+            UiAction::None
+        }
+        PaletteAction::Review => {
+            open_timeline(app, true);
             UiAction::None
         }
         PaletteAction::Why => explain_why(app),

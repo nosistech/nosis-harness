@@ -28,12 +28,14 @@ If `nh` is not on PATH, the quickstart shows how to call the executable directly
 Setup confirms the folder, lets you choose a model and offers hidden API-key entry.
 You can stop after a no-key price preview, which makes no provider request.
 
-Then follow [your first task](docs/GETTING_STARTED.md) or the
-[practice tasks with independent checks](examples/practice-tasks/README.md).
-The practice files are separate from the portable download; that guide explains how to get them.
+Then follow [your first task](docs/GETTING_STARTED.md). The new
+[text practice task](examples/first-task/README.md) needs no programming tools;
+packages built from rc.3 source bundle it in `practice`. Older downloads do not.
+The optional [Python practice tasks](examples/practice-tasks/README.md) are a
+separate download with independent checks.
 
 **WinGet:** the [submission](https://github.com/microsoft/winget-pkgs/pull/438174)
-is awaiting moderator approval as checked September 25, 2026. Use the portable
+is awaiting moderator approval as checked September 27, 2026. Use the portable
 download until catalog availability and installation are verified.
 
 ## What is available in each version?
@@ -42,9 +44,10 @@ download until catalog availability and installation are verified.
 | --- | --- |
 | v0.2.2 | Published Windows download with guided setup, chat, TUI and explicit model selection |
 | v0.3.0-rc.1 | Existing unpublished candidate; adds remembered model choice, catalog migration and multiline TUI input, plus safety fixes |
-| v0.3.0-rc.2 source | Unreleased work after rc.1, including read-only tasks and MiMo 2.6 / GLM 5.3 routes; absent from the published download and existing candidate |
+| v0.3.0-rc.2 | Verified Windows draft with read-only tasks, MiMo 2.6 / GLM 5.3 routes and additional safety fixes; clean installation check pending |
+| v0.3.0-rc.3 source | Current development: bundled first practice, live change review and actionable recovery; not a published binary |
 
-The current source reports `0.3.0-rc.2`, distinguishing it from the older candidate.
+The current source reports `0.3.0-rc.3`, distinguishing it from the older candidates.
 Its `nh run --help` lists `--read-only`. See [model updates](docs/MODEL_UPDATES.md). New features
 are documented with their availability; see the [changelog](CHANGELOG.md).
 

@@ -11,6 +11,15 @@ commit passes local and remote gates.
 
 ### Added
 
+- A first text-edit exercise bundled in Windows packages built from rc.3 source,
+  with an expected result and no Git, Python, Node.js or Rust prerequisite.
+- A live `/review` view of published file fragments and observed command outcomes,
+  with scrollable details and explicit truncation, omission and expiry labels.
+  It is not a complete workspace diff, durable verification record or undo feature.
+- Typed provider recovery guidance in the full-screen interface. Failed or
+  interrupted work preserves drafts and no longer automatically dispatches queued
+  text; continuing requires a deliberate action. Existing usage stops still apply.
+
 - Opt-in local efficiency measurements and experimental ranged file reads for
   `nh run`, with an offline task-cost report and comparison protocol. Billing gaps
   remain explicit and correctness is judged separately from loop completion.

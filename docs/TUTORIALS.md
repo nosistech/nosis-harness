@@ -7,6 +7,11 @@ commands in your terminal, and task messages inside Nosis when instructed.
 Examples 1 and 2 work with v0.2.2. Commands marked **v0.3.0-rc.1 candidate** require that source build; they are not in the downloadable v0.2.2 package.
 Output panels illustrate what to look for, not a recorded model response or exact price.
 
+**No programming tools installed?** Start with the
+[text practice task](../examples/first-task/README.md). It is included in packages
+built from v0.3.0-rc.3 source; older downloads do not include it. The following
+Git/Python exercises are optional next steps.
+
 For a small bug fix with executable acceptance checks, use the
 [practice project](../examples/practice-tasks/README.md). The unreleased source build
 also supports [read-only tasks](READ_ONLY.md) for asking about files without giving

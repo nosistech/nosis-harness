@@ -48,6 +48,12 @@ you can continue using `.\nh.exe` from its folder.
 
 ## Use it on a project
 
+**First time?** Packages built from v0.3.0-rc.3 source include a `practice` folder.
+Open its README.md for a small text-edit exercise with an expected result and no
+extra programming tools. This folder is absent from v0.2.2 and earlier candidates.
+Start there before using a project you care about. The free preview needs no key;
+the optional model task needs provider access and can incur charges.
+
 Open a terminal in your project folder. Call the executable using its full path,
 for example `& 'C:\Users\you\Apps\Nosis\nh.exe' doctor`.
 For shorter commands from any folder, add the folder containing `nh.exe` to your

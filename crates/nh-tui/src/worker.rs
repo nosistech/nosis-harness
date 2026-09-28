@@ -28,7 +28,7 @@ use crate::session::{
     effort_for, identity_constitution, install_literal, safe_line, scrub_full_line,
 };
 use crate::state::PROMPT_ESTIMATE_UNAVAILABLE;
-use crate::{AgentEvent, ConnectFn, SharedScrubber, TimelineSummary};
+use crate::{AgentEvent, ConnectFn, RecoveryHint, SharedScrubber, TimelineSummary};
 
 const APPROVAL_WAIT_POLL: Duration = Duration::from_millis(10);
 const JOIN_POLL: Duration = Duration::from_millis(2);
@@ -74,7 +74,17 @@ impl Tool for TrackedTool {
             events: &self.events,
             name,
         };
-        self.inner.execute_with_audit(args, ctx)
+        let execution = match self.inner.execute_with_audit(args, ctx) {
+            Ok(execution) => execution,
+            Err(error) => {
+                let _ = self.events.send(AgentEvent::ToolReviewIncomplete);
+                return Err(error);
+            }
+        };
+        for item in execution.review.iter().cloned() {
+            let _ = self.events.send(AgentEvent::ToolReview(item));
+        }
+        Ok(execution)
     }
 }
 
@@ -745,7 +755,13 @@ impl WorkerSession {
             if self.stopped() {
                 return false;
             }
-            self.send_unreceipted_failure(&error.to_string());
+            self.send_recoverable_failure(
+                &error.to_string(),
+                RecoveryHint::Connection {
+                    key_entry: self.route.vault_entry().to_owned(),
+                },
+                Some(task),
+            );
             return true;
         }
 
@@ -836,7 +852,21 @@ impl WorkerSession {
                         answer: format!("error: {reason}"),
                     }));
                     self.observe_usage(run_error.receipt().usage.as_ref());
-                    let _ = self.events.send(AgentEvent::Failed(reason));
+                    if let Some(kind) = run_error.provider_failure_kind() {
+                        if kind == nh_core::wire::ProviderFailureKind::Authentication {
+                            self.connected = false;
+                        }
+                        let _ = self.events.send(AgentEvent::RecoverableFailure {
+                            reason,
+                            recovery: RecoveryHint::Provider {
+                                kind,
+                                key_entry: self.route.vault_entry().to_owned(),
+                            },
+                            retry_task: None,
+                        });
+                    } else {
+                        let _ = self.events.send(AgentEvent::Failed(reason));
+                    }
                 } else {
                     self.send_unreceipted_failure(&reason);
                 }
@@ -874,6 +904,21 @@ impl WorkerSession {
         let _ = self.events.send(AgentEvent::Failed(format!(
             "{reason} - receipt unavailable"
         )));
+    }
+
+    fn send_recoverable_failure(
+        &mut self,
+        error: &str,
+        recovery: RecoveryHint,
+        retry_task: Option<String>,
+    ) {
+        self.observe_usage(None);
+        let reason = safe_line(&self.scrubber, error);
+        let _ = self.events.send(AgentEvent::RecoverableFailure {
+            reason: format!("{reason} - receipt unavailable"),
+            recovery,
+            retry_task,
+        });
     }
 }
 

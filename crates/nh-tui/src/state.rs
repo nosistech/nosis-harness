@@ -10,12 +10,15 @@ use nh_core::agent::{estimate_message_tokens, CompactionEvent};
 use nh_core::receipt::{CompactionStats, FailureClass, Outcome, Receipt, ReceiptKind};
 use nh_core::session_ledger::RestoredSession;
 use nh_core::terminal_capability::TerminalCapability;
-use nh_core::wire::{cache_hit_pct, ChatMessage, ThinkingEffort, Usage, UsageEvidence};
+use nh_core::wire::{
+    cache_hit_pct, ChatMessage, ProviderFailureKind, ThinkingEffort, Usage, UsageEvidence,
+};
 use nh_law::{Law, PolicyView};
 use nh_routes::{
     cost_of, format_context_percent, money, money_with_gloss, Currency, PriceConfidence, Profiles,
     ResolvedRoute, RouteClass, RouteResolver,
 };
+use nh_tools::ToolReviewItem;
 use std::cell::Cell;
 use std::collections::{btree_map::Entry, BTreeMap};
 use std::ops::Range;
@@ -27,6 +30,50 @@ use std::time::Instant;
 pub(super) const MIN_TYPICAL_DURATION_SAMPLES: usize = 5;
 pub(super) const PROMPT_HISTORY_CAPACITY: usize = 100;
 pub(super) const PROMPT_ESTIMATE_UNAVAILABLE: u64 = u64::MAX;
+pub(super) const MAX_TASK_REVIEW_BYTES: usize = 64 * 1024;
+pub(super) const MAX_TASK_REVIEW_ITEMS: usize = 32;
+pub(super) const MAX_SESSION_REVIEW_BYTES: usize = 256 * 1024;
+
+#[derive(Debug, Clone, Default)]
+pub struct TaskReview {
+    pub(super) items: Vec<ToolReviewItem>,
+    pub(super) omitted: usize,
+    pub(super) incomplete: bool,
+    retained_bytes: usize,
+}
+
+impl TaskReview {
+    pub(super) fn record(&mut self, item: ToolReviewItem) {
+        let bytes = item.retained_bytes();
+        if self.items.len() >= MAX_TASK_REVIEW_ITEMS
+            || self.retained_bytes.saturating_add(bytes) > MAX_TASK_REVIEW_BYTES
+        {
+            self.omitted = self.omitted.saturating_add(1);
+            return;
+        }
+        self.retained_bytes = self.retained_bytes.saturating_add(bytes);
+        self.items.push(item);
+    }
+
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    pub(super) fn mark_incomplete(&mut self) {
+        self.incomplete = true;
+    }
+
+    pub(super) fn observed_items(&self) -> usize {
+        self.items.len().saturating_add(self.omitted)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum TimelineReview {
+    Unavailable,
+    Live(TaskReview),
+    Expired { observed_items: usize },
+}
 
 /// The single status shown by the semáforo.
 #[derive(Debug, Clone, PartialEq)]
@@ -63,6 +110,7 @@ pub struct TimelineEntry {
     pub compaction: CompactionStats,
     pub(super) compaction_detail: Option<String>,
     pub(super) compaction_hud: Option<String>,
+    pub(super) review: TimelineReview,
 }
 
 impl TimelineEntry {
@@ -95,6 +143,7 @@ impl TimelineEntry {
             compaction,
             compaction_detail: None,
             compaction_hud: None,
+            review: TimelineReview::Unavailable,
         }
     }
 
@@ -152,6 +201,7 @@ pub(super) enum PaletteAction {
     Search,
     TrustDial,
     Timeline,
+    Review,
     Why,
     Palette,
     Prefill(&'static str),
@@ -220,8 +270,21 @@ pub(super) enum Overlay {
 }
 
 /// Everything the render loop learns from the worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryHint {
+    Connection {
+        key_entry: String,
+    },
+    Provider {
+        kind: ProviderFailureKind,
+        key_entry: String,
+    },
+}
+
 pub enum AgentEvent {
     Progress(String),
+    ToolReview(ToolReviewItem),
+    ToolReviewIncomplete,
     Compaction(CompactionEvent),
     ModelStarted {
         route: String,
@@ -244,6 +307,11 @@ pub enum AgentEvent {
     CancelledTurn(TimelineSummary),
     Answer(String),
     Failed(String),
+    RecoverableFailure {
+        reason: String,
+        recovery: RecoveryHint,
+        retry_task: Option<String>,
+    },
 }
 
 /// Resolved inputs for one TUI session.
@@ -404,6 +472,9 @@ pub struct App {
     pub(super) help_scroll: Cell<usize>,
     pub(super) help_max_scroll: Cell<usize>,
     pub(super) help_page_rows: Cell<usize>,
+    pub(super) timeline_scroll: Cell<usize>,
+    pub(super) timeline_max_scroll: Cell<usize>,
+    pub(super) timeline_page_rows: Cell<usize>,
     pub(super) scrubber: SharedScrubber,
     pub(super) project_root: Option<PathBuf>,
     pub(super) local_offset: FixedOffset,
@@ -412,6 +483,8 @@ pub struct App {
     pub(super) credentialed_providers: Vec<String>,
     pub(super) overlay: Overlay,
     pub(super) timeline: Vec<TimelineEntry>,
+    pub(super) current_task_review: TaskReview,
+    pub(super) timeline_review_bytes: usize,
     pub(super) current_task_compaction: CompactionStats,
     pub(super) last_compaction_hud: Option<String>,
     pub(super) route_timing_history: RouteTimingHistory,
@@ -485,6 +558,9 @@ impl App {
             help_scroll: Cell::new(0),
             help_max_scroll: Cell::new(0),
             help_page_rows: Cell::new(1),
+            timeline_scroll: Cell::new(0),
+            timeline_max_scroll: Cell::new(0),
+            timeline_page_rows: Cell::new(1),
             scrubber,
             project_root: None,
             local_offset: *chrono::Local::now().offset(),
@@ -493,6 +569,8 @@ impl App {
             credentialed_providers,
             overlay: Overlay::None,
             timeline: Vec::new(),
+            current_task_review: TaskReview::default(),
+            timeline_review_bytes: 0,
             current_task_compaction: CompactionStats::default(),
             last_compaction_hud: None,
             route_timing_history,
@@ -654,6 +732,7 @@ impl App {
         self.input_cursor = None;
         self.pending_send = false;
         self.current_task_compaction = CompactionStats::default();
+        self.current_task_review = TaskReview::default();
         self.last_compaction_hud = None;
         self.active_model = None;
         self.active_tool = None;

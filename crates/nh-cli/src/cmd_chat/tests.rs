@@ -223,6 +223,7 @@ impl ChatClient for MeteredFailingClient {
                 evidence: UsageEvidence::Measured,
             }),
             last_failure: "provider failed after metering".into(),
+            kind: nh_core::wire::ProviderFailureKind::Unavailable,
             attempts: 1,
             elapsed: Duration::from_millis(5),
         }))

@@ -12,7 +12,7 @@ mod usage_debug;
 
 pub use anthropic::AnthropicMessagesClient;
 pub use openai::OpenAiCompatClient;
-pub use retry::RetryExhausted;
+pub use retry::{ProviderFailureKind, RetryExhausted};
 
 use nh_routes::{ThinkingDialect, ThinkingPosture, Wire};
 use openai::{OpenAiPolicy, DEFAULT_MAX_TOKENS};

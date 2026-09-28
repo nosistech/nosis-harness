@@ -547,13 +547,46 @@ pub(super) fn render_timeline(
     inspecting: bool,
     note: Option<&str>,
 ) {
-    let body = render_modal_shell(
-        frame,
-        app,
-        area,
-        " Timeline ",
-        "↑/↓ move · Enter inspect · Esc close",
-    );
+    let footer = if inspecting {
+        "PgUp/PgDn scroll | Enter list | Esc close"
+    } else {
+        "Up/Down move | Enter inspect | Esc close"
+    };
+    let body = render_modal_shell(frame, app, area, " Timeline ", footer);
+    if inspecting {
+        let mut raw = Vec::new();
+        if let Some(note) = note {
+            raw.push(note.to_owned());
+            raw.push(String::new());
+        }
+        if let Some(entry) = app.timeline.get(selected) {
+            raw.extend(timeline_detail_lines_for(app.terminal_capability, entry));
+        }
+        let width = usize::from(body.width.max(1));
+        let lines = raw
+            .into_iter()
+            .flat_map(|line| wrap_help_line(&display_line(app, &line), width))
+            .map(Line::from)
+            .collect::<Vec<_>>();
+        let page_rows = usize::from(body.height.max(1));
+        let max_scroll = lines.len().saturating_sub(page_rows);
+        let scroll = app.timeline_scroll.get().min(max_scroll);
+        app.timeline_scroll.set(scroll);
+        app.timeline_max_scroll.set(max_scroll);
+        app.timeline_page_rows.set(page_rows);
+        let visible = lines
+            .into_iter()
+            .skip(scroll)
+            .take(page_rows)
+            .collect::<Vec<_>>();
+        frame.render_widget(
+            Paragraph::new(visible).style(Style::default().fg(Color::White).bg(Color::Black)),
+            body,
+        );
+        return;
+    }
+    app.timeline_scroll.set(0);
+    app.timeline_max_scroll.set(0);
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
@@ -593,10 +626,14 @@ pub(super) fn render_timeline(
 
     let mut detail = Vec::new();
     if let Some(note) = note {
-        detail.push(Line::from(Span::styled(
-            display_line(app, note),
-            Style::default().fg(Color::DarkGray),
-        )));
+        detail.extend(
+            wrap_help_line(
+                &display_line(app, note),
+                usize::from(columns[1].width.max(1)),
+            )
+            .into_iter()
+            .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::DarkGray)))),
+        );
         detail.push(Line::from(display_line(app, "")));
     }
     if let Some(entry) = app.timeline.get(selected) {

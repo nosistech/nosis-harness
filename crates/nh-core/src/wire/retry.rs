@@ -44,6 +44,34 @@ pub(super) enum AttemptOutcome {
     HttpStatus(u16),
 }
 
+/// Stable provider failure classes for user-facing recovery without parsing
+/// provider-controlled error text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderFailureKind {
+    Authentication,
+    RateLimited,
+    Timeout,
+    Network,
+    Unavailable,
+    Rejected,
+    InvalidResponse,
+}
+
+impl AttemptOutcome {
+    fn failure_kind(self) -> ProviderFailureKind {
+        match self {
+            Self::TransportFailure { timed_out: true } => ProviderFailureKind::Timeout,
+            Self::TransportFailure { timed_out: false } => ProviderFailureKind::Network,
+            Self::IncompleteResponse => ProviderFailureKind::InvalidResponse,
+            Self::HttpStatus(401 | 403) => ProviderFailureKind::Authentication,
+            Self::HttpStatus(408) => ProviderFailureKind::Timeout,
+            Self::HttpStatus(429) => ProviderFailureKind::RateLimited,
+            Self::HttpStatus(500 | 502 | 503 | 504) => ProviderFailureKind::Unavailable,
+            Self::HttpStatus(_) => ProviderFailureKind::Rejected,
+        }
+    }
+}
+
 /// Ratified transient statuses may be retried. Their bodies can carry billed
 /// usage, and missing counters are not evidence that no billing occurred. A
 /// request timeout proves even less: the provider may have generated and
@@ -98,6 +126,7 @@ pub struct RetryExhausted {
     pub stats: RetryStats,
     pub usage: Option<Usage>,
     pub last_failure: String,
+    pub kind: ProviderFailureKind,
     pub attempts: u32,
     pub elapsed: Duration,
 }
@@ -270,6 +299,7 @@ fn run_with_retry_clock<T>(
                             salvaged_usage
                         },
                         last_failure: detail,
+                        kind: outcome.failure_kind(),
                         attempts,
                         elapsed,
                     });
@@ -287,6 +317,7 @@ fn run_with_retry_clock<T>(
                             salvaged_usage
                         },
                         last_failure: detail,
+                        kind: outcome.failure_kind(),
                         attempts,
                         elapsed,
                     });
@@ -302,6 +333,7 @@ fn run_with_retry_clock<T>(
                             salvaged_usage
                         },
                         last_failure: detail,
+                        kind: outcome.failure_kind(),
                         attempts,
                         elapsed: elapsed_after_sleep,
                     });
@@ -315,6 +347,7 @@ fn run_with_retry_clock<T>(
                             salvaged_usage
                         },
                         last_failure: detail,
+                        kind: outcome.failure_kind(),
                         attempts,
                         elapsed: elapsed_after_sleep,
                     });
@@ -393,6 +426,43 @@ mod tests {
         ];
         for (outcome, expected) in cases {
             assert_eq!(is_retryable(outcome), expected, "{outcome:?}");
+        }
+    }
+
+    #[test]
+    fn recovery_classes_are_derived_from_typed_attempt_outcomes() {
+        let cases = [
+            (
+                AttemptOutcome::TransportFailure { timed_out: false },
+                ProviderFailureKind::Network,
+            ),
+            (
+                AttemptOutcome::TransportFailure { timed_out: true },
+                ProviderFailureKind::Timeout,
+            ),
+            (
+                AttemptOutcome::IncompleteResponse,
+                ProviderFailureKind::InvalidResponse,
+            ),
+            (
+                AttemptOutcome::HttpStatus(401),
+                ProviderFailureKind::Authentication,
+            ),
+            (
+                AttemptOutcome::HttpStatus(429),
+                ProviderFailureKind::RateLimited,
+            ),
+            (
+                AttemptOutcome::HttpStatus(503),
+                ProviderFailureKind::Unavailable,
+            ),
+            (
+                AttemptOutcome::HttpStatus(422),
+                ProviderFailureKind::Rejected,
+            ),
+        ];
+        for (outcome, expected) in cases {
+            assert_eq!(outcome.failure_kind(), expected, "{outcome:?}");
         }
     }
 
@@ -531,6 +601,7 @@ mod tests {
             stats: RetryStats::default(),
             usage: None,
             last_failure: provider_error.into(),
+            kind: ProviderFailureKind::Authentication,
             attempts: 1,
             elapsed: Duration::from_millis(412),
         };
@@ -543,6 +614,7 @@ mod tests {
             },
             usage: None,
             last_failure: provider_error.into(),
+            kind: ProviderFailureKind::Authentication,
             attempts: 2,
             elapsed: Duration::from_millis(1_250),
         };

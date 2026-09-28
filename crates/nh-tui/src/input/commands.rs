@@ -72,11 +72,11 @@ pub(super) fn execute_command(app: &mut App) -> UiAction {
             UiAction::None
         }
         ("timeline", _) => {
-            app.overlay = Overlay::Timeline {
-                selected: app.timeline.len().saturating_sub(1),
-                inspecting: false,
-                note: None,
-            };
+            open_timeline(app, false);
+            UiAction::None
+        }
+        ("review", _) => {
+            open_timeline(app, true);
             UiAction::None
         }
         ("search", None) => {
@@ -114,6 +114,26 @@ pub(super) fn execute_command(app: &mut App) -> UiAction {
         ("quit", _) => UiAction::Quit,
         _ => command_error(app, "unknown command", "type / to see all"),
     }
+}
+
+pub(super) fn open_timeline(app: &mut App, inspect_latest: bool) {
+    let empty = app.timeline.is_empty();
+    let note = if empty && app.resumed {
+        Some(
+            "review details are live-session only; resumed turns remain in session history but are not available here"
+                .to_owned(),
+        )
+    } else if empty && inspect_latest {
+        Some("no completed turns to review yet; details appear after a turn finishes".to_owned())
+    } else {
+        None
+    };
+    app.timeline_scroll.set(0);
+    app.overlay = Overlay::Timeline {
+        selected: app.timeline.len().saturating_sub(1),
+        inspecting: inspect_latest && !empty,
+        note,
+    };
 }
 
 fn open_model_picker(app: &mut App) -> UiAction {

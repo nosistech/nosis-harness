@@ -129,6 +129,11 @@ pub(super) fn builtin_palette_entries(shell_unavailable: bool) -> Vec<PaletteEnt
             PaletteAction::Timeline,
         ),
         (
+            "/review",
+            "inspect the latest live file changes and command outcomes",
+            PaletteAction::Review,
+        ),
+        (
             "/search",
             "search the displayed transcript",
             PaletteAction::Search,
