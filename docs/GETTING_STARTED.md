@@ -83,7 +83,7 @@ printing key values. It does not test whether your provider account accepts call
 | No API key | Rerun setup and use the hidden key prompt |
 | Provider rejects the request | Check that provider's API access and credit; `doctor` only confirms stored configuration |
 | Provider times out | Inspect files before retrying; earlier actions may have completed |
-| Catalog is untrusted | Follow [catalog upgrade guidance](CONFIGURATION.md); do not grant trust just to dismiss the error |
+| Catalog is untrusted after an upgrade | In candidate/source builds, run `nh catalog migrate` to review a recognized older bundled catalog. Custom catalogs need manual review; do not grant trust just to dismiss the error. See [catalog upgrade guidance](CONFIGURATION.md) |
 
 If the saved API key is wrong or expired, replace it at the hidden prompt with
 `nh key add <entry>`, using the credential entry shown by setup or doctor. This
@@ -104,7 +104,10 @@ offers a read-only first task. When `nh run --help` lists `--read-only`, use
 that task. Those protections are not in the published v0.2.2 download.
 
 [Remember a model or upgrade a catalog](CONFIGURATION.md) in candidate/source builds.
-For v0.2.2 catalog replacement, retain a backup outside the project before intentionally
-removing the old `catalog.toml` and rerunning setup; review provider destinations first.
+When upgrading from v0.2.2 with a newer candidate, prefer `nh catalog migrate`;
+it reviews recognized bundled catalogs and preserves a backup after consent.
+If you are still running v0.2.2, this command is unavailable. Retain a backup
+outside the project before any intentional manual replacement, and review
+provider destinations first.
 For local inference, follow [local models](LOCAL_MODELS.md).
 For keyboard help and change review, see [terminal controls](TERMINAL_GUIDE.md).

@@ -72,6 +72,12 @@ commit passes local and remote gates.
 
 ### Fixed
 
+- Direct `nh init` now shares guided setup's preflight checks for `.nosis`, the
+  project catalog, policy and ignore files. Symbolic links, junctions and wrong
+  file types are refused before writing; existing files remain untouched on refusal.
+- Setup recognizes an unchanged older bundled catalog and points to the explicit
+  catalog migration command. Migration still requires review and consent, keeps a
+  backup and does not automatically trust a custom catalog.
 - Durable session, receipt and Fleet records scrub decoded JSON strings and keys
   before encoding, including OpenAI-style `tool_calls[].arguments`. This protects
   active literal credentials and known key shapes at those boundaries. Arbitrary

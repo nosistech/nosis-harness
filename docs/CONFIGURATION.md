@@ -34,6 +34,11 @@ replace an unsafe file. Explicit `--model <id>` remains available for a session.
 
 ## Upgrade your project catalog (v0.3.0-rc.1 candidate)
 
+In rc.4 source, setup points to this command when it recognizes an older bundled
+catalog. Use the full executable path printed by setup if `nh` is not on PATH.
+After reviewing and accepting the migration, rerun setup in the same folder.
+Declining leaves the catalog unchanged; custom catalogs require manual review.
+
 If an updated binary rejects an older bundled catalog, run `nh catalog migrate`
 in an interactive terminal. Review the affected path, provider/model/capability/
 price changes and credential destinations before answering yes. Enter declines.

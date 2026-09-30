@@ -43,6 +43,20 @@ const HISTORICAL_CATALOGS: &[HistoricalCatalog] = &[
     },
 ];
 
+pub(crate) fn is_known_historical_catalog(path: &Path) -> bool {
+    read_catalog(path)
+        .ok()
+        .and_then(|existing| find_historical_catalog(&existing))
+        .is_some()
+}
+
+fn find_historical_catalog(existing: &str) -> Option<HistoricalCatalog> {
+    HISTORICAL_CATALOGS
+        .iter()
+        .find(|historical| catalogs_match_across_line_endings(historical.text, existing))
+        .copied()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Answer {
     Yes,
@@ -129,11 +143,7 @@ fn migrate_with(
     if existing == CURRENT_CATALOG {
         anyhow::bail!("catalog.toml already matches this nh version")
     }
-    let historical = HISTORICAL_CATALOGS
-        .iter()
-        .find(|historical| catalogs_match_across_line_endings(historical.text, &existing))
-        .copied()
-        .ok_or_else(|| {
+    let historical = find_historical_catalog(&existing).ok_or_else(|| {
             anyhow::anyhow!(
                 "catalog.toml is custom or changed - it was not modified; review and update it manually"
             )
@@ -592,6 +602,34 @@ fn read_answer(reader: &mut dyn io::BufRead) -> io::Result<Answer> {
         "" | "n" | "N" | "no" | "No" | "NO" => Answer::No,
         _ => Answer::Cancel,
     })
+}
+
+#[cfg(test)]
+pub(crate) fn migrate_with_consent_for_test(path: &Path, consent: bool) -> anyhow::Result<String> {
+    struct ConsentUi {
+        answer: Answer,
+        output: String,
+    }
+
+    impl CatalogUi for ConsentUi {
+        fn line(&mut self, line: &str) -> io::Result<()> {
+            self.output.push_str(line);
+            self.output.push('\n');
+            Ok(())
+        }
+
+        fn confirm(&mut self, prompt: &str) -> io::Result<Answer> {
+            self.output.push_str(prompt);
+            Ok(self.answer)
+        }
+    }
+
+    let mut ui = ConsentUi {
+        answer: if consent { Answer::Yes } else { Answer::No },
+        output: String::new(),
+    };
+    migrate_with(path, &mut ui, || Ok(()))?;
+    Ok(ui.output)
 }
 
 #[cfg(test)]

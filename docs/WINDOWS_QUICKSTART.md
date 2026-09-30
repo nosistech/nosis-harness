@@ -99,11 +99,11 @@ remove that saved key. See the
 [privacy guide](https://github.com/nosistech/nosis-harness/blob/main/PRIVACY.md)
 for configuration, receipts, and session locations.
 
-If setup reports an untrusted catalog after an upgrade, it has preserved your older
-project catalog. Back it up outside the project before intentionally replacing it
-with the new bundled catalog; the guided setup guide explains the steps. Never trust
-a changed catalog without reviewing its provider destinations.
-v0.3.0-rc.1 candidate builds also offer an explicit `nh catalog migrate` command for
-recognized older bundled catalogs. This command is not in v0.2.2; see the current
+If setup reports an untrusted catalog after an upgrade, it has preserved your
+project catalog. In v0.3.0-rc.1 or later candidates, run `nh catalog migrate` using
+your executable's full path if needed. It can review a recognized older bundled
+catalog and retain a backup after you approve the changes. Then rerun setup.
+Custom catalogs need manual review; never grant trust just to dismiss an error.
+This command is not in v0.2.2; see the current
 [configuration guide](https://github.com/nosistech/nosis-harness/blob/main/docs/CONFIGURATION.md)
 for its consent, backup and recovery behavior.

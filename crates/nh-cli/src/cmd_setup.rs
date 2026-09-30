@@ -1,7 +1,6 @@
 //! `nh setup` - a guided, default-deny first run for one project folder.
 
 use std::collections::BTreeSet;
-use std::fs;
 use std::io::{self, BufRead, IsTerminal as _, Write as _};
 use std::path::Path;
 
@@ -10,7 +9,7 @@ use nh_core::terminal_capability::TerminalCapability;
 use nh_routes::{money, PriceConfidence, ResolvedRoute, RouteClass, RouteResolver};
 use nh_vault::{KeyringVault, Scrubber};
 
-use crate::{cmd_doctor, cmd_init, cmd_key, cmd_run, cmd_why, model_preference};
+use crate::{cmd_catalog, cmd_doctor, cmd_init, cmd_key, cmd_run, cmd_why, model_preference};
 
 const MAX_PROMPT_BYTES: usize = 256;
 const FIRST_TASK: &str = "List the top-level files and read README if present, then explain this project's purpose, main parts, and one likely next step. Do not edit files or run commands.";
@@ -104,24 +103,7 @@ impl SetupActions for SystemActions {
 
     fn routes(&mut self, root: &Path) -> anyhow::Result<Vec<SetupRoute>> {
         let (catalog_root, catalog) = cmd_run::find_catalog(root)?;
-        if catalog_root != root {
-            anyhow::bail!(
-                "setup found a catalog outside the confirmed project folder - run `nh init` in the intended folder"
-            );
-        }
-        let resolver = RouteResolver::from_toml(&catalog)?;
-        let mut routes = Vec::new();
-        let at = Utc::now();
-        for id in resolver.available() {
-            let route = resolver.resolve(&id)?;
-            if route.class() == RouteClass::Api {
-                routes.push(setup_route(&route, self.terminal_capability, at));
-            }
-        }
-        if routes.is_empty() {
-            anyhow::bail!("trusted catalog has no API routes to select");
-        }
-        Ok(routes)
+        routes_from_catalog(root, &catalog_root, &catalog, self.terminal_capability)
     }
 
     fn preview(&mut self, route: &str) -> anyhow::Result<()> {
@@ -144,6 +126,32 @@ impl SetupActions for SystemActions {
         let (task, model, options) = first_task_request(route, self.terminal_capability);
         cmd_run::run(task, model, options)
     }
+}
+
+fn routes_from_catalog(
+    root: &Path,
+    catalog_root: &Path,
+    catalog: &str,
+    terminal_capability: TerminalCapability,
+) -> anyhow::Result<Vec<SetupRoute>> {
+    if catalog_root != root {
+        anyhow::bail!(
+            "setup found a catalog outside the confirmed project folder - run `nh init` in the intended folder"
+        );
+    }
+    let resolver = RouteResolver::from_toml(catalog)?;
+    let mut routes = Vec::new();
+    let at = Utc::now();
+    for id in resolver.available() {
+        let route = resolver.resolve(&id)?;
+        if route.class() == RouteClass::Api {
+            routes.push(setup_route(&route, terminal_capability, at));
+        }
+    }
+    if routes.is_empty() {
+        anyhow::bail!("trusted catalog has no API routes to select");
+    }
+    Ok(routes)
 }
 
 fn first_task_request(
@@ -218,46 +226,7 @@ fn setup_price(
 }
 
 fn initialize_project(root: &Path) -> anyhow::Result<Vec<String>> {
-    preflight_init_paths(root)?;
     cmd_init::init_at(root)
-}
-
-fn preflight_init_paths(root: &Path) -> anyhow::Result<()> {
-    let nosis = root.join(".nosis");
-    let nosis_exists = inspect_setup_path(&nosis, true, ".nosis")?;
-    inspect_setup_path(&root.join("catalog.toml"), false, "catalog.toml")?;
-    if nosis_exists {
-        inspect_setup_path(&nosis.join("law.toml"), false, ".nosis/law.toml")?;
-        inspect_setup_path(&nosis.join(".gitignore"), false, ".nosis/.gitignore")?;
-    }
-    Ok(())
-}
-
-fn inspect_setup_path(path: &Path, directory: bool, label: &str) -> anyhow::Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata)
-            if !metadata.file_type().is_symlink()
-                && if directory {
-                    metadata.is_dir()
-                } else {
-                    metadata.is_file()
-                } =>
-        {
-            Ok(true)
-        }
-        Ok(_) => {
-            let expected = if directory {
-                "directory"
-            } else {
-                "regular file"
-            };
-            anyhow::bail!(
-                "refused setup: {label} must be a {expected}; symlinks and other file types are not accepted"
-            )
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => anyhow::bail!("could not inspect {label} before setup ({error})"),
-    }
 }
 
 pub fn run(
@@ -309,11 +278,9 @@ fn guide(
     ui.line("Install check:")?;
     actions.doctor()?;
 
-    let routes = actions.routes(project).map_err(|error| {
-        anyhow::anyhow!(
-            "could not list trusted routes: {error}. Existing catalog.toml was preserved; review it before trusting or replacing it"
-        )
-    })?;
+    let routes = actions
+        .routes(project)
+        .map_err(|error| trusted_routes_error(project, executable, error))?;
     ui.line("")?;
     let providers = routes
         .iter()
@@ -485,6 +452,19 @@ fn stop_after_init(ui: &mut dyn SetupUi) -> io::Result<()> {
     ui.line("Setup stopped. Existing setup changes were kept. No provider request was sent.")
 }
 
+fn trusted_routes_error(project: &Path, executable: &Path, error: anyhow::Error) -> anyhow::Error {
+    if cmd_catalog::is_known_historical_catalog(&project.join("catalog.toml")) {
+        anyhow::anyhow!(
+            "could not list trusted routes: {error}. The unchanged known historical bundled catalog was preserved. Review it and explicitly consent with {}, then rerun setup",
+            command_line(executable, &["catalog", "migrate"])
+        )
+    } else {
+        anyhow::anyhow!(
+            "could not list trusted routes: {error}. Existing catalog.toml was preserved; review it before trusting or replacing it"
+        )
+    }
+}
+
 fn print_next_commands(
     ui: &mut dyn SetupUi,
     executable: &Path,
@@ -643,6 +623,7 @@ fn shell_argument(value: &str) -> String {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+    use std::fs;
     use std::path::PathBuf;
 
     #[derive(Default)]
@@ -752,6 +733,60 @@ mod tests {
             if self.overview_error {
                 anyhow::bail!("synthetic overview failure");
             }
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct LifecycleActions {
+        calls: Vec<String>,
+    }
+
+    impl SetupActions for LifecycleActions {
+        fn initialize(&mut self, root: &Path) -> anyhow::Result<Vec<String>> {
+            self.calls.push("init".to_owned());
+            initialize_project(root)
+        }
+
+        fn doctor(&mut self) -> anyhow::Result<()> {
+            self.calls.push("doctor".to_owned());
+            Ok(())
+        }
+
+        fn routes(&mut self, root: &Path) -> anyhow::Result<Vec<SetupRoute>> {
+            self.calls.push("routes".to_owned());
+            let (catalog_root, catalog) =
+                cmd_run::find_catalog_without_operator_trust_for_test(root)?;
+            routes_from_catalog(
+                root,
+                &catalog_root,
+                &catalog,
+                TerminalCapability::AsciiFallback,
+            )
+        }
+
+        fn preview(&mut self, route: &str) -> anyhow::Result<()> {
+            self.calls.push(format!("preview:{route}"));
+            Ok(())
+        }
+
+        fn save_model(&mut self, route: &str) -> anyhow::Result<()> {
+            self.calls.push(format!("save-model:{route}"));
+            Ok(())
+        }
+
+        fn key_exists(&mut self, entry: &str) -> anyhow::Result<bool> {
+            self.calls.push(format!("key-exists:{entry}"));
+            Ok(false)
+        }
+
+        fn add_key(&mut self, entry: &str) -> anyhow::Result<()> {
+            self.calls.push(format!("add-key:{entry}"));
+            Ok(())
+        }
+
+        fn read_only_overview(&mut self, route: &str) -> anyhow::Result<()> {
+            self.calls.push(format!("provider-overview:{route}"));
             Ok(())
         }
     }
@@ -1209,5 +1244,88 @@ mod tests {
 
         assert!(error.to_string().contains("not trusted"));
         assert_eq!(fs::read_to_string(catalog).unwrap(), original);
+    }
+
+    #[test]
+    fn historical_catalog_migration_lifecycle_reaches_no_key_setup_offline() {
+        const HISTORICAL: &str = include_str!("../catalog-history/v0.2.2.toml");
+        const CURRENT: &str = include_str!("../../../catalog.toml");
+
+        let project = tempfile::tempdir().unwrap();
+        let catalog = project.path().join("catalog.toml");
+        fs::write(&catalog, HISTORICAL).unwrap();
+
+        let mut first_ui = TestUi::with_lines(&["y"]);
+        let mut first_actions = LifecycleActions::default();
+        let error = guide(
+            project.path(),
+            &executable(),
+            &mut first_ui,
+            &mut first_actions,
+        )
+        .unwrap_err();
+        let migrate_command = command_line(&executable(), &["catalog", "migrate"]);
+        assert!(error.to_string().contains(&migrate_command));
+        assert!(error.to_string().contains("explicitly consent"));
+        assert_eq!(fs::read_to_string(&catalog).unwrap(), HISTORICAL);
+
+        let decline = cmd_catalog::migrate_with_consent_for_test(&catalog, false).unwrap();
+        assert!(decline.contains("Replace this known historical catalog? [y/N]"));
+        assert!(decline.contains("declined. No files changed"));
+        assert_eq!(fs::read_to_string(&catalog).unwrap(), HISTORICAL);
+        assert!(!project
+            .path()
+            .join("catalog.toml.nh-backup-v0.2.2-or-v0.3.0-rc.1")
+            .exists());
+
+        let consent = cmd_catalog::migrate_with_consent_for_test(&catalog, true).unwrap();
+        assert!(consent.contains("Catalog migration complete"));
+        assert_eq!(fs::read_to_string(&catalog).unwrap(), CURRENT);
+        assert_eq!(
+            fs::read_to_string(
+                project
+                    .path()
+                    .join("catalog.toml.nh-backup-v0.2.2-or-v0.3.0-rc.1")
+            )
+            .unwrap(),
+            HISTORICAL
+        );
+
+        let mut final_ui = TestUi::with_lines(&["y", "1", "1", "n", "n", "n"]);
+        let mut final_actions = LifecycleActions::default();
+        guide(
+            project.path(),
+            &executable(),
+            &mut final_ui,
+            &mut final_actions,
+        )
+        .unwrap();
+
+        assert!(final_actions
+            .calls
+            .iter()
+            .any(|call| call.starts_with("key-exists:")));
+        assert!(!final_actions
+            .calls
+            .iter()
+            .any(|call| call.starts_with("add-key:") || call.starts_with("provider-overview:")));
+        assert!(final_ui.output.contains("No provider request was sent"));
+    }
+
+    #[test]
+    fn custom_untrusted_catalog_does_not_offer_historical_migration() {
+        let project = tempfile::tempdir().unwrap();
+        let catalog = project.path().join("catalog.toml");
+        let custom = "# operator-owned custom catalog\n";
+        fs::write(&catalog, custom).unwrap();
+        let mut ui = TestUi::with_lines(&["y"]);
+        let mut actions = LifecycleActions::default();
+
+        let error = guide(project.path(), &executable(), &mut ui, &mut actions).unwrap_err();
+
+        assert!(error.to_string().contains("not trusted"));
+        assert!(!error.to_string().contains("catalog' 'migrate"));
+        assert!(!error.to_string().contains("catalog migrate"));
+        assert_eq!(fs::read_to_string(catalog).unwrap(), custom);
     }
 }

@@ -21,6 +21,13 @@ use meter::turn_cost_line_for_run;
 use meter::{run_meter_lines, terminal_meter_lines, RunTiming, RunUsage};
 
 #[cfg(test)]
+pub(crate) fn find_catalog_without_operator_trust_for_test(
+    start: &std::path::Path,
+) -> anyhow::Result<(std::path::PathBuf, String)> {
+    config::find_catalog_with_home(start, None)
+}
+
+#[cfg(test)]
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::sync::Arc;

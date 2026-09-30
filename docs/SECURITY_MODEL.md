@@ -156,6 +156,13 @@ assistant's answer or from a receipt's `pass` value.
 - Can a required receipt fail without changing the reported outcome?
 - Git guard: `nh init` writes `.nosis/.gitignore` covering the runtime artifacts (`receipts.jsonl`, `fleet/`, `sessions/`, `observations/`, `efficiency-v1.jsonl`, `*.log`, `auth*`). Rerunning it adds missing entries while preserving custom ones. The directory itself is not ignored, so a repository `law.toml` or `mcp.toml` can still be committed and reviewed. A pre-commit hook blocks files matching secret patterns (installed by `nh init`).
 
+In rc.4 source, both `init` and guided setup check `.nosis`, `catalog.toml`,
+`.nosis/law.toml` and `.nosis/.gitignore` before writing. Symbolic links, junctions
+and wrong file types are refused at those paths. Hard links, the project root's
+ancestors and Git hook paths are outside this check. It does not isolate writes
+from a concurrent process replacing paths after inspection. Earlier direct `init`
+versions lacked setup's shared path checks; avoid initializing unreviewed links.
+
 Opt-in [efficiency experiments](EFFICIENCY.md) can retain scrubbed tool output and
 extractive history temporarily under `.nosis/observations`. Handles are bound to
 one running session; retrieval verifies stored bytes and cannot authorize another

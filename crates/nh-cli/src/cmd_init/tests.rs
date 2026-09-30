@@ -49,6 +49,145 @@ fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::windows::fs::symlink_dir(target, link)
 }
 
+fn symlink_fixture_created(result: std::io::Result<()>, label: &str) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported
+            ) =>
+        {
+            eprintln!("skipping {label}: {error}");
+            false
+        }
+        Err(error) => panic!("could not create {label}: {error}"),
+    }
+}
+
+#[cfg(windows)]
+fn junction_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    let output = std::process::Command::new("cmd.exe")
+        .args(["/D", "/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "mklink /J failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
+}
+
+fn assert_redirected_nosis_is_refused(project: &Path, outside: &Path) {
+    let sentinel = outside.join("sentinel.txt");
+    fs::write(&sentinel, "keep this exact value").unwrap();
+
+    let error = init_at(project).unwrap_err();
+
+    assert!(error.to_string().contains(".nosis must be a directory"));
+    assert_eq!(
+        fs::read_to_string(&sentinel).unwrap(),
+        "keep this exact value"
+    );
+    assert!(!outside.join(".gitignore").exists());
+    assert!(!outside.join("law.toml").exists());
+    assert!(!project.join("catalog.toml").exists());
+}
+
+#[test]
+fn init_refuses_symlinked_nosis_before_any_write() {
+    let project = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    if !symlink_fixture_created(
+        symlink_dir(outside.path(), &project.path().join(".nosis")),
+        "init directory symlink fixture",
+    ) {
+        return;
+    }
+
+    assert_redirected_nosis_is_refused(project.path(), outside.path());
+}
+
+#[cfg(windows)]
+#[test]
+fn init_refuses_windows_nosis_junction_before_any_write() {
+    let project = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    junction_dir(outside.path(), &project.path().join(".nosis"))
+        .expect("Windows junction fixture should be available without symlink privilege");
+
+    assert_redirected_nosis_is_refused(project.path(), outside.path());
+}
+
+#[test]
+fn init_refuses_dangling_catalog_symlink_before_any_write() {
+    let project = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let nosis = project.path().join(".nosis");
+    let external_catalog = outside.path().join("external-catalog.toml");
+    fs::create_dir(&nosis).unwrap();
+    if !symlink_fixture_created(
+        symlink_file(&external_catalog, &project.path().join("catalog.toml")),
+        "init dangling catalog symlink fixture",
+    ) {
+        return;
+    }
+
+    let error = init_at(project.path()).unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("catalog.toml must be a regular file"));
+    assert!(!external_catalog.exists());
+    assert!(!nosis.join(".gitignore").exists());
+    assert!(!nosis.join("law.toml").exists());
+}
+
+#[test]
+fn init_refuses_law_symlink_before_any_write() {
+    let project = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let nosis = project.path().join(".nosis");
+    let sentinel = outside.path().join("outside-law.toml");
+    fs::create_dir(&nosis).unwrap();
+    fs::write(&sentinel, "keep this policy").unwrap();
+    if !symlink_fixture_created(
+        symlink_file(&sentinel, &nosis.join("law.toml")),
+        "init law symlink fixture",
+    ) {
+        return;
+    }
+
+    let error = init_at(project.path()).unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains(".nosis/law.toml must be a regular file"));
+    assert_eq!(fs::read_to_string(sentinel).unwrap(), "keep this policy");
+    assert!(!project.path().join("catalog.toml").exists());
+    assert!(!nosis.join(".gitignore").exists());
+}
+
+#[test]
+fn init_refuses_non_regular_managed_paths_before_any_write() {
+    let project = tempfile::tempdir().unwrap();
+    let nosis = project.path().join(".nosis");
+    fs::create_dir(&nosis).unwrap();
+    fs::create_dir(project.path().join("catalog.toml")).unwrap();
+
+    let error = init_at(project.path()).unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("catalog.toml must be a regular file"));
+    assert!(!nosis.join(".gitignore").exists());
+    assert!(!nosis.join("law.toml").exists());
+}
+
 #[test]
 fn creates_nosis_gitignore_and_catalog_then_is_idempotent() {
     let tmp = tempfile::tempdir().unwrap();

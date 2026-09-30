@@ -65,6 +65,7 @@ pub fn run() -> anyhow::Result<()> {
 /// ["already set up"]. Existing files are never overwritten.
 /// No Git metadata means there is no hook to install.
 pub fn init_at(root: &Path) -> anyhow::Result<Vec<String>> {
+    preflight_init_paths(root)?;
     let mut lines = Vec::new();
 
     let nosis = root.join(".nosis");
@@ -102,6 +103,44 @@ pub fn init_at(root: &Path) -> anyhow::Result<Vec<String>> {
         lines.push("already set up".to_string());
     }
     Ok(lines)
+}
+
+fn preflight_init_paths(root: &Path) -> anyhow::Result<()> {
+    let nosis = root.join(".nosis");
+    let nosis_exists = inspect_init_path(&nosis, true, ".nosis")?;
+    inspect_init_path(&root.join("catalog.toml"), false, "catalog.toml")?;
+    if nosis_exists {
+        inspect_init_path(&nosis.join("law.toml"), false, ".nosis/law.toml")?;
+        inspect_init_path(&nosis.join(".gitignore"), false, ".nosis/.gitignore")?;
+    }
+    Ok(())
+}
+
+fn inspect_init_path(path: &Path, directory: bool, label: &str) -> anyhow::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata)
+            if !metadata.file_type().is_symlink()
+                && if directory {
+                    metadata.is_dir()
+                } else {
+                    metadata.is_file()
+                } =>
+        {
+            Ok(true)
+        }
+        Ok(_) => {
+            let expected = if directory {
+                "directory"
+            } else {
+                "regular file"
+            };
+            anyhow::bail!(
+                "refused init: {label} must be a {expected}; links and other file types are not accepted"
+            )
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => anyhow::bail!("could not inspect {label} before init ({error})"),
+    }
 }
 
 fn update_gitignore(path: &Path, lines: &mut Vec<String>) -> anyhow::Result<()> {
