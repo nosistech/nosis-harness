@@ -46,7 +46,7 @@ download until catalog availability and installation are verified.
 | v0.3.0-rc.1 | Existing unpublished candidate; adds remembered model choice, catalog migration and multiline TUI input, plus safety fixes |
 | v0.3.0-rc.2 | Verified Windows draft with read-only tasks, MiMo 2.6 / GLM 5.3 routes and additional safety fixes; clean installation check pending |
 | v0.3.0-rc.3 | Unpublished Windows draft with bundled first practice, live change review and actionable recovery |
-| v0.3.0-rc.4 source | Current development: shared initialization path checks and clearer recovery for older bundled catalogs; not a published binary |
+| v0.3.0-rc.4 source | Current development: shared initialization path checks, catalog-upgrade recovery and a shorter setup flow; not a published binary |
 
 The current source reports `0.3.0-rc.4`, distinguishing it from the older candidates.
 Its `nh run --help` lists `--read-only`. See [model updates](docs/MODEL_UPDATES.md). New features

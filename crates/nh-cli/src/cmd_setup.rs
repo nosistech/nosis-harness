@@ -9,7 +9,7 @@ use nh_core::terminal_capability::TerminalCapability;
 use nh_routes::{money, PriceConfidence, ResolvedRoute, RouteClass, RouteResolver};
 use nh_vault::{KeyringVault, Scrubber};
 
-use crate::{cmd_catalog, cmd_doctor, cmd_init, cmd_key, cmd_run, cmd_why, model_preference};
+use crate::{cmd_catalog, cmd_init, cmd_key, cmd_run, model_preference};
 
 const MAX_PROMPT_BYTES: usize = 256;
 const FIRST_TASK: &str = "List the top-level files and read README if present, then explain this project's purpose, main parts, and one likely next step. Do not edit files or run commands.";
@@ -44,9 +44,7 @@ trait SetupUi {
 
 trait SetupActions {
     fn initialize(&mut self, root: &Path) -> anyhow::Result<Vec<String>>;
-    fn doctor(&mut self) -> anyhow::Result<()>;
     fn routes(&mut self, root: &Path) -> anyhow::Result<Vec<SetupRoute>>;
-    fn preview(&mut self, route: &str) -> anyhow::Result<()>;
     fn save_model(&mut self, route: &str) -> anyhow::Result<()>;
     fn key_exists(&mut self, entry: &str) -> anyhow::Result<bool>;
     fn add_key(&mut self, entry: &str) -> anyhow::Result<()>;
@@ -89,7 +87,6 @@ impl SetupUi for ConsoleUi {
 
 struct SystemActions {
     terminal_capability: TerminalCapability,
-    forced_ascii: Option<bool>,
 }
 
 impl SetupActions for SystemActions {
@@ -97,17 +94,9 @@ impl SetupActions for SystemActions {
         initialize_project(root)
     }
 
-    fn doctor(&mut self) -> anyhow::Result<()> {
-        cmd_doctor::run(self.terminal_capability, self.forced_ascii)
-    }
-
     fn routes(&mut self, root: &Path) -> anyhow::Result<Vec<SetupRoute>> {
         let (catalog_root, catalog) = cmd_run::find_catalog(root)?;
         routes_from_catalog(root, &catalog_root, &catalog, self.terminal_capability)
-    }
-
-    fn preview(&mut self, route: &str) -> anyhow::Result<()> {
-        cmd_why::run(None, Some(route), self.terminal_capability)
     }
 
     fn save_model(&mut self, route: &str) -> anyhow::Result<()> {
@@ -229,10 +218,7 @@ fn initialize_project(root: &Path) -> anyhow::Result<Vec<String>> {
     cmd_init::init_at(root)
 }
 
-pub fn run(
-    terminal_capability: TerminalCapability,
-    forced_ascii: Option<bool>,
-) -> anyhow::Result<()> {
+pub fn run(terminal_capability: TerminalCapability) -> anyhow::Result<()> {
     require_interactive(io::stdin().is_terminal(), io::stdout().is_terminal())?;
 
     let project = std::env::current_dir()?;
@@ -240,7 +226,6 @@ pub fn run(
     let mut ui = ConsoleUi::new();
     let mut actions = SystemActions {
         terminal_capability,
-        forced_ascii,
     };
     guide(&project, &executable, &mut ui, &mut actions)
 }
@@ -275,12 +260,22 @@ fn guide(
         ui.line(&line)?;
     }
     ui.line("")?;
-    ui.line("Install check:")?;
-    actions.doctor()?;
+    ui.line("Next: choose a model, connect its provider API key, then optionally try one read-only project overview.")?;
+    ui.line(
+        "API keys come from provider developer consoles. A chat subscription is separate and may not include API access or credits.",
+    )?;
+    ui.line("For detailed local configuration checks, run:")?;
+    ui.line(&command_line(executable, &["doctor"]))?;
 
-    let routes = actions
-        .routes(project)
-        .map_err(|error| trusted_routes_error(project, executable, error))?;
+    let routes = match actions.routes(project) {
+        Ok(routes) => routes,
+        Err(error) => {
+            if cmd_catalog::is_known_historical_catalog(&project.join("catalog.toml")) {
+                print_historical_catalog_recovery(ui, executable)?;
+            }
+            return Err(trusted_routes_error(project, error));
+        }
+    };
     ui.line("")?;
     let providers = routes
         .iter()
@@ -288,7 +283,7 @@ fn guide(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    ui.line("Choose a provider:")?;
+    ui.line("Choose an API provider you use or plan to use:")?;
     ui.line("  1. All models")?;
     for (index, provider) in providers.iter().enumerate() {
         ui.line(&format!("  {}. {provider}", index + 2))?;
@@ -353,21 +348,6 @@ fn guide(
             return Ok(());
         }
     }
-    ui.line(
-        "This keyless preview compares catalog prices. It is not an AI response, and your selected model stays the same.",
-    )?;
-    match ask_yes_no(
-        ui,
-        "Open the nh why preview now? (no key or provider call) [y/N] ",
-    )? {
-        Answer::Yes => actions.preview(&selected.id)?,
-        Answer::No => {}
-        Answer::Cancel => {
-            stop_after_init(ui)?;
-            return Ok(());
-        }
-    }
-
     ui.line("")?;
     ui.line(&format!(
         "Cloud use: prompts and tool results for this model go to {}; provider charges may apply.",
@@ -383,12 +363,16 @@ fn guide(
             "selected route has an unsafe vault entry name - review the trusted catalog before adding a key"
         );
     }
-    let key_present = actions.key_exists(&selected.vault_entry).map_err(|error| {
-        anyhow::anyhow!(
-            "could not check the secure credential store ({error}) - inspect it with {}",
-            command_line(executable, &["doctor"])
-        )
-    })?;
+    let key_present = match actions.key_exists(&selected.vault_entry) {
+        Ok(present) => present,
+        Err(error) => {
+            ui.line("The secure credential-store check failed. For detailed local checks, run:")?;
+            ui.line(&command_line(executable, &["doctor"]))?;
+            return Err(anyhow::anyhow!(
+                "could not check the secure credential store ({error})"
+            ));
+        }
+    };
     if key_present {
         ui.line(&format!(
             "Existing secure credential entry {} was found and will not be replaced.",
@@ -404,11 +388,8 @@ fn guide(
         )? {
             Answer::Yes => actions.add_key(&selected.vault_entry)?,
             Answer::No => {
-                ui.line("Setup complete. No provider request was sent.")?;
-                ui.line(&format!(
-                    "Add the key when ready: {}",
-                    command_line(executable, &["key", "add", &selected.vault_entry])
-                ))?;
+                ui.line("Setup complete. No AI task ran. No provider request was sent.")?;
+                print_no_key_commands(ui, executable, selected)?;
                 return Ok(());
             }
             Answer::Cancel => {
@@ -419,6 +400,7 @@ fn guide(
     }
 
     ui.line("Recommended first task: a read-only overview of this project (maximum 4 turns).")?;
+    ui.line("The 4-turn limit bounds this task; it is not a provider spending cap.")?;
     ui.line(&format!(
         "If you continue, permitted project file content is sent to {}; provider charges may apply. Nosis will not edit files or run commands.",
         selected.provider
@@ -426,7 +408,9 @@ fn guide(
     match ask_yes_no(ui, "Run the read-only project overview now? [y/N] ")? {
         Answer::Yes => match actions.read_only_overview(&selected.id) {
             Ok(()) => {
-                ui.line("Read-only overview finished. Review important claims yourself.")?;
+                ui.line(
+                    "Read-only overview finished. If README exists, verify the project description against it.",
+                )?;
                 print_next_commands(ui, executable, selected)?;
                 Ok(())
             }
@@ -437,7 +421,7 @@ fn guide(
             }
         },
         Answer::No => {
-            ui.line("Setup complete. No provider request was sent.")?;
+            ui.line("Setup complete. No AI task ran. No provider request was sent.")?;
             print_next_commands(ui, executable, selected)?;
             Ok(())
         }
@@ -452,11 +436,10 @@ fn stop_after_init(ui: &mut dyn SetupUi) -> io::Result<()> {
     ui.line("Setup stopped. Existing setup changes were kept. No provider request was sent.")
 }
 
-fn trusted_routes_error(project: &Path, executable: &Path, error: anyhow::Error) -> anyhow::Error {
+fn trusted_routes_error(project: &Path, error: anyhow::Error) -> anyhow::Error {
     if cmd_catalog::is_known_historical_catalog(&project.join("catalog.toml")) {
         anyhow::anyhow!(
-            "could not list trusted routes: {error}. The unchanged known historical bundled catalog was preserved. Review it and explicitly consent with {}, then rerun setup",
-            command_line(executable, &["catalog", "migrate"])
+            "could not list trusted routes: {error}. The unchanged known historical bundled catalog was preserved"
         )
     } else {
         anyhow::anyhow!(
@@ -465,34 +448,58 @@ fn trusted_routes_error(project: &Path, executable: &Path, error: anyhow::Error)
     }
 }
 
+fn print_historical_catalog_recovery(ui: &mut dyn SetupUi, executable: &Path) -> io::Result<()> {
+    ui.line("Review the known historical catalog and explicitly consent to migration with:")?;
+    ui.line(&command_line(executable, &["catalog", "migrate"]))?;
+    ui.line("After migration, rerun setup with:")?;
+    ui.line(&command_line(executable, &["setup"]))
+}
+
+fn print_price_command(
+    ui: &mut dyn SetupUi,
+    executable: &Path,
+    route: &SetupRoute,
+) -> io::Result<()> {
+    ui.line("Compare catalog prices locally (no API key, AI request, or provider charge):")?;
+    ui.line(&command_line(executable, &["why", "--model", &route.id]))
+}
+
+fn print_no_key_commands(
+    ui: &mut dyn SetupUi,
+    executable: &Path,
+    route: &SetupRoute,
+) -> io::Result<()> {
+    ui.line("Add the API key to the secure credential store when ready:")?;
+    ui.line(&command_line(
+        executable,
+        &["key", "add", &route.vault_entry],
+    ))?;
+    ui.line("Resume guided setup:")?;
+    ui.line(&command_line(executable, &["setup"]))?;
+    print_price_command(ui, executable, route)
+}
+
 fn print_next_commands(
     ui: &mut dyn SetupUi,
     executable: &Path,
     route: &SetupRoute,
 ) -> io::Result<()> {
-    ui.line(&format!(
-        "Compare prices: {}",
-        command_line(executable, &["why", "--model", &route.id])
+    ui.line("Run the read-only overview later:")?;
+    ui.line(&command_line(
+        executable,
+        &[
+            "run",
+            FIRST_TASK,
+            "--model",
+            &route.id,
+            "--read-only",
+            "--max-turns",
+            "4",
+        ],
     ))?;
-    ui.line(&format!(
-        "Run the read-only overview later: {}",
-        command_line(
-            executable,
-            &[
-                "run",
-                FIRST_TASK,
-                "--model",
-                &route.id,
-                "--read-only",
-                "--max-turns",
-                "4",
-            ],
-        )
-    ))?;
-    ui.line(&format!(
-        "Start chat later: {}",
-        command_line(executable, &["chat", "--model", &route.id])
-    ))
+    ui.line("Start chat later:")?;
+    ui.line(&command_line(executable, &["chat", "--model", &route.id]))?;
+    print_price_command(ui, executable, route)
 }
 
 fn ask_yes_no(ui: &mut dyn SetupUi, prompt: &str) -> anyhow::Result<Answer> {
@@ -660,6 +667,7 @@ mod tests {
     struct TestActions {
         routes: Vec<SetupRoute>,
         key_present: bool,
+        key_error: bool,
         overview_error: bool,
         calls: Vec<String>,
     }
@@ -686,6 +694,7 @@ mod tests {
                     },
                 ],
                 key_present,
+                key_error: false,
                 overview_error: false,
                 calls: Vec::new(),
             }
@@ -698,19 +707,9 @@ mod tests {
             Ok(vec!["initialized".to_owned()])
         }
 
-        fn doctor(&mut self) -> anyhow::Result<()> {
-            self.calls.push("doctor".to_owned());
-            Ok(())
-        }
-
         fn routes(&mut self, _root: &Path) -> anyhow::Result<Vec<SetupRoute>> {
             self.calls.push("routes".to_owned());
             Ok(self.routes.clone())
-        }
-
-        fn preview(&mut self, route: &str) -> anyhow::Result<()> {
-            self.calls.push(format!("preview:{route}"));
-            Ok(())
         }
 
         fn save_model(&mut self, route: &str) -> anyhow::Result<()> {
@@ -720,6 +719,9 @@ mod tests {
 
         fn key_exists(&mut self, entry: &str) -> anyhow::Result<bool> {
             self.calls.push(format!("key-exists:{entry}"));
+            if self.key_error {
+                anyhow::bail!("synthetic credential-store failure");
+            }
             Ok(self.key_present)
         }
 
@@ -748,11 +750,6 @@ mod tests {
             initialize_project(root)
         }
 
-        fn doctor(&mut self) -> anyhow::Result<()> {
-            self.calls.push("doctor".to_owned());
-            Ok(())
-        }
-
         fn routes(&mut self, root: &Path) -> anyhow::Result<Vec<SetupRoute>> {
             self.calls.push("routes".to_owned());
             let (catalog_root, catalog) =
@@ -763,11 +760,6 @@ mod tests {
                 &catalog,
                 TerminalCapability::AsciiFallback,
             )
-        }
-
-        fn preview(&mut self, route: &str) -> anyhow::Result<()> {
-            self.calls.push(format!("preview:{route}"));
-            Ok(())
         }
 
         fn save_model(&mut self, route: &str) -> anyhow::Result<()> {
@@ -823,7 +815,7 @@ mod tests {
 
     #[test]
     fn provider_filter_dispatches_selected_read_only_overview_with_existing_key() {
-        let mut ui = TestUi::with_lines(&["y", "3", "1", "n", "y", "y"]);
+        let mut ui = TestUi::with_lines(&["y", "3", "1", "n", "y"]);
         let mut actions = TestActions::new(true);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
@@ -832,22 +824,26 @@ mod tests {
             actions.calls,
             [
                 "init",
-                "doctor",
                 "routes",
-                "preview:second-route",
                 "key-exists:provider-two",
                 "read-only-overview:second-route",
             ]
         );
         assert!(!actions.calls.iter().any(|call| call.starts_with("add-key")));
         assert!(ui.output.contains("will not be replaced"));
-        assert!(ui.output.contains("Choose a provider:"));
+        assert!(ui.output.contains("Choose an API provider"));
         assert!(ui
             .output
             .contains("second-route (provider-two; text; price unknown)"));
         assert!(!ui.output.contains("first-route (provider-one"));
         assert!(ui.output.contains("permitted project file content is sent"));
         assert!(ui.output.contains("will not edit files or run commands"));
+        assert!(ui
+            .output
+            .contains("verify the project description against it"));
+        let doctor = command_line(&executable(), &["doctor"]);
+        assert!(ui.output.lines().any(|line| line == doctor));
+        assert!(ui.output.contains("chat subscription is separate"));
     }
 
     #[test]
@@ -877,7 +873,7 @@ mod tests {
 
     #[test]
     fn overview_failure_prints_return_commands_and_preserves_the_error() {
-        let mut ui = TestUi::with_lines(&["y", "3", "1", "n", "n", "y"]);
+        let mut ui = TestUi::with_lines(&["y", "3", "1", "n", "y"]);
         let mut actions = TestActions::new(true);
         actions.overview_error = true;
 
@@ -890,14 +886,15 @@ mod tests {
         assert!(ui
             .output
             .contains("read-only overview stopped with an error"));
-        assert!(ui.output.contains("Compare prices:"));
-        assert!(ui.output.contains("Run the read-only overview later:"));
-        assert!(ui.output.contains("Start chat later:"));
+        let overview = ui.output.find("Run the read-only overview later:").unwrap();
+        let chat = ui.output.find("Start chat later:").unwrap();
+        let prices = ui.output.find("Compare catalog prices locally").unwrap();
+        assert!(overview < chat && chat < prices, "{}", ui.output);
     }
 
     #[test]
     fn all_models_option_lists_every_route_without_a_hidden_default() {
-        let mut ui = TestUi::with_lines(&["y", "1", "2", "n", "n", "n"]);
+        let mut ui = TestUi::with_lines(&["y", "1", "2", "n", "n"]);
         let mut actions = TestActions::new(true);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
@@ -918,7 +915,7 @@ mod tests {
 
     #[test]
     fn invalid_provider_and_model_choices_retry_before_selection() {
-        let mut ui = TestUi::with_lines(&["y", "9", "3", "8", "1", "n", "n", "n"]);
+        let mut ui = TestUi::with_lines(&["y", "9", "3", "8", "1", "n", "n"]);
         let mut actions = TestActions::new(true);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
@@ -937,14 +934,14 @@ mod tests {
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
 
-        assert_eq!(actions.calls, ["init", "doctor", "routes"]);
+        assert_eq!(actions.calls, ["init", "routes"]);
         assert!(ui.output.contains("stopped before provider selection"));
         assert!(!ui.output.contains("Choose a model:"));
     }
 
     #[test]
     fn selected_model_is_saved_only_after_explicit_opt_in() {
-        let mut ui = TestUi::with_lines(&["y", "3", "1", "y", "n", "n"]);
+        let mut ui = TestUi::with_lines(&["y", "3", "1", "y", "n"]);
         let mut actions = TestActions::new(true);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
@@ -952,7 +949,6 @@ mod tests {
         assert!(actions
             .calls
             .contains(&"save-model:second-route".to_owned()));
-        assert!(!actions.calls.iter().any(|call| call.starts_with("preview")));
         assert!(!actions
             .calls
             .iter()
@@ -962,7 +958,7 @@ mod tests {
 
     #[test]
     fn default_decline_never_writes_a_model_preference() {
-        let mut ui = TestUi::with_lines(&["y", "2", "1", "", "n", "n"]);
+        let mut ui = TestUi::with_lines(&["y", "2", "1", "", "n"]);
         let mut actions = TestActions::new(true);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
@@ -983,18 +979,17 @@ mod tests {
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
 
-        assert_eq!(actions.calls, ["init", "doctor", "routes"]);
+        assert_eq!(actions.calls, ["init", "routes"]);
         assert!(ui.output.contains("Setup stopped"));
     }
 
     #[test]
     fn no_key_path_stays_offline_and_prints_portable_key_command() {
-        let mut ui = TestUi::with_lines(&["y", "2", "1", "n", "y", "n"]);
+        let mut ui = TestUi::with_lines(&["y", "2", "1", "n", "n"]);
         let mut actions = TestActions::new(false);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
 
-        assert!(actions.calls.contains(&"preview:first-route".to_owned()));
         assert!(!actions.calls.iter().any(|call| call.starts_with("add-key")));
         assert!(!actions
             .calls
@@ -1004,28 +999,50 @@ mod tests {
         assert!(!ui
             .output
             .contains("Run the read-only project overview now?"));
-        let expected = if cfg!(windows) {
-            "Add the key when ready: & 'C:/portable/Nosis Harness/nh.exe' 'key' 'add' 'provider-one'"
-        } else {
-            "Add the key when ready: 'C:/portable/Nosis Harness/nh.exe' 'key' 'add' 'provider-one'"
-        };
-        assert!(
-            ui.output.contains(expected),
-            "missing {expected:?}: {}",
-            ui.output
-        );
-        assert!(ui.output.contains("not an AI response"));
+        let key_command = command_line(&executable(), &["key", "add", "provider-one"]);
+        let setup_command = command_line(&executable(), &["setup"]);
+        let price_command = command_line(&executable(), &["why", "--model", "first-route"]);
+        for command in [key_command, setup_command, price_command] {
+            assert!(
+                ui.output.lines().any(|line| line == command),
+                "missing standalone command {command:?}: {}",
+                ui.output
+            );
+        }
+        assert!(ui.output.contains("No AI task ran"));
+        assert!(ui
+            .output
+            .contains("no API key, AI request, or provider charge"));
     }
 
     #[test]
-    fn eof_at_optional_preview_stops_before_key_or_provider_run() {
+    fn credential_store_failure_is_fail_closed_and_points_to_standalone_doctor() {
         let mut ui = TestUi::with_lines(&["y", "2", "1", "n"]);
+        let mut actions = TestActions::new(false);
+        actions.key_error = true;
+
+        let error = guide(&project(), &executable(), &mut ui, &mut actions).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("could not check the secure credential store"));
+        assert_eq!(actions.calls, ["init", "routes", "key-exists:provider-one"]);
+        assert!(!actions.calls.iter().any(|call| {
+            call.starts_with("add-key:") || call.starts_with("read-only-overview:")
+        }));
+        let doctor = command_line(&executable(), &["doctor"]);
+        assert_eq!(ui.output.lines().filter(|line| *line == doctor).count(), 2);
+    }
+
+    #[test]
+    fn eof_at_model_selection_stops_before_key_or_provider_run() {
+        let mut ui = TestUi::with_lines(&["y", "2"]);
         let mut actions = TestActions::new(false);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
 
-        assert_eq!(actions.calls, ["init", "doctor", "routes"]);
-        assert!(ui.output.contains("Setup stopped"));
+        assert_eq!(actions.calls, ["init", "routes"]);
+        assert!(ui.output.contains("stopped before model selection"));
     }
 
     #[test]
@@ -1036,27 +1053,27 @@ mod tests {
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
 
-        assert_eq!(actions.calls, ["init", "doctor", "routes"]);
+        assert_eq!(actions.calls, ["init", "routes"]);
         assert!(ui
             .output
             .contains("Setup stopped before provider selection"));
     }
 
     #[test]
-    fn oversized_preview_answer_stops_before_key_or_provider_run() {
+    fn oversized_key_answer_stops_before_key_or_provider_run() {
         let mut ui = TestUi::with_lines(&["y", "2", "1", "n"]);
         ui.input.push_back(PromptInput::TooLong);
         let mut actions = TestActions::new(false);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
 
-        assert_eq!(actions.calls, ["init", "doctor", "routes"]);
+        assert_eq!(actions.calls, ["init", "routes", "key-exists:provider-one"]);
         assert!(ui.output.contains("Setup stopped"));
     }
 
     #[test]
     fn eof_at_key_prompt_stops_before_key_or_provider_run() {
-        let mut ui = TestUi::with_lines(&["y", "2", "1", "n", "n"]);
+        let mut ui = TestUi::with_lines(&["y", "2", "1", "n"]);
         let mut actions = TestActions::new(false);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
@@ -1074,7 +1091,7 @@ mod tests {
 
     #[test]
     fn eof_at_overview_prompt_stops_without_a_provider_run() {
-        let mut ui = TestUi::with_lines(&["y", "2", "1", "n", "n"]);
+        let mut ui = TestUi::with_lines(&["y", "2", "1", "n"]);
         let mut actions = TestActions::new(true);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
@@ -1091,7 +1108,7 @@ mod tests {
 
     #[test]
     fn key_prompt_calls_existing_hidden_key_path_only_after_yes() {
-        let mut ui = TestUi::with_lines(&["y", "2", "1", "n", "n", "y", "n"]);
+        let mut ui = TestUi::with_lines(&["y", "2", "1", "n", "y", "n"]);
         let mut actions = TestActions::new(false);
 
         guide(&project(), &executable(), &mut ui, &mut actions).unwrap();
@@ -1128,7 +1145,7 @@ mod tests {
 
     #[test]
     fn unsafe_vault_entry_never_reaches_key_actions() {
-        let mut ui = TestUi::with_lines(&["y", "2", "1", "n", "n"]);
+        let mut ui = TestUi::with_lines(&["y", "2", "1", "n"]);
         let mut actions = TestActions::new(false);
         actions.routes[0].vault_entry = "unsafe\nentry".to_owned();
 
@@ -1237,7 +1254,6 @@ mod tests {
         fs::write(&catalog, original).unwrap();
         let mut actions = SystemActions {
             terminal_capability: TerminalCapability::AsciiFallback,
-            forced_ascii: Some(true),
         };
 
         let error = actions.routes(project.path()).unwrap_err();
@@ -1265,8 +1281,13 @@ mod tests {
         )
         .unwrap_err();
         let migrate_command = command_line(&executable(), &["catalog", "migrate"]);
-        assert!(error.to_string().contains(&migrate_command));
-        assert!(error.to_string().contains("explicitly consent"));
+        let setup_command = command_line(&executable(), &["setup"]);
+        assert!(error
+            .to_string()
+            .contains("known historical bundled catalog was preserved"));
+        assert!(first_ui.output.lines().any(|line| line == migrate_command));
+        assert!(first_ui.output.lines().any(|line| line == setup_command));
+        assert!(first_ui.output.contains("explicitly consent"));
         assert_eq!(fs::read_to_string(&catalog).unwrap(), HISTORICAL);
 
         let decline = cmd_catalog::migrate_with_consent_for_test(&catalog, false).unwrap();
@@ -1291,7 +1312,7 @@ mod tests {
             HISTORICAL
         );
 
-        let mut final_ui = TestUi::with_lines(&["y", "1", "1", "n", "n", "n"]);
+        let mut final_ui = TestUi::with_lines(&["y", "1", "1", "n", "n"]);
         let mut final_actions = LifecycleActions::default();
         guide(
             project.path(),
@@ -1326,6 +1347,8 @@ mod tests {
         assert!(error.to_string().contains("not trusted"));
         assert!(!error.to_string().contains("catalog' 'migrate"));
         assert!(!error.to_string().contains("catalog migrate"));
+        assert!(!ui.output.contains("catalog' 'migrate"));
+        assert!(!ui.output.contains("catalog migrate"));
         assert_eq!(fs::read_to_string(catalog).unwrap(), custom);
     }
 }

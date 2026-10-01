@@ -10,7 +10,8 @@ of password entry. Obtain consent before taking notes or recording a session.
 
 1. Install, verify and open Nosis using the guide. Explain any Windows warning in
    their own words. Never ask them to disable antivirus or accept a detection.
-2. Reach a no-key preview. Ask what it did and whether it contacted an AI provider.
+2. Complete setup without adding a key, then find the local price comparison.
+   Ask what it did and whether it contacted an AI provider.
 3. With their own configured access if they choose, ask about a practice project.
    Explain what information can leave the computer and where the answer came from.
 4. Make one small practice edit. Ask how they know it is correct and whether an
@@ -31,6 +32,13 @@ Observe whether the person can distinguish a key problem, provider limit and
 network failure, keep their draft, and choose the next action. Do not intentionally
 exhaust a paid account or alter antivirus/firewall settings to create a failure.
 Record whether queued text is unexpectedly sent after a failed task.
+
+For current rc.4 source, observe whether the shorter setup makes the next action
+clear. Without coaching, ask the person to find detailed diagnostics, distinguish
+a chat subscription from API access, skip key entry and explain how to return.
+With configured access, ask what the read-only overview can read, what it cannot
+change and whether four turns guarantees a price. Record confusion and assistance;
+fewer printed lines or prompts alone do not establish better usability.
 
 For the full-screen interface, also observe these everyday interactions. Resize
 the window to 80 columns by 24 rows and then 60 by 15; ask the person to find Help,

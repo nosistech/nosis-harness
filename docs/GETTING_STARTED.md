@@ -103,6 +103,17 @@ offers a read-only first task. When `nh run --help` lists `--read-only`, use
 [enforced read-only tasks](READ_ONLY.md) to remove editing and command tools for
 that task. Those protections are not in the published v0.2.2 download.
 
+Current rc.4 source keeps diagnostics and price comparison out of the setup
+questions. Choose your provider and model, then connect a key when ready. Setup
+prints commands for detailed checks (`doctor`) and a free local price comparison
+(`why`); neither makes a model request. If you skip the key, follow the printed
+key-entry command and rerun setup in the same folder. No AI task has run yet.
+
+With a stored key, setup offers to explain the project using read-only tools.
+Accept only when you are comfortable sending permitted project content to that
+provider. The task has a four-turn limit, which is not a billing cap. Check that
+its explanation agrees with your README and files before relying on it.
+
 [Remember a model or upgrade a catalog](CONFIGURATION.md) in candidate/source builds.
 When upgrading from v0.2.2 with a newer candidate, prefer `nh catalog migrate`;
 it reviews recognized bundled catalogs and preserves a backup after consent.

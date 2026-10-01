@@ -49,6 +49,10 @@ commit passes local and remote gates.
 
 ### Changed
 
+- Guided setup goes directly from project confirmation to model selection and
+  key connection. Detailed diagnostics and the free local price comparison are
+  available through printed commands. Skipping a key explains how to return;
+  the first model request still requires explicit read-only-task consent.
 - Outbound MCP client setup rejects literal link-local addresses, including the
   common IPv4 metadata endpoint, for
   both server and OAuth token destinations before connecting. Loopback and LAN

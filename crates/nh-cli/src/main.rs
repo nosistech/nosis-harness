@@ -243,7 +243,7 @@ fn main() -> anyhow::Result<()> {
     let result = if std::env::args_os().nth(1).is_none() {
         let terminal_capability =
             nh_core::terminal_capability::TerminalCapability::from_process(None);
-        cmd_setup::run(terminal_capability, None)
+        cmd_setup::run(terminal_capability)
     } else {
         dispatch(Cli::parse())
     };
@@ -255,7 +255,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
     let terminal_capability =
         nh_core::terminal_capability::TerminalCapability::from_process(forced_ascii);
     match cli.cmd {
-        Cmd::Setup => cmd_setup::run(terminal_capability, forced_ascii),
+        Cmd::Setup => cmd_setup::run(terminal_capability),
         Cmd::Catalog {
             action: CatalogAction::Migrate,
         } => cmd_catalog::migrate(),
