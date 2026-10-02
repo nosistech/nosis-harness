@@ -67,7 +67,15 @@ nh setup
 ```
 
 In setup, confirm the displayed folder, choose a model, and enter a key only at
-the hidden key prompt. Start chat only when you are ready for a paid request.
+the hidden key prompt. Published v0.2.2 can open chat. Current source setup offers
+a read-only overview and then returns to the terminal; decline that overview for
+this editing exercise. When ready for a paid request, use the chat command setup
+prints for your selected model. If that model is `deepseek-v4-flash`, the command is:
+
+```powershell
+nh chat --model deepseek-v4-flash
+```
+
 Then paste this single-line message at the Nosis prompt:
 
 ```text
@@ -177,3 +185,33 @@ history and OS-vault credentials in place; see [privacy and removal](../PRIVACY.
 For terminal controls, see [terminal guide](TERMINAL_GUIDE.md). For screenshots as
 model input, see [image input](IMAGES.md). For local inference, see
 [local models](LOCAL_MODELS.md).
+
+## Reuse the same process on your own project
+
+Choose one outcome you can check. Name the files the assistant may change and
+the behavior that must remain. Keep acceptance checks outside that editing scope;
+inspect the diff if a task legitimately requires test changes. A passing command
+only establishes what that command actually checked.
+
+Replace the bracketed text in this single-line task before pasting it into chat:
+
+```text
+Goal: [one change]. Inputs: [relevant files]. Change only [allowed files]. Preserve [existing behavior and edge cases]. Check with [known test command or expected output]; ask before running commands. Keep the acceptance check unchanged. Report changed files, checks actually run with their outcomes, and anything still unverified. If blocked, explain the blocker without broadening the task.
+```
+
+These instructions do not grant or remove tool permissions. Use
+[read-only mode](READ_ONLY.md) in a supporting source build when you only want
+inspection. For edits, approve commands deliberately and review the final changes.
+
+Keep a short record for work you will repeat:
+
+| Requested result | Changed files | Check and observed result | Still unverified |
+| --- | --- | --- | --- |
+| Correct one README typo | README.md | Compared the diff; `git diff --check` exited zero | No application tests needed for this text-only example |
+
+The row is an illustration, not a result recorded by Nosis. An answer, receipt
+or successful tool exit does not prove the whole task is correct. If a check fails,
+keep the failure and fix its cause; do not weaken the acceptance condition to get
+a pass. Before retrying interrupted work, inspect what already changed. Reuse the
+small task and its checks once they work, and leave the decision that the result
+is useful to the person who needs it.

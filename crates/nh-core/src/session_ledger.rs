@@ -1,5 +1,6 @@
 //! Crash-safe, append-only ledgers for interactive chat and TUI sessions.
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -8,6 +9,8 @@ use anyhow::Context as _;
 use crate::wire::{ChatMessage, Usage};
 
 const MAX_SESSION_ID_BYTES: usize = 128;
+/// Whole-ledger read ceiling. Oversized ledgers are refused, never replayed as a prefix.
+pub const MAX_SESSION_LEDGER_BYTES: u64 = 64 * 1024 * 1024;
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(0);
 
 /// Interactive surface that owns a session ledger.
@@ -280,8 +283,7 @@ pub fn read_session(root: &Path, session_id: &str) -> anyhow::Result<RestoredSes
     };
     let path = directory.join(format!("{session_id}.jsonl"));
     crate::runtime_path::reject_symlink_or_special_file(&path, "session")?;
-    let bytes =
-        std::fs::read(&path).with_context(|| format!("could not read session {session_id}"))?;
+    let bytes = read_session_bytes(&path, session_id)?;
     let (events, dropped_torn_tail) = parse_jsonl(&bytes)?;
     let mut restored = fold_session(&events)?;
     if restored.session_id != session_id {
@@ -312,43 +314,27 @@ pub fn list_sessions(root: &Path) -> anyhow::Result<SessionIndex> {
             index.unreadable.push(filename);
             continue;
         };
-        let restored = match read_session(root, session_id) {
-            Ok(restored) => restored,
-            Err(_) => {
-                index.unreadable.push(filename);
-                continue;
-            }
-        };
-        let bytes = match std::fs::read(&path) {
+        if validate_session_id(session_id).is_err()
+            || crate::runtime_path::reject_symlink_or_special_file(&path, "session").is_err()
+        {
+            index.unreadable.push(filename);
+            continue;
+        }
+        let bytes = match read_session_bytes(&path, session_id) {
             Ok(bytes) => bytes,
             Err(_) => {
                 index.unreadable.push(filename);
                 continue;
             }
         };
-        let (events, _) = match parse_jsonl(&bytes) {
-            Ok(parsed) => parsed,
+        let summary = match summarize_session(&bytes, session_id) {
+            Ok(summary) => summary,
             Err(_) => {
                 index.unreadable.push(filename);
                 continue;
             }
         };
-        let last_ts_utc = events
-            .last()
-            .map(event_timestamp)
-            .unwrap_or(&restored.created_utc)
-            .to_owned();
-        index.sessions.push(SessionSummary {
-            session_id: restored.session_id,
-            surface: restored.surface,
-            route_id: restored.route_id,
-            model_id: restored.model_id,
-            profile: restored.profile,
-            created_utc: restored.created_utc,
-            last_ts_utc,
-            turns: restored.turns.len(),
-            ended: restored.ended,
-        });
+        index.sessions.push(summary);
     }
     index.sessions.sort_by(|left, right| {
         right
@@ -358,6 +344,132 @@ pub fn list_sessions(root: &Path) -> anyhow::Result<SessionIndex> {
     });
     index.unreadable.sort();
     Ok(index)
+}
+
+fn read_session_bytes(path: &Path, session_id: &str) -> anyhow::Result<Vec<u8>> {
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("could not read session {session_id}"))?;
+    let len = file
+        .metadata()
+        .with_context(|| format!("could not inspect session {session_id}"))?
+        .len();
+    read_bounded_session_bytes(file, len, session_id, MAX_SESSION_LEDGER_BYTES)
+}
+
+fn read_bounded_session_bytes(
+    reader: impl std::io::Read,
+    advertised_len: u64,
+    session_id: &str,
+    limit: u64,
+) -> anyhow::Result<Vec<u8>> {
+    if advertised_len > limit {
+        return Err(oversized_session_error(session_id, limit));
+    }
+
+    let capacity = usize::try_from(advertised_len).unwrap_or(0);
+    let mut bytes = Vec::with_capacity(capacity);
+    reader
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("could not read session {session_id}"))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
+        return Err(oversized_session_error(session_id, limit));
+    }
+    Ok(bytes)
+}
+
+fn oversized_session_error(session_id: &str, limit: u64) -> anyhow::Error {
+    const MEBIBYTE: u64 = 1024 * 1024;
+    let limit = if limit.is_multiple_of(MEBIBYTE) {
+        format!("{} MiB", limit / MEBIBYTE)
+    } else {
+        format!("{limit} bytes")
+    };
+    anyhow::anyhow!(
+        "session {session_id} exceeds the {limit} safe read limit - move its JSONL file out of .nosis/sessions to archive it, then start a new chat or TUI session"
+    )
+}
+
+#[derive(Default)]
+struct SessionSummaryBuilder {
+    identity: Option<(String, Surface, String)>,
+    route_id: Option<String>,
+    model_id: Option<String>,
+    profile: Option<String>,
+    last_ts_utc: Option<String>,
+    turns: usize,
+    ended: bool,
+}
+
+impl SessionSummaryBuilder {
+    fn apply(&mut self, event: SessionEvent) {
+        self.last_ts_utc = Some(event_timestamp(&event).to_owned());
+        match event {
+            SessionEvent::Started {
+                session_id,
+                surface,
+                route_id,
+                model_id,
+                profile,
+                created_utc,
+                ..
+            } => {
+                if self.identity.is_none() {
+                    self.identity = Some((session_id, surface, created_utc));
+                }
+                self.route_id = Some(route_id);
+                self.model_id = Some(model_id);
+                self.profile = Some(profile);
+                self.ended = false;
+            }
+            SessionEvent::Resumed { .. } => self.ended = false,
+            SessionEvent::RouteSwitched {
+                route_id,
+                model_id,
+                profile,
+                ..
+            } => {
+                self.route_id = Some(route_id);
+                self.model_id = Some(model_id);
+                self.profile = Some(profile);
+            }
+            SessionEvent::Turn { .. } => self.turns = self.turns.saturating_add(1),
+            SessionEvent::Ended { .. } => self.ended = true,
+        }
+    }
+
+    fn finish(self, expected_session_id: &str) -> anyhow::Result<SessionSummary> {
+        let Some((session_id, surface, created_utc)) = self.identity else {
+            anyhow::bail!("session ledger has no start event");
+        };
+        if session_id != expected_session_id {
+            anyhow::bail!("session ledger id does not match its filename");
+        }
+        Ok(SessionSummary {
+            session_id,
+            surface,
+            route_id: self.route_id.context("session ledger has no route")?,
+            model_id: self.model_id.context("session ledger has no model")?,
+            profile: self.profile.context("session ledger has no profile")?,
+            last_ts_utc: self.last_ts_utc.unwrap_or_else(|| created_utc.clone()),
+            created_utc,
+            turns: self.turns,
+            ended: self.ended,
+        })
+    }
+}
+
+fn summarize_session(bytes: &[u8], expected_session_id: &str) -> anyhow::Result<SessionSummary> {
+    let mut builder = SessionSummaryBuilder::default();
+    crate::jsonl::for_each_jsonl_record(
+        bytes,
+        |line, error| anyhow::anyhow!("session ledger line {line} is invalid: {error}"),
+        |event: SessionEvent| {
+            builder.apply(event);
+            Ok(())
+        },
+    )?;
+    builder.finish(expected_session_id)
 }
 
 fn event_timestamp(event: &SessionEvent) -> &str {
@@ -661,6 +773,55 @@ mod tests {
     }
 
     #[test]
+    fn oversized_session_is_refused_whole_with_archive_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let id = "oversized";
+        let writer = ledger(root.path(), id);
+        writer.append(&started(id)).unwrap();
+        let path = ledger_path(root.path(), id);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(MAX_SESSION_LEDGER_BYTES + 1)
+            .unwrap();
+
+        let error = read_session(root.path(), id).unwrap_err().to_string();
+
+        assert!(error.contains("64 MiB safe read limit"), "got: {error}");
+        assert!(error.contains("move its JSONL file"), "got: {error}");
+        assert!(
+            error.contains("start a new chat or TUI session"),
+            "got: {error}"
+        );
+        let index = list_sessions(root.path()).unwrap();
+        assert!(index.sessions.is_empty());
+        assert_eq!(index.unreadable, ["oversized.jsonl"]);
+    }
+
+    #[test]
+    fn bounded_reader_rejects_growth_after_advertised_length_at_limit_plus_one() {
+        const TEST_LIMIT: u64 = 4;
+
+        let mut exact = std::io::Cursor::new(b"abcd".to_vec());
+        let bytes = read_bounded_session_bytes(&mut exact, TEST_LIMIT, "exact", TEST_LIMIT)
+            .expect("a ledger exactly at the limit should be accepted");
+        assert_eq!(bytes, b"abcd");
+        assert_eq!(exact.position(), TEST_LIMIT);
+
+        let mut underreported = std::io::Cursor::new(b"abcdefghijkl".to_vec());
+        let error = read_bounded_session_bytes(&mut underreported, 1, "grew", TEST_LIMIT)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("4 bytes safe read limit"), "got: {error}");
+        assert_eq!(
+            underreported.position(),
+            TEST_LIMIT + 1,
+            "the bounded reader must consume only the oversize sentinel byte"
+        );
+    }
+
+    #[test]
     fn session_id_validation_blocks_traversal_before_filesystem_access() {
         for invalid in ["", "..", "../escape", r"..\escape", "with/slash", "a:b"] {
             assert!(
@@ -700,5 +861,62 @@ mod tests {
         assert_eq!(index.sessions.len(), 1);
         assert_eq!(index.sessions[0].session_id, "good");
         assert_eq!(index.unreadable, ["broken.jsonl"]);
+    }
+
+    #[test]
+    fn listing_folds_route_turn_end_and_torn_tail_semantics_without_history() {
+        let root = tempfile::tempdir().unwrap();
+        let id = "summary";
+        let writer = ledger(root.path(), id);
+        writer.append(&started(id)).unwrap();
+        writer
+            .append(&SessionEvent::Turn {
+                ts_utc: "2026-07-31T14:06:00Z".into(),
+                route_id: "test-route".into(),
+                messages: vec![crate::wire::ChatMessage {
+                    role: "assistant".into(),
+                    content: Some("large history is irrelevant to listing".repeat(256)),
+                    parts: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                }],
+                usage: None,
+            })
+            .unwrap();
+        writer
+            .append(&SessionEvent::RouteSwitched {
+                ts_utc: "2026-07-31T14:07:00Z".into(),
+                route_id: "next-route".into(),
+                model_id: "next-model".into(),
+                profile: "frugal".into(),
+            })
+            .unwrap();
+        writer
+            .append(&SessionEvent::Ended {
+                ts_utc: "2026-07-31T14:08:00Z".into(),
+            })
+            .unwrap();
+        let path = ledger_path(root.path(), id);
+        use std::io::Write as _;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(br#"{"event":"turn""#)
+            .unwrap();
+
+        let index = list_sessions(root.path()).unwrap();
+
+        assert!(index.unreadable.is_empty());
+        assert_eq!(index.sessions.len(), 1);
+        let summary = &index.sessions[0];
+        assert_eq!(summary.session_id, id);
+        assert_eq!(summary.route_id, "next-route");
+        assert_eq!(summary.model_id, "next-model");
+        assert_eq!(summary.profile, "frugal");
+        assert_eq!(summary.turns, 1);
+        assert!(summary.ended);
+        assert_eq!(summary.last_ts_utc, "2026-07-31T14:08:00Z");
     }
 }

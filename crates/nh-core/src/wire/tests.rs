@@ -63,11 +63,7 @@ fn policy(dialect: ThinkingDialect, preserve_reasoning: bool, quirk: bool) -> Op
 }
 
 #[test]
-fn anthropic_body_roles_alternate_after_compaction() {
-    // Reproduces the post-L7-compaction shape on the Anthropic wire: the
-    // elision note (a SECOND system message inserted at history[1]) degrades
-    // to a user block and lands immediately before the first retained user
-    // turn - the Anthropic Messages API rejects two consecutive user roles.
+fn anthropic_body_preserves_compaction_system_authority_and_message_roles() {
     let request = req(vec![
         msg("system", Some("sealed constitution")),
         msg(
@@ -77,7 +73,17 @@ fn anthropic_body_roles_alternate_after_compaction() {
         msg("user", Some("retained question")),
         msg("assistant", Some("retained answer")),
     ]);
-    let body = build_anthropic_body(&request, 1024, ThinkingDialect::None);
+    let body = build_anthropic_body(&request, 1024, ThinkingDialect::None).unwrap();
+    assert_eq!(
+        body["system"],
+        serde_json::json!([
+            {"type": "text", "text": "sealed constitution"},
+            {
+                "type": "text",
+                "text": "[nosis] earlier context compacted: 3 messages, ~900 tokens elided."
+            }
+        ])
+    );
     let roles: Vec<String> = body["messages"]
         .as_array()
         .expect("messages array")
@@ -98,6 +104,118 @@ fn anthropic_body_roles_alternate_after_compaction() {
 }
 
 #[test]
+fn anthropic_body_omits_empty_blocks_from_multiple_system_messages() {
+    let request = req(vec![
+        msg("system", None),
+        msg("system", Some("first")),
+        msg("system", Some("")),
+        msg("system", Some("second")),
+        msg("system", None),
+        msg("user", Some("question")),
+    ]);
+    let body = build_anthropic_body(&request, 1024, ThinkingDialect::None).unwrap();
+    assert_eq!(
+        body["system"],
+        serde_json::json!([
+            {"type": "text", "text": "first"},
+            {"type": "text", "text": "second"}
+        ])
+    );
+
+    let all_empty = req(vec![
+        msg("system", None),
+        msg("system", Some("")),
+        msg("user", Some("question")),
+    ]);
+    let body = build_anthropic_body(&all_empty, 1024, ThinkingDialect::None).unwrap();
+    assert_eq!(body["system"], "");
+
+    let single_empty = req(vec![msg("system", None), msg("user", Some("question"))]);
+    let body = build_anthropic_body(&single_empty, 1024, ThinkingDialect::None).unwrap();
+    assert_eq!(body["system"], "");
+}
+
+#[test]
+fn anthropic_body_refuses_unsafe_hoisted_system_ordering() {
+    const ORDER_ERROR: &str =
+        "Anthropic system correction must be followed by a user or tool message";
+
+    let trailing_correction = req(vec![
+        msg("system", Some("constitution")),
+        msg("user", Some("question")),
+        msg("assistant", Some("answer")),
+        msg("system", Some("late correction")),
+    ]);
+    assert_eq!(
+        build_anthropic_body(&trailing_correction, 1024, ThinkingDialect::None)
+            .unwrap_err()
+            .to_string(),
+        ORDER_ERROR
+    );
+
+    let correction_between_assistants = req(vec![
+        msg("user", Some("question")),
+        msg("assistant", Some("first answer")),
+        msg("system", Some("late correction")),
+        msg("assistant", Some("second answer")),
+    ]);
+    assert_eq!(
+        build_anthropic_body(&correction_between_assistants, 1024, ThinkingDialect::None,)
+            .unwrap_err()
+            .to_string(),
+        ORDER_ERROR
+    );
+
+    let system_only = req(vec![
+        msg("system", Some("constitution")),
+        msg("system", Some("correction")),
+    ]);
+    assert_eq!(
+        build_anthropic_body(&system_only, 1024, ThinkingDialect::None)
+            .unwrap_err()
+            .to_string(),
+        "Anthropic request requires at least one conversational message"
+    );
+}
+
+#[test]
+fn anthropic_body_allows_correction_before_next_user_and_intentional_prefill() {
+    let corrected = req(vec![
+        msg("system", Some("constitution")),
+        msg("user", Some("first question")),
+        msg("assistant", Some("first answer")),
+        msg("system", Some("late correction")),
+        msg("user", Some("next question")),
+    ]);
+    let body = build_anthropic_body(&corrected, 1024, ThinkingDialect::None).unwrap();
+    assert_eq!(
+        body["system"],
+        serde_json::json!([
+            {"type": "text", "text": "constitution"},
+            {"type": "text", "text": "late correction"}
+        ])
+    );
+    assert_eq!(
+        body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["user", "assistant", "user"]
+    );
+
+    let prefill = req(vec![
+        msg("system", Some("constitution")),
+        msg("user", Some("question")),
+        msg("assistant", Some("answer prefix")),
+    ]);
+    let body = build_anthropic_body(&prefill, 1024, ThinkingDialect::None).unwrap();
+    assert_eq!(body["messages"][1]["role"], "assistant");
+    assert_eq!(body["messages"][1]["content"][0]["text"], "answer prefix");
+}
+
+#[test]
 fn anthropic_body_merges_user_role_blocks_in_order() {
     let request = req(vec![
         msg("system", Some("sealed constitution")),
@@ -109,23 +227,26 @@ fn anthropic_body_merges_user_role_blocks_in_order() {
         },
         msg("user", Some("follow-up")),
     ]);
-    let body = build_anthropic_body(&request, 1024, ThinkingDialect::None);
+    let body = build_anthropic_body(&request, 1024, ThinkingDialect::None).unwrap();
+    assert_eq!(
+        body["system"],
+        serde_json::json!([
+            {"type": "text", "text": "sealed constitution"},
+            {"type": "text", "text": "elision note"}
+        ])
+    );
     let messages = body["messages"].as_array().expect("messages array");
 
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["role"], "user");
     let blocks = messages[0]["content"].as_array().expect("content array");
-    assert_eq!(blocks.len(), 4);
+    assert_eq!(blocks.len(), 3);
     assert_eq!(
         blocks[0],
-        serde_json::json!({"type": "text", "text": "elision note"})
-    );
-    assert_eq!(
-        blocks[1],
         serde_json::json!({"type": "text", "text": "retained question"})
     );
     assert_eq!(
-        blocks[2],
+        blocks[1],
         serde_json::json!({
             "type": "tool_result",
             "tool_use_id": "c1",
@@ -133,7 +254,7 @@ fn anthropic_body_merges_user_role_blocks_in_order() {
         })
     );
     assert_eq!(
-        blocks[3],
+        blocks[2],
         serde_json::json!({"type": "text", "text": "follow-up"})
     );
 }
@@ -581,7 +702,7 @@ fn anthropic_body_lifts_system_and_wraps_text() {
         msg("assistant", Some("hello")),
     ]);
     request.thinking = ThinkingEffort::Max;
-    let body = build_anthropic_body(&request, 8192, ThinkingDialect::None);
+    let body = build_anthropic_body(&request, 8192, ThinkingDialect::None).unwrap();
     assert_eq!(body["model"], "mock-model");
     assert_eq!(body["max_tokens"], 8192);
     assert_eq!(body["system"], "be brief");
@@ -603,6 +724,16 @@ fn anthropic_body_lifts_system_and_wraps_text() {
 }
 
 #[test]
+fn anthropic_body_preserves_empty_single_system_wire_shape() {
+    let request = req(vec![msg("system", None), msg("user", Some("hi"))]);
+
+    let body = build_anthropic_body(&request, 8192, ThinkingDialect::None).unwrap();
+
+    assert_eq!(body["system"], "");
+    assert_eq!(body["messages"][0]["content"][0]["text"], "hi");
+}
+
+#[test]
 fn anthropic_body_preserves_text_and_image_parts_in_order() {
     let request = req(vec![ChatMessage {
         role: "user".into(),
@@ -621,7 +752,7 @@ fn anthropic_body_preserves_text_and_image_parts_in_order() {
         reasoning_content: None,
     }]);
 
-    let body = build_anthropic_body(&request, 8192, ThinkingDialect::None);
+    let body = build_anthropic_body(&request, 8192, ThinkingDialect::None).unwrap();
 
     assert_eq!(
         body["messages"][0]["content"],
@@ -640,9 +771,24 @@ fn anthropic_body_preserves_text_and_image_parts_in_order() {
 }
 
 #[test]
+fn anthropic_body_rejects_unsupported_roles_without_echoing_them() {
+    let request = req(vec![msg(
+        "developer-secret-role",
+        Some("untrusted authority"),
+    )]);
+
+    let error = build_anthropic_body(&request, 8192, ThinkingDialect::None)
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!(error, "request contained an unsupported message role");
+    assert!(!error.contains("developer-secret-role"));
+}
+
+#[test]
 fn deepseek_anthropic_body_explicitly_disables_default_thinking() {
     let request = req(vec![msg("user", Some("hi"))]);
-    let body = build_anthropic_body(&request, 8192, ThinkingDialect::DeepseekNhm);
+    let body = build_anthropic_body(&request, 8192, ThinkingDialect::DeepseekNhm).unwrap();
     assert_eq!(body["thinking"]["type"], "disabled");
 }
 
@@ -672,7 +818,7 @@ fn anthropic_body_maps_tool_use_and_merges_tool_results() {
         description: "read a file".into(),
         parameters: serde_json::json!({"type": "object"}),
     }];
-    let body = build_anthropic_body(&request, 4096, ThinkingDialect::None);
+    let body = build_anthropic_body(&request, 4096, ThinkingDialect::None).unwrap();
 
     let assistant = &body["messages"][1];
     assert_eq!(assistant["content"][0]["type"], "text");
@@ -706,7 +852,9 @@ fn anthropic_body_never_serializes_reasoning_content() {
         tool_calls: Some(vec![tool_call("c1", "read_file", "{}")]),
         ..msg("assistant", None)
     }]);
-    let raw = build_anthropic_body(&request, 8192, ThinkingDialect::None).to_string();
+    let raw = build_anthropic_body(&request, 8192, ThinkingDialect::None)
+        .unwrap()
+        .to_string();
     assert!(!raw.contains("reasoning_content") && !raw.contains("chain"));
 }
 
@@ -753,7 +901,9 @@ fn anthropic_tool_use_requires_nonempty_id_and_name() {
         r#"{"content":[{"type":"tool_use","name":"read_file","input":{}}]}"#,
         r#"{"content":[{"type":"tool_use","id":"t1","input":{}}]}"#,
         r#"{"content":[{"type":"tool_use","id":"","name":"read_file","input":{}}]}"#,
+        r#"{"content":[{"type":"tool_use","id":"  ","name":"read_file","input":{}}]}"#,
         r#"{"content":[{"type":"tool_use","id":"t1","name":"","input":{}}]}"#,
+        r#"{"content":[{"type":"tool_use","id":"t1","name":"\t","input":{}}]}"#,
     ] {
         let error = parse_anthropic_response(body).unwrap_err().to_string();
         assert!(
@@ -769,6 +919,96 @@ fn anthropic_tool_use_requires_nonempty_id_and_name() {
     let call = &response.message.tool_calls.unwrap()[0];
     assert_eq!(call.id, "t1");
     assert_eq!(call.name, "read_file");
+}
+
+#[test]
+fn provider_tool_call_batches_reject_blank_fields_and_duplicate_ids_atomically() {
+    for (id, name, expected) in [
+        ("", "read_file", "provider tool call id was empty"),
+        (" \t", "read_file", "provider tool call id was empty"),
+        ("call", "", "provider tool call name was empty"),
+        ("call", "\n", "provider tool call name was empty"),
+    ] {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": id,
+                        "function": {"name": name, "arguments": "{}"}
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        assert_eq!(
+            parse_response(&body.to_string()).unwrap_err().to_string(),
+            expected
+        );
+    }
+
+    let openai_blank_later = r#"{
+        "choices":[{"message":{"role":"assistant","tool_calls":[
+            {"id":"first","function":{"name":"read_file","arguments":"{}"}},
+            {"id":"second","function":{"name":"  ","arguments":"{}"}}
+        ]},"finish_reason":"tool_calls"}],
+        "usage":{"prompt_tokens":9,"completion_tokens":2}
+    }"#;
+    let error = parse_response(openai_blank_later).unwrap_err().to_string();
+    assert_eq!(error, "provider tool call name was empty");
+    assert_eq!(
+        extract_openai_usage(openai_blank_later)
+            .unwrap()
+            .prompt_tokens,
+        9
+    );
+
+    let anthropic_blank_later = r#"{
+        "content":[
+            {"type":"tool_use","id":"first","name":"read_file","input":{}},
+            {"type":"tool_use","id":"  ","name":"read_file","input":{}}
+        ],
+        "stop_reason":"tool_use",
+        "usage":{"input_tokens":7,"output_tokens":3}
+    }"#;
+    let error = parse_anthropic_response(anthropic_blank_later)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "provider tool_use block missing id or name");
+    assert_eq!(
+        extract_anthropic_usage(anthropic_blank_later)
+            .unwrap()
+            .completion_tokens,
+        3
+    );
+
+    let duplicate_openai = r#"{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"same","function":{"name":"read_file","arguments":"{}"}},{"id":"same","function":{"name":"future_tool","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#;
+    assert_eq!(
+        parse_response(duplicate_openai).unwrap_err().to_string(),
+        "provider returned duplicate tool call ids"
+    );
+    let duplicate_anthropic = r#"{"content":[{"type":"tool_use","id":"same","name":"read_file","input":{}},{"type":"tool_use","id":"same","name":"future_tool","input":{}}],"stop_reason":"tool_use"}"#;
+    assert_eq!(
+        parse_anthropic_response(duplicate_anthropic)
+            .unwrap_err()
+            .to_string(),
+        "provider returned duplicate tool call ids"
+    );
+}
+
+#[test]
+fn provider_parsers_preserve_unknown_nonempty_tool_names_for_guarded_dispatch() {
+    let openai = parse_response(
+        r#"{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c1","function":{"name":"future_tool","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(openai.message.tool_calls.unwrap()[0].name, "future_tool");
+
+    let anthropic = parse_anthropic_response(
+        r#"{"content":[{"type":"tool_use","id":"c1","name":"future_tool","input":{}}],"stop_reason":"tool_use"}"#,
+    )
+    .unwrap();
+    assert_eq!(anthropic.message.tool_calls.unwrap()[0].name, "future_tool");
 }
 
 #[test]

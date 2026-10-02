@@ -49,6 +49,24 @@ pub struct ToolCallReq {
     pub arguments: String,
 }
 
+/// Validate the identity fields needed to pair every provider tool request
+/// with exactly one result before any call reaches the agent dispatcher.
+fn validate_provider_tool_calls(calls: &[ToolCallReq]) -> anyhow::Result<()> {
+    let mut ids = std::collections::HashSet::with_capacity(calls.len());
+    for call in calls {
+        if call.id.trim().is_empty() {
+            anyhow::bail!("provider tool call id was empty");
+        }
+        if call.name.trim().is_empty() {
+            anyhow::bail!("provider tool call name was empty");
+        }
+        if !ids.insert(call.id.as_str()) {
+            anyhow::bail!("provider returned duplicate tool call ids");
+        }
+    }
+    Ok(())
+}
+
 /// Requested thinking effort. Clients map it to the route's dialect;
 /// `None` means no extra thinking was requested.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

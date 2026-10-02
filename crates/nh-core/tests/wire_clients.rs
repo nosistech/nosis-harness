@@ -5,13 +5,18 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
 
+use nh_core::agent::{AgentLoop, AgentRunError};
 use nh_core::credential;
+use nh_core::receipt::{Outcome, ReceiptWriter};
 use nh_core::wire::{
-    ChatClient, ChatMessage, ChatRequest, ContentPart, ThinkingEffort, ToolCallReq, UsageEvidence,
+    ChatClient, ChatMessage, ChatRequest, ContentPart, ProviderFailureKind, RetryExhausted,
+    ThinkingEffort, ToolCallReq, UsageEvidence,
 };
 use nh_routes::{Profiles, ResolvedRoute, RouteResolver, ThinkingDialect, Wire};
+use nh_tools::{Guard, Tool, ToolCtx, ToolSpec};
 use nh_vault::Vault;
 use zeroize::Zeroizing;
 
@@ -24,6 +29,23 @@ struct Captured {
     /// Header names lowercased.
     headers: HashMap<String, String>,
     body: serde_json::Value,
+}
+
+struct CountingTool(Arc<AtomicUsize>);
+
+impl Tool for CountingTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "count_tool".into(),
+            description: "count executions".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    fn execute(&self, _args: serde_json::Value, _ctx: &ToolCtx) -> anyhow::Result<String> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok("executed".into())
+    }
 }
 
 /// Accepts ONE connection, captures the request, answers with canned JSON.
@@ -559,7 +581,11 @@ fn factory_anthropic_wire_posts_v1_messages_with_required_headers() {
     let client = client(&r, None);
 
     let request = req(
-        vec![msg("system", Some("be brief")), msg("user", Some("hi"))],
+        vec![
+            msg("system", Some("be brief")),
+            msg("system", Some("shell unavailable")),
+            msg("user", Some("hi")),
+        ],
         ThinkingEffort::Max,
     );
     let resp = client.complete(&request).unwrap();
@@ -579,9 +605,100 @@ fn factory_anthropic_wire_posts_v1_messages_with_required_headers() {
         "no bearer auth on this wire"
     );
     assert_eq!(captured.body["max_tokens"], 384_000);
-    assert_eq!(captured.body["system"], "be brief");
+    assert_eq!(
+        captured.body["system"],
+        serde_json::json!([
+            {"type": "text", "text": "be brief"},
+            {"type": "text", "text": "shell unavailable"}
+        ])
+    );
     assert_eq!(captured.body["messages"][0]["content"][0]["text"], "hi");
     assert!(captured.body.get("thinking").is_none());
+}
+
+#[test]
+fn invalid_tool_batches_preserve_usage_on_both_wire_error_paths() {
+    let cases = [
+        (
+            Wire::OpenAi,
+            r#"{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"same","function":{"name":"read_file","arguments":"{}"}},{"id":"same","function":{"name":"future_tool","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":11,"completion_tokens":2}}"#,
+            11,
+            2,
+        ),
+        (
+            Wire::AnthropicMessages,
+            r#"{"content":[{"type":"tool_use","id":"same","name":"read_file","input":{}},{"type":"tool_use","id":"same","name":"future_tool","input":{}}],"stop_reason":"tool_use","usage":{"input_tokens":7,"output_tokens":3}}"#,
+            7,
+            3,
+        ),
+    ];
+
+    for (wire, response, prompt_tokens, completion_tokens) in cases {
+        let (url, _captured) = one_shot_server(200, response.into());
+        let route = route(&url, wire, ThinkingDialect::None, false, &[], None);
+
+        let error = client(&route, None)
+            .complete(&req(vec![msg("user", Some("go"))], ThinkingEffort::None))
+            .unwrap_err();
+        let exhausted = error
+            .downcast_ref::<RetryExhausted>()
+            .expect("wire validation errors retain retry accounting");
+        assert_eq!(exhausted.kind, ProviderFailureKind::InvalidResponse);
+        assert_eq!(exhausted.attempts, 1);
+        let usage = exhausted.usage.as_ref().expect("reported usage survives");
+        assert_eq!(usage.prompt_tokens, prompt_tokens);
+        assert_eq!(usage.completion_tokens, completion_tokens);
+        assert_eq!(usage.evidence, UsageEvidence::Measured);
+    }
+}
+
+#[test]
+fn later_invalid_tool_call_prevents_all_dispatch_and_reaches_failed_receipt() {
+    let response = r#"{
+        "choices":[{"message":{"role":"assistant","tool_calls":[
+            {"id":"first","function":{"name":"count_tool","arguments":"{}"}},
+            {"id":"second","function":{"name":"  ","arguments":"{}"}}
+        ]},"finish_reason":"tool_calls"}],
+        "usage":{"prompt_tokens":13,"completion_tokens":5}
+    }"#;
+    let (url, _captured) = one_shot_server(200, response.into());
+    let route = route(&url, Wire::OpenAi, ThinkingDialect::None, false, &[], None);
+    let workdir = tempfile::tempdir().unwrap();
+    let executions = Arc::new(AtomicUsize::new(0));
+    let mut agent = AgentLoop {
+        client: client(&route, None),
+        tools: vec![Box::new(CountingTool(Arc::clone(&executions)))],
+        ctx: ToolCtx::new(
+            workdir.path().to_path_buf(),
+            Box::new(|_| false),
+            Box::new(|_| Guard::Allow),
+            nh_vault::Scrubber::new(Vec::new()),
+        ),
+        receipts: ReceiptWriter::project(workdir.path(), nh_vault::Scrubber::new(Vec::new())),
+        model_id: "mock-model".into(),
+        max_turns: 1,
+        thinking: ThinkingEffort::None,
+        profile: None,
+        constitution: None,
+        context_limit: None,
+        on_event: None,
+    };
+
+    let error = agent.run("do work").unwrap_err();
+
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    let failure = error
+        .downcast_ref::<AgentRunError>()
+        .expect("agent preserves the provider failure receipt");
+    assert_eq!(failure.receipt().outcome, Outcome::Fail);
+    assert_eq!(failure.receipt().tool_calls, 0);
+    let usage = failure
+        .receipt()
+        .usage
+        .as_ref()
+        .expect("billed invalid response remains visible");
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (13, 5));
+    assert_eq!(usage.evidence, UsageEvidence::Measured);
 }
 
 #[test]

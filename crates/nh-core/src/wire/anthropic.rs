@@ -49,7 +49,7 @@ impl AnthropicMessagesClient {
 impl ChatClient for AnthropicMessagesClient {
     fn complete(&self, request: &ChatRequest) -> anyhow::Result<ChatResponse> {
         let url = endpoint(&self.base_url);
-        let request_body = build_body(request, self.max_tokens, self.dialect);
+        let request_body = build_body(request, self.max_tokens, self.dialect)?;
         let mut output = run_with_retry(
             RetryPolicy::DEFAULT,
             &std::thread::sleep,
@@ -138,21 +138,35 @@ pub(super) fn endpoint(base_url: &str) -> String {
     format!("{}/v1/messages", base_url.trim_end_matches('/'))
 }
 
-/// Map the common request onto Anthropic Messages. The first system message
-/// becomes top-level `system`; assistant tool calls become `tool_use`; and
+/// Map the common request onto Anthropic Messages. System messages retain
+/// their order at top level; assistant tool calls become `tool_use`; and
 /// consecutive tool results merge into one user message so roles alternate.
 pub(super) fn build_body(
     request: &ChatRequest,
     max_tokens: u64,
     dialect: ThinkingDialect,
-) -> serde_json::Value {
-    let mut system: Option<String> = None;
+) -> anyhow::Result<serde_json::Value> {
+    let mut system = Vec::new();
     let mut messages: Vec<serde_json::Value> = Vec::new();
     let mut previous_was_user = false;
+    let mut system_after_assistant = false;
     for message in &request.messages {
         match message.role.as_str() {
-            "system" if system.is_none() => {
-                system = Some(message.content.clone().unwrap_or_default());
+            "system" => {
+                if message
+                    .parts
+                    .as_ref()
+                    .is_some_and(|parts| !parts.is_empty())
+                {
+                    anyhow::bail!("Anthropic system messages do not support content parts");
+                }
+                if messages
+                    .last()
+                    .is_some_and(|message| message["role"] == "assistant")
+                {
+                    system_after_assistant = true;
+                }
+                system.push(message.content.clone().unwrap_or_default());
             }
             "tool" => {
                 let block = serde_json::json!({
@@ -162,8 +176,14 @@ pub(super) fn build_body(
                 });
                 push_user_block(&mut messages, previous_was_user, block);
                 previous_was_user = true;
+                system_after_assistant = false;
             }
             "assistant" => {
+                if system_after_assistant {
+                    anyhow::bail!(
+                        "Anthropic system correction must be followed by a user or tool message"
+                    );
+                }
                 let mut blocks: Vec<serde_json::Value> = Vec::new();
                 if let Some(text) = message.content.as_deref().filter(|text| !text.is_empty()) {
                     blocks.push(serde_json::json!({ "type": "text", "text": text }));
@@ -184,8 +204,8 @@ pub(super) fn build_body(
                 }));
                 previous_was_user = false;
             }
-            // User and unexpected roles degrade to user blocks; declared parts keep their order.
-            _ => {
+            // User content parts keep their declared order.
+            "user" => {
                 let blocks: Vec<serde_json::Value> = match &message.parts {
                     Some(parts) if !parts.is_empty() => parts
                         .iter()
@@ -212,8 +232,17 @@ pub(super) fn build_body(
                     push_user_block(&mut messages, previous_was_user, block);
                     previous_was_user = true;
                 }
+                system_after_assistant = false;
             }
+            _ => anyhow::bail!("request contained an unsupported message role"),
         }
+    }
+
+    if system_after_assistant {
+        anyhow::bail!("Anthropic system correction must be followed by a user or tool message");
+    }
+    if messages.is_empty() {
+        anyhow::bail!("Anthropic request requires at least one conversational message");
     }
 
     let mut body = serde_json::json!({
@@ -221,8 +250,21 @@ pub(super) fn build_body(
         "max_tokens": max_tokens,
         "messages": messages,
     });
-    if let Some(system) = system {
-        body["system"] = serde_json::Value::String(system);
+    match system.as_slice() {
+        [] => {}
+        [system] => body["system"] = serde_json::Value::String(system.clone()),
+        systems => {
+            let blocks: Vec<_> = systems
+                .iter()
+                .filter(|text| !text.is_empty())
+                .map(|text| serde_json::json!({"type": "text", "text": text}))
+                .collect();
+            body["system"] = if blocks.is_empty() {
+                serde_json::Value::String(String::new())
+            } else {
+                serde_json::Value::Array(blocks)
+            };
+        }
     }
     if !request.tools.is_empty() {
         body["tools"] = request
@@ -240,7 +282,7 @@ pub(super) fn build_body(
     if dialect == ThinkingDialect::DeepseekNhm {
         body["thinking"] = serde_json::json!({ "type": "disabled" });
     }
-    body
+    Ok(body)
 }
 
 fn push_user_block(
@@ -329,8 +371,8 @@ pub(super) fn parse_response(body: &str) -> anyhow::Result<ChatResponse> {
                 text.push_str(block.text.as_deref().unwrap_or_default());
             }
             "tool_use" => {
-                let id = block.id.filter(|id| !id.is_empty());
-                let name = block.name.filter(|name| !name.is_empty());
+                let id = block.id.filter(|id| !id.trim().is_empty());
+                let name = block.name.filter(|name| !name.trim().is_empty());
                 let (Some(id), Some(name)) = (id, name) else {
                     return Err(anyhow::anyhow!(
                         "provider tool_use block missing id or name"
@@ -348,6 +390,7 @@ pub(super) fn parse_response(body: &str) -> anyhow::Result<ChatResponse> {
             _ => {}
         }
     }
+    super::validate_provider_tool_calls(&calls)?;
     Ok(ChatResponse {
         message: ChatMessage {
             role: "assistant".into(),

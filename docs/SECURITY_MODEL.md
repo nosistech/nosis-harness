@@ -56,6 +56,14 @@ Permissions:
   Production callers supply their session policy; this prevents an implicit
   permissive default, but does not make caller-provided policy inherently safe.
 - MCP responses, provider responses, task fields, tool results, and receipt reads are bounded.
+- Current source validates a provider's entire tool-call list before dispatch:
+  IDs and names cannot be blank, and IDs must be unique within that response.
+  Invalid lists fail without executing their valid-looking prefix. Unknown
+  nonempty tool names still follow the guarded unknown-tool error path.
+- The Anthropic adapter keeps later system corrections at system authority and
+  rejects unsupported request roles or correction ordering that would become
+  assistant prefill before HTTP. This preserves instruction
+  representation; actual permissions still come from the tool/policy boundary.
 - `nh-mcp` accepts at most four active Fleet runs, clamps workers to the configured ceiling,
   requires a bounded positive token budget, and accepts at most 256 tasks per run.
 - MCP Apps and the MCP Tasks extension are not implemented.
@@ -146,6 +154,13 @@ A normal receipt outcome records completed execution, not independently checked
 correctness. Source-build progress can show actual tool outcomes, but those facts
 are not added to historical receipt schemas. Do not infer passed checks from an
 assistant's answer or from a receipt's `pass` value.
+
+Current source requests `0600` for newly created receipt/session JSONL files and `0700`
+for new runtime directories on Unix. These creation modes do not change existing
+permissions or Windows access-control inheritance and do not encrypt stored data.
+Session reads are capped at 64 MiB, including a check for growth during the read;
+oversized histories are refused whole and preserved. Session listing reads each
+ledger once and folds a summary. See [local data and recovery](../PRIVACY.md).
 
 ## Security Checklist
 

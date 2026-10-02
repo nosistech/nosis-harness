@@ -447,16 +447,22 @@ pub(super) fn parse_response(body: &str) -> anyhow::Result<ChatResponse> {
         Some(role) if role == "assistant" => role,
         Some(_) => anyhow::bail!("provider response message role was not assistant"),
     };
-    let tool_calls = choice.message.tool_calls.map(|calls| {
-        calls
-            .into_iter()
-            .map(|call| ToolCallReq {
-                id: call.id,
-                name: call.function.name,
-                arguments: call.function.arguments,
-            })
-            .collect()
-    });
+    let tool_calls = choice
+        .message
+        .tool_calls
+        .map(|calls| {
+            let calls = calls
+                .into_iter()
+                .map(|call| ToolCallReq {
+                    id: call.id,
+                    name: call.function.name,
+                    arguments: call.function.arguments,
+                })
+                .collect::<Vec<_>>();
+            super::validate_provider_tool_calls(&calls)?;
+            Ok::<_, anyhow::Error>(calls)
+        })
+        .transpose()?;
     Ok(ChatResponse {
         message: ChatMessage {
             role,

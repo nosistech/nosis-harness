@@ -1,6 +1,6 @@
 # Why these features
 
-Research cutoff: September 26, 2026; implementation checks continued September 27.
+Research through September 26, 2026, with the focused October 1 addition below.
 Unversioned product documentation reflects the time it was read. These are reasons for the current
 product direction, not claims that Nosis has beaten another assistant.
 
@@ -38,3 +38,11 @@ Automated rendering and regression tests cannot replace those observations.
 The design deliberately avoids a new desktop framework, hidden paid retries and
 automatic provider changes. Those would add complexity or change the user's
 control without evidence that they improve the first experience.
+
+**Reuse tasks with observable acceptance conditions.** The October 1 guest post
+[Claude-shaped science](https://www.anthropic.com/research/claude-shaped-science)
+describes specialized tools, checkable calculations and expert judgment. Our
+application is the [task and evidence template](TUTORIALS.md#reuse-the-same-process-on-your-own-project):
+state the outcome, limit edits, preserve acceptance checks and record unresolved
+work. This is guidance using existing Nosis tools; it is not a new automation
+framework, scientific-validation claim or measured performance improvement.

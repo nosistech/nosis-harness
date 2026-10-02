@@ -59,6 +59,19 @@ their own policies.
   It does not remove all confidential code, personal information or other sensitive content
   from saved conversations. Review transcripts before sharing them.
 
+In current unreleased source, newly created receipt/session JSONL files request
+Unix mode `0600` and newly created runtime directories request `0700` (owner-only
+access, further restricted by the process umask). Existing files/directories are
+not chmodded; review their permissions separately on shared machines. Windows
+continues to inherit access permissions. These files are not encrypted by Nosis.
+
+Current source refuses to resume a session ledger larger than 64 MiB. It preserves
+the file and never substitutes a partial history. Archive an oversized transcript
+outside `.nosis/sessions` in a private location and start a new session; review
+project changes before describing the remaining work. Listing skips unreadable
+or oversized ledgers while continuing to show readable sessions. This read limit
+does not prune history or limit how much a running session can write.
+
 ## Delete local data
 
 - Run `nh key remove <entry>` to remove an OS-vault entry. If you used

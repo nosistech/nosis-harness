@@ -69,7 +69,7 @@ fn walk_contained_dir(
                 return Ok(None)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                match std::fs::create_dir(&current) {
+                match create_private_directory(&current) {
                     Ok(()) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                     Err(error) => {
@@ -105,6 +105,19 @@ fn walk_contained_dir(
         current = resolved;
     }
     Ok(Some(current))
+}
+
+#[cfg(unix)]
+fn create_private_directory(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt as _;
+
+    let mut builder = std::fs::DirBuilder::new();
+    builder.mode(0o700).create(path)
+}
+
+#[cfg(not(unix))]
+fn create_private_directory(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir(path)
 }
 
 fn validate_relative(relative: &Path) -> anyhow::Result<()> {
@@ -171,5 +184,48 @@ mod tests {
             None
         );
         assert!(!root.path().join(".nosis").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_runtime_directories_are_private_without_chmodding_existing_directories() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fresh = tempfile::tempdir().unwrap();
+        ensure_contained_dir(fresh.path(), Path::new(".nosis/sessions")).unwrap();
+        assert_eq!(
+            std::fs::metadata(fresh.path().join(".nosis"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(fresh.path().join(".nosis/sessions"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+
+        let existing = tempfile::tempdir().unwrap();
+        let nosis = existing.path().join(".nosis");
+        std::fs::create_dir(&nosis).unwrap();
+        std::fs::set_permissions(&nosis, std::fs::Permissions::from_mode(0o750)).unwrap();
+        ensure_contained_dir(existing.path(), Path::new(".nosis/sessions")).unwrap();
+        assert_eq!(
+            std::fs::metadata(&nosis).unwrap().permissions().mode() & 0o777,
+            0o750
+        );
+        assert_eq!(
+            std::fs::metadata(nosis.join("sessions"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
     }
 }

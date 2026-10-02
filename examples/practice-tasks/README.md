@@ -7,7 +7,6 @@ They are a starting point for comparison, not evidence that one assistant is bet
 **Portable download users:** the release ZIP does not contain these practice files.
 From this source tree, open [starter.py](starter.py) and [check.py](check.py). On
 GitHub, use **Download raw file** on each page; in a local checkout, copy the files.
-Until this source is published, these files are available only in the local checkout.
 Save them in a practice-materials folder, then follow the steps below.
 
 Use a new scratch folder. Copy `starter.py` there as `work.py`. Keep `check.py` outside
@@ -95,3 +94,7 @@ as complete only after its checks pass and a person confirms the requested scope
 Compare total spend per correctly completed task, not token prices alone. Repeat
 attempts and include realistic projects before drawing purchasing or marketing
 conclusions. These visible, small tests are practice checks, not a hidden benchmark.
+
+For work in your own project, reuse the [task and evidence template](../../docs/TUTORIALS.md#reuse-the-same-process-on-your-own-project).
+Choose the expected outcome before the assistant edits, and keep the acceptance
+check outside its permitted edit scope.

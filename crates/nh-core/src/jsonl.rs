@@ -129,10 +129,10 @@ fn append_locked_line_inner(
     // read(true): Windows LockFileEx requires read/write DATA access on the
     // handle; a pure append-only handle (FILE_APPEND_DATA) fails file.lock()
     // with ACCESS_DENIED. Append semantics are preserved.
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .create(true)
-        .append(true)
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).create(true).append(true);
+    set_private_create_mode(&mut options);
+    let mut file = options
         .open(path)
         .with_context(|| format!("could not open {}", path.display()))?;
     if nonblocking_lock {
@@ -165,6 +165,50 @@ fn append_locked_line_inner(
     Ok(())
 }
 
+#[cfg(unix)]
+fn set_private_create_mode(options: &mut std::fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    options.mode(0o600);
+}
+
+#[cfg(not(unix))]
+fn set_private_create_mode(_options: &mut std::fs::OpenOptions) {}
+
+/// Visit complete JSONL records while tolerating only one torn final append.
+pub(crate) fn for_each_jsonl_record<T, F, V>(
+    bytes: &[u8],
+    invalid_record: F,
+    mut visitor: V,
+) -> anyhow::Result<bool>
+where
+    T: DeserializeOwned,
+    F: Fn(usize, serde_json::Error) -> anyhow::Error,
+    V: FnMut(T) -> anyhow::Result<()>,
+{
+    let ends_in_newline = bytes.last() == Some(&b'\n');
+    let last_non_empty = bytes
+        .split(|byte| *byte == b'\n')
+        .enumerate()
+        .filter(|(_, line)| !line.iter().all(u8::is_ascii_whitespace))
+        .map(|(index, _)| index)
+        .last();
+    let mut dropped_torn_tail = false;
+    for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        match serde_json::from_slice::<T>(line) {
+            Ok(record) => visitor(record)?,
+            Err(_) if Some(index) == last_non_empty && !ends_in_newline => {
+                dropped_torn_tail = true;
+            }
+            Err(error) => return Err(invalid_record(index + 1, error)),
+        }
+    }
+    Ok(dropped_torn_tail)
+}
+
 /// SECURITY INVARIANT: only one malformed final record without a newline is tolerated.
 pub(crate) fn parse_jsonl_records<T, F>(
     bytes: &[u8],
@@ -174,25 +218,11 @@ where
     T: DeserializeOwned,
     F: Fn(usize, serde_json::Error) -> anyhow::Error,
 {
-    let ends_in_newline = bytes.last() == Some(&b'\n');
-    let lines = bytes.split(|byte| *byte == b'\n').collect::<Vec<_>>();
-    let last_non_empty = lines
-        .iter()
-        .rposition(|line| !line.iter().all(u8::is_ascii_whitespace));
     let mut records = Vec::new();
-    let mut dropped_torn_tail = false;
-    for (index, line) in lines.into_iter().enumerate() {
-        if line.iter().all(u8::is_ascii_whitespace) {
-            continue;
-        }
-        match serde_json::from_slice::<T>(line) {
-            Ok(record) => records.push(record),
-            Err(_) if Some(index) == last_non_empty && !ends_in_newline => {
-                dropped_torn_tail = true;
-            }
-            Err(error) => return Err(invalid_record(index + 1, error)),
-        }
-    }
+    let dropped_torn_tail = for_each_jsonl_record(bytes, invalid_record, |record| {
+        records.push(record);
+        Ok(())
+    })?;
     Ok((records, dropped_torn_tail))
 }
 
@@ -230,5 +260,28 @@ mod tests {
             ]
         );
         assert!(!dropped_torn_tail);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_creates_private_files_without_chmodding_existing_files() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let created = directory.path().join("created.jsonl");
+        append_locked_line(&created, "{}").unwrap();
+        assert_eq!(
+            std::fs::metadata(&created).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let existing = directory.path().join("existing.jsonl");
+        std::fs::write(&existing, b"{}\n").unwrap();
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o640)).unwrap();
+        append_locked_line(&existing, "{}").unwrap();
+        assert_eq!(
+            std::fs::metadata(&existing).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
     }
 }

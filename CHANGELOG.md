@@ -49,6 +49,11 @@ commit passes local and remote gates.
 
 ### Changed
 
+- Session resume and listing refuse a ledger above 64 MiB without changing it or
+  replaying a partial history. Listing reads each ledger once and keeps summary
+  state instead of assembling a conversation that will not be displayed.
+- Tutorials include a reusable task brief and evidence table, and distinguish
+  the current setup overview from opening an editing chat.
 - Guided setup goes directly from project confirmation to model selection and
   key connection. Detailed diagnostics and the free local price comparison are
   available through printed commands. Skipping a key explains how to return;
@@ -76,6 +81,15 @@ commit passes local and remote gates.
 
 ### Fixed
 
+- Provider responses with empty or whitespace-only tool IDs/names, or duplicate
+  tool IDs, are rejected before any call in that response executes. Available
+  usage is retained on the error path; malformed responses are not retried.
+- Anthropic requests preserve later system corrections at system authority and
+  reject unsupported message roles instead of silently converting them to users.
+  Structured system-message parts are refused instead of silently dropped.
+  A late correction that would become assistant prefill is refused before HTTP.
+- New receipt/session JSONL files and runtime directories request private Unix
+  creation modes. Existing permissions and Windows inheritance are preserved.
 - Direct `nh init` now shares guided setup's preflight checks for `.nosis`, the
   project catalog, policy and ignore files. Symbolic links, junctions and wrong
   file types are refused before writing; existing files remain untouched on refusal.
