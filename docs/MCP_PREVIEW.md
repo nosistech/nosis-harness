@@ -28,6 +28,17 @@ of being treated as successful tool output. A failed tool call is not automatica
 Discovery and tool-list requests may retry once after refreshing an OAuth credential.
 Replies are limited to 4 MiB, and the client offers at most 512 tools per server.
 
+Tool results preserve text and structured JSON, including structured-only replies.
+When a server returns both, Nosis includes both unless the complete text already
+represents the same value. Secret redaction happens before JSON serialization,
+including each text block whose entire value is JSON. JSON text keeps its number
+values and formatting while secret-bearing strings are replaced.
+If redaction makes two distinct object keys identical, Nosis reports that the
+affected JSON component was omitted; it does not silently choose a value or replay
+the tool call. The adapter applies its output size limit to both results and error
+messages. This does not add support for
+rendering image, audio or resource content blocks.
+
 The local server checks the protocol metadata and matching HTTP headers before dispatching
 tools. An integration that previously sent a bare JSON-RPC body must add the modern request
 metadata and headers. See the official [HTTP transport specification](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http).

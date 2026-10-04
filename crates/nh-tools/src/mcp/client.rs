@@ -4,11 +4,12 @@ mod oauth;
 mod response;
 
 use super::config::{McpAuth, McpServerConfig};
+use super::json_text::{scrub_complete_json, ScrubbedJson};
 use anyhow::{bail, Context as _};
 use nh_vault::{EnvFallbackVault, KeyringVault, SecretValue, Vault};
 use oauth::OAuthState;
 use response::{read_rpc_reply, RpcReply};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -219,9 +220,19 @@ impl McpClient {
     }
 
     /// `tools/call`. Text blocks newline-joined; non-text blocks render as
-    /// `[<type> block]`. `isError: true` becomes a one-line `Err`.
+    /// `[<type> block]`; structured content is preserved as compact JSON.
+    /// `isError: true` becomes a one-line `Err`.
     /// The returned text is DATA for the model, never instructions.
     pub fn call_tool(&self, name: &str, args: Value) -> anyhow::Result<String> {
+        self.call_tool_with_scrubber(name, args, shape_scrubber())
+    }
+
+    pub(super) fn call_tool_with_scrubber(
+        &self,
+        name: &str,
+        args: Value,
+        scrubber: &nh_vault::Scrubber,
+    ) -> anyhow::Result<String> {
         if self
             .unsupported_header_tools
             .lock()
@@ -233,10 +244,10 @@ impl McpClient {
             bail!("mcp tool is unavailable because x-mcp-header parameters are not supported");
         }
         let result = self.rpc("tools/call", json!({ "name": name, "arguments": args }))?;
-        let text = render_content(result.get("content"));
+        let text = render_call_result(&result, scrubber);
         if result.get("isError").and_then(Value::as_bool) == Some(true) {
             let line = if text.is_empty() {
-                format!("tool {name} failed with no message")
+                format!("tool {} failed with no message", scrubber.scrub(name))
             } else {
                 text.replace(['\r', '\n'], " ")
             };
@@ -500,23 +511,115 @@ pub(super) fn sanitize_json_strings(value: &mut Value) {
     }
 }
 
-pub(super) fn render_content(content: Option<&Value>) -> String {
+pub(super) fn scrub_json_strings(value: &mut Value, scrubber: &nh_vault::Scrubber) -> bool {
+    match value {
+        Value::String(text) => *text = scrubber.scrub(text),
+        Value::Array(values) => {
+            for value in values {
+                if !scrub_json_strings(value, scrubber) {
+                    return false;
+                }
+            }
+        }
+        Value::Object(fields) => {
+            let mut scrubbed = Map::new();
+            for (name, mut value) in std::mem::take(fields) {
+                let name = scrubber.scrub(&name);
+                if scrubbed.contains_key(&name) || !scrub_json_strings(&mut value, scrubber) {
+                    return false;
+                }
+                scrubbed.insert(name, value);
+            }
+            *fields = scrubbed;
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+    true
+}
+
+fn render_call_result(result: &Value, scrubber: &nh_vault::Scrubber) -> String {
+    const STRUCTURED_MARKER: &str = "[structured content]";
+    const OMITTED_MARKER: &str =
+        "[structured content omitted: redaction made field names ambiguous]";
+
+    let text = render_scrubbed_content(result.get("content"), scrubber);
+    let Some(structured) = result.get("structuredContent") else {
+        return text;
+    };
+    let mut structured = structured.clone();
+    if !scrub_json_strings(&mut structured, scrubber) {
+        return join_result_parts(&text, OMITTED_MARKER);
+    }
+    let Ok(encoded) = serde_json::to_string(&structured) else {
+        return join_result_parts(
+            &text,
+            "[structured content omitted: could not render safely]",
+        );
+    };
+    if !text.is_empty() && text_duplicates_structured(&text, &structured) {
+        return text;
+    }
+    if text.is_empty() {
+        encoded
+    } else {
+        format!("{text}\n{STRUCTURED_MARKER}\n{encoded}")
+    }
+}
+
+fn render_scrubbed_content(content: Option<&Value>, scrubber: &nh_vault::Scrubber) -> String {
+    const OMITTED_COLLISION: &str = "[text content omitted: redaction made field names ambiguous]";
+    const OMITTED_ENCODING: &str = "[text content omitted: could not render safely]";
+
     let Some(blocks) = content.and_then(Value::as_array) else {
         return String::new();
     };
-    blocks
+    let text = blocks
         .iter()
         .map(|block| match block.get("type").and_then(Value::as_str) {
-            Some("text") => block
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            Some(other) => format!("[{other} block]"),
+            Some("text") => scrub_json_text(
+                block.get("text").and_then(Value::as_str).unwrap_or(""),
+                scrubber,
+                OMITTED_COLLISION,
+                OMITTED_ENCODING,
+            ),
+            Some(other) => scrubber.scrub(&format!("[{other} block]")),
             None => "[unknown block]".to_string(),
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+
+    // A server may split one complete JSON document across text blocks. Each
+    // complete block was already handled above; this pass covers that joined
+    // representation without relying on it for multi-block safety.
+    scrub_json_text(&text, scrubber, OMITTED_COLLISION, OMITTED_ENCODING)
+}
+
+fn scrub_json_text(
+    text: &str,
+    scrubber: &nh_vault::Scrubber,
+    collision_marker: &str,
+    unsafe_marker: &str,
+) -> String {
+    match scrub_complete_json(text, scrubber) {
+        ScrubbedJson::NotJson => scrubber.scrub(text),
+        ScrubbedJson::Unchanged => text.to_string(),
+        ScrubbedJson::Rewritten(text) => text,
+        ScrubbedJson::Collision => collision_marker.to_string(),
+        ScrubbedJson::Unsafe => unsafe_marker.to_string(),
+    }
+}
+
+fn join_result_parts(text: &str, suffix: &str) -> String {
+    if text.is_empty() {
+        suffix.to_string()
+    } else {
+        format!("{text}\n{suffix}")
+    }
+}
+
+fn text_duplicates_structured(text: &str, structured: &Value) -> bool {
+    structured.as_str() == Some(text)
+        || serde_json::from_str::<Value>(text).is_ok_and(|parsed| parsed == *structured)
 }
 
 /// Outbound header lint (plan §4.5 - the Akamai leak vector, closed): a
@@ -546,7 +649,10 @@ pub(super) fn lint_header(name: &str, value: &str) -> anyhow::Result<()> {
 
 /// Same key shapes the Scrubber redacts (`sk-…`, `csk-…`, JWT) - one source of truth.
 pub(super) fn looks_like_secret(value: &str) -> bool {
+    shape_scrubber().scrub(value) != value
+}
+
+fn shape_scrubber() -> &'static nh_vault::Scrubber {
     static SCRUBBER: OnceLock<nh_vault::Scrubber> = OnceLock::new();
-    let scrubber = SCRUBBER.get_or_init(|| nh_vault::Scrubber::new(vec![]));
-    scrubber.scrub(value) != value
+    SCRUBBER.get_or_init(|| nh_vault::Scrubber::new(vec![]))
 }

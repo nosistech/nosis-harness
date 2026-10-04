@@ -1,9 +1,9 @@
 //! Tool adapters that project remote MCP tools into the Nosis approval model.
 
-use super::client::{McpClient, ToolEntry, ARGS_SUMMARY_MAX};
+use super::client::{scrub_json_strings, McpClient, ToolEntry, ARGS_SUMMARY_MAX};
 use super::config::{McpServerConfig, McpTrust};
 use crate::{cancelled_before, render_tool_result, Tool, ToolCtx, ToolSpec};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
@@ -493,32 +493,6 @@ fn compact_discovery_item(adapter: &McpToolAdapter, ctx: &ToolCtx, status: &str)
     })
 }
 
-fn scrub_json_strings(value: &mut Value, scrubber: &nh_vault::Scrubber) -> bool {
-    match value {
-        Value::String(text) => *text = scrubber.scrub(text),
-        Value::Array(values) => {
-            for value in values {
-                if !scrub_json_strings(value, scrubber) {
-                    return false;
-                }
-            }
-        }
-        Value::Object(fields) => {
-            let mut scrubbed = Map::new();
-            for (name, mut value) in std::mem::take(fields) {
-                let name = scrubber.scrub(&name);
-                if scrubbed.contains_key(&name) || !scrub_json_strings(&mut value, scrubber) {
-                    return false;
-                }
-                scrubbed.insert(name, value);
-            }
-            *fields = scrubbed;
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) => {}
-    }
-    true
-}
-
 fn discovery_response_size(items: &[Value], offset: usize, total: usize) -> anyhow::Result<usize> {
     serde_json::to_vec(&json!({
         "tools": items,
@@ -588,8 +562,13 @@ impl Tool for McpToolAdapter {
         if let Some(cancelled) = cancelled_before("MCP tool call", ctx) {
             return Ok(cancelled);
         }
-        let raw = self.client.call_tool(tool, args)?;
-        Ok(render_tool_result(raw, ctx))
+        match self
+            .client
+            .call_tool_with_scrubber(tool, args, &ctx.scrubber)
+        {
+            Ok(raw) => Ok(render_tool_result(raw, ctx)),
+            Err(error) => anyhow::bail!(render_tool_result(error.to_string(), ctx)),
+        }
     }
 }
 

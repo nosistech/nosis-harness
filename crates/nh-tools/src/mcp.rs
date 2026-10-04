@@ -7,6 +7,7 @@
 mod adapter;
 mod client;
 mod config;
+mod json_text;
 
 pub use adapter::{mcp_discovery_tools, mcp_tools, McpToolset};
 pub use client::{McpClient, McpToolInfo};

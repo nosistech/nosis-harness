@@ -81,6 +81,9 @@ commit passes local and remote gates.
 
 ### Fixed
 
+- MCP structured-only results are no longer lost. Mixed text/JSON and error
+  results preserve useful data, with secret redaction before JSON serialization
+  and an explicit omission notice if redacted object keys collide.
 - Provider responses with empty or whitespace-only tool IDs/names, or duplicate
   tool IDs, are rejected before any call in that response executes. Available
   usage is retained on the error path; malformed responses are not retried.

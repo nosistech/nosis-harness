@@ -28,8 +28,9 @@ directory. Move a previous output aside before preparing a replacement.
 The output contains:
 
 - `nh.exe` for a direct portable download, with `LICENSE` and `START_HERE.md` beside it.
-- `nh-<version>-windows-x64.zip` containing only `nh.exe`, `LICENSE`, and
-  `START_HERE.md` (the [Windows quickstart](WINDOWS_QUICKSTART.md)).
+- `nh-<version>-windows-x64.zip` containing `nh.exe`, `LICENSE`,
+  `START_HERE.md` (the [Windows quickstart](WINDOWS_QUICKSTART.md)), and the three
+  practice files `practice/README.md`, `practice/WELCOME.txt` and `practice/EXPECTED.txt`.
 - `SHA256SUMS` for the executable and ZIP.
 - `provenance.json`, unsigned packaging metadata recording the source revision,
   working-tree status, target, version, and packaging mode. It is not an attestation.

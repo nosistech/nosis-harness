@@ -689,6 +689,140 @@ fn call_tool_is_error_becomes_one_line_err() {
 }
 
 #[test]
+fn call_tool_preserves_structured_shapes_and_only_suppresses_full_duplicates() {
+    let mock = start_mock(|request| {
+        let result = match request.body["params"]["name"].as_str().unwrap() {
+            "null" => json!({ "structuredContent": null }),
+            "boolean" => json!({ "structuredContent": true }),
+            "number" => json!({ "structuredContent": 42 }),
+            "string" => json!({ "structuredContent": "ready" }),
+            "array" => json!({ "structuredContent": [1, "two"] }),
+            "object" => json!({ "structuredContent": { "answer": 42 } }),
+            "distinct" => json!({
+                "content": [{ "type": "text", "text": "answer 42" }],
+                "structuredContent": { "answer": 42 }
+            }),
+            "semantic-duplicate" => json!({
+                "content": [{ "type": "text", "text": "{\n  \"answer\": 42\n}" }],
+                "structuredContent": { "answer": 42 }
+            }),
+            "string-duplicate" => json!({
+                "content": [{ "type": "text", "text": "ready" }],
+                "structuredContent": "ready"
+            }),
+            "absent" => json!({
+                "content": [{ "type": "text", "text": "plain text" }]
+            }),
+            name => panic!("unexpected tool fixture {name}"),
+        };
+        rpc_result(request, result)
+    });
+    let client = mcp_client(config(&mock.url, McpTrust::Ask));
+
+    for (name, expected) in [
+        ("null", "null"),
+        ("boolean", "true"),
+        ("number", "42"),
+        ("string", "\"ready\""),
+        ("array", "[1,\"two\"]"),
+        ("object", "{\"answer\":42}"),
+    ] {
+        assert_eq!(client.call_tool(name, json!({})).unwrap(), expected);
+    }
+    assert_eq!(
+        client.call_tool("distinct", json!({})).unwrap(),
+        "answer 42\n[structured content]\n{\"answer\":42}"
+    );
+    assert_eq!(
+        client.call_tool("semantic-duplicate", json!({})).unwrap(),
+        "{\n  \"answer\": 42\n}"
+    );
+    assert_eq!(
+        client.call_tool("string-duplicate", json!({})).unwrap(),
+        "ready"
+    );
+    assert_eq!(client.call_tool("absent", json!({})).unwrap(), "plain text");
+}
+
+#[test]
+fn call_tool_preserves_structured_error_details() {
+    let mock = start_mock(|request| {
+        let result = match request.body["params"]["name"].as_str().unwrap() {
+            "structured-error" => json!({
+                "isError": true,
+                "structuredContent": { "code": "bad_request" }
+            }),
+            "mixed-error" => json!({
+                "isError": true,
+                "content": [{ "type": "text", "text": "request\nfailed" }],
+                "structuredContent": { "code": "bad_request" }
+            }),
+            name => panic!("unexpected tool fixture {name}"),
+        };
+        rpc_result(request, result)
+    });
+    let client = mcp_client(config(&mock.url, McpTrust::Ask));
+
+    assert_eq!(
+        client
+            .call_tool("structured-error", json!({}))
+            .unwrap_err()
+            .to_string(),
+        "{\"code\":\"bad_request\"}"
+    );
+    assert_eq!(
+        client
+            .call_tool("mixed-error", json!({}))
+            .unwrap_err()
+            .to_string(),
+        "request failed [structured content] {\"code\":\"bad_request\"}"
+    );
+}
+
+#[test]
+fn public_call_tool_shape_scrubs_structured_content_before_encoding() {
+    let shaped = format!("{}{}", "sk-", "abcdefghijkl");
+    let returned = shaped.clone();
+    let mock = start_mock(move |request| {
+        rpc_result(
+            request,
+            json!({ "structuredContent": { "token": returned } }),
+        )
+    });
+    let client = mcp_client(config(&mock.url, McpTrust::Ask));
+
+    let output = client.call_tool("peek", json!({})).unwrap();
+
+    assert_eq!(output, "{\"token\":\"[REDACTED]\"}");
+    assert!(!output.contains(&shaped));
+}
+
+#[test]
+fn complete_json_text_key_collision_returns_a_static_omission() {
+    let first = "fixture-text-first-\"quoted\\path";
+    let second = "fixture-text-second-\"quoted\\path";
+    let content = json!({ first.to_string(): 1, second.to_string(): 2 }).to_string();
+    let mock = start_mock(move |request| {
+        rpc_result(
+            request,
+            json!({ "content": [{ "type": "text", "text": content }] }),
+        )
+    });
+    let client = mcp_client(config(&mock.url, McpTrust::Ask));
+    let scrubber = nh_vault::Scrubber::new(vec![first.to_string(), second.to_string()]);
+
+    let output = client
+        .call_tool_with_scrubber("peek", json!({}), &scrubber)
+        .unwrap();
+
+    assert_eq!(
+        output,
+        "[text content omitted: redaction made field names ambiguous]"
+    );
+    assert_eq!(count_method(&mock, "tools/call"), 1);
+}
+
+#[test]
 fn jsonrpc_error_is_a_friendly_one_liner() {
     let mock = start_mock(|req| {
         (
@@ -1783,6 +1917,234 @@ fn adapter_result_is_bounded_and_scrubbed_at_the_egress_choke_point() {
     );
     assert!(result.matches("[REDACTED]").count() >= 2, "got: {result}");
     assert!(result.chars().count() <= crate::MAX_TOOL_RESULT_CHARS + 100);
+}
+
+#[test]
+fn adapter_structurally_scrubs_escaped_keys_and_values_before_encoding() {
+    let literal = "fixture-active-\"quoted\\path";
+    let secret_key = literal.to_string();
+    let secret_value = literal.to_string();
+    let structured = json!({
+        secret_key: { "value": secret_value }
+    });
+    let duplicate_text = serde_json::to_string(&structured).unwrap();
+    let mock = start_mock(move |request| match request.body["method"].as_str() {
+        Some("tools/list") => rpc_result(request, mock_tools_result(None)),
+        Some("tools/call") => rpc_result(
+            request,
+            json!({
+                "content": [{ "type": "text", "text": duplicate_text }],
+                "structuredContent": structured
+            }),
+        ),
+        _ => rpc_result(request, Value::Null),
+    });
+    let set = mcp_tools(&[config(&mock.url, McpTrust::Auto)], &|_| true);
+    let peek = named_tool(&set, "mcp__mock__peek");
+    let (ctx, _) = approving_ctx(true);
+    let ctx = ctx.with_scrubber(nh_vault::Scrubber::new(vec![literal.to_string()]));
+
+    let output = peek.execute(json!({}), &ctx).unwrap();
+    let structured: Value = serde_json::from_str(&output).unwrap();
+    let escaped = serde_json::to_string(literal).unwrap();
+    let escaped = escaped
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap();
+
+    assert_eq!(structured["[REDACTED]"]["value"], "[REDACTED]");
+    assert!(!output.contains("[structured content]"));
+    assert!(!output.contains(literal));
+    assert!(!output.contains(escaped));
+}
+
+#[test]
+fn adapter_scrubs_each_complete_json_text_block_before_joining_mixed_content() {
+    let literal = "fixture-block-active-\"quoted\\path";
+    let encoded = serde_json::to_string(literal).unwrap();
+    let huge_number = "1234567890123456789012345678901234567890.00000000000000000001";
+    let json_text = format!("{{\"secret\":{encoded},\"precise\":{huge_number}}}");
+    let structured_literal = literal.to_string();
+    let mock = start_mock(move |request| match request.body["method"].as_str() {
+        Some("tools/list") => rpc_result(request, mock_tools_result(None)),
+        Some("tools/call") => rpc_result(
+            request,
+            json!({
+                "content": [
+                    { "type": "text", "text": "Result follows" },
+                    { "type": "image", "data": "unused" },
+                    { "type": "text", "text": json_text }
+                ],
+                "structuredContent": { "different": structured_literal }
+            }),
+        ),
+        _ => rpc_result(request, Value::Null),
+    });
+    let set = mcp_tools(&[config(&mock.url, McpTrust::Auto)], &|_| true);
+    let peek = named_tool(&set, "mcp__mock__peek");
+    let (ctx, _) = approving_ctx(true);
+    let ctx = ctx.with_scrubber(nh_vault::Scrubber::new(vec![literal.to_string()]));
+
+    let output = peek.execute(json!({}), &ctx).unwrap();
+    let escaped = encoded.trim_matches('"');
+
+    assert!(output.starts_with("Result follows\n[image block]\n"));
+    assert!(output.contains(huge_number), "got: {output}");
+    assert_eq!(output.matches("[REDACTED]").count(), 2, "got: {output}");
+    assert!(output.contains("\n[structured content]\n"), "got: {output}");
+    assert!(!output.contains(literal));
+    assert!(!output.contains(escaped));
+    assert_eq!(count_method(&mock, "tools/call"), 1);
+}
+
+#[test]
+fn complete_clean_json_text_preserves_numeric_lexemes_escapes_and_duplicate_fields() {
+    let exact = concat!(
+        "{\n  \"path\": \"C:\\\\work\\\\file\",\n  ",
+        "\"number\": 1234567890123456789012345678901234567890,\n  ",
+        "\"number\": 0.123456789012345678901234567890\n}"
+    );
+    let returned = exact.to_string();
+    let mock = start_mock(move |request| {
+        rpc_result(
+            request,
+            json!({ "content": [{ "type": "text", "text": returned }] }),
+        )
+    });
+    let client = mcp_client(config(&mock.url, McpTrust::Ask));
+
+    let output = client.call_tool("peek", json!({})).unwrap();
+
+    assert_eq!(output, exact);
+}
+
+#[test]
+fn complete_json_text_scrubs_a_shadowed_escaped_value_without_losing_duplicates() {
+    let literal = "fixture-shadow-active-\"quoted\\path";
+    let encoded = serde_json::to_string(literal).unwrap();
+    let huge_number = "1234567890123456789012345678901234567890";
+    let text = format!("{{\"cmd\":{encoded},\"cmd\":\"safe\",\"number\":{huge_number}}}");
+    let returned = text.clone();
+    let mock = start_mock(move |request| {
+        rpc_result(
+            request,
+            json!({ "content": [{ "type": "text", "text": returned }] }),
+        )
+    });
+    let client = mcp_client(config(&mock.url, McpTrust::Ask));
+    let scrubber = nh_vault::Scrubber::new(vec![literal.to_string()]);
+
+    let output = client
+        .call_tool_with_scrubber("peek", json!({}), &scrubber)
+        .unwrap();
+
+    assert_eq!(
+        output,
+        format!("{{\"cmd\":\"[REDACTED]\",\"cmd\":\"safe\",\"number\":{huge_number}}}")
+    );
+    assert!(!output.contains(literal));
+    assert!(!output.contains(encoded.trim_matches('"')));
+}
+
+#[test]
+fn adapter_preserves_unchanged_pretty_json_duplicate_text() {
+    let pretty = "{\n  \"answer\": 42,\n  \"items\": [\"a\", \"b\"]\n}";
+    let mock = start_mock(move |request| match request.body["method"].as_str() {
+        Some("tools/list") => rpc_result(request, mock_tools_result(None)),
+        Some("tools/call") => rpc_result(
+            request,
+            json!({
+                "content": [{ "type": "text", "text": pretty }],
+                "structuredContent": { "answer": 42, "items": ["a", "b"] }
+            }),
+        ),
+        _ => rpc_result(request, Value::Null),
+    });
+    let set = mcp_tools(&[config(&mock.url, McpTrust::Auto)], &|_| true);
+    let peek = named_tool(&set, "mcp__mock__peek");
+    let (ctx, _) = approving_ctx(true);
+
+    let output = peek.execute(json!({}), &ctx).unwrap();
+
+    assert_eq!(output, pretty);
+}
+
+#[test]
+fn adapter_structured_error_is_bounded_scrubbed_and_not_replayed() {
+    let literal = "fixture-error-active-\"quoted\\path";
+    let shaped = ["sk-", "fixture-abc123"].concat();
+    let detail = format!("{literal}\n{shaped}\n{}", "x".repeat(40_000));
+    let mock = start_mock(move |request| match request.body["method"].as_str() {
+        Some("tools/list") => rpc_result(request, mock_tools_result(None)),
+        Some("tools/call") => rpc_result(
+            request,
+            json!({
+                "isError": true,
+                "structuredContent": { "detail": detail }
+            }),
+        ),
+        _ => rpc_result(request, Value::Null),
+    });
+    let set = mcp_tools(&[config(&mock.url, McpTrust::Auto)], &|_| true);
+    let peek = named_tool(&set, "mcp__mock__peek");
+    let (ctx, _) = approving_ctx(true);
+    let ctx = ctx.with_scrubber(nh_vault::Scrubber::new(vec![literal.to_string()]));
+
+    let error = peek.execute(json!({}), &ctx).unwrap_err().to_string();
+
+    assert!(error.contains("chars elided; digest "), "got: {error}");
+    assert!(error.contains("[REDACTED]"), "got: {error}");
+    assert!(!error.contains(literal), "literal leaked: {error}");
+    assert!(!error.contains(&shaped), "key shape leaked: {error}");
+    assert!(error.chars().count() <= crate::MAX_TOOL_RESULT_CHARS + 100);
+    assert_eq!(
+        count_method(&mock, "tools/call"),
+        1,
+        "bounded error rendering must not replay the remote call"
+    );
+}
+
+#[test]
+fn structured_key_collision_returns_a_safe_marker_after_one_remote_call() {
+    let first = "fixture-first-\"quoted\\path";
+    let second = "fixture-second-\"quoted\\path";
+    let first_key = first.to_string();
+    let second_key = second.to_string();
+    let mock = start_mock(move |request| match request.body["method"].as_str() {
+        Some("tools/list") => rpc_result(request, mock_tools_result(None)),
+        Some("tools/call") => rpc_result(
+            request,
+            json!({
+                "content": [{ "type": "text", "text": "remote action completed" }],
+                "structuredContent": {
+                    first_key.clone(): 1,
+                    second_key.clone(): 2
+                }
+            }),
+        ),
+        _ => rpc_result(request, Value::Null),
+    });
+    let set = mcp_tools(&[config(&mock.url, McpTrust::Auto)], &|_| true);
+    let peek = named_tool(&set, "mcp__mock__peek");
+    let (ctx, _) = approving_ctx(true);
+    let ctx = ctx.with_scrubber(nh_vault::Scrubber::new(vec![
+        first.to_string(),
+        second.to_string(),
+    ]));
+
+    let output = peek.execute(json!({}), &ctx).unwrap();
+
+    assert_eq!(
+        output,
+        "remote action completed\n[structured content omitted: redaction made field names ambiguous]"
+    );
+    assert!(!output.contains(first));
+    assert!(!output.contains(second));
+    assert_eq!(
+        count_method(&mock, "tools/call"),
+        1,
+        "a local redaction collision after a remote side effect must not invite replay"
+    );
 }
 
 #[test]
