@@ -7,7 +7,7 @@ to off. Provider choice and reasoning defaults are unchanged.
 
 ## Local measurement
 
-Add `--measure-efficiency` to an `nh run` command. For example, from an initialized
+Add `--measure-efficiency` to an `nh run` or new `nh chat` command. For example, from an initialized
 project, use a model whose key you have already stored:
 
 ```powershell
@@ -35,9 +35,10 @@ identity to detect changes across requests. It excludes message content and is
 not proof of provider token order, a cache hit, or cryptographic integrity.
 They exclude task text, file contents, tool arguments/results, reasoning text,
 headers, credentials and raw errors. They are still local usage metadata; review
-them before sharing. This measurement option currently applies to `run`, not chat,
-TUI or Fleet. Task duration includes measurement overhead, including local log
-flushes, as well as any enabled observation storage work. Enable measurement on
+them before sharing. This measurement option applies to `run` and new `chat`
+sessions, not TUI or Fleet. Recorded task duration is the receipt's agent-loop
+wall time. It includes measurements written during the loop and enabled observation
+storage work, but excludes CLI startup and task-start/final-summary writes. Enable measurement on
 both sides of a timing comparison; per-request and
 per-tool elapsed times exclude their subsequent measurement write. Per-tool
 timing also excludes the argument fingerprint calculation before execution.
@@ -48,6 +49,8 @@ reveal which individual source was cached. Cost by source and billing type is
 therefore unavailable. The captured catalog quote is taken at task start and may
 not match a task that crosses a pricing window. Missing prices or usage remain
 unknown. Retry usage is aggregate; attempt-level billing is not reconstructed.
+Estimates cover catalog model-token rates, not separate fees an external tool
+service might charge.
 
 Measured tool records also describe consecutive identical calls and returned
 errors. Equality includes the tool name and argument JSON with stable object
@@ -62,6 +65,27 @@ normally. Repetition does not prove a stall. The report separates first calls,
 comparable calls, unavailable comparisons and older records without this metadata.
 Missing evidence never becomes a zero repetition rate. Dropped records can hide
 parts of a sequence, so reported streaks are observed maxima, not a complete trace.
+
+## Measure interactive tasks
+
+Start a new measured chat from your initialized project:
+
+```powershell
+nh chat --model deepseek-v4-flash --measure-efficiency
+```
+
+Each ordinary user task receives a separate printed task ID, request and tool
+counters, and a price snapshot for its current model. Slash commands such as
+`/tools` do not create task records. Later tasks still send the relevant chat
+history, so their request sizes include that context. Keep all repair attempts
+when grouping IDs into an evaluated task.
+
+The flag defaults to off and is not saved in the session. `nh resume` does not
+enable measurement. A failed task keeps whatever usage and receipt evidence is
+available; a task-start record without a summary is incomplete, not a free or
+successful task. Measurement failure leaves the normal answer and session behavior
+intact and reports a warning. Run-only observation retention and context experiments
+are not enabled for chat by this flag.
 
 ## Ranged reads
 
@@ -265,7 +289,12 @@ python -B scripts/mcp-efficiency-smoke.py --binary target/release/nh.exe
 
 This fixture checks stable schemas when a synthetic MCP server reverses tool order,
 discovery followed by invocation, and refusal of a mutation because piped input
-cannot grant approval. Both endpoints are temporary loopback fixtures. This does
+cannot grant approval. Two-task eager and discovery cases also check separate task
+IDs, usage totals, repetition resets and the offline report. Measurement on/off
+must preserve request content after normalizing only fixture paths, origins and
+credential-entry names, as well as actual tool execution. Reported wall time is
+for the local fixture process; its usage counters are synthetic and cannot establish
+provider cost savings or production latency. Both endpoints are temporary loopback fixtures. This does
 not substitute for observing a person decline an interactive approval prompt.
 
 Before changing defaults, use repeated matched tasks and a separate held-out set.

@@ -6,6 +6,7 @@ use std::sync::{Arc, RwLock};
 use chrono::Utc;
 use nh_core::agent::AgentLoop;
 use nh_core::credential;
+use nh_core::efficiency::ActiveEfficiencyRecorder;
 use nh_core::receipt::ReceiptWriter;
 use nh_core::session_ledger::{
     new_session_id, RestoredSession, SessionBudget, SessionEvent, SessionLedger, Surface,
@@ -18,7 +19,8 @@ use nh_tools::{builtin_tools_for_policy, Tool, ToolCtx};
 use nh_vault::{EnvFallbackVault, KeyringVault, Scrubber, SecretRegistry};
 
 use super::{
-    load_mcp, scrub_approval_line, scrub_line, ChatSession, ConnectFn, NotConnected, SharedScrubber,
+    load_mcp, scrub_approval_line, scrub_line, ChatEfficiency, ChatSession, ConnectFn,
+    NotConnected, SharedScrubber,
 };
 use crate::cmd_run::{self, effort_for, DELEGATE_MSG};
 use crate::model_preference;
@@ -89,9 +91,17 @@ pub(super) fn open(
     model: Option<&str>,
     profile: &str,
     mcp_discovery: bool,
+    measure_efficiency: bool,
     terminal_capability: TerminalCapability,
 ) -> anyhow::Result<ChatSession> {
-    open_session(model, profile, None, mcp_discovery, terminal_capability)
+    open_session(
+        model,
+        profile,
+        None,
+        mcp_discovery,
+        measure_efficiency,
+        terminal_capability,
+    )
 }
 
 pub(super) fn reopen(
@@ -105,6 +115,7 @@ pub(super) fn reopen(
         Some(&route_id),
         &profile,
         Some(restored),
+        false,
         false,
         terminal_capability,
     )
@@ -125,6 +136,7 @@ fn open_session(
     profile: &str,
     restored: Option<RestoredSession>,
     mcp_discovery: bool,
+    measure_efficiency: bool,
     terminal_capability: TerminalCapability,
 ) -> anyhow::Result<ChatSession> {
     let startup = Startup::load(model, profile, restored.is_some())?;
@@ -137,6 +149,7 @@ fn open_session(
         restored,
         connect,
         move |root, policy, scrubber| chat_tools(root, policy, scrubber, mcp_discovery),
+        measure_efficiency,
         terminal_capability,
     )
 }
@@ -146,6 +159,7 @@ fn open_prepared<F>(
     restored: Option<RestoredSession>,
     connect: ConnectFn,
     load_tools: F,
+    measure_efficiency: bool,
     terminal_capability: TerminalCapability,
 ) -> anyhow::Result<ChatSession>
 where
@@ -173,6 +187,14 @@ where
     let registry_scrubber = initial.key_literals.scrubber();
     let scrubber: SharedScrubber = Arc::new(RwLock::new(registry_scrubber.clone()));
     let (tools, mcp_warnings) = load_tools(&root, &law.policy, &scrubber);
+    let efficiency = measure_efficiency.then(|| ChatEfficiency {
+        root: root.clone(),
+        active: ActiveEfficiencyRecorder::default(),
+    });
+    let tools = match &efficiency {
+        Some(efficiency) => efficiency.active.wrap_tools(tools),
+        None => tools,
+    };
     let shell_unavailable = law.policy.blocks_all_shell_commands();
 
     let approve_scrubber = Arc::clone(&scrubber);
@@ -182,8 +204,13 @@ where
     let current_constitution =
         cmd_run::agent_constitution(&law_constitution, &route, shell_unavailable);
     let last_request_usage = LastRequestUsage::default();
+    let client = last_request_usage.wrap(initial.client);
+    let client = match &efficiency {
+        Some(efficiency) => efficiency.active.wrap_client(client),
+        None => client,
+    };
     let agent = AgentLoop {
-        client: last_request_usage.wrap(initial.client),
+        client,
         tools,
         ctx: ToolCtx::new(
             cwd,
@@ -243,6 +270,7 @@ where
         profiles,
         active_profile: execution_policy.profile,
         agent,
+        efficiency,
         law_constitution,
         history,
         session_usage: None,
@@ -322,6 +350,7 @@ pub(super) fn reopen_with_test_dependencies(
         Some(restored),
         connect,
         |_, policy, _| (builtin_tools_for_policy(policy), Vec::new()),
+        false,
         TerminalCapability::Unicode,
     )
 }

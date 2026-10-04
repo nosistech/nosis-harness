@@ -149,6 +149,14 @@ fn session_events(root: &Path, id: &str) -> Vec<SessionEvent> {
         .collect()
 }
 
+fn efficiency_records(root: &Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(root.join(EfficiencyRecorder::relative_path()))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
 struct MockClient {
     reply: String,
     calls: Arc<AtomicUsize>,
@@ -243,10 +251,23 @@ fn test_session(model: &str, tmp: &Path) -> (ChatSession, Arc<AtomicUsize>) {
     test_session_from_catalog(model, tmp, TEST_CATALOG)
 }
 
+fn measured_test_session(model: &str, tmp: &Path) -> (ChatSession, Arc<AtomicUsize>) {
+    test_session_from_catalog_with_measurement(model, tmp, TEST_CATALOG, true)
+}
+
 fn test_session_from_catalog(
     model: &str,
     tmp: &Path,
     catalog: &str,
+) -> (ChatSession, Arc<AtomicUsize>) {
+    test_session_from_catalog_with_measurement(model, tmp, catalog, false)
+}
+
+fn test_session_from_catalog_with_measurement(
+    model: &str,
+    tmp: &Path,
+    catalog: &str,
+    measure_efficiency: bool,
 ) -> (ChatSession, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let connect_calls = Arc::clone(&calls);
@@ -282,9 +303,23 @@ fn test_session_from_catalog(
             budget: Some(SessionBudget::Unlimited),
         })
         .unwrap();
+    let efficiency = measure_efficiency.then(|| ChatEfficiency {
+        root: tmp.to_path_buf(),
+        active: ActiveEfficiencyRecorder::default(),
+    });
+    let client = last_request_usage.wrap(client);
+    let client = match &efficiency {
+        Some(efficiency) => efficiency.active.wrap_client(client),
+        None => client,
+    };
+    let tools = builtin_tools();
+    let tools = match &efficiency {
+        Some(efficiency) => efficiency.active.wrap_tools(tools),
+        None => tools,
+    };
     let agent = AgentLoop {
-        client: last_request_usage.wrap(client),
-        tools: builtin_tools(),
+        client,
+        tools,
         ctx: ToolCtx::new(
             tmp.to_path_buf(),
             Box::new(|_| false),
@@ -315,6 +350,7 @@ fn test_session_from_catalog(
         profiles,
         active_profile: execution_policy.profile,
         agent,
+        efficiency,
         law_constitution: law_constitution.into(),
         history: Vec::new(),
         session_usage: None,
@@ -359,6 +395,14 @@ fn reopen_test_session(restored: RestoredSession, tmp: &Path) -> (ChatSession, A
     let session = super::startup::reopen_with_test_dependencies(tmp, resolver, restored, connect)
         .expect("offline resume opens");
     (session, calls)
+}
+
+fn replace_test_client(session: &mut ChatSession, client: Box<dyn ChatClient>) {
+    let client = session.last_request_usage.wrap(client);
+    session.agent.client = match &session.efficiency {
+        Some(efficiency) => efficiency.active.wrap_client(client),
+        None => client,
+    };
 }
 
 #[test]
@@ -830,6 +874,200 @@ fn session_usage_accumulates_across_turns_and_switches() {
         "cumulative after switch: {err}"
     );
     assert_eq!(s.session_cost.len(), 2, "native currencies stay separate");
+}
+
+#[test]
+fn measured_chat_uses_fresh_task_ids_and_current_route_across_slash_commands() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut session, calls) = measured_test_session("deepseek-v4-flash", tmp.path());
+
+    let (_out, err) = drive(
+        &mut session,
+        &[
+            "first task",
+            "/price",
+            "/model kimi-k2.6",
+            "/tools",
+            "second task",
+        ],
+    );
+
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(session.key_literals.contains("fake-key-deepseek"));
+    assert!(session.key_literals.contains("fake-key-kimi"));
+    assert_eq!(err.matches("local efficiency metadata:").count(), 2);
+    let records = efficiency_records(tmp.path());
+    assert_eq!(records.len(), 6, "two one-request tasks, no slash records");
+    let starts = records
+        .iter()
+        .filter(|record| record["record_type"] == "task_start")
+        .collect::<Vec<_>>();
+    assert_eq!(starts.len(), 2);
+    assert_ne!(starts[0]["task_id"], starts[1]["task_id"]);
+    assert_eq!(starts[0]["route"]["route_id"], "deepseek-v4-flash");
+    assert_eq!(starts[0]["route"]["price"]["currency"], "CNY");
+    assert_eq!(starts[0]["route"]["price"]["input_cache_miss"], 1.0);
+    assert_eq!(starts[1]["route"]["route_id"], "kimi-k2.6");
+    assert_eq!(starts[1]["route"]["price"]["currency"], "USD");
+    assert_eq!(starts[1]["route"]["price"]["input_cache_miss"], 0.6);
+    for start in starts {
+        let task_id = &start["task_id"];
+        let task_records = records
+            .iter()
+            .filter(|record| &record["task_id"] == task_id)
+            .collect::<Vec<_>>();
+        assert_eq!(task_records.len(), 3);
+        assert_eq!(task_records[1]["record_type"], "request");
+        assert_eq!(task_records[1]["request_seq"], 1);
+        assert_eq!(task_records[2]["record_type"], "task");
+        assert_eq!(task_records[2]["usage"]["prompt_tokens"], 12);
+        assert_eq!(task_records[2]["usage"]["completion_tokens"], 7);
+    }
+    let raw =
+        std::fs::read_to_string(tmp.path().join(EfficiencyRecorder::relative_path())).unwrap();
+    assert!(!raw.contains("first task"));
+    assert!(!raw.contains("second task"));
+    assert!(!raw.contains("fake-key-deepseek"));
+    assert!(!raw.contains("fake-key-kimi"));
+}
+
+#[test]
+fn measured_keyless_retry_installs_the_fresh_client_before_task_capture() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut session, calls) = measured_test_session("deepseek-v4-flash", tmp.path());
+    session.agent.client = Box::new(NotConnected {
+        msg: "stale keyless fixture".into(),
+    });
+    session.connected = false;
+
+    let (out, err) = drive(&mut session, &["retry after key add"]);
+
+    assert!(out.contains("ok"), "got: {out}");
+    assert!(!err.contains("stale keyless fixture"), "got: {err}");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(session.connected);
+    let records = efficiency_records(tmp.path());
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0]["record_type"], "task_start");
+    assert_eq!(records[1]["record_type"], "request");
+    assert_eq!(records[2]["record_type"], "task");
+    assert!(records
+        .iter()
+        .all(|record| record["task_id"] == records[0]["task_id"]));
+}
+
+#[test]
+fn measured_connection_and_prereceipt_failures_stay_explicit_without_zero_summary() {
+    let connection_root = tempfile::tempdir().unwrap();
+    let (mut keyless, calls) = measured_test_session("deepseek-v4-flash", connection_root.path());
+    make_keyless(&mut keyless);
+
+    let (_out, connection_err) = drive(&mut keyless, &["cannot connect"]);
+
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(connection_err.contains("no provider request or receipt was recorded"));
+    let records = efficiency_records(connection_root.path());
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["record_type"], "task_start");
+
+    let validation_root = tempfile::tempdir().unwrap();
+    let (mut invalid, _) = measured_test_session("deepseek-v4-flash", validation_root.path());
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    run_task(
+        &mut invalid,
+        &"x".repeat(MAX_TASK_BYTES.saturating_add(1)),
+        &mut out,
+        &mut err,
+    );
+
+    assert!(out.is_empty());
+    assert!(invalid.history.is_empty());
+    let err = String::from_utf8(err).unwrap();
+    assert!(
+        err.contains("no receipt summary was recorded"),
+        "got: {err}"
+    );
+    let records = efficiency_records(validation_root.path());
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["record_type"], "task_start");
+}
+
+#[test]
+fn measured_usage_bearing_failure_keeps_request_and_receipt_evidence() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut session, _) = measured_test_session("deepseek-v4-flash", tmp.path());
+    replace_test_client(&mut session, Box::new(MeteredFailingClient));
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+
+    run_task(&mut session, "meter before failing", &mut out, &mut err);
+
+    assert!(out.is_empty());
+    let records = efficiency_records(tmp.path());
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[1]["record_type"], "request");
+    assert_eq!(records[1]["result"], "error");
+    assert_eq!(records[1]["usage"]["prompt_tokens"], 12);
+    assert_eq!(records[1]["usage"]["completion_tokens"], 7);
+    assert_eq!(records[2]["record_type"], "task");
+    assert_eq!(records[2]["receipt_outcome"], "fail");
+    assert_eq!(records[2]["usage"]["prompt_tokens"], 12);
+    assert_eq!(records[2]["usage"]["completion_tokens"], 7);
+    assert!(records
+        .iter()
+        .all(|record| record["task_id"] == records[0]["task_id"]));
+}
+
+#[test]
+fn measurement_write_failure_does_not_change_chat_history_or_receipt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut session, calls) = measured_test_session("deepseek-v4-flash", tmp.path());
+    std::fs::create_dir_all(tmp.path().join(EfficiencyRecorder::relative_path())).unwrap();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+
+    run_task(&mut session, "keep normal behavior", &mut out, &mut err);
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("ok"), "got: {out}");
+    assert!(session
+        .history
+        .iter()
+        .any(|message| message.content.as_deref() == Some("keep normal behavior")));
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("receipts.jsonl"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    let err = String::from_utf8(err).unwrap();
+    assert!(
+        err.contains("warning: efficiency measurement incomplete"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn unmeasured_and_resumed_chat_create_no_efficiency_log() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut session, _) = test_session("deepseek-v4-flash", tmp.path());
+    let (_out, _err) = drive(&mut session, &["ordinary task", "/price"]);
+    assert!(!tmp
+        .path()
+        .join(EfficiencyRecorder::relative_path())
+        .exists());
+
+    let restored = read_session(tmp.path(), "test-session").unwrap();
+    let (mut resumed, _) = reopen_test_session(restored, tmp.path());
+    assert!(resumed.efficiency.is_none());
+    let (_out, _err) = drive(&mut resumed, &["resumed task"]);
+    assert!(!tmp
+        .path()
+        .join(EfficiencyRecorder::relative_path())
+        .exists());
 }
 
 #[test]

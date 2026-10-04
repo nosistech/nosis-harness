@@ -6,6 +6,7 @@ Usage: python -B scripts/mcp-efficiency-smoke.py --binary target/release/nh.exe
 
 import argparse
 import hashlib
+import importlib.util
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
@@ -13,6 +14,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import threading
+import time
 import uuid
 
 
@@ -24,6 +26,21 @@ CORE_TOOLS = {"read_file", "glob_files", "grep_files", "write_file", "edit_file"
 
 def encoded(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def request_identity(requests, root, origin, entry):
+    """Compare payloads after replacing only controlled ephemeral fixture values."""
+    def normalized(value):
+        if isinstance(value, str):
+            return (value.replace(str(root), "<fixture-root>")
+                    .replace(root.as_posix(), "<fixture-root>")
+                    .replace(origin, "<fixture-origin>").replace(entry, "<fixture-entry>"))
+        if isinstance(value, list):
+            return [normalized(item) for item in value]
+        if isinstance(value, dict):
+            return {key: normalized(item) for key, item in value.items()}
+        return value
+    return hashlib.sha256(encoded(normalized(requests))).hexdigest()
 
 
 def fingerprint(value):
@@ -47,12 +64,14 @@ def write_review(home, origin, schemas, enabled=True):
     (directory / "fixture.json").write_bytes(encoded(state))
 
 
-def run_case(binary, discovery, reverse=False, deny=False, changed=False, review_state="enabled"):
+def run_case(binary, discovery, reverse=False, deny=False, changed=False, review_state="enabled",
+             measured=False, task_count=1):
     requests, bodies, remote_calls, remote_lists, errors = [], [], [], [], []
     remote_name = "mutate_record" if deny else "lookup_17"
     exposed = "mcp__fixture__" + remote_name
     enabled = review_state == "enabled"
-    expected_requests = (3 if discovery else 2) if enabled else 1
+    requests_per_task = (3 if discovery else 2) if enabled else 1
+    expected_requests = requests_per_task * task_count
     schemas = [{"name": f"lookup_{index:02}",
                 "description": f"Synthetic lookup {index:02}. " + "Public fixture documentation. " * 12,
                 "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}},
@@ -92,12 +111,13 @@ def run_case(binary, discovery, reverse=False, deny=False, changed=False, review
                 else:
                     requests.append(request)
                     bodies.append(body)
-                    step = len(requests)
-                    if step > expected_requests:
+                    absolute_step = len(requests)
+                    step = (absolute_step - 1) % requests_per_task + 1
+                    if absolute_step > expected_requests:
                         raise ValueError("unexpected provider request")
                     if enabled and discovery and step == 1:
                         name, arguments = DISCOVER, {"query": remote_name, "offset": 0, "limit": 1}
-                    elif step < expected_requests:
+                    elif step < requests_per_task:
                         name = INVOKE if discovery else exposed
                         arguments = {"query": "public fixture"}
                         if discovery:
@@ -106,7 +126,7 @@ def run_case(binary, discovery, reverse=False, deny=False, changed=False, review
                         name, arguments = None, None
                     if name:
                         message = {"role": "assistant", "content": None, "tool_calls": [{
-                            "id": f"fixture_{step}", "type": "function",
+                            "id": f"fixture_{absolute_step}", "type": "function",
                             "function": {"name": name, "arguments": json.dumps(arguments)}}]}
                     else:
                         message = {"role": "assistant", "content": "Synthetic chat fixture complete."}
@@ -165,11 +185,15 @@ thinking_dialect = "none"
                 command = [str(binary), "chat", "--model", "fixture"]
                 if discovery:
                     command.append("--mcp-discovery")
+                if measured:
+                    command.append("--measure-efficiency")
                 # Non-terminal stdin cannot grant approval. Do not send a fake
                 # approval answer: it would become a second chat task instead.
-                user_input = b"Use the synthetic MCP fixture.\n/quit\n"
+                user_input = (b"Use the synthetic MCP fixture.\n/tools\n" * task_count) + b"/quit\n"
+                started = time.perf_counter()
                 completed = subprocess.run(command, cwd=project, env=env, input=user_input,
                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90)
+                local_duration_ms = (time.perf_counter() - started) * 1000
                 if completed.returncode or errors or len(requests) != expected_requests:
                     raise RuntimeError(completed.stderr.decode("utf-8", errors="replace")
                                        + f"\nfixture errors={errors}; requests={len(requests)}")
@@ -203,21 +227,88 @@ thinking_dialect = "none"
                         raise AssertionError("unapproved mutation reached remote tool")
                     if b"approval refused" not in completed.stderr:
                         raise AssertionError("mutation fixture did not reach the approval boundary")
-                elif (len(remote_calls) != 1
-                      or remote_calls[0].get("name") != remote_name
-                      or remote_calls[0].get("arguments") != {"query": "public fixture"}
+                elif (len(remote_calls) != task_count
+                      or any(call.get("name") != remote_name
+                             or call.get("arguments") != {"query": "public fixture"}
+                             for call in remote_calls)
                       or EVIDENCE not in tool_output):
                     raise AssertionError("MCP invocation/result did not match the discovered adapter")
+                measurement = check_measurement(project, measured, task_count, requests_per_task,
+                                                len(remote_calls), discovery, enabled)
                 return {"discovery": discovery, "reverse_server_order": reverse, "approval_refused_mutation": deny,
                         "changed_definition_refused": changed,
                         "review_state": review_state,
                         "request_bytes": [len(body) for body in bodies],
+                        "normalized_request_sha256": request_identity(requests, root, origin, entry),
                         "tool_schema_bytes": len(encoded(tools)), "tools": len(tools),
                         "schema_sha256": hashlib.sha256(encoded(tools)).hexdigest(),
-                        "remote_calls": len(remote_calls), "remote_lists": len(remote_lists)}
+                        "remote_calls": len(remote_calls), "remote_lists": len(remote_lists),
+                        "measurement_enabled": measured, "task_count": task_count,
+                        "observed_local_duration_ms": local_duration_ms,
+                        "measurement": measurement}
         finally:
             server.shutdown()
             thread.join(timeout=5)
+
+
+def check_measurement(project, measured, task_count, requests_per_task, remote_calls, discovery, enabled):
+    path = project / ".nosis" / "efficiency-v1.jsonl"
+    if not measured:
+        if path.exists():
+            raise AssertionError("chat measurement wrote a log with the flag disabled")
+        return None
+    text = path.read_text(encoding="utf-8")
+    for private in ("Use the synthetic MCP fixture.", "public fixture", EVIDENCE,
+                    "local-fixture-placeholder", "Synthetic chat fixture complete."):
+        if private in text:
+            raise AssertionError("chat measurement retained private fixture content")
+    rows = [json.loads(line) for line in text.splitlines() if line.strip()]
+    starts = [row for row in rows if row["record_type"] == "task_start"]
+    tasks = [row for row in rows if row["record_type"] == "task"]
+    ids = {row["task_id"] for row in starts}
+    if len(starts) != task_count or len(ids) != task_count or len(tasks) != task_count:
+        raise AssertionError("chat tasks/slash commands did not have separate measurement lifetimes")
+    if {row["task_id"] for row in rows} != ids or {row["task_id"] for row in tasks} != ids:
+        raise AssertionError("request/tool/task measurement identities differ")
+    for task in tasks:
+        task_rows = [row for row in rows if row["task_id"] == task["task_id"]]
+        requests = [row for row in task_rows if row["record_type"] == "request"]
+        tools = [row for row in task_rows if row["record_type"] == "tool"]
+        if len(requests) != requests_per_task or task["turns"] != requests_per_task:
+            raise AssertionError("chat task measurement has wrong request/turn counts")
+        if [row["request_seq"] for row in requests] != list(range(1, requests_per_task + 1)):
+            raise AssertionError("chat request sequence did not reset at the task boundary")
+        expected_tools = (2 if discovery else 1) if enabled else 0
+        if len(tools) != expected_tools:
+            raise AssertionError("chat measurement skipped or duplicated a tool")
+        if [row["tool_seq"] for row in tools] != list(range(1, expected_tools + 1)):
+            raise AssertionError("chat tool sequence did not reset at the task boundary")
+        if tools and tools[0]["repetition"]["comparison_status"] != "first_call":
+            raise AssertionError("chat repetition state leaked across tasks")
+        if task["correctness_assessed"] or task["recorder"]["records_dropped_before_summary"]:
+            raise AssertionError("synthetic chat invented correctness or dropped measurements")
+        if task["usage"] != {"usage_object_reported": True, "evidence": "measured",
+                             "prompt_tokens": 100 * requests_per_task,
+                             "completion_tokens": 10 * requests_per_task,
+                             "cached_tokens": 20 * requests_per_task}:
+            raise AssertionError("chat measurement differs from synthetic provider usage")
+    module_spec = importlib.util.spec_from_file_location(
+        "efficiency_report", Path(__file__).with_name("efficiency-report.py"))
+    reporter = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(reporter)
+    report = reporter.summarize(reporter.read_records([path]), {"schema_version": 1, "trials": [
+        {"trial_id": f"synthetic-chat-{index}", "pair_id": f"synthetic-chat-{index}",
+         "case_id": "synthetic-chat", "variant": "discovery" if discovery else "eager",
+         "task_ids": [task["task_id"]], "judgment": "unjudged", "evidence": "",
+         "settings": {"model": "fixture-model", "thinking": "none",
+                      "cache_condition": "synthetic", "fixture_revision": "synthetic-chat"}}
+        for index, task in enumerate(tasks)]})
+    if report["automatic_promotion"] or any(cohort["total_cost_estimate"] is not None
+                                            for cohort in report["cohorts"]):
+        raise AssertionError("chat report invented billed costs or promoted synthetic runs")
+    return {"tasks": len(tasks), "requests": sum(row["record_type"] == "request" for row in rows),
+            "tools": sum(row["record_type"] == "tool" for row in rows),
+            "provider_usage_is_synthetic": True, "remote_actions": remote_calls}
 
 
 def main():
@@ -235,6 +326,14 @@ def main():
                       run_case(binary, False, review_state="none"),
                       run_case(binary, True, review_state="none"),
                       run_case(binary, False, review_state="missing")])
+        for discovery in (False, True):
+            enabled_measurement = run_case(binary, discovery, measured=True, task_count=2)
+            disabled_measurement = run_case(binary, discovery, task_count=2)
+            for key in ("request_bytes", "normalized_request_sha256", "schema_sha256",
+                        "remote_calls", "remote_lists"):
+                if enabled_measurement[key] != disabled_measurement[key]:
+                    raise AssertionError("measurement changed rendered chat requests or tool execution")
+            cases.extend([disabled_measurement, enabled_measurement])
     print(json.dumps({"synthetic_only": True, "model_quality_assessed": False,
                       "real_token_savings_assessed": False, "cases": cases}, indent=2))
 

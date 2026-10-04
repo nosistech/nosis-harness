@@ -122,6 +122,9 @@ enum Cmd {
         /// Replace eager MCP schemas with fixed discovery and invocation tools (preview)
         #[arg(long)]
         mcp_discovery: bool,
+        /// Append local metadata-only efficiency records for each task (preview)
+        #[arg(long)]
+        measure_efficiency: bool,
     },
     /// Check the install and print what is wrong and how to fix it
     Doctor,
@@ -308,10 +311,12 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             model,
             profile,
             mcp_discovery,
+            measure_efficiency,
         } => cmd_chat::run(
             model.as_deref(),
             &profile,
             mcp_discovery,
+            measure_efficiency,
             terminal_capability,
         ),
         Cmd::Doctor => cmd_doctor::run(terminal_capability, forced_ascii),

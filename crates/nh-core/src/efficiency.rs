@@ -256,6 +256,101 @@ pub struct EfficiencyRecorder {
     inner: Arc<EfficiencyInner>,
 }
 
+/// A task-scoped recorder slot for long-lived clients and tools.
+///
+/// Wrappers clone the current recorder while holding the lock, then release the
+/// lock before provider or tool execution. An empty slot adds no records.
+#[derive(Clone, Default)]
+pub struct ActiveEfficiencyRecorder {
+    inner: Arc<Mutex<Option<EfficiencyRecorder>>>,
+}
+
+/// Clears its own recorder when one task leaves its measurement scope.
+#[must_use = "measurement remains active only while this guard is held"]
+pub struct ActiveEfficiencyGuard {
+    slot: ActiveEfficiencyRecorder,
+    task_id: Option<String>,
+}
+
+impl ActiveEfficiencyRecorder {
+    /// Measure subsequent calls through this slot until the returned guard drops.
+    pub fn activate(&self, recorder: EfficiencyRecorder) -> ActiveEfficiencyGuard {
+        let mut active = match self.inner.lock() {
+            Ok(active) => active,
+            Err(poisoned) => {
+                *poisoned.into_inner() = None;
+                recorder.note_warning(
+                    "efficiency active-recorder slot is unavailable; request and tool measurements were skipped",
+                );
+                return ActiveEfficiencyGuard {
+                    slot: self.clone(),
+                    task_id: None,
+                };
+            }
+        };
+        if let Some(previous) = active.take() {
+            drop(active);
+            const WARNING: &str =
+                "efficiency active-recorder overlap; request and tool measurements were skipped";
+            previous.note_warning(WARNING);
+            recorder.note_warning(WARNING);
+            return ActiveEfficiencyGuard {
+                slot: self.clone(),
+                task_id: None,
+            };
+        }
+        let task_id = recorder.task_id().to_owned();
+        *active = Some(recorder);
+        drop(active);
+        ActiveEfficiencyGuard {
+            slot: self.clone(),
+            task_id: Some(task_id),
+        }
+    }
+
+    /// Wrap a long-lived client whose calls use the recorder active at call start.
+    pub fn wrap_client(&self, inner: Box<dyn ChatClient>) -> Box<dyn ChatClient> {
+        Box::new(MeasuredClient {
+            inner,
+            recorder: RecorderSource::Active(self.clone()),
+        })
+    }
+
+    /// Wrap long-lived tools whose calls use the recorder active at call start.
+    pub fn wrap_tools(&self, tools: Vec<Box<dyn Tool>>) -> Vec<Box<dyn Tool>> {
+        tools
+            .into_iter()
+            .map(|inner| {
+                Box::new(MeasuredTool {
+                    inner,
+                    recorder: RecorderSource::Active(self.clone()),
+                }) as Box<dyn Tool>
+            })
+            .collect()
+    }
+
+    fn capture(&self) -> Option<EfficiencyRecorder> {
+        self.inner.lock().ok()?.clone()
+    }
+}
+
+impl Drop for ActiveEfficiencyGuard {
+    fn drop(&mut self) {
+        let Some(task_id) = self.task_id.take() else {
+            return;
+        };
+        let Ok(mut active) = self.slot.inner.lock() else {
+            return;
+        };
+        if active
+            .as_ref()
+            .is_some_and(|recorder| recorder.task_id() == task_id)
+        {
+            *active = None;
+        }
+    }
+}
+
 impl EfficiencyRecorder {
     /// Construct a recorder only when the caller's explicit flag is enabled.
     /// The disabled path performs no filesystem operation.
@@ -339,7 +434,7 @@ impl EfficiencyRecorder {
     pub fn wrap_client(&self, inner: Box<dyn ChatClient>) -> Box<dyn ChatClient> {
         Box::new(MeasuredClient {
             inner,
-            recorder: self.clone(),
+            recorder: RecorderSource::Fixed(self.clone()),
         })
     }
 
@@ -349,7 +444,7 @@ impl EfficiencyRecorder {
             .map(|inner| {
                 Box::new(MeasuredTool {
                     inner,
-                    recorder: self.clone(),
+                    recorder: RecorderSource::Fixed(self.clone()),
                 }) as Box<dyn Tool>
             })
             .collect()
@@ -415,6 +510,14 @@ impl EfficiencyRecorder {
         match self.inner.first_error.lock() {
             Ok(error) => error.clone(),
             Err(_) => Some("efficiency recorder error state is unavailable".to_owned()),
+        }
+    }
+
+    fn note_warning(&self, warning: &str) {
+        if let Ok(mut first) = self.inner.first_error.lock() {
+            if first.is_none() {
+                *first = Some(warning.to_owned());
+            }
         }
     }
 
@@ -608,33 +711,31 @@ impl EfficiencyRecorder {
         if let Err(error) = result {
             self.inner.dropped_records.fetch_add(1, Ordering::Relaxed);
             let safe = self.inner.scrubber.scrub(&error.to_string());
-            if let Ok(mut first) = self.inner.first_error.lock() {
-                if first.is_none() {
-                    *first = Some(safe);
-                }
-            }
+            self.note_warning(&safe);
         }
     }
 }
 
 struct MeasuredClient {
     inner: Box<dyn ChatClient>,
-    recorder: EfficiencyRecorder,
+    recorder: RecorderSource,
 }
 
 impl ChatClient for MeasuredClient {
     fn complete(&self, request: &ChatRequest) -> anyhow::Result<ChatResponse> {
+        let recorder = self.recorder.capture();
         let started = Instant::now();
         let result = self.inner.complete(request);
-        self.recorder
-            .record_request(request, elapsed_ms(started), &result);
+        if let Some(recorder) = recorder {
+            recorder.record_request(request, elapsed_ms(started), &result);
+        }
         result
     }
 }
 
 struct MeasuredTool {
     inner: Box<dyn Tool>,
-    recorder: EfficiencyRecorder,
+    recorder: RecorderSource,
 }
 
 impl Tool for MeasuredTool {
@@ -648,22 +749,41 @@ impl Tool for MeasuredTool {
     }
 
     fn execute_with_audit(&self, args: ToolArgs, ctx: &ToolCtx) -> anyhow::Result<ToolExecution> {
+        let recorder = self.recorder.capture();
         let name = self.inner.spec().name;
-        let call_identity = self.recorder.tool_call_identity(&name, &args);
+        let call_identity = recorder
+            .as_ref()
+            .and_then(|recorder| recorder.tool_call_identity(&name, &args));
         let started = Instant::now();
         let result = self.inner.execute_with_audit(args, ctx);
         let outcome = match &result {
             Ok(execution) => observed_tool_outcome(&execution.audit),
             Err(_) => "error",
         };
-        self.recorder.record_tool(
-            &name,
-            call_identity,
-            elapsed_ms(started),
-            outcome,
-            result.is_err(),
-        );
+        if let Some(recorder) = recorder {
+            recorder.record_tool(
+                &name,
+                call_identity,
+                elapsed_ms(started),
+                outcome,
+                result.is_err(),
+            );
+        }
         result
+    }
+}
+
+enum RecorderSource {
+    Fixed(EfficiencyRecorder),
+    Active(ActiveEfficiencyRecorder),
+}
+
+impl RecorderSource {
+    fn capture(&self) -> Option<EfficiencyRecorder> {
+        match self {
+            Self::Fixed(recorder) => Some(recorder.clone()),
+            Self::Active(slot) => slot.capture(),
+        }
     }
 }
 
@@ -1714,6 +1834,157 @@ mod tests {
         assert!(repetition["consecutive_same_call_count"].is_null());
         assert_eq!(repetition["returned_error"], false);
         assert!(repetition["consecutive_returned_error_count"].is_null());
+    }
+
+    #[test]
+    fn active_recorder_captures_one_task_without_holding_or_stacking_the_slot() {
+        let first_root = tempfile::tempdir().unwrap();
+        let second_root = tempfile::tempdir().unwrap();
+        let first = EfficiencyRecorder::project(
+            first_root.path(),
+            &route(),
+            fixed_at(),
+            nh_vault::Scrubber::new(Vec::new()),
+        );
+        let second = EfficiencyRecorder::project(
+            second_root.path(),
+            &route(),
+            fixed_at(),
+            nh_vault::Scrubber::new(Vec::new()),
+        );
+        let active = ActiveEfficiencyRecorder::default();
+        let client = active.wrap_client(Box::new(SequenceClient {
+            results: Mutex::new(VecDeque::from([
+                FakeResult::Response(None),
+                FakeResult::Response(None),
+                FakeResult::Response(None),
+                FakeResult::Response(None),
+            ])),
+        }));
+        let mut tools = active.wrap_tools(vec![Box::new(SequenceTool::new(
+            "read_file",
+            [true, true, true, true],
+            Arc::new(Mutex::new(Vec::new())),
+        ))]);
+        let tool = tools.pop().unwrap();
+        let request = request("ordinary fixture");
+        let args = json!({"path": "ordinary.txt"});
+
+        client.complete(&request).unwrap();
+        tool.execute_with_audit(args.clone(), &ctx(first_root.path()))
+            .unwrap();
+        {
+            let _scope = active.activate(first.clone());
+            client.complete(&request).unwrap();
+            tool.execute_with_audit(args.clone(), &ctx(first_root.path()))
+                .unwrap();
+        }
+        client.complete(&request).unwrap();
+        tool.execute_with_audit(args.clone(), &ctx(first_root.path()))
+            .unwrap();
+        {
+            let _scope = active.activate(second.clone());
+            client.complete(&request).unwrap();
+            tool.execute_with_audit(args, &ctx(second_root.path()))
+                .unwrap();
+        }
+
+        for (root, task_id) in [
+            (first_root.path(), first.task_id()),
+            (second_root.path(), second.task_id()),
+        ] {
+            let records = records(root);
+            assert_eq!(records.len(), 3);
+            assert_eq!(records[0]["record_type"], "task_start");
+            assert_eq!(records[1]["record_type"], "request");
+            assert_eq!(records[1]["request_seq"], 1);
+            assert_eq!(records[2]["record_type"], "tool");
+            assert_eq!(records[2]["tool_seq"], 1);
+            assert!(records.iter().all(|record| record["task_id"] == task_id));
+        }
+    }
+
+    #[test]
+    fn overlapping_active_recorder_guards_fail_closed_without_resurrecting_a_task() {
+        let first_root = tempfile::tempdir().unwrap();
+        let second_root = tempfile::tempdir().unwrap();
+        let third_root = tempfile::tempdir().unwrap();
+        let first = EfficiencyRecorder::project(
+            first_root.path(),
+            &route(),
+            fixed_at(),
+            nh_vault::Scrubber::new(Vec::new()),
+        );
+        let second = EfficiencyRecorder::project(
+            second_root.path(),
+            &route(),
+            fixed_at(),
+            nh_vault::Scrubber::new(Vec::new()),
+        );
+        let third = EfficiencyRecorder::project(
+            third_root.path(),
+            &route(),
+            fixed_at(),
+            nh_vault::Scrubber::new(Vec::new()),
+        );
+        let active = ActiveEfficiencyRecorder::default();
+        let client = active.wrap_client(Box::new(SequenceClient {
+            results: Mutex::new(VecDeque::from([
+                FakeResult::Response(None),
+                FakeResult::Response(None),
+                FakeResult::Response(None),
+                FakeResult::Response(None),
+            ])),
+        }));
+        let request = request("ordinary fixture");
+
+        let first_guard = active.activate(first.clone());
+        client.complete(&request).unwrap();
+        let second_guard = active.activate(second.clone());
+        client.complete(&request).unwrap();
+        let third_guard = active.activate(third.clone());
+        drop(first_guard);
+        client.complete(&request).unwrap();
+        drop(second_guard);
+        client.complete(&request).unwrap();
+        drop(third_guard);
+
+        assert!(first.warning().unwrap().contains("overlap"));
+        assert!(second.warning().unwrap().contains("overlap"));
+        assert_eq!(records(first_root.path()).len(), 2);
+        assert_eq!(records(second_root.path()).len(), 1);
+        let third_records = records(third_root.path());
+        assert_eq!(third_records.len(), 3);
+        assert_eq!(third_records[1]["record_type"], "request");
+        assert_eq!(third_records[1]["request_seq"], 1);
+        assert_eq!(third_records[2]["request_seq"], 2);
+    }
+
+    #[test]
+    fn poisoned_active_recorder_slot_skips_measurement_without_changing_the_call() {
+        let root = tempfile::tempdir().unwrap();
+        let recorder = EfficiencyRecorder::project(
+            root.path(),
+            &route(),
+            fixed_at(),
+            nh_vault::Scrubber::new(Vec::new()),
+        );
+        let active = ActiveEfficiencyRecorder::default();
+        let poison_target = active.clone();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = poison_target.inner.lock().unwrap();
+            panic!("poison active recorder fixture");
+        }));
+        let _scope = active.activate(recorder.clone());
+        let client = active.wrap_client(Box::new(SequenceClient {
+            results: Mutex::new(VecDeque::from([FakeResult::Response(None)])),
+        }));
+
+        let response = client.complete(&request("ordinary fixture")).unwrap();
+
+        assert_eq!(response.finish_reason, FinishReason::Stop);
+        assert_eq!(records(root.path()).len(), 1);
+        assert!(recorder.warning().unwrap().contains("slot is unavailable"));
     }
 
     #[test]

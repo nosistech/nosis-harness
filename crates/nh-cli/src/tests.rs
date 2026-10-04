@@ -372,10 +372,12 @@ fn parses_chat_without_an_explicit_model() {
             model,
             profile,
             mcp_discovery,
+            measure_efficiency,
         } => {
             assert_eq!(model, None);
             assert_eq!(profile, "balanced");
             assert!(!mcp_discovery);
+            assert!(!measure_efficiency);
         }
         _ => panic!("expected chat"),
     }
@@ -425,10 +427,12 @@ fn parses_chat_with_model_override() {
             model,
             profile,
             mcp_discovery,
+            measure_efficiency,
         } => {
             assert_eq!(model.as_deref(), Some("kimi-k2.6"));
             assert_eq!(profile, "balanced");
             assert!(!mcp_discovery);
+            assert!(!measure_efficiency);
         }
         _ => panic!("expected chat"),
     }
@@ -441,6 +445,18 @@ fn parses_chat_mcp_discovery_as_explicit_opt_in() {
         cli.cmd,
         Cmd::Chat {
             mcp_discovery: true,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn parses_chat_efficiency_measurement_as_explicit_opt_in() {
+    let cli = Cli::try_parse_from(["nh", "chat", "--measure-efficiency"]).unwrap();
+    assert!(matches!(
+        cli.cmd,
+        Cmd::Chat {
+            measure_efficiency: true,
             ..
         }
     ));

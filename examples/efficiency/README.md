@@ -33,10 +33,31 @@ defaults. The three practice edits use [the practice kit](../practice-tasks/READ
 Build the large fixtures from public synthetic text. Do not put private transcripts
 or credentials in the evaluation kit. Mock-provider tests can prove request shapes,
 retrieval and accounting. They cannot prove model quality or real token savings.
-The context/archive experiment and JSONL measurement currently apply to `run`.
-The resume case checks existing chat behavior, and MCP discovery is chat-only;
-those two cases need separate manual/provider evidence rather than the run-only
-measurement report. Do not present them as instrumented cost comparisons.
+The context/archive experiment applies only to `run`. JSONL measurement supports
+`run` and new `chat --measure-efficiency` sessions. The resume case still checks
+existing chat behavior without new measurements: the flag is not persisted, and
+`nh resume` does not enable it. MCP discovery is chat-only and can now use the
+task measurement report. Provider-backed trials still need separate spending
+consent and independently checked task results.
+
+For an MCP comparison, use identical disposable projects, reviewed tools and
+task instructions in both variants. Start the baseline from its project folder:
+
+```powershell
+nh chat --model deepseek-v4-flash --measure-efficiency
+```
+
+Start the candidate from its separate project folder with only discovery changed:
+
+```powershell
+nh chat --model deepseek-v4-flash --measure-efficiency --mcp-discovery
+```
+
+Ordinary task messages make real provider requests and incur normal charges.
+Keep every printed task ID, including repair messages; `/tools` is not a measured
+task. Group attempts in the judgments file described in [the measurement guide](../../docs/EFFICIENCY.md).
+The offline loopback fixture checks this mechanism without charged calls; its
+synthetic usage and local timing are not provider billing or model quality results.
 
 ## Judging and measurement
 

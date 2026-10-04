@@ -11,6 +11,9 @@ commit passes local and remote gates.
 
 ### Added
 
+- `nh chat --measure-efficiency` records each ordinary task separately, including
+  the current model's usage and price context. Slash commands are excluded;
+  measurement defaults off and is not enabled when resuming a session.
 - Optional efficiency records report consecutive identical tool calls and returned
   errors without saving arguments or results. Offline reports keep missing older
   measurements explicit. Repeated calls still execute normally.

@@ -7,11 +7,12 @@
 mod startup;
 
 use std::io::{BufRead, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use chrono::{DateTime, FixedOffset, Utc};
 use nh_core::agent::{result_notice, AgentLoop, AgentRunError, MAX_TASK_BYTES};
+use nh_core::efficiency::{ActiveEfficiencyRecorder, EfficiencyRecorder};
 use nh_core::receipt::Receipt;
 use nh_core::session_ledger::{RestoredSession, RestoredTurn, SessionEvent, SessionLedger};
 use nh_core::terminal_capability::TerminalCapability;
@@ -93,6 +94,11 @@ struct SessionCost {
     upper_bound: bool,
 }
 
+struct ChatEfficiency {
+    root: PathBuf,
+    active: ActiveEfficiencyRecorder,
+}
+
 /// Everything one chat session owns. History and usage survive route switches.
 struct ChatSession {
     terminal_capability: TerminalCapability,
@@ -101,6 +107,7 @@ struct ChatSession {
     profiles: Profiles,
     active_profile: String,
     agent: AgentLoop,
+    efficiency: Option<ChatEfficiency>,
     law_constitution: String,
     history: Vec<ChatMessage>,
     /// None means no task has run. Once a task is attempted, its typed evidence
@@ -145,12 +152,14 @@ pub fn run(
     model: Option<&str>,
     profile: &str,
     mcp_discovery: bool,
+    measure_efficiency: bool,
     terminal_capability: TerminalCapability,
 ) -> anyhow::Result<()> {
     run_session(startup::open(
         model,
         profile,
         mcp_discovery,
+        measure_efficiency,
         terminal_capability,
     )?)
 }
@@ -325,10 +334,23 @@ fn run_task(s: &mut ChatSession, task: &str, out: &mut dyn Write, err: &mut dyn 
             Ok((client, literal)) => install_client(s, client, literal),
             Err(e) => {
                 print_err(s, err, &e.to_string());
+                if let Some(recorder) = start_efficiency_measurement(s, err) {
+                    let _ = writeln!(
+                        err,
+                        "warning: no provider request or receipt was recorded for this measured task"
+                    );
+                    report_efficiency_warning(s, &recorder, err);
+                }
                 return;
             }
         }
     }
+    let efficiency = start_efficiency_measurement(s, err);
+    let _efficiency_scope = efficiency.as_ref().and_then(|recorder| {
+        s.efficiency
+            .as_ref()
+            .map(|efficiency| efficiency.active.activate(recorder.clone()))
+    });
     let history_before = s.history.len();
     if let Some(message) = s.pending_route_context.take() {
         s.history.push(message);
@@ -359,6 +381,17 @@ fn run_task(s: &mut ChatSession, task: &str, out: &mut dyn Write, err: &mut dyn 
             .downcast_ref::<AgentRunError>()
             .map(AgentRunError::receipt),
     };
+    if let Some(recorder) = &efficiency {
+        if let Some(receipt) = receipt {
+            recorder.record_task(receipt);
+        } else {
+            let _ = writeln!(
+                err,
+                "warning: no receipt summary was recorded for this measured task"
+            );
+        }
+        report_efficiency_warning(s, recorder, err);
+    }
     let usage = receipt.and_then(|receipt| receipt.usage.clone());
     let messages = s
         .history
@@ -387,6 +420,34 @@ fn run_task(s: &mut ChatSession, task: &str, out: &mut dyn Write, err: &mut dyn 
                 .map(AgentRunError::receipt);
             project_turn_meter(s, receipt, at, err);
         }
+    }
+}
+
+fn start_efficiency_measurement(
+    s: &ChatSession,
+    err: &mut dyn Write,
+) -> Option<EfficiencyRecorder> {
+    let efficiency = s.efficiency.as_ref()?;
+    let recorder = EfficiencyRecorder::project_if_enabled(
+        true,
+        efficiency.root.clone(),
+        &s.route,
+        (s.now)(),
+        s.key_literals.scrubber(),
+    )?;
+    let line = format!(
+        "local efficiency metadata: {} (task {}; receipt outcome is not correctness)",
+        EfficiencyRecorder::relative_path(),
+        recorder.task_id()
+    );
+    let _ = writeln!(err, "  {}", display_line(s, &line));
+    Some(recorder)
+}
+
+fn report_efficiency_warning(s: &ChatSession, recorder: &EfficiencyRecorder, err: &mut dyn Write) {
+    if let Some(error) = recorder.warning() {
+        let line = format!("warning: efficiency measurement incomplete: {error}");
+        let _ = writeln!(err, "{}", display_line(s, &line));
     }
 }
 
@@ -482,7 +543,11 @@ fn install_client(s: &mut ChatSession, client: Box<dyn ChatClient>, literal: Sec
     s.agent.ctx.scrubber = registry.clone();
     s.agent.receipts.replace_scrubber(registry.clone());
     s.ledger.replace_scrubber(registry);
-    s.agent.client = s.last_request_usage.wrap(client);
+    let client = s.last_request_usage.wrap(client);
+    s.agent.client = match &s.efficiency {
+        Some(efficiency) => efficiency.active.wrap_client(client),
+        None => client,
+    };
     s.connected = true;
 }
 

@@ -242,11 +242,12 @@ Chat with a model - /model and /provider switch routes mid-session
 Usage: nh.exe chat [OPTIONS]
 
 Options:
-      --ascii <ASCII>      Force one-column ASCII fallback glyphs on or off (default: decide from stdout) [possible values: on, off]
-      --model <MODEL>      Model id override; otherwise use the saved model or bundled default
-      --profile <PROFILE>  Execution profile: frugal, balanced, or max-quality [default: balanced]
-      --mcp-discovery      Replace eager MCP schemas with fixed discovery and invocation tools (preview)
-  -h, --help               Print help
+      --ascii <ASCII>       Force one-column ASCII fallback glyphs on or off (default: decide from stdout) [possible values: on, off]
+      --model <MODEL>       Model id override; otherwise use the saved model or bundled default
+      --profile <PROFILE>   Execution profile: frugal, balanced, or max-quality [default: balanced]
+      --mcp-discovery       Replace eager MCP schemas with fixed discovery and invocation tools (preview)
+      --measure-efficiency  Append local metadata-only efficiency records for each task (preview)
+  -h, --help                Print help
 ```
 
 ## nh doctor
