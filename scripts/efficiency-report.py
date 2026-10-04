@@ -94,6 +94,61 @@ def read_records(paths):
     return records
 
 
+def repetition_summary(rows):
+    """Optional diagnostics: absent/invalid evidence never becomes a zero rate."""
+    statuses = Counter()
+    repeated, error_records, errors, error_streak_records = 0, 0, 0, 0
+    longest_same, longest_error = None, None
+    for row in rows:
+        if "repetition" not in row:
+            statuses["missing"] += 1
+            continue
+        observation = row["repetition"]
+        if not isinstance(observation, dict):
+            statuses["invalid"] += 1
+            continue
+        returned = observation.get("returned_error")
+        error_streak = observation.get("consecutive_returned_error_count")
+        if isinstance(returned, bool):
+            error_records += 1
+            errors += returned
+            if integer(error_streak) and ((returned and error_streak > 0)
+                                          or (not returned and error_streak == 0)):
+                error_streak_records += 1
+                longest_error = max(longest_error or 0, error_streak)
+        status = observation.get("comparison_status")
+        same = observation.get("same_as_previous_call")
+        streak = observation.get("consecutive_same_call_count")
+        has_comparison = {"same_as_previous_call", "consecutive_same_call_count"} <= observation.keys()
+        valid = has_comparison and (
+            (status == "first_call" and same is None and integer(streak) and streak == 1)
+            or (status == "compared" and isinstance(same, bool) and integer(streak)
+                and ((same and streak >= 2) or (not same and streak == 1)))
+            or (status == "unavailable" and same is None and streak is None))
+        if not valid:
+            statuses["invalid"] += 1
+            continue
+        statuses[status] += 1
+        if status == "compared":
+            repeated += same
+        if streak is not None:
+            longest_same = max(longest_same or 0, streak)
+    comparable = statuses["compared"]
+    return {
+        "tool_records": len(rows), "comparison_status_counts": dict(statuses),
+        "comparable_calls": comparable,
+        "observed_repeated_calls": repeated if comparable else None,
+        "repeated_fraction_of_comparable_calls": repeated / comparable if comparable else None,
+        "returned_error_records": error_records,
+        "observed_returned_errors": errors if error_records else None,
+        "returned_error_fraction_of_measured_calls": errors / error_records if error_records else None,
+        "error_streak_records": error_streak_records,
+        "max_observed_same_call_streak": longest_same,
+        "max_observed_task_error_streak_at_these_calls": longest_error,
+        "basis": "task-local consecutive calls across tools; diagnostic only, not proof of a stall",
+    }
+
+
 def summarize(records, judgments):
     if not isinstance(judgments, dict) or judgments.get("schema_version") != 1:
         raise ValueError("unsupported judgment schema")
@@ -233,6 +288,9 @@ def summarize(records, judgments):
                         "median_turns": statistics.median(trial["turns"] for trial in selected)
                         if all(trial["turns"] is not None for trial in selected) else None,
                         "request_records": len(cohort_requests),
+                        "tool_repetition": repetition_summary([
+                            row for row in records
+                            if row["task_id"] in cohort_ids and row["record_type"] == "tool"]),
                         "tool_schema_diagnostics": {
                             "records": len(schemas),
                             "distinct_observed_identities": len({row["identity"] for row in schemas
@@ -257,15 +315,17 @@ def summarize(records, judgments):
     requests = [row for row in records if row["record_type"] == "request"]
     source_bytes = {source: sum(row.get("sizes", {}).get(f"{source}_bytes") or 0 for row in requests)
                     for source in SOURCES}
-    tools = defaultdict(lambda: {"calls": 0, "attempt_ids": set(), "outcomes": Counter()})
+    tools = defaultdict(lambda: {"calls": 0, "attempt_ids": set(), "outcomes": Counter(), "rows": []})
     for row in records:
         if row["record_type"] == "tool":
             tool = tools[row["tool_name"]]
             tool["calls"] += 1
             tool["attempt_ids"].add(row["task_id"])
             tool["outcomes"][row["outcome"]] += 1
+            tool["rows"].append(row)
     tool_report = {name: {"calls": value["calls"], "observed_attempt_share": len(value["attempt_ids"]) / len(assigned),
                           "outcomes": dict(value["outcomes"]),
+                          "repetition": repetition_summary(value["rows"]),
                           "returned_error_fraction": value["outcomes"]["error"] / value["calls"],
                           "unclassified_fraction": value["outcomes"]["returned_unclassified"] / value["calls"]}
                    for name, value in sorted(tools.items())}
@@ -294,6 +354,8 @@ def summarize(records, judgments):
                             "Partial/missing billing never counts as zero; priced subsets omit unknown spend.",
                             "Attempt-level usage inside provider retries is unavailable.",
                             "Returned-error rates exclude failures hidden in unclassified tool text.",
+                            "Repetition is optional task-local measurement, not proof of a stall; polling and retests may repeat.",
+                            "Missing/invalid repetition fields remain unknown; digest collisions and dropped records limit evidence.",
                             "Dropped records make request/tool composition incomplete even when a task total survives.",
                             "A task-start quote may differ from rates across a pricing window.",
                             "This report does not establish statistical quality equivalence."]}

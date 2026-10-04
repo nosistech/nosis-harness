@@ -11,6 +11,9 @@ commit passes local and remote gates.
 
 ### Added
 
+- Optional efficiency records report consecutive identical tool calls and returned
+  errors without saving arguments or results. Offline reports keep missing older
+  measurements explicit. Repeated calls still execute normally.
 - Per-server MCP tool selection and definition review through `nh mcp review`.
   Existing integrations need a one-time review; new or changed tools stay disabled
   until selected and approved. Normal send, credential and action approvals remain.

@@ -38,7 +38,94 @@ def summarize(records, trials=None):
     return report.summarize(records, {"schema_version": 1, "trials": trials or [trial()]})
 
 
+def tool_record(sequence, task_id="a", **repetition):
+    row = {"schema_version": 1, "record_type": "tool", "task_id": task_id,
+           "tool_seq": sequence, "tool_name": "fixture", "outcome": "returned_unclassified"}
+    if repetition:
+        row["repetition"] = repetition
+    return row
+
+
 class AccountingTests(unittest.TestCase):
+    def test_old_tool_records_keep_repetition_unknown(self):
+        result = summarize([task(), tool_record(1)])
+        observed = result["tools"]["fixture"]["repetition"]
+        self.assertEqual(observed["comparison_status_counts"], {"missing": 1})
+        for field in ("observed_repeated_calls", "repeated_fraction_of_comparable_calls",
+                      "observed_returned_errors", "max_observed_same_call_streak",
+                      "max_observed_task_error_streak_at_these_calls"):
+            self.assertIsNone(observed[field], field)
+
+    def test_mixed_repetition_coverage_and_independent_error_streak(self):
+        rows = [tool_record(1)]
+        for sequence, (status, same, streak, returned, errors) in enumerate([
+                ("first_call", None, 1, False, 0),
+                ("compared", True, 2, True, 1),
+                ("compared", False, 1, True, 2),
+                ("compared", False, 1, False, 0),
+                ("unavailable", None, None, True, None)], 2):
+            rows.append(tool_record(sequence, comparison_status=status,
+                                    same_as_previous_call=same,
+                                    consecutive_same_call_count=streak, returned_error=returned,
+                                    consecutive_returned_error_count=errors))
+        result = summarize([task(), *rows])
+        observed = result["tools"]["fixture"]["repetition"]
+        self.assertEqual(observed["comparison_status_counts"],
+                         {"missing": 1, "first_call": 1, "compared": 3, "unavailable": 1})
+        self.assertEqual(observed["observed_repeated_calls"], 1)
+        self.assertEqual(observed["repeated_fraction_of_comparable_calls"], 1 / 3)
+        self.assertEqual(observed["returned_error_records"], 5)
+        self.assertEqual(observed["observed_returned_errors"], 3)
+        self.assertEqual(observed["error_streak_records"], 4)
+        self.assertEqual(observed["max_observed_same_call_streak"], 2)
+        self.assertEqual(observed["max_observed_task_error_streak_at_these_calls"], 2)
+        baseline = summarize([task()])
+        self.assertEqual(result["trials"], baseline["trials"])
+        self.assertEqual(result["cohorts"][0]["cost_per_correct_task"],
+                         baseline["cohorts"][0]["cost_per_correct_task"])
+
+    def test_malformed_optional_repetition_is_unknown_not_false(self):
+        malformed = [None, [], {"comparison_status": "unavailable"},
+                     {"comparison_status": "compared", "same_as_previous_call": 1,
+                      "consecutive_same_call_count": 2},
+                     {"comparison_status": "first_call", "same_as_previous_call": None,
+                      "consecutive_same_call_count": True},
+                     {"comparison_status": "compared", "same_as_previous_call": True,
+                      "consecutive_same_call_count": 1},
+                     {"comparison_status": "future", "same_as_previous_call": False,
+                      "consecutive_same_call_count": 1}]
+        for observation in malformed:
+            with self.subTest(observation=observation):
+                row = tool_record(1)
+                row["repetition"] = observation
+                observed = summarize([task(), row])["tools"]["fixture"]["repetition"]
+                self.assertEqual(observed["comparison_status_counts"], {"invalid": 1})
+                self.assertIsNone(observed["observed_repeated_calls"])
+                self.assertIsNone(observed["observed_returned_errors"])
+
+    def test_invalid_error_streak_does_not_erase_boolean_error_evidence(self):
+        for returned, count in [(True, 0), (False, 1), (True, True), (True, -1)]:
+            row = tool_record(1, comparison_status="unavailable",
+                              same_as_previous_call=None, consecutive_same_call_count=None,
+                              returned_error=returned, consecutive_returned_error_count=count)
+            observed = summarize([task(), row])["tools"]["fixture"]["repetition"]
+            self.assertEqual(observed["observed_returned_errors"], int(returned))
+            self.assertEqual(observed["error_streak_records"], 0)
+            self.assertIsNone(observed["max_observed_task_error_streak_at_these_calls"])
+
+    def test_repetition_is_separate_by_variant_and_never_rebuilt_across_tasks(self):
+        rows = [task(), task("b"), tool_record(1),
+                tool_record(1, "b", comparison_status="first_call", same_as_previous_call=None,
+                            consecutive_same_call_count=1, returned_error=False,
+                            consecutive_returned_error_count=0)]
+        candidate = trial(["b"], trial_id="candidate", variant="candidate")
+        result = summarize(rows, [trial(), candidate])
+        diagnostics = {cohort["variant"]: cohort["tool_repetition"] for cohort in result["cohorts"]}
+        self.assertEqual(diagnostics["baseline"]["comparison_status_counts"], {"missing": 1})
+        self.assertEqual(diagnostics["candidate"]["comparison_status_counts"], {"first_call": 1})
+        self.assertIsNone(diagnostics["candidate"]["observed_repeated_calls"])
+        self.assertEqual(diagnostics["candidate"]["max_observed_same_call_streak"], 1)
+
     def test_split_prices_and_failed_repair_attempts_are_in_total(self):
         failed = task("a")
         failed["receipt_outcome"] = "fail"

@@ -229,6 +229,22 @@ thinking_dialect = "none"
                                          "completion_tokens": 10 * expected_requests,
                                          "cached_tokens": 20 * expected_requests}:
                         raise AssertionError("task usage differs from synthetic provider usage")
+                    tool_records = [row for row in records if row.get("record_type") == "tool"]
+                    if len(tool_records) != expected_requests - 1:
+                        raise AssertionError("repetition measurement skipped or duplicated a tool execution")
+                    fields = {"comparison_status", "same_as_previous_call", "consecutive_same_call_count",
+                              "returned_error", "consecutive_returned_error_count"}
+                    for index, row in enumerate(tool_records):
+                        diagnostic = row["repetition"]
+                        if set(diagnostic) != fields or row["task_id"] != task["task_id"]:
+                            raise AssertionError("repetition measurement has unexpected fields or task identity")
+                        repeated = context and 0 < index < 8
+                        if diagnostic != {
+                                "comparison_status": "first_call" if index == 0 else "compared",
+                                "same_as_previous_call": None if index == 0 else repeated,
+                                "consecutive_same_call_count": index + 1 if repeated else 1,
+                                "returned_error": False, "consecutive_returned_error_count": 0}:
+                            raise AssertionError("repetition measurement differs from the executed fixture calls")
                     check_report_contract(telemetry, task["task_id"])
                 if not context and (ranged or retained) and MARKER not in observation:
                     raise AssertionError("retrieval lost middle evidence")

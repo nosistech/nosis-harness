@@ -14,7 +14,11 @@ use nh_routes::ResolvedRoute;
 use nh_tools::{
     CommandOutcome, FileChangeKind, Tool, ToolArgs, ToolAudit, ToolCtx, ToolExecution, ToolSpec,
 };
-use serde::Serialize;
+use serde::ser::{SerializeMap, SerializeSeq};
+use serde::{Serialize, Serializer};
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hasher};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -128,6 +132,16 @@ struct ToolRecord {
     tool_name: String,
     elapsed_ms: u64,
     outcome: &'static str,
+    repetition: ToolRepetitionMeasurement,
+}
+
+#[derive(Debug, Serialize)]
+struct ToolRepetitionMeasurement {
+    comparison_status: &'static str,
+    same_as_previous_call: Option<bool>,
+    consecutive_same_call_count: Option<u64>,
+    returned_error: bool,
+    consecutive_returned_error_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -213,6 +227,13 @@ struct RecorderMeasurement {
     task_duration_basis: &'static str,
 }
 
+#[derive(Default)]
+struct ToolRepetitionState {
+    previous_call_identity: Option<u64>,
+    consecutive_same_call_count: u64,
+    consecutive_returned_error_count: u64,
+}
+
 struct EfficiencyInner {
     root: PathBuf,
     path: PathBuf,
@@ -225,6 +246,8 @@ struct EfficiencyInner {
     dropped_records: AtomicU64,
     first_error: Mutex<Option<String>>,
     previous_tool_schema_identity: Mutex<Option<String>>,
+    tool_call_hasher: RandomState,
+    tool_repetition: Mutex<ToolRepetitionState>,
 }
 
 /// Shared recorder used by request, tool, and task boundaries for one run.
@@ -300,6 +323,8 @@ impl EfficiencyRecorder {
                 dropped_records: AtomicU64::new(0),
                 first_error: Mutex::new(None),
                 previous_tool_schema_identity: Mutex::new(None),
+                tool_call_hasher: RandomState::new(),
+                tool_repetition: Mutex::new(ToolRepetitionState::default()),
             }),
         };
         recorder.record_task_start();
@@ -477,7 +502,75 @@ impl EfficiencyRecorder {
         }
     }
 
-    fn record_tool(&self, name: &str, elapsed_ms: u64, outcome: &'static str) {
+    fn tool_call_identity(&self, name: &str, args: &ToolArgs) -> Option<u64> {
+        let mut hasher = self.inner.tool_call_hasher.build_hasher();
+        hasher.write_u64(u64::try_from(name.len()).unwrap_or(u64::MAX));
+        hasher.write(name.as_bytes());
+        serde_json::to_writer(&mut HasherWriter(&mut hasher), &CanonicalJson(args)).ok()?;
+        Some(hasher.finish())
+    }
+
+    fn repetition_measurement(
+        &self,
+        call_identity: Option<u64>,
+        returned_error: bool,
+    ) -> ToolRepetitionMeasurement {
+        let Ok(mut state) = self.inner.tool_repetition.lock() else {
+            return ToolRepetitionMeasurement {
+                comparison_status: "unavailable",
+                same_as_previous_call: None,
+                consecutive_same_call_count: None,
+                returned_error,
+                consecutive_returned_error_count: None,
+            };
+        };
+
+        state.consecutive_returned_error_count = if returned_error {
+            state.consecutive_returned_error_count.saturating_add(1)
+        } else {
+            0
+        };
+        let returned_error_count = Some(state.consecutive_returned_error_count);
+        let Some(call_identity) = call_identity else {
+            state.previous_call_identity = None;
+            state.consecutive_same_call_count = 0;
+            return ToolRepetitionMeasurement {
+                comparison_status: "unavailable",
+                same_as_previous_call: None,
+                consecutive_same_call_count: None,
+                returned_error,
+                consecutive_returned_error_count: returned_error_count,
+            };
+        };
+
+        let previous = state.previous_call_identity.replace(call_identity);
+        let same_as_previous_call = previous.map(|previous| previous == call_identity);
+        state.consecutive_same_call_count = if same_as_previous_call == Some(true) {
+            state.consecutive_same_call_count.saturating_add(1)
+        } else {
+            1
+        };
+        ToolRepetitionMeasurement {
+            comparison_status: if previous.is_some() {
+                "compared"
+            } else {
+                "first_call"
+            },
+            same_as_previous_call,
+            consecutive_same_call_count: Some(state.consecutive_same_call_count),
+            returned_error,
+            consecutive_returned_error_count: returned_error_count,
+        }
+    }
+
+    fn record_tool(
+        &self,
+        name: &str,
+        call_identity: Option<u64>,
+        elapsed_ms: u64,
+        outcome: &'static str,
+        returned_error: bool,
+    ) {
         let tool_seq = self
             .inner
             .tool_seq
@@ -493,6 +586,7 @@ impl EfficiencyRecorder {
             tool_name: name,
             elapsed_ms,
             outcome,
+            repetition: self.repetition_measurement(call_identity, returned_error),
         };
         self.record(&record);
     }
@@ -555,15 +649,66 @@ impl Tool for MeasuredTool {
 
     fn execute_with_audit(&self, args: ToolArgs, ctx: &ToolCtx) -> anyhow::Result<ToolExecution> {
         let name = self.inner.spec().name;
+        let call_identity = self.recorder.tool_call_identity(&name, &args);
         let started = Instant::now();
         let result = self.inner.execute_with_audit(args, ctx);
         let outcome = match &result {
             Ok(execution) => observed_tool_outcome(&execution.audit),
             Err(_) => "error",
         };
-        self.recorder
-            .record_tool(&name, elapsed_ms(started), outcome);
+        self.recorder.record_tool(
+            &name,
+            call_identity,
+            elapsed_ms(started),
+            outcome,
+            result.is_err(),
+        );
         result
+    }
+}
+
+struct HasherWriter<'a, H: Hasher>(&'a mut H);
+
+impl<H: Hasher> Write for HasherWriter<'_, H> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+struct CanonicalJson<'a>(&'a serde_json::Value);
+
+impl Serialize for CanonicalJson<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self.0 {
+            serde_json::Value::Null => serializer.serialize_unit(),
+            serde_json::Value::Bool(value) => serializer.serialize_bool(*value),
+            serde_json::Value::Number(value) => value.serialize(serializer),
+            serde_json::Value::String(value) => serializer.serialize_str(value),
+            serde_json::Value::Array(values) => {
+                let mut sequence = serializer.serialize_seq(Some(values.len()))?;
+                for value in values {
+                    sequence.serialize_element(&CanonicalJson(value))?;
+                }
+                sequence.end()
+            }
+            serde_json::Value::Object(values) => {
+                let mut entries = values.iter().collect::<Vec<_>>();
+                entries.sort_unstable_by_key(|(key, _)| *key);
+                let mut map = serializer.serialize_map(Some(entries.len()))?;
+                for (key, value) in entries {
+                    map.serialize_entry(key, &CanonicalJson(value))?;
+                }
+                map.end()
+            }
+        }
     }
 }
 
@@ -995,6 +1140,57 @@ mod tests {
         }
     }
 
+    struct SequenceTool {
+        name: &'static str,
+        succeeds: Mutex<VecDeque<bool>>,
+        seen: Arc<Mutex<Vec<ToolArgs>>>,
+    }
+
+    impl SequenceTool {
+        fn new(
+            name: &'static str,
+            succeeds: impl IntoIterator<Item = bool>,
+            seen: Arc<Mutex<Vec<ToolArgs>>>,
+        ) -> Self {
+            Self {
+                name,
+                succeeds: Mutex::new(succeeds.into_iter().collect()),
+                seen,
+            }
+        }
+    }
+
+    impl Tool for SequenceTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: self.name.into(),
+                description: "sequence fixture".into(),
+                parameters: json!({"type": "object"}),
+            }
+        }
+
+        fn execute(&self, args: ToolArgs, ctx: &ToolCtx) -> anyhow::Result<String> {
+            self.execute_with_audit(args, ctx)
+                .map(|execution| execution.output)
+        }
+
+        fn execute_with_audit(
+            &self,
+            args: ToolArgs,
+            _ctx: &ToolCtx,
+        ) -> anyhow::Result<ToolExecution> {
+            self.seen.lock().unwrap().push(args);
+            if !self.succeeds.lock().unwrap().pop_front().unwrap() {
+                anyhow::bail!("fixture tool failure");
+            }
+            Ok(ToolExecution {
+                output: "exact fixture output".into(),
+                audit: vec![ToolAudit::Command(CommandOutcome::Exited(Some(0)))],
+                review: Vec::new(),
+            })
+        }
+    }
+
     fn ctx(root: &std::path::Path) -> ToolCtx {
         ToolCtx::new(
             root.to_path_buf(),
@@ -1050,6 +1246,15 @@ mod tests {
         );
 
         assert!(recorder.is_none());
+        assert!(!root.path().join(".nosis").exists());
+        let execution = AuditedTool
+            .execute_with_audit(json!({"ordinary": "argument"}), &ctx(root.path()))
+            .unwrap();
+        assert_eq!(execution.output, "raw tool output must not be recorded");
+        assert_eq!(
+            execution.audit,
+            vec![ToolAudit::Command(CommandOutcome::Exited(Some(7)))]
+        );
         assert!(!root.path().join(".nosis").exists());
     }
 
@@ -1262,6 +1467,14 @@ mod tests {
         assert_eq!(records[1]["record_type"], "tool");
         assert_eq!(records[1]["outcome"], "command_exit_nonzero");
         assert_eq!(records[1]["tool_name"], "[REDACTED]");
+        assert_eq!(records[1]["repetition"]["comparison_status"], "first_call");
+        assert!(records[1]["repetition"]["same_as_previous_call"].is_null());
+        assert_eq!(records[1]["repetition"]["consecutive_same_call_count"], 1);
+        assert_eq!(records[1]["repetition"]["returned_error"], false);
+        assert_eq!(
+            records[1]["repetition"]["consecutive_returned_error_count"],
+            0
+        );
         assert_eq!(records[2]["record_type"], "task");
         assert_eq!(records[2]["receipt_outcome"], "pass");
         assert_eq!(records[2]["correctness_assessed"], false);
@@ -1272,6 +1485,235 @@ mod tests {
             records[2]["recorder"]["task_duration_basis"],
             "receipt wall time includes local efficiency recorder append, flush, and sync overhead"
         );
+    }
+
+    #[test]
+    fn tool_repetition_compares_canonical_arguments_and_tool_names_per_task() {
+        let root = tempfile::tempdir().unwrap();
+        let recorder = EfficiencyRecorder::project(
+            root.path(),
+            &route(),
+            fixed_at(),
+            nh_vault::Scrubber::new(Vec::new()),
+        );
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut alpha = recorder.wrap_tools(vec![Box::new(SequenceTool::new(
+            "alpha",
+            [true, true, true],
+            Arc::clone(&seen),
+        ))]);
+        let alpha = alpha.pop().unwrap();
+        let mut beta = recorder.wrap_tools(vec![Box::new(SequenceTool::new(
+            "beta",
+            [true],
+            Arc::clone(&seen),
+        ))]);
+        let beta = beta.pop().unwrap();
+        let first: Value =
+            serde_json::from_str(r#"{"z":2,"a":{"last":false,"first":true}}"#).unwrap();
+        let reordered: Value =
+            serde_json::from_str(r#"{"a":{"first":true,"last":false},"z":2}"#).unwrap();
+        let changed = json!({"a": {"first": true, "last": false}, "z": 3});
+
+        alpha
+            .execute_with_audit(first.clone(), &ctx(root.path()))
+            .unwrap();
+        alpha
+            .execute_with_audit(reordered.clone(), &ctx(root.path()))
+            .unwrap();
+        alpha
+            .execute_with_audit(changed.clone(), &ctx(root.path()))
+            .unwrap();
+        beta.execute_with_audit(changed.clone(), &ctx(root.path()))
+            .unwrap();
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![first, reordered, changed.clone(), changed]
+        );
+        let records = records(root.path());
+        let repetitions = records
+            .iter()
+            .filter(|record| record["record_type"] == "tool")
+            .map(|record| &record["repetition"])
+            .collect::<Vec<_>>();
+        assert_eq!(repetitions[0]["comparison_status"], "first_call");
+        assert!(repetitions[0]["same_as_previous_call"].is_null());
+        assert_eq!(repetitions[0]["consecutive_same_call_count"], 1);
+        assert_eq!(repetitions[1]["comparison_status"], "compared");
+        assert_eq!(repetitions[1]["same_as_previous_call"], true);
+        assert_eq!(repetitions[1]["consecutive_same_call_count"], 2);
+        assert_eq!(repetitions[2]["same_as_previous_call"], false);
+        assert_eq!(repetitions[2]["consecutive_same_call_count"], 1);
+        assert_eq!(repetitions[3]["same_as_previous_call"], false);
+        assert_eq!(repetitions[3]["consecutive_same_call_count"], 1);
+    }
+
+    #[test]
+    fn returned_error_streak_is_independent_and_wrapping_preserves_results() {
+        let root = tempfile::tempdir().unwrap();
+        let recorder = EfficiencyRecorder::project(
+            root.path(),
+            &route(),
+            fixed_at(),
+            nh_vault::Scrubber::new(Vec::new()),
+        );
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut tools = recorder.wrap_tools(vec![Box::new(SequenceTool::new(
+            "sequence",
+            [true, false, false, true],
+            Arc::clone(&seen),
+        ))]);
+        let tool = tools.pop().unwrap();
+
+        let first = tool
+            .execute_with_audit(json!({"call": 1}), &ctx(root.path()))
+            .unwrap();
+        assert_eq!(first.output, "exact fixture output");
+        assert_eq!(
+            first.audit,
+            vec![ToolAudit::Command(CommandOutcome::Exited(Some(0)))]
+        );
+        assert_eq!(
+            tool.execute_with_audit(json!({"call": 2}), &ctx(root.path()))
+                .unwrap_err()
+                .to_string(),
+            "fixture tool failure"
+        );
+        assert_eq!(
+            tool.execute_with_audit(json!({"call": 3}), &ctx(root.path()))
+                .unwrap_err()
+                .to_string(),
+            "fixture tool failure"
+        );
+        let last = tool
+            .execute_with_audit(json!({"call": 4}), &ctx(root.path()))
+            .unwrap();
+        assert_eq!(last.output, "exact fixture output");
+
+        let records = records(root.path());
+        let repetitions = records
+            .iter()
+            .filter(|record| record["record_type"] == "tool")
+            .map(|record| &record["repetition"])
+            .collect::<Vec<_>>();
+        assert_eq!(repetitions[0]["returned_error"], false);
+        assert_eq!(repetitions[0]["consecutive_returned_error_count"], 0);
+        assert_eq!(repetitions[1]["returned_error"], true);
+        assert_eq!(repetitions[1]["consecutive_returned_error_count"], 1);
+        assert_eq!(repetitions[2]["returned_error"], true);
+        assert_eq!(repetitions[2]["consecutive_returned_error_count"], 2);
+        assert_eq!(repetitions[3]["returned_error"], false);
+        assert_eq!(repetitions[3]["consecutive_returned_error_count"], 0);
+        assert_eq!(repetitions[1]["same_as_previous_call"], false);
+        assert_eq!(repetitions[2]["same_as_previous_call"], false);
+    }
+
+    #[test]
+    fn tool_repetition_resets_per_task_and_never_serializes_arguments_or_digest() {
+        const SECRET: &str = "active private value with quote \" and slash \\";
+        let first_root = tempfile::tempdir().unwrap();
+        let first_recorder = EfficiencyRecorder::project(
+            first_root.path(),
+            &route(),
+            fixed_at(),
+            nh_vault::Scrubber::new(vec![SECRET.into()]),
+        );
+        let mut first_tools = first_recorder.wrap_tools(vec![Box::new(SequenceTool::new(
+            "read_file",
+            [true, true],
+            Arc::new(Mutex::new(Vec::new())),
+        ))]);
+        let first_tool = first_tools.pop().unwrap();
+        let arguments = json!({"private_argument": {"value": SECRET}});
+        first_tool
+            .execute_with_audit(arguments.clone(), &ctx(first_root.path()))
+            .unwrap();
+        first_tool
+            .execute_with_audit(arguments.clone(), &ctx(first_root.path()))
+            .unwrap();
+
+        let second_root = tempfile::tempdir().unwrap();
+        let second_recorder = EfficiencyRecorder::project(
+            second_root.path(),
+            &route(),
+            fixed_at(),
+            nh_vault::Scrubber::new(vec![SECRET.into()]),
+        );
+        let mut second_tools = second_recorder.wrap_tools(vec![Box::new(SequenceTool::new(
+            "read_file",
+            [true],
+            Arc::new(Mutex::new(Vec::new())),
+        ))]);
+        second_tools
+            .pop()
+            .unwrap()
+            .execute_with_audit(arguments, &ctx(second_root.path()))
+            .unwrap();
+
+        let first_records = records(first_root.path());
+        let first_repetitions = first_records
+            .iter()
+            .filter(|record| record["record_type"] == "tool")
+            .map(|record| &record["repetition"])
+            .collect::<Vec<_>>();
+        assert_eq!(first_repetitions[0]["comparison_status"], "first_call");
+        assert_eq!(first_repetitions[1]["comparison_status"], "compared");
+        assert_eq!(first_repetitions[1]["same_as_previous_call"], true);
+        let second_records = records(second_root.path());
+        let second_repetition = &second_records
+            .iter()
+            .find(|record| record["record_type"] == "tool")
+            .unwrap()["repetition"];
+        assert_eq!(second_repetition["comparison_status"], "first_call");
+        assert!(second_repetition["same_as_previous_call"].is_null());
+
+        for root in [first_root.path(), second_root.path()] {
+            let raw = std::fs::read_to_string(root.join(EFFICIENCY_RELATIVE_PATH)).unwrap();
+            assert!(!raw.contains(SECRET));
+            assert!(!raw.contains("private_argument"));
+            assert!(!raw.contains("digest"));
+            assert!(!raw.contains("salt"));
+        }
+    }
+
+    #[test]
+    fn poisoned_tool_repetition_state_records_unavailable_without_affecting_tool() {
+        let root = tempfile::tempdir().unwrap();
+        let recorder = EfficiencyRecorder::project(
+            root.path(),
+            &route(),
+            fixed_at(),
+            nh_vault::Scrubber::new(Vec::new()),
+        );
+        let poison_target = recorder.clone();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = poison_target.inner.tool_repetition.lock().unwrap();
+            panic!("poison repetition fixture");
+        }));
+        let mut tools = recorder.wrap_tools(vec![Box::new(SequenceTool::new(
+            "read_file",
+            [true],
+            Arc::new(Mutex::new(Vec::new())),
+        ))]);
+
+        let execution = tools
+            .pop()
+            .unwrap()
+            .execute_with_audit(json!({"path": "ordinary.txt"}), &ctx(root.path()))
+            .unwrap();
+
+        assert_eq!(execution.output, "exact fixture output");
+        let records = records(root.path());
+        let repetition = &records
+            .iter()
+            .find(|record| record["record_type"] == "tool")
+            .unwrap()["repetition"];
+        assert_eq!(repetition["comparison_status"], "unavailable");
+        assert!(repetition["same_as_previous_call"].is_null());
+        assert!(repetition["consecutive_same_call_count"].is_null());
+        assert_eq!(repetition["returned_error"], false);
+        assert!(repetition["consecutive_returned_error_count"].is_null());
     }
 
     #[test]

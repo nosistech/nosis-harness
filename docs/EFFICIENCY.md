@@ -39,7 +39,8 @@ them before sharing. This measurement option currently applies to `run`, not cha
 TUI or Fleet. Task duration includes measurement overhead, including local log
 flushes, as well as any enabled observation storage work. Enable measurement on
 both sides of a timing comparison; per-request and
-per-tool elapsed times exclude their subsequent measurement write.
+per-tool elapsed times exclude their subsequent measurement write. Per-tool
+timing also excludes the argument fingerprint calculation before execution.
 
 Byte counts describe the request before provider encoding. They are not exact
 token counts. Providers report usage for the whole request; those totals do not
@@ -47,6 +48,20 @@ reveal which individual source was cached. Cost by source and billing type is
 therefore unavailable. The captured catalog quote is taken at task start and may
 not match a task that crosses a pricing window. Missing prices or usage remain
 unknown. Retry usage is aggregate; attempt-level billing is not reconstructed.
+
+Measured tool records also describe consecutive identical calls and returned
+errors. Equality includes the tool name and argument JSON with stable object
+ordering. Only a randomized, task-local digest and counters are kept in memory;
+arguments, results, the digest and its random seed are not saved in measurement
+records. Counters reset for each task. Error streaks count returned errors across
+tools independently of call equality; an ordinary text result is not classified
+as an error by guessing from its wording. Digest collisions remain possible.
+
+This is measurement only: repeated reads, polling and test reruns still execute
+normally. Repetition does not prove a stall. The report separates first calls,
+comparable calls, unavailable comparisons and older records without this metadata.
+Missing evidence never becomes a zero repetition rate. Dropped records can hide
+parts of a sequence, so reported streaks are observed maxima, not a complete trace.
 
 ## Ranged reads
 
@@ -208,6 +223,10 @@ composition and tool usage pool all supplied runs. Cache ratios show the number
 of attempts and prompt tokens with a usable cache split. Unclassified tool returns
 can include refusals or errors, so the returned-error fraction is not a complete
 error rate. Cohorts list their settings and flag mixed configurations.
+Repetition and returned-error diagnostics include their measurement coverage by
+variant and tool. A per-tool error streak describes the task-wide sequence ending
+at that call; preceding errors can have come from other tools. These diagnostics
+do not change task judgments or cost calculations.
 
 ## Offline checks
 
