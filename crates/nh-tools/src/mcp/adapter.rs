@@ -2,6 +2,7 @@
 
 use super::client::{scrub_json_strings, McpClient, ToolEntry, ARGS_SUMMARY_MAX};
 use super::config::{McpServerConfig, McpTrust};
+use super::review::McpReviewPolicy;
 use crate::{cancelled_before, render_tool_result, Tool, ToolCtx, ToolSpec};
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -24,8 +25,12 @@ pub struct McpToolset {
 
 /// Build one adapter per server tool, named `mcp__<server>__<tool>`.
 /// `trust = "block"` servers are never contacted and offer no tools.
-pub fn mcp_tools(configs: &[McpServerConfig], send_allowed: &dyn Fn(&str) -> bool) -> McpToolset {
-    let (adapters, warnings) = collect_adapters(configs, send_allowed, false);
+pub fn mcp_tools(
+    configs: &[McpServerConfig],
+    reviews: &McpReviewPolicy,
+    send_allowed: &dyn Fn(&str) -> bool,
+) -> McpToolset {
+    let (adapters, warnings) = collect_adapters(configs, reviews, send_allowed, false);
     let tools = adapters
         .into_iter()
         .map(|adapter| Box::new(adapter) as Box<dyn Tool>)
@@ -38,9 +43,10 @@ pub fn mcp_tools(configs: &[McpServerConfig], send_allowed: &dyn Fn(&str) -> boo
 /// allowed only after that exact name was returned in this chat session.
 pub fn mcp_discovery_tools(
     configs: &[McpServerConfig],
+    reviews: &McpReviewPolicy,
     send_allowed: &dyn Fn(&str) -> bool,
 ) -> McpToolset {
-    let (adapters, warnings) = collect_adapters(configs, send_allowed, true);
+    let (adapters, warnings) = collect_adapters(configs, reviews, send_allowed, true);
     if adapters.is_empty() {
         return McpToolset {
             tools: Vec::new(),
@@ -62,6 +68,7 @@ pub fn mcp_discovery_tools(
 
 fn collect_adapters(
     configs: &[McpServerConfig],
+    reviews: &McpReviewPolicy,
     send_allowed: &dyn Fn(&str) -> bool,
     report_blocked: bool,
 ) -> (Vec<McpToolAdapter>, Vec<String>) {
@@ -97,6 +104,27 @@ fn collect_adapters(
             ));
             continue;
         }
+        let reviewed_state = reviews.state(&server);
+        if !reviews.accepts_current_for_tests() && reviewed_state.is_none() {
+            warnings.push(format!(
+                "mcp server \"{server}\": tools are disabled until reviewed - run `nh mcp review {server}`"
+            ));
+            continue;
+        }
+        if reviewed_state.is_some_and(|state| !state.connection_matches(config)) {
+            warnings.push(format!(
+                "mcp server \"{server}\": connection settings changed; tools are disabled - run `nh mcp review {server}`"
+            ));
+            continue;
+        }
+        if !reviews.accepts_current_for_tests()
+            && reviewed_state.is_some_and(|state| state.enabled.is_empty())
+        {
+            warnings.push(format!(
+                "mcp server \"{server}\": no tools are enabled - run `nh mcp review {server}` to change the selection"
+            ));
+            continue;
+        }
         let trust = config.trust;
         let client = match McpClient::new(config.clone()) {
             Ok(client) => Arc::new(client),
@@ -108,22 +136,45 @@ fn collect_adapters(
         match client.list_tools_full() {
             Ok(entries) => {
                 let mut excluded_names = 0_usize;
+                let mut unreviewed = 0_usize;
                 for entry in entries {
                     let Some(exposed_name) = exposed_tool_name(&server, &entry.info.name) else {
                         excluded_names += 1;
                         continue;
                     };
+                    let Some(current_review) = entry.reviewed.as_ref() else {
+                        unreviewed += 1;
+                        continue;
+                    };
+                    let enabled = reviews.accepts_current_for_tests()
+                        || reviewed_state.is_some_and(|state| {
+                            state.is_enabled(&entry.info.name)
+                                && state.tool(&entry.info.name).is_some_and(|saved| {
+                                    saved.fingerprint == current_review.fingerprint
+                                })
+                        });
+                    if !enabled {
+                        unreviewed += 1;
+                        continue;
+                    }
+                    let review_fingerprint = current_review.fingerprint.clone();
                     adapters.push(McpToolAdapter {
                         server: server.clone(),
                         exposed_name,
                         trust,
                         entry,
                         client: Arc::clone(&client),
+                        review_fingerprint,
                     });
                 }
                 if excluded_names > 0 {
                     warnings.push(format!(
                         "mcp server \"{server}\": excluded {excluded_names} tools whose names cannot be exposed safely"
+                    ));
+                }
+                if unreviewed > 0 {
+                    warnings.push(format!(
+                        "mcp server \"{server}\": {unreviewed} new, changed, disabled, or unreviewable tools were not enabled; run `nh mcp review {server}`"
                     ));
                 }
             }
@@ -186,6 +237,7 @@ pub(super) struct McpToolAdapter {
     pub(super) trust: McpTrust,
     pub(super) entry: ToolEntry,
     pub(super) client: Arc<McpClient>,
+    pub(super) review_fingerprint: String,
 }
 
 struct McpDiscoveryRegistry {
@@ -558,6 +610,25 @@ impl Tool for McpToolAdapter {
                     ));
                 }
             }
+        }
+        if let Some(cancelled) = cancelled_before("MCP tool call", ctx) {
+            return Ok(cancelled);
+        }
+        let review_is_current = self
+            .client
+            .list_tools_fresh()
+            .ok()
+            .and_then(|entries| entries.into_iter().find(|entry| entry.info.name == *tool))
+            .and_then(|entry| entry.reviewed)
+            .is_some_and(|reviewed| reviewed.fingerprint == self.review_fingerprint);
+        if !review_is_current {
+            return Ok(render_tool_result(
+                format!(
+                    "MCP tool metadata could not be revalidated; no remote action was sent - run `nh mcp review {}`",
+                    self.server
+                ),
+                ctx,
+            ));
         }
         if let Some(cancelled) = cancelled_before("MCP tool call", ctx) {
             return Ok(cancelled);

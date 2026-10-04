@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use nh_law::{read_guarded, GuardedRead};
 use nh_tools::{McpAuth, McpServerConfig, McpTrust};
 
+use crate::private_state::{PrivateStateFile, PrivateStateRead};
+
 pub(super) const BUNDLED_CATALOG: &str = include_str!("../../../../catalog.toml");
 const MAX_CATALOG_BYTES: usize = 1024 * 1024;
 const MAX_MCP_CONFIG_BYTES: usize = 64 * 1024;
@@ -103,6 +105,85 @@ pub(crate) fn load_and_vet_mcp_configs(
         |entry| policy.approved_audiences(entry),
         warnings,
     )
+}
+
+pub(crate) fn load_mcp_review_policy(
+    configs: &[McpServerConfig],
+    home: Option<&Path>,
+    warnings: &mut Vec<String>,
+) -> nh_tools::McpReviewPolicy {
+    let Some(home) = home else {
+        return nh_tools::McpReviewPolicy::default();
+    };
+    let mut states = Vec::new();
+    for config in configs {
+        if !safe_mcp_state_name(&config.name) {
+            warnings.push(format!(
+                "mcp server \"{}\": review state cannot use this server name; tools disabled",
+                config.name
+            ));
+            continue;
+        }
+        let filename = format!("{}.json", config.name);
+        let state_path = home.join(".nosis").join("mcp-reviews").join(&filename);
+        let file = match PrivateStateFile::open(
+            home,
+            Some("mcp-reviews"),
+            &filename,
+            &config.name,
+            nh_tools::MAX_MCP_REVIEW_BYTES,
+            false,
+        ) {
+            Ok(Some(file)) => file,
+            Ok(None) => continue,
+            Err(_) => {
+                warnings.push(format!(
+                    "mcp server \"{}\": review state at {} could not be accessed safely; tools disabled - inspect that path and move or remove it deliberately, then run `nh mcp review {}`",
+                    config.name,
+                    state_path.display(),
+                    config.name
+                ));
+                continue;
+            }
+        };
+        let text = match file.read() {
+            Ok(PrivateStateRead::Text(text)) => text,
+            Ok(PrivateStateRead::Absent) => continue,
+            Ok(PrivateStateRead::Interrupted) => {
+                warnings.push(format!(
+                    "mcp server \"{}\": review update is incomplete at {}; tools disabled - inspect and resolve the recovery files in that directory deliberately, then run `nh mcp review {}`",
+                    config.name,
+                    state_path.display(),
+                    config.name
+                ));
+                continue;
+            }
+            Err(_) => {
+                warnings.push(format!(
+                    "mcp server \"{}\": review state was refused at {}; tools disabled - inspect that path and move or remove it deliberately, then run `nh mcp review {}`",
+                    config.name,
+                    state_path.display(),
+                    config.name
+                ));
+                continue;
+            }
+        };
+        match nh_tools::McpReviewState::parse(&text) {
+            Ok(state) if state.server == config.name => states.push(state),
+            Ok(_) | Err(_) => warnings.push(format!(
+                "mcp server \"{}\": review state is malformed or belongs to another server; tools disabled - run `nh mcp review {}`",
+                config.name, config.name
+            )),
+        }
+    }
+    nh_tools::McpReviewPolicy::new(states).unwrap_or_default()
+}
+
+fn safe_mcp_state_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn read_optional_mcp_config(

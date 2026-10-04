@@ -206,6 +206,25 @@ fn mcp_client(config: McpServerConfig) -> McpClient {
     McpClient::new(config).expect("test HTTP clients initialize")
 }
 
+fn mcp_tools(configs: &[McpServerConfig], send_allowed: &dyn Fn(&str) -> bool) -> McpToolset {
+    super::adapter::mcp_tools(
+        configs,
+        &super::review::McpReviewPolicy::allow_current_for_tests(),
+        send_allowed,
+    )
+}
+
+fn mcp_discovery_tools(
+    configs: &[McpServerConfig],
+    send_allowed: &dyn Fn(&str) -> bool,
+) -> McpToolset {
+    super::adapter::mcp_discovery_tools(
+        configs,
+        &super::review::McpReviewPolicy::allow_current_for_tests(),
+        send_allowed,
+    )
+}
+
 fn permissive_test_guard() -> crate::GuardFn {
     Box::new(|access| match access {
         crate::Access::Exec(_) => crate::Guard::Ask,
@@ -1130,6 +1149,158 @@ fn apikey_bearer_comes_from_vault_env_fallback() {
         "missing bearer in: {}",
         recorded[0].head
     );
+}
+
+#[test]
+fn rpc_errors_scrub_used_credentials_in_plain_and_complete_json_messages() {
+    const ENV: &str = "NH_MCP_ERROR_SCRUB_TEST_KEY";
+    let active = concat!("opaque-mcp-error-", "secret");
+    std::env::set_var(ENV, active);
+    let responses = Arc::new(AtomicU64::new(0));
+    let count = Arc::clone(&responses);
+    let mock = start_mock(move |request| {
+        let message = if count.fetch_add(1, Ordering::SeqCst) == 0 {
+            format!("credential echo: {active}")
+        } else {
+            r#"{"token":"opaque-mcp-error-\u0073ecret"}"#.to_string()
+        };
+        (
+            200,
+            json!({
+                "jsonrpc": "2.0",
+                "id": request.body["id"],
+                "error": {"code": -32000, "message": message}
+            })
+            .to_string(),
+        )
+    });
+    let mut configured = config(&mock.url, McpTrust::Ask);
+    configured.auth = McpAuth::ApiKey {
+        vault_entry: "mcp-error-scrub-test".into(),
+    };
+    let client = mcp_client(configured);
+
+    for _ in 0..2 {
+        let error = client.list_tools().unwrap_err().to_string();
+        assert!(!error.contains(active), "{error}");
+        assert!(!error.contains("\\u0073ecret"), "{error}");
+        assert!(error.contains("[REDACTED]"), "{error}");
+    }
+    std::env::remove_var(ENV);
+    assert_eq!(responses.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn inspected_rpc_error_scrubs_credentials_reassembled_by_terminal_sanitization() {
+    const ENV: &str = "NH_MCP_ERROR_CARRIER_TEST_KEY";
+    let active = concat!("opaque-error-", "credential");
+    std::env::set_var(ENV, active);
+    let split_key = "opaque-error-\u{200b}credential";
+    let mock = start_mock(move |request| {
+        let message = json!({
+            split_key: "C1 \u{85} bidi \u{202e}"
+        })
+        .to_string();
+        (
+            200,
+            json!({
+                "jsonrpc": "2.0",
+                "id": request.body["id"],
+                "error": {"code": -32000, "message": message}
+            })
+            .to_string(),
+        )
+    });
+    let mut configured = config(&mock.url, McpTrust::Ask);
+    configured.auth = McpAuth::ApiKey {
+        vault_entry: "mcp-error-carrier-test".into(),
+    };
+
+    let error = inspect_mcp_server(&configured).unwrap_err();
+    std::env::remove_var(ENV);
+
+    let chain = error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" | ");
+    assert!(!chain.contains(active), "{chain}");
+    assert!(!chain.contains(split_key), "{chain}");
+    assert!(chain.contains("[REDACTED]"), "{chain}");
+    assert!(chain.contains("\\\\u{85}"), "{chain}");
+    assert!(chain.contains("\\\\u{202e}"), "{chain}");
+    assert!(!chain.contains('\u{85}'), "{chain}");
+    assert!(!chain.contains('\u{202e}'), "{chain}");
+}
+
+#[test]
+fn unsupported_response_metadata_never_echoes_the_used_api_credential() {
+    const ENV: &str = "NH_MCP_CONTENT_TYPE_TEST_KEY";
+    let active = concat!("opaque-content-type-", "credential");
+    std::env::set_var(ENV, active);
+    let (url, peer) = start_raw_peer(move |request, stream| {
+        assert_eq!(authorization_bearer(&request), Some(active));
+        let reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {active}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+        );
+        stream.write_all(reply.as_bytes()).unwrap();
+    });
+    let mut configured = config(&url, McpTrust::Ask);
+    configured.auth = McpAuth::ApiKey {
+        vault_entry: "mcp-content-type-test".into(),
+    };
+
+    let error = mcp_client(configured).list_tools().unwrap_err();
+    peer.join().unwrap();
+    std::env::remove_var(ENV);
+
+    let chain = error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" | ");
+    assert!(!chain.contains(active), "{chain}");
+    assert!(
+        chain.contains("unsupported MCP response Content-Type"),
+        "{chain}"
+    );
+    assert!(
+        chain.contains("application/json or text/event-stream"),
+        "{chain}"
+    );
+
+    std::env::set_var(ENV, active);
+    let (url, peer) = start_raw_peer(move |request, stream| {
+        assert_eq!(authorization_bearer(&request), Some(active));
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": request.body["id"],
+            "result": {"resultType": active}
+        })
+        .to_string();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    });
+    let mut configured = config(&url, McpTrust::Ask);
+    configured.auth = McpAuth::ApiKey {
+        vault_entry: "mcp-content-type-test".into(),
+    };
+
+    let error = mcp_client(configured).list_tools().unwrap_err();
+    peer.join().unwrap();
+    std::env::remove_var(ENV);
+
+    let chain = error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" | ");
+    assert!(!chain.contains(active), "{chain}");
+    assert!(chain.contains("unsupported resultType"), "{chain}");
 }
 
 #[test]
@@ -2325,11 +2496,13 @@ fn blocked_adapter_execute_names_the_fix() {
                 input_schema: json!({ "type": "object" }),
             },
             read_only: false,
+            reviewed: None,
         },
         client: Arc::new(mcp_client(config(
             "http://127.0.0.1:1/mcp",
             McpTrust::Block,
         ))),
+        review_fingerprint: String::new(),
     };
     let (ctx, seen) = approving_ctx(true);
     let out = adapter.execute(json!({}), &ctx).unwrap();
@@ -2430,4 +2603,272 @@ fn poisoned_oauth_state_returns_an_error_instead_of_panicking() {
     let error = client.oauth_access_token().unwrap_err().to_string();
     assert!(error.contains("OAuth state"), "{error}");
     assert!(error.contains("internal panic"), "{error}");
+}
+
+fn reviewed_policy(
+    snapshot: McpReviewSnapshot,
+    enabled: impl IntoIterator<Item = &'static str>,
+) -> McpReviewPolicy {
+    let state =
+        McpReviewState::from_snapshot(snapshot, enabled.into_iter().map(str::to_string)).unwrap();
+    McpReviewPolicy::new([state]).unwrap()
+}
+
+#[test]
+fn missing_review_state_disables_tools_without_contacting_the_server() {
+    let mock = start_mock(full_responder);
+
+    let set = super::adapter::mcp_tools(
+        &[config(&mock.url, McpTrust::Ask)],
+        &McpReviewPolicy::default(),
+        &|_| true,
+    );
+
+    assert!(set.tools.is_empty());
+    assert_eq!(mock.recorded.lock().unwrap().len(), 0);
+    assert!(set.warnings.iter().any(|warning| {
+        warning.contains("tools are disabled") && warning.contains("nh mcp review mock")
+    }));
+}
+
+#[test]
+fn explicit_empty_selection_avoids_authentication_and_network_contact() {
+    let mock = start_mock(full_responder);
+    let configured = config(&mock.url, McpTrust::Ask);
+    let connection = super::review::connection_descriptor(&configured).unwrap();
+    let policy = reviewed_policy(
+        McpReviewSnapshot {
+            server: configured.name.clone(),
+            connection_fingerprint: super::review::fingerprint(&connection).unwrap(),
+            connection,
+            tools: Vec::new(),
+            omitted_tools: 0,
+        },
+        [],
+    );
+
+    let set = super::adapter::mcp_tools(&[configured], &policy, &|_| true);
+
+    assert!(set.tools.is_empty());
+    assert_eq!(mock.recorded.lock().unwrap().len(), 0);
+    assert!(set
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("no tools are enabled")));
+}
+
+#[test]
+fn explicit_review_selection_exposes_and_invokes_only_the_selected_tool() {
+    let mock = start_mock(full_responder);
+    let configured = config(&mock.url, McpTrust::Ask);
+    let policy = reviewed_policy(inspect_mcp_server(&configured).unwrap(), ["peek"]);
+
+    let set = super::adapter::mcp_tools(&[configured], &policy, &|_| true);
+
+    assert_eq!(
+        set.tools
+            .iter()
+            .map(|tool| tool.spec().name)
+            .collect::<Vec<_>>(),
+        ["mcp__mock__peek"]
+    );
+    let (ctx, approvals) = approving_ctx(true);
+    let result = named_tool(&set, "mcp__mock__peek")
+        .execute(json!({}), &ctx)
+        .unwrap();
+    assert_eq!(result, "peeked");
+    assert_eq!(approvals.lock().unwrap().len(), 1);
+    assert_eq!(count_method(&mock, "tools/call"), 1);
+    assert!(set
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("1 new, changed, disabled")));
+}
+
+#[test]
+fn metadata_drift_after_startup_refuses_the_call_without_replay() {
+    let list_calls = Arc::new(AtomicU64::new(0));
+    let seen = Arc::clone(&list_calls);
+    let mock = start_mock(move |request| {
+        if request.body["method"] == json!("tools/list") {
+            let call = seen.fetch_add(1, Ordering::SeqCst);
+            let mut result = mock_tools_result(Some(60_000));
+            if call >= 2 {
+                result["tools"][0]["description"] = json!("Changed after startup.");
+            }
+            rpc_result(request, result)
+        } else {
+            full_responder(request)
+        }
+    });
+    let configured = config(&mock.url, McpTrust::Ask);
+    let policy = reviewed_policy(inspect_mcp_server(&configured).unwrap(), ["peek"]);
+    let set = super::adapter::mcp_tools(&[configured], &policy, &|_| true);
+    let (ctx, approvals) = approving_ctx(true);
+
+    let result = named_tool(&set, "mcp__mock__peek")
+        .execute(json!({}), &ctx)
+        .unwrap();
+
+    assert!(
+        result.contains("metadata could not be revalidated"),
+        "{result}"
+    );
+    assert!(result.contains("nh mcp review mock"), "{result}");
+    assert_eq!(approvals.lock().unwrap().len(), 1);
+    assert_eq!(count_method(&mock, "tools/call"), 0);
+    assert_eq!(list_calls.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn discovery_and_eager_modes_share_reviewed_authority() {
+    let mock = start_mock(full_responder);
+    let configured = config(&mock.url, McpTrust::Auto);
+    let policy = reviewed_policy(inspect_mcp_server(&configured).unwrap(), ["peek"]);
+
+    let eager = super::adapter::mcp_tools(std::slice::from_ref(&configured), &policy, &|_| true);
+    let discovery = super::adapter::mcp_discovery_tools(&[configured], &policy, &|_| true);
+
+    assert_eq!(eager.tools.len(), 1);
+    assert_eq!(eager.tools[0].spec().name, "mcp__mock__peek");
+    assert_eq!(discovery.tools.len(), 2);
+    let (ctx, _) = approving_ctx(true);
+    let listed = named_tool(&discovery, "mcp_discover")
+        .execute(json!({"query": "peek"}), &ctx)
+        .unwrap();
+    assert!(listed.contains("mcp__mock__peek"), "{listed}");
+    assert!(!listed.contains("mcp__mock__shout"), "{listed}");
+    let invoked = named_tool(&discovery, "mcp_invoke")
+        .execute(json!({"name": "mcp__mock__peek", "arguments": {}}), &ctx)
+        .unwrap();
+    assert_eq!(invoked, "peeked");
+}
+
+#[test]
+fn used_api_credential_in_escaped_metadata_is_omitted_before_fingerprinting() {
+    const ENV: &str = "NH_MCP_REVIEW_SECRET_KEY";
+    let active = concat!("opaque-review-quote\"-", "slash\\credential");
+    std::env::set_var(ENV, active);
+    let secret = active.to_string();
+    let mock = start_mock(move |request| {
+        rpc_result(
+            request,
+            json!({
+                "tools": [{
+                    "name": "peek",
+                    "description": format!("credential={secret}"),
+                    "inputSchema": {"type": "object"}
+                }]
+            }),
+        )
+    });
+    let mut configured = config(&mock.url, McpTrust::Ask);
+    configured.auth = McpAuth::ApiKey {
+        vault_entry: "mcp-review-secret".into(),
+    };
+
+    let snapshot = inspect_mcp_server(&configured).unwrap();
+    std::env::remove_var(ENV);
+
+    assert!(snapshot.tools.is_empty());
+    assert_eq!(snapshot.omitted_tools, 1);
+    let persisted = McpReviewState::from_snapshot(snapshot, Vec::<String>::new())
+        .unwrap()
+        .to_pretty_json()
+        .unwrap();
+    assert!(!persisted.contains(active));
+    assert!(!persisted.contains("opaque-review"));
+}
+
+#[test]
+fn used_credential_split_by_removed_carriers_is_omitted_from_review_metadata() {
+    const ENV: &str = "NH_MCP_REVIEW_CARRIER_TEST_KEY";
+    let active = concat!("opaque-review-carrier-", "credential");
+    std::env::set_var(ENV, active);
+    let description = "opaque-review-carrier-\u{200b}credential";
+    let schema_value = "opaque-review-carrier-\u{200c}credential";
+    let schema_key = "opaque-review-carrier-\u{2060}credential";
+    let mock = start_mock(move |request| {
+        rpc_result(
+            request,
+            json!({
+                "tools": [
+                    {
+                        "name": "description_leak",
+                        "description": description,
+                        "inputSchema": {"type": "object"}
+                    },
+                    {
+                        "name": "schema_value_leak",
+                        "inputSchema": {"type": "object", "description": schema_value}
+                    },
+                    {
+                        "name": "schema_key_leak",
+                        "inputSchema": {"type": "object", (schema_key): {"type": "string"}}
+                    }
+                ]
+            }),
+        )
+    });
+    let mut configured = config(&mock.url, McpTrust::Ask);
+    configured.auth = McpAuth::ApiKey {
+        vault_entry: "mcp-review-carrier-test".into(),
+    };
+
+    let snapshot = inspect_mcp_server(&configured).unwrap();
+    std::env::remove_var(ENV);
+
+    assert!(snapshot.tools.is_empty());
+    assert_eq!(snapshot.omitted_tools, 3);
+}
+
+#[test]
+fn used_oauth_credentials_in_metadata_are_omitted_before_fingerprinting() {
+    const REFRESH_ENV: &str = "NH_MCP_REVIEW_OAUTH_REFRESH_KEY";
+    const SECRET_ENV: &str = "NH_MCP_REVIEW_OAUTH_SECRET_KEY";
+    let refresh = concat!("opaque-review-refresh-", "value");
+    let client_secret = concat!("opaque-review-client-", "value");
+    let access = concat!("opaque-review-access-", "value");
+    std::env::set_var(REFRESH_ENV, refresh);
+    std::env::set_var(SECRET_ENV, client_secret);
+
+    let token_server = start_mock(move |_| {
+        (
+            200,
+            json!({"access_token": access, "expires_in": 3600}).to_string(),
+        )
+    });
+    let description = format!("{refresh} {client_secret} {access}");
+    let mcp_server = start_mock(move |request| {
+        rpc_result(
+            request,
+            json!({
+                "tools": [{
+                    "name": "peek",
+                    "description": description,
+                    "inputSchema": {"type": "object"}
+                }]
+            }),
+        )
+    });
+    let mut configured = config(&mcp_server.url, McpTrust::Ask);
+    configured.auth = McpAuth::OAuth2 {
+        token_url: token_server.url.clone(),
+        client_id: "review-client".into(),
+        vault_entry: "mcp-review-oauth".into(),
+    };
+
+    let snapshot = inspect_mcp_server(&configured).unwrap();
+    std::env::remove_var(REFRESH_ENV);
+    std::env::remove_var(SECRET_ENV);
+
+    assert!(snapshot.tools.is_empty());
+    assert_eq!(snapshot.omitted_tools, 1);
+    let persisted = McpReviewState::from_snapshot(snapshot, Vec::<String>::new())
+        .unwrap()
+        .to_pretty_json()
+        .unwrap();
+    for secret in [refresh, client_secret, access] {
+        assert!(!persisted.contains(secret));
+    }
 }

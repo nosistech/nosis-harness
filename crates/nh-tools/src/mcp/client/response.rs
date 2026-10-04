@@ -35,8 +35,8 @@ pub(super) fn read_rpc_reply(
             validate_response(&message, expected_id)
         }
         "text/event-stream" => read_sse_reply(response, expected_id, url),
-        other => bail!(
-            "{url} sent unsupported MCP response Content-Type {other:?} - expected application/json or text/event-stream"
+        _ => bail!(
+            "{url} sent unsupported MCP response Content-Type - expected application/json or text/event-stream"
         ),
     }
 }
@@ -193,9 +193,7 @@ fn validate_response(message: &Value, expected_id: &Value) -> anyhow::Result<Rpc
         match result.get("resultType") {
             None => {}
             Some(Value::String(kind)) if kind == "complete" => {}
-            Some(Value::String(kind)) => {
-                bail!("MCP response used unsupported resultType {kind:?}")
-            }
+            Some(Value::String(_)) => bail!("MCP response used an unsupported resultType"),
             Some(_) => bail!("MCP response resultType was not a string"),
         }
         return Ok(RpcReply::Complete(Value::Object(result.clone())));
@@ -211,6 +209,5 @@ fn validate_response(message: &Value, expected_id: &Value) -> anyhow::Result<Rpc
         .get("message")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("MCP response error message was not a string"))?;
-    let message = nh_vault::sanitize_untrusted_text(message).replace(['\r', '\n'], " ");
-    Ok(RpcReply::ServerError(message))
+    Ok(RpcReply::ServerError(message.to_string()))
 }

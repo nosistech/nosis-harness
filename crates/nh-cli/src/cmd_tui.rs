@@ -137,6 +137,7 @@ fn load_mcp_palette(
 ) -> Vec<PaletteEntry> {
     let warning_start = warnings.len();
     let configs = cmd_run::load_and_vet_mcp_configs(root, home, policy, warnings);
+    let reviews = cmd_run::load_mcp_review_policy(&configs, home, warnings);
     if configs.is_empty() && warnings.len() > warning_start {
         for warning in &mut warnings[warning_start..] {
             warning.push_str(" - palette marks MCP stale");
@@ -146,7 +147,7 @@ fn load_mcp_palette(
     let McpToolset {
         tools,
         warnings: discovery_warnings,
-    } = nh_tools::mcp_tools(&configs, &send_allowed);
+    } = nh_tools::mcp_tools(&configs, &reviews, &send_allowed);
     let mut palette_warnings = warnings[warning_start..].to_vec();
     palette_warnings.extend(discovery_warnings.iter().cloned());
     let toolset = McpToolset {

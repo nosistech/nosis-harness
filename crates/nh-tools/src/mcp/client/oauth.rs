@@ -109,6 +109,11 @@ impl McpClient {
             .ok_or_else(failure)?;
         let secret_entry = format!("{vault_entry}-secret");
         let client_secret = vault.get(&secret_entry).map_err(|_| failure())?;
+        let refresh_secret = nh_vault::secret(refresh_token.to_string());
+        self.remember_secret(&refresh_secret)
+            .map_err(|_| failure())?;
+        self.remember_secret(&client_secret)
+            .map_err(|_| failure())?;
         let scope = self.config.scopes.join(" ");
         let mut form = vec![
             ("grant_type", "refresh_token"),
@@ -139,6 +144,7 @@ impl McpClient {
             .filter(|value| !value.is_empty())
             .map(nh_vault::secret)
             .ok_or_else(failure)?;
+        self.remember_secret(&access).map_err(|_| failure())?;
         let now = Instant::now();
         let expires_at = now
             .checked_add(Duration::from_secs(
@@ -154,6 +160,7 @@ impl McpClient {
             .filter(|value| !value.is_empty())
             .map(nh_vault::secret)
         {
+            self.remember_secret(&refresh).map_err(|_| failure())?;
             if vault.set(&refresh_entry, refresh.as_str()).is_err() {
                 let mut registry = SecretRegistry::new();
                 registry.insert(refresh.clone());

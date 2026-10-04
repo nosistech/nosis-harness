@@ -13,7 +13,7 @@ $Destination = Join-Path $RepoRoot 'docs/CLI_REFERENCE.md'
 $Sections = @('', 'setup', 'init', 'catalog', 'catalog migrate', 'model',
     'model set', 'model show', 'model clear', 'key', 'key add', 'key remove',
     'run', 'chat', 'doctor', 'resume', 'why', 'profile', 'tui',
-    'fleet', 'fleet run', 'fleet resume', 'mcp', 'mcp serve')
+    'fleet', 'fleet run', 'fleet resume', 'mcp', 'mcp serve', 'mcp review')
 $Document = [Collections.Generic.List[string]]::new()
 $Document.Add('# Command reference')
 $Document.Add('')

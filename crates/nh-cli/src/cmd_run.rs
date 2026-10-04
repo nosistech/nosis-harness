@@ -5,7 +5,7 @@
 mod config;
 mod meter;
 
-pub(crate) use config::{find_catalog, load_and_vet_mcp_configs};
+pub(crate) use config::{find_catalog, load_and_vet_mcp_configs, load_mcp_review_policy};
 pub(crate) use meter::{
     compaction_meter_line, context_window_summary, terminal_progress_meter_line, turn_cost_line,
     usage_token_summary,

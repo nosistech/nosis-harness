@@ -26,11 +26,33 @@ def encoded(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
-def run_case(binary, discovery, reverse=False, deny=False):
-    requests, bodies, remote_calls, errors = [], [], [], []
+def fingerprint(value):
+    """Match the review store's canonical object ordering for public fixtures."""
+    canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def write_review(home, origin, schemas, enabled=True):
+    # This trusted test fixture supplies the operator's saved review. Production
+    # reviews come from the terminal; repository settings cannot authorize tools.
+    connection = {"url": origin + "/mcp", "protocol": "2026-07-28",
+                  "auth": {"kind": "none"}, "scopes": []}
+    snapshot = [{"descriptor": schema, "fingerprint": fingerprint(schema)}
+                for schema in sorted(schemas, key=lambda item: item["name"])]
+    state = {"version": 1, "server": "fixture", "connection": connection,
+             "connection_fingerprint": fingerprint(connection), "snapshot": snapshot,
+             "enabled": [item["descriptor"]["name"] for item in snapshot] if enabled else []}
+    directory = home / ".nosis" / "mcp-reviews"
+    directory.mkdir()
+    (directory / "fixture.json").write_bytes(encoded(state))
+
+
+def run_case(binary, discovery, reverse=False, deny=False, changed=False, review_state="enabled"):
+    requests, bodies, remote_calls, remote_lists, errors = [], [], [], [], []
     remote_name = "mutate_record" if deny else "lookup_17"
     exposed = "mcp__fixture__" + remote_name
-    expected_requests = 3 if discovery else 2
+    enabled = review_state == "enabled"
+    expected_requests = (3 if discovery else 2) if enabled else 1
     schemas = [{"name": f"lookup_{index:02}",
                 "description": f"Synthetic lookup {index:02}. " + "Public fixture documentation. " * 12,
                 "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}},
@@ -55,7 +77,12 @@ def run_case(binary, discovery, reverse=False, deny=False):
                 if self.path == "/mcp":
                     method = request["method"]
                     if method == "tools/list":
+                        remote_lists.append(method)
                         result = {"tools": schemas}
+                        if changed and len(remote_lists) > 1:
+                            result = {"tools": [dict(schema, description="Changed after review")
+                                                if schema["name"] == remote_name else schema
+                                                for schema in schemas]}
                     elif method == "tools/call":
                         remote_calls.append(request["params"])
                         result = {"content": [{"type": "text", "text": EVIDENCE}]}
@@ -68,7 +95,7 @@ def run_case(binary, discovery, reverse=False, deny=False):
                     step = len(requests)
                     if step > expected_requests:
                         raise ValueError("unexpected provider request")
-                    if discovery and step == 1:
+                    if enabled and discovery and step == 1:
                         name, arguments = DISCOVER, {"query": remote_name, "offset": 0, "limit": 1}
                     elif step < expected_requests:
                         name = INVOKE if discovery else exposed
@@ -127,6 +154,8 @@ thinking_dialect = "none"
                 (home / ".nosis" / "mcp.toml").write_text(
                     f'[servers.fixture]\nurl = "{origin}/mcp"\nauth = "none"\ntrust = "auto"\n',
                     encoding="utf-8")
+                if review_state != "missing":
+                    write_review(home, origin, schemas, enabled=enabled)
                 essentials = {"path", "systemroot", "windir", "temp", "tmp", "comspec", "pathext"}
                 env = {name: value for name, value in os.environ.items() if name.lower() in essentials}
                 env.update(HOME=str(home), USERPROFILE=str(home), NO_PROXY="127.0.0.1",
@@ -148,7 +177,10 @@ thinking_dialect = "none"
                 names = {tool["function"]["name"] for tool in tools}
                 if not CORE_TOOLS <= names:
                     raise AssertionError("core tools missing from first request")
-                if discovery:
+                if not enabled:
+                    if names != CORE_TOOLS or remote_calls or remote_lists:
+                        raise AssertionError("disabled or unreviewed server was contacted/offered tools")
+                elif discovery:
                     if not {DISCOVER, INVOKE} <= names or exposed in names:
                         raise AssertionError("discovery did not replace eager MCP schemas")
                     discovery_output = requests[1]["messages"][-1]["content"]
@@ -159,7 +191,14 @@ thinking_dialect = "none"
                 if any(request["tools"] != tools for request in requests):
                     raise AssertionError("schema registry changed mid-task")
                 tool_output = requests[-1]["messages"][-1]["content"]
-                if deny:
+                if not enabled:
+                    pass
+                elif changed:
+                    if remote_calls or EVIDENCE in tool_output or "review" not in tool_output.lower():
+                        raise AssertionError("changed definition was not refused before tools/call")
+                    if len(remote_lists) < 2:
+                        raise AssertionError("definition was not fetched again before invocation")
+                elif deny:
                     if remote_calls or EVIDENCE in tool_output:
                         raise AssertionError("unapproved mutation reached remote tool")
                     if b"approval refused" not in completed.stderr:
@@ -170,10 +209,12 @@ thinking_dialect = "none"
                       or EVIDENCE not in tool_output):
                     raise AssertionError("MCP invocation/result did not match the discovered adapter")
                 return {"discovery": discovery, "reverse_server_order": reverse, "approval_refused_mutation": deny,
+                        "changed_definition_refused": changed,
+                        "review_state": review_state,
                         "request_bytes": [len(body) for body in bodies],
                         "tool_schema_bytes": len(encoded(tools)), "tools": len(tools),
                         "schema_sha256": hashlib.sha256(encoded(tools)).hexdigest(),
-                        "remote_calls": len(remote_calls)}
+                        "remote_calls": len(remote_calls), "remote_lists": len(remote_lists)}
         finally:
             server.shutdown()
             thread.join(timeout=5)
@@ -189,7 +230,11 @@ def main():
     if cases[0]["schema_sha256"] != cases[1]["schema_sha256"]:
         raise AssertionError("server response order changed eager model schema order")
     if not args.baseline_only:
-        cases.extend([run_case(binary, True), run_case(binary, True, deny=True)])
+        cases.extend([run_case(binary, True), run_case(binary, True, deny=True),
+                      run_case(binary, False, changed=True), run_case(binary, True, changed=True),
+                      run_case(binary, False, review_state="none"),
+                      run_case(binary, True, review_state="none"),
+                      run_case(binary, False, review_state="missing")])
     print(json.dumps({"synthetic_only": True, "model_quality_assessed": False,
                       "real_token_savings_assessed": False, "cases": cases}, indent=2))
 

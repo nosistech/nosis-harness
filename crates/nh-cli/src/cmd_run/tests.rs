@@ -227,6 +227,67 @@ fn oversized_repo_mcp_is_refused_before_parsing() {
 }
 
 #[test]
+fn malformed_oversized_and_interrupted_mcp_review_state_fail_closed() {
+    let config = mcp_config("sample", "https://user.example/mcp", McpTrust::Ask);
+
+    let malformed_home = tempfile::tempdir().unwrap();
+    let malformed_dir = malformed_home.path().join(".nosis/mcp-reviews");
+    fs::create_dir_all(&malformed_dir).unwrap();
+    fs::write(malformed_dir.join("sample.json"), "not json").unwrap();
+    let mut malformed_warnings = Vec::new();
+    let _ = load_mcp_review_policy(
+        std::slice::from_ref(&config),
+        Some(malformed_home.path()),
+        &mut malformed_warnings,
+    );
+    assert_eq!(malformed_warnings.len(), 1);
+    assert!(malformed_warnings[0].contains("malformed"));
+    assert!(!malformed_warnings[0].contains("not json"));
+
+    let oversized_home = tempfile::tempdir().unwrap();
+    let oversized_dir = oversized_home.path().join(".nosis/mcp-reviews");
+    fs::create_dir_all(&oversized_dir).unwrap();
+    fs::write(
+        oversized_dir.join("sample.json"),
+        "x".repeat(nh_tools::MAX_MCP_REVIEW_BYTES + 1),
+    )
+    .unwrap();
+    let mut oversized_warnings = Vec::new();
+    let _ = load_mcp_review_policy(
+        std::slice::from_ref(&config),
+        Some(oversized_home.path()),
+        &mut oversized_warnings,
+    );
+    assert_eq!(oversized_warnings.len(), 1);
+    assert!(oversized_warnings[0].contains("review state was refused"));
+    assert!(oversized_warnings[0]
+        .replace('\\', "/")
+        .contains("/.nosis/mcp-reviews/sample.json"));
+    assert!(oversized_warnings[0].contains("move or remove it deliberately"));
+
+    let interrupted_home = tempfile::tempdir().unwrap();
+    let interrupted_dir = interrupted_home.path().join(".nosis/mcp-reviews");
+    fs::create_dir_all(&interrupted_dir).unwrap();
+    fs::write(
+        interrupted_dir.join(".sample.nh-restore-1-0.tmp"),
+        "recovery bytes",
+    )
+    .unwrap();
+    let mut interrupted_warnings = Vec::new();
+    let _ = load_mcp_review_policy(
+        &[config],
+        Some(interrupted_home.path()),
+        &mut interrupted_warnings,
+    );
+    assert_eq!(interrupted_warnings.len(), 1);
+    assert!(interrupted_warnings[0].contains("review update is incomplete"));
+    assert!(interrupted_warnings[0]
+        .replace('\\', "/")
+        .contains("/.nosis/mcp-reviews/sample.json"));
+    assert!(interrupted_warnings[0].contains("resolve the recovery files"));
+}
+
+#[test]
 fn mcp_audience_checks_use_exact_origins() {
     let approved = vec!["api.deepseek.com".to_string()];
     let api = McpServerConfig {

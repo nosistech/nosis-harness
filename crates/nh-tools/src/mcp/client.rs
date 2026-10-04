@@ -72,6 +72,7 @@ pub struct McpToolInfo {
 pub(super) struct ToolEntry {
     pub(super) info: McpToolInfo,
     pub(super) read_only: bool,
+    pub(super) reviewed: Option<super::review::ReviewedTool>,
 }
 
 pub(super) struct ToolCache {
@@ -92,6 +93,7 @@ pub struct McpClient {
     pub(super) unsupported_header_tools: Mutex<HashSet<String>>,
     pub(super) oauth: Mutex<OAuthState>,
     pub(super) refresh_lock: Mutex<()>,
+    pub(super) credential_secrets: Mutex<nh_vault::SecretRegistry>,
 }
 
 impl McpClient {
@@ -130,6 +132,7 @@ impl McpClient {
             unsupported_header_tools: Mutex::new(HashSet::new()),
             oauth: Mutex::new(OAuthState::default()),
             refresh_lock: Mutex::new(()),
+            credential_secrets: Mutex::new(nh_vault::SecretRegistry::new()),
         })
     }
 
@@ -149,7 +152,16 @@ impl McpClient {
                 return Ok(cache.entries.clone());
             }
         }
+        self.fetch_tools_full(true)
+    }
+
+    pub(super) fn list_tools_fresh(&self) -> anyhow::Result<Vec<ToolEntry>> {
+        self.fetch_tools_full(false)
+    }
+
+    fn fetch_tools_full(&self, cache_result: bool) -> anyhow::Result<Vec<ToolEntry>> {
         let result = self.rpc_with(&self.startup_http, "tools/list", json!({}))?;
+        let credential_scrubber = self.credential_scrubber()?;
         let mut unsupported = HashSet::new();
         let mut entries = Vec::new();
         for tool in result
@@ -169,7 +181,7 @@ impl McpClient {
                 unsupported.insert(name.to_string());
                 continue;
             }
-            if let Some(entry) = parse_tool(tool) {
+            if let Some(entry) = parse_tool(tool, &credential_scrubber) {
                 entries.push(entry);
             }
         }
@@ -200,7 +212,7 @@ impl McpClient {
             .and_then(Value::as_u64)
             .unwrap_or(DEFAULT_TTL_MS)
             .min(MAX_TTL_MS);
-        if ttl_ms > 0 {
+        if cache_result && ttl_ms > 0 {
             let now = Instant::now();
             let expires_at = now
                 .checked_add(Duration::from_millis(ttl_ms))
@@ -211,6 +223,42 @@ impl McpClient {
             });
         }
         Ok(entries)
+    }
+
+    pub(super) fn review_snapshot(&self) -> anyhow::Result<super::review::McpReviewSnapshot> {
+        let entries = self.list_tools_fresh()?;
+        let omitted_tools = entries
+            .iter()
+            .filter(|entry| entry.reviewed.is_none())
+            .count();
+        let tools = entries
+            .into_iter()
+            .filter_map(|entry| entry.reviewed)
+            .collect();
+        super::review::snapshot_from_tools(&self.config, tools, omitted_tools)
+    }
+
+    pub(super) fn credential_scrubber(&self) -> anyhow::Result<nh_vault::Scrubber> {
+        self.credential_secrets
+            .lock()
+            .map(|registry| registry.scrubber())
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "MCP credential redaction state is unavailable after an internal panic"
+                )
+            })
+    }
+
+    pub(super) fn remember_secret(&self, secret: &SecretValue) -> anyhow::Result<()> {
+        self.credential_secrets
+            .lock()
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "MCP credential redaction state is unavailable after an internal panic"
+                )
+            })?
+            .insert(secret.clone());
+        Ok(())
     }
 
     fn cache_state(&self) -> anyhow::Result<std::sync::MutexGuard<'_, Option<ToolCache>>> {
@@ -244,7 +292,8 @@ impl McpClient {
             bail!("mcp tool is unavailable because x-mcp-header parameters are not supported");
         }
         let result = self.rpc("tools/call", json!({ "name": name, "arguments": args }))?;
-        let text = render_call_result(&result, scrubber);
+        let credential_scrubber = self.credential_scrubber()?;
+        let text = render_call_result(&result, &[scrubber, &credential_scrubber]);
         if result.get("isError").and_then(Value::as_bool) == Some(true) {
             let line = if text.is_empty() {
                 format!("tool {} failed with no message", scrubber.scrub(name))
@@ -360,7 +409,16 @@ impl McpClient {
             }
             match read_rpc_reply(response, &json!(request_id), url)? {
                 RpcReply::Complete(result) => return Ok(result),
-                RpcReply::ServerError(message) => bail!("server error: {message}"),
+                RpcReply::ServerError(message) => {
+                    let safe = self
+                        .credential_scrubber()
+                        .map(|scrubber| scrub_server_error(&message, &scrubber))
+                        .unwrap_or_else(|_| {
+                            "MCP server error details omitted because credential redaction was unavailable"
+                                .to_string()
+                        });
+                    bail!("server error: {safe}")
+                }
             }
         }
     }
@@ -376,6 +434,7 @@ impl McpClient {
             McpAuth::None => {}
             McpAuth::OAuth2 { .. } => {
                 let access = self.oauth_access_token_with(http)?;
+                self.remember_secret(&access)?;
                 headers.push((
                     "authorization".to_string(),
                     nh_vault::secret(format!("Bearer {}", access.as_str())),
@@ -386,6 +445,7 @@ impl McpClient {
                     inner: KeyringVault,
                 };
                 let secret = vault.get(vault_entry)?;
+                self.remember_secret(&secret)?;
                 headers.push((
                     "authorization".to_string(),
                     nh_vault::secret(format!("Bearer {}", secret.as_str())),
@@ -468,7 +528,10 @@ fn encode_header_value(header_name: &str, raw: &str) -> anyhow::Result<String> {
     }
 }
 
-pub(super) fn parse_tool(tool: &Value) -> Option<ToolEntry> {
+pub(super) fn parse_tool(
+    tool: &Value,
+    credential_scrubber: &nh_vault::Scrubber,
+) -> Option<ToolEntry> {
     let name = tool.get("name")?.as_str()?.to_string();
     let description = nh_vault::sanitize_untrusted_text(
         tool.get("description")
@@ -485,6 +548,21 @@ pub(super) fn parse_tool(tool: &Value) -> Option<ToolEntry> {
         .and_then(|a| a.get("readOnlyHint"))
         .and_then(Value::as_bool)
         == Some(true);
+    let mut descriptor = Map::new();
+    for field in [
+        "name",
+        "description",
+        "inputSchema",
+        "outputSchema",
+        "annotations",
+    ] {
+        if let Some(value) = tool.get(field) {
+            descriptor.insert(field.to_string(), value.clone());
+        }
+    }
+    let reviewed = super::review::reviewed_tool(Value::Object(descriptor), credential_scrubber)
+        .ok()
+        .flatten();
     Some(ToolEntry {
         info: McpToolInfo {
             name,
@@ -492,6 +570,7 @@ pub(super) fn parse_tool(tool: &Value) -> Option<ToolEntry> {
             input_schema,
         },
         read_only,
+        reviewed,
     })
 }
 pub(super) fn sanitize_json_strings(value: &mut Value) {
@@ -512,11 +591,19 @@ pub(super) fn sanitize_json_strings(value: &mut Value) {
 }
 
 pub(super) fn scrub_json_strings(value: &mut Value, scrubber: &nh_vault::Scrubber) -> bool {
+    scrub_json_strings_many(value, &[scrubber])
+}
+
+fn scrub_json_strings_many(value: &mut Value, scrubbers: &[&nh_vault::Scrubber]) -> bool {
     match value {
-        Value::String(text) => *text = scrubber.scrub(text),
+        Value::String(text) => {
+            *text = scrubbers
+                .iter()
+                .fold(text.clone(), |text, scrubber| scrubber.scrub(&text));
+        }
         Value::Array(values) => {
             for value in values {
-                if !scrub_json_strings(value, scrubber) {
+                if !scrub_json_strings_many(value, scrubbers) {
                     return false;
                 }
             }
@@ -524,8 +611,10 @@ pub(super) fn scrub_json_strings(value: &mut Value, scrubber: &nh_vault::Scrubbe
         Value::Object(fields) => {
             let mut scrubbed = Map::new();
             for (name, mut value) in std::mem::take(fields) {
-                let name = scrubber.scrub(&name);
-                if scrubbed.contains_key(&name) || !scrub_json_strings(&mut value, scrubber) {
+                let name = scrubbers
+                    .iter()
+                    .fold(name, |name, scrubber| scrubber.scrub(&name));
+                if scrubbed.contains_key(&name) || !scrub_json_strings_many(&mut value, scrubbers) {
                     return false;
                 }
                 scrubbed.insert(name, value);
@@ -537,17 +626,17 @@ pub(super) fn scrub_json_strings(value: &mut Value, scrubber: &nh_vault::Scrubbe
     true
 }
 
-fn render_call_result(result: &Value, scrubber: &nh_vault::Scrubber) -> String {
+fn render_call_result(result: &Value, scrubbers: &[&nh_vault::Scrubber]) -> String {
     const STRUCTURED_MARKER: &str = "[structured content]";
     const OMITTED_MARKER: &str =
         "[structured content omitted: redaction made field names ambiguous]";
 
-    let text = render_scrubbed_content(result.get("content"), scrubber);
+    let text = render_scrubbed_content(result.get("content"), scrubbers);
     let Some(structured) = result.get("structuredContent") else {
         return text;
     };
     let mut structured = structured.clone();
-    if !scrub_json_strings(&mut structured, scrubber) {
+    if !scrub_json_strings_many(&mut structured, scrubbers) {
         return join_result_parts(&text, OMITTED_MARKER);
     }
     let Ok(encoded) = serde_json::to_string(&structured) else {
@@ -566,7 +655,7 @@ fn render_call_result(result: &Value, scrubber: &nh_vault::Scrubber) -> String {
     }
 }
 
-fn render_scrubbed_content(content: Option<&Value>, scrubber: &nh_vault::Scrubber) -> String {
+fn render_scrubbed_content(content: Option<&Value>, scrubbers: &[&nh_vault::Scrubber]) -> String {
     const OMITTED_COLLISION: &str = "[text content omitted: redaction made field names ambiguous]";
     const OMITTED_ENCODING: &str = "[text content omitted: could not render safely]";
 
@@ -578,11 +667,15 @@ fn render_scrubbed_content(content: Option<&Value>, scrubber: &nh_vault::Scrubbe
         .map(|block| match block.get("type").and_then(Value::as_str) {
             Some("text") => scrub_json_text(
                 block.get("text").and_then(Value::as_str).unwrap_or(""),
-                scrubber,
+                scrubbers,
                 OMITTED_COLLISION,
                 OMITTED_ENCODING,
             ),
-            Some(other) => scrubber.scrub(&format!("[{other} block]")),
+            Some(other) => scrubbers
+                .iter()
+                .fold(format!("[{other} block]"), |text, scrubber| {
+                    scrubber.scrub(&text)
+                }),
             None => "[unknown block]".to_string(),
         })
         .collect::<Vec<_>>()
@@ -591,22 +684,85 @@ fn render_scrubbed_content(content: Option<&Value>, scrubber: &nh_vault::Scrubbe
     // A server may split one complete JSON document across text blocks. Each
     // complete block was already handled above; this pass covers that joined
     // representation without relying on it for multi-block safety.
-    scrub_json_text(&text, scrubber, OMITTED_COLLISION, OMITTED_ENCODING)
+    scrub_json_text(&text, scrubbers, OMITTED_COLLISION, OMITTED_ENCODING)
 }
 
 fn scrub_json_text(
     text: &str,
-    scrubber: &nh_vault::Scrubber,
+    scrubbers: &[&nh_vault::Scrubber],
     collision_marker: &str,
     unsafe_marker: &str,
 ) -> String {
-    match scrub_complete_json(text, scrubber) {
-        ScrubbedJson::NotJson => scrubber.scrub(text),
+    match scrub_complete_json(text, scrubbers) {
+        ScrubbedJson::NotJson => scrubbers
+            .iter()
+            .fold(text.to_string(), |text, scrubber| scrubber.scrub(&text)),
         ScrubbedJson::Unchanged => text.to_string(),
         ScrubbedJson::Rewritten(text) => text,
         ScrubbedJson::Collision => collision_marker.to_string(),
         ScrubbedJson::Unsafe => unsafe_marker.to_string(),
     }
+}
+
+fn scrub_server_error(message: &str, scrubber: &nh_vault::Scrubber) -> String {
+    fn scrub_once(message: &str, scrubber: &nh_vault::Scrubber) -> String {
+        match scrub_complete_json(message, &[scrubber]) {
+            ScrubbedJson::NotJson => scrubber.scrub(message),
+            ScrubbedJson::Unchanged => message.to_string(),
+            ScrubbedJson::Rewritten(message) => message,
+            ScrubbedJson::Collision | ScrubbedJson::Unsafe => {
+                "MCP server error details omitted because they could not be redacted safely"
+                    .to_string()
+            }
+        }
+    }
+
+    let scrubbed = scrub_once(message, scrubber);
+    let scrubbed = match serde_json::from_str::<Value>(&scrubbed) {
+        Ok(mut value) => {
+            if !escape_json_strings(&mut value) || !scrub_json_strings(&mut value, scrubber) {
+                "MCP server error details omitted because they could not be redacted safely"
+                    .to_string()
+            } else {
+                serde_json::to_string(&value).unwrap_or_else(|_| {
+                    "MCP server error details omitted because they could not be rendered safely"
+                        .to_string()
+                })
+            }
+        }
+        Err(_) => {
+            let escaped = nh_vault::escape_untrusted(&scrubbed).replace(['\r', '\n'], " ");
+            scrubber.scrub(&escaped)
+        }
+    };
+    let sanitized = nh_vault::sanitize_untrusted_text(&scrubbed).replace(['\r', '\n'], " ");
+    scrub_once(&sanitized, scrubber)
+}
+
+fn escape_json_strings(value: &mut Value) -> bool {
+    match value {
+        Value::String(text) => *text = nh_vault::escape_untrusted(text),
+        Value::Array(values) => {
+            for value in values {
+                if !escape_json_strings(value) {
+                    return false;
+                }
+            }
+        }
+        Value::Object(fields) => {
+            let mut escaped = Map::new();
+            for (name, mut value) in std::mem::take(fields) {
+                let name = nh_vault::escape_untrusted(&name);
+                if escaped.contains_key(&name) || !escape_json_strings(&mut value) {
+                    return false;
+                }
+                escaped.insert(name, value);
+            }
+            *fields = escaped;
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+    true
 }
 
 fn join_result_parts(text: &str, suffix: &str) -> String {

@@ -88,6 +88,9 @@ jobs:
           cargo build --locked --release -p nh-cli
           if ($LASTEXITCODE -ne 0) { throw 'CLI build failed.' }
           .\scripts\generate-cli-reference.ps1 -Check
+      - name: Offline MCP chat boundaries
+        if: runner.os == 'Windows'
+        run: python -B scripts/mcp-efficiency-smoke.py --binary target/release/nh.exe
 
   supply-chain:
     name: Supply chain

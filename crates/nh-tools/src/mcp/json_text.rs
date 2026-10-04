@@ -20,7 +20,7 @@ enum Container {
 /// The initial validation keeps this scanner small: delimiters outside strings
 /// are trustworthy, while numbers, whitespace, ordering, and duplicate fields
 /// can be copied without materializing the document as a `Value`.
-pub(super) fn scrub_complete_json(text: &str, scrubber: &Scrubber) -> ScrubbedJson {
+pub(super) fn scrub_complete_json(text: &str, scrubbers: &[&Scrubber]) -> ScrubbedJson {
     if serde_json::from_str::<IgnoredAny>(text).is_err() {
         return ScrubbedJson::NotJson;
     }
@@ -69,7 +69,9 @@ pub(super) fn scrub_complete_json(text: &str, scrubber: &Scrubber) -> ScrubbedJs
                 let Ok(decoded) = serde_json::from_str::<String>(token) else {
                     return ScrubbedJson::Unsafe;
                 };
-                let scrubbed = scrubber.scrub(&decoded);
+                let scrubbed = scrubbers
+                    .iter()
+                    .fold(decoded.clone(), |text, scrubber| scrubber.scrub(&text));
                 let is_key = matches!(containers.last(), Some(Container::Object(_)))
                     && next_non_whitespace(bytes, cursor) == Some(b':');
 

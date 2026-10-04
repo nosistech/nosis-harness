@@ -8,10 +8,15 @@ mod adapter;
 mod client;
 mod config;
 mod json_text;
+mod review;
 
 pub use adapter::{mcp_discovery_tools, mcp_tools, McpToolset};
 pub use client::{McpClient, McpToolInfo};
 pub use config::{load_mcp_config, McpAuth, McpServerConfig, McpTrust};
+pub use review::{
+    inspect_mcp_server, McpReviewPolicy, McpReviewSnapshot, McpReviewState, ReviewedTool,
+    MAX_MCP_REVIEW_BYTES,
+};
 
 #[cfg(test)]
 mod tests;

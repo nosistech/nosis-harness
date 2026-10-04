@@ -57,6 +57,38 @@ must permit the destination. Repository settings cannot grant those permissions 
 Use `trust = "ask"` while evaluating a server. Inspect the requested tool and arguments
 before approving. A server's tool descriptions and returned text are untrusted data.
 
+## Review and enable actions
+
+After configuring a server, run this in a terminal, substituting its configured name:
+
+```powershell
+nh mcp review local
+```
+
+Review the destination and available actions, select the tools you want, and confirm
+the selection. Enter without a selection cancels. Connecting or discovering a server
+does not enable its tools. Existing configurations also need this one-time review.
+The review makes no model request and does not execute the listed tools.
+
+Nosis saves your selection and the reviewed definitions in your user configuration.
+Tools with detected secrets, invalid or oversized metadata cannot be enabled.
+It checks those definitions again before a tool runs. New tools
+start disabled; changed or removed tools cannot run under an older approval. Run
+the same review command to inspect changes and update the selection.
+
+Start a new chat or TUI session after changing the selection. Existing sessions
+keep the selection they loaded. A session with no enabled tools does not contact
+that server at startup. Each allowed action requires another tool-list request;
+this adds a network round trip, and a failed check prevents the action.
+
+Enabling a tool does not override project restrictions, credential destinations or
+the server's `ask`/`auto`/`block` setting. A server's read-only claim is metadata;
+Nosis cannot prove that its remote implementation is read-only or unchanged.
+Review state is kept in your user profile, using its inherited permissions on
+Windows and private permissions for newly created Unix files. Saving updates
+requires a filesystem that supports hard links. If a saved state cannot be read
+safely, the error names the file to inspect; Nosis does not overwrite it.
+
 ## Start the local Nosis server
 
 From an initialized project directory:
@@ -106,7 +138,8 @@ audience = ["http://127.0.0.1:8765"]
 Merge these settings into existing tables if present. Use the address printed by the server
 if you selected a different port. Project send restrictions still apply.
 
-Your next `nh chat` session discovers tools named `mcp__local__...` and asks before each call.
+Run `nh mcp review local` and enable only the actions you need. Your next `nh chat`
+session offers the selected tools named `mcp__local__...` and asks before each call.
 Chat still uses your configured model and its normal billing. When the server restarts with
 a new generated token, update the vault entry through the same hidden prompt.
 
@@ -114,6 +147,8 @@ a new generated token, update the vault entry through the same hidden prompt.
 
 | Message or symptom | What to check |
 | --- | --- |
+| Tools need review or no tools are enabled | Run `nh mcp review <server>` in a terminal and select the actions you need. |
+| Tool definition changed | Review the before/after definition with `nh mcp review <server>`. A new name or changed description/schema is not automatically trusted. |
 | Unsupported protocol version | The affected server is skipped with a warning; the session can continue. Confirm it supports the modern stateless interface. Changing only the version string cannot add a legacy handshake. |
 | Missing or mismatched metadata | Update the integrating client to send matching protocol, method, and tool-name headers and body fields. |
 | Credential origin not approved | Verify the intended server address and the credential's trusted origin configuration. |

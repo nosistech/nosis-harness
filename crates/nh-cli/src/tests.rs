@@ -646,6 +646,17 @@ fn parses_mcp_serve_token_entry() {
 }
 
 #[test]
+fn parses_mcp_review_server() {
+    let cli = Cli::try_parse_from(["nh", "mcp", "review", "browser"]).unwrap();
+    assert!(matches!(
+        cli.cmd,
+        Cmd::Mcp {
+            action: McpAction::Review { ref server }
+        } if server == "browser"
+    ));
+}
+
+#[test]
 fn mcp_serve_help_names_all_six_runtime_tools() {
     use clap::CommandFactory as _;
 

@@ -849,11 +849,12 @@ fn load_mcp(
     warnings: &mut Vec<String>,
 ) -> Vec<Box<dyn Tool>> {
     let configs = cmd_run::load_and_vet_mcp_configs(root, home, policy, warnings);
+    let reviews = cmd_run::load_mcp_review_policy(&configs, home, warnings);
     let send_allowed = |host: &str| !matches!(policy.send_verdict(host), nh_law::Verdict::Block(_));
     let set = if discovery {
-        nh_tools::mcp::mcp_discovery_tools(&configs, &send_allowed)
+        nh_tools::mcp::mcp_discovery_tools(&configs, &reviews, &send_allowed)
     } else {
-        nh_tools::mcp::mcp_tools(&configs, &send_allowed)
+        nh_tools::mcp::mcp_tools(&configs, &reviews, &send_allowed)
     };
     warnings.extend(set.warnings);
     set.tools

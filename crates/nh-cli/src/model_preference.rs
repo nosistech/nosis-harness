@@ -1,14 +1,12 @@
 //! Operator-owned, user-global default route selection.
 
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
-use nh_law::{read_guarded, GuardedRead};
 use nh_routes::RouteResolver;
 use nh_vault::Scrubber;
 
 use crate::cmd_run;
+use crate::private_state::{PrivateStateFile, PrivateStateRead};
 
 pub(crate) const FALLBACK_MODEL: &str = "deepseek-v4-flash";
 const MAX_MODEL_BYTES: usize = 256;
@@ -101,69 +99,35 @@ fn required_home() -> anyhow::Result<PathBuf> {
     })
 }
 
+#[cfg(test)]
 fn preference_path(home: &Path) -> PathBuf {
     home.join(".nosis").join("model")
 }
 
-fn inspect_preference_dir(home: &Path, create: bool) -> anyhow::Result<Option<PathBuf>> {
-    let directory = home.join(".nosis");
-    match fs::symlink_metadata(&directory) {
-        Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_dir() => {
-            Ok(Some(directory))
-        }
-        Ok(_) => anyhow::bail!(
-            "refused ~/.nosis/model: ~/.nosis must be a directory; symlinks and special files are not accepted"
-        ),
-        Err(error) if error.kind() == io::ErrorKind::NotFound && create => {
-            match fs::create_dir(&directory) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(error) => anyhow::bail!("could not create ~/.nosis: {error}"),
-            }
-            let metadata = fs::symlink_metadata(&directory)?;
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                anyhow::bail!(
-                    "refused ~/.nosis/model: ~/.nosis must be a directory; symlinks and special files are not accepted"
-                )
-            }
-            Ok(Some(directory))
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => anyhow::bail!("could not inspect ~/.nosis: {error}"),
-    }
+fn preference_file(home: &Path, create: bool) -> anyhow::Result<Option<PrivateStateFile>> {
+    PrivateStateFile::open(home, None, "model", "model", MAX_MODEL_BYTES, create).map_err(|error| {
+        anyhow::anyhow!(
+            "could not safely access saved model preference at ~/.nosis/model: {error}; inspect ~/.nosis and run `nh model clear` if the saved preference should be removed"
+        )
+    })
 }
 
 fn read_preference(home: &Path) -> anyhow::Result<Option<String>> {
-    let Some(directory) = inspect_preference_dir(home, false)? else {
+    let Some(file) = preference_file(home, false)? else {
         return Ok(None);
     };
-    let path = preference_path(home);
-    match read_guarded(&path, Some(home), MAX_MODEL_BYTES) {
-        GuardedRead::Text(text) => parse_preference(&text).map(Some),
-        GuardedRead::Absent if interrupted_update_present(&directory)? => anyhow::bail!(
+    let preference = file.read().map_err(|error| {
+        anyhow::anyhow!(
+            "refused saved model preference at ~/.nosis/model: {error}; inspect the file and run `nh model clear` to remove it deliberately"
+        )
+    })?;
+    match preference {
+        PrivateStateRead::Text(text) => parse_preference(&text).map(Some),
+        PrivateStateRead::Interrupted => anyhow::bail!(
             "saved model preference is absent while interrupted update files remain in ~/.nosis; run `nh model set <id>` to choose a model again"
         ),
-        GuardedRead::Absent => Ok(None),
-        GuardedRead::Refused(reason) => {
-            anyhow::bail!("refused saved model preference: {reason}; run `nh model clear`");
-        }
+        PrivateStateRead::Absent => Ok(None),
     }
-}
-
-fn interrupted_update_present(directory: &Path) -> anyhow::Result<bool> {
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if name.ends_with(".tmp")
-            && (name.starts_with(".model.nh-new-") || name.starts_with(".model.nh-restore-"))
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 fn parse_preference(text: &str) -> anyhow::Result<String> {
@@ -184,203 +148,49 @@ fn parse_preference(text: &str) -> anyhow::Result<String> {
 
 fn set_with_home(home: &Path, model: &str) -> anyhow::Result<()> {
     let model = parse_preference(model)?;
-    let directory = inspect_preference_dir(home, true)?.expect("created preference directory");
-    let path = preference_path(home);
-    let previous = match read_guarded(&path, Some(home), MAX_MODEL_BYTES) {
-        GuardedRead::Text(text) => Some(text),
-        GuardedRead::Absent => None,
-        GuardedRead::Refused(reason) => anyhow::bail!("refused saved model preference: {reason}"),
+    let file = preference_file(home, true)?.expect("created preference directory");
+    let previous = match file.read().map_err(|error| {
+        anyhow::anyhow!(
+            "refused saved model preference at ~/.nosis/model before update: {error}; inspect the file and run `nh model clear` to remove it deliberately"
+        )
+    })? {
+        PrivateStateRead::Text(text) => Some(text),
+        PrivateStateRead::Absent | PrivateStateRead::Interrupted => None,
     };
     let replacement = format!("{model}\n");
-    publish_preference(&directory, &path, previous.as_deref(), &replacement)
-}
-
-fn publish_preference(
-    directory: &Path,
-    path: &Path,
-    previous: Option<&str>,
-    replacement: &str,
-) -> anyhow::Result<()> {
-    publish_preference_with(directory, path, previous, replacement, || Ok(()))
-}
-
-fn publish_preference_with(
-    directory: &Path,
-    path: &Path,
-    previous: Option<&str>,
-    replacement: &str,
-    after_remove: impl FnOnce() -> io::Result<()>,
-) -> anyhow::Result<()> {
-    let replacement_stage = stage_preference(directory, "new", replacement)?;
-    let restore_stage = match previous {
-        Some(previous) => match stage_preference(directory, "restore", previous) {
-            Ok(path) => Some(path),
-            Err(error) => {
-                let _ = fs::remove_file(&replacement_stage);
-                return Err(error.into());
-            }
-        },
-        None => None,
-    };
-
-    if let Err(error) = probe_hard_link(directory, &replacement_stage) {
-        cleanup_preference_stages(&replacement_stage, restore_stage.as_deref());
-        anyhow::bail!(
-            "could not verify no-clobber preference publication before changing the saved value: {error}; check permissions, free space, and filesystem hard-link support"
-        )
-    }
-
-    if let Some(previous) = previous {
-        let unchanged = matches!(
-            read_guarded(path, path.parent(), MAX_MODEL_BYTES),
-            GuardedRead::Text(ref current) if current == previous
-        );
-        if !unchanged {
-            cleanup_preference_stages(&replacement_stage, restore_stage.as_deref());
-            anyhow::bail!("saved model preference changed concurrently; retry the command")
-        }
-        if let Err(error) = fs::remove_file(path) {
-            cleanup_preference_stages(&replacement_stage, restore_stage.as_deref());
-            anyhow::bail!("could not replace saved model preference: {error}")
-        }
-    }
-
-    if let Err(error) = after_remove() {
-        let rollback = restore_stage
-            .as_deref()
-            .map(|restore| fs::hard_link(restore, path));
-        let preserve_restore = matches!(rollback, Some(Err(_)));
-        let cleanup_restore = if preserve_restore {
-            None
-        } else {
-            restore_stage.as_deref()
-        };
-        cleanup_preference_stages(&replacement_stage, cleanup_restore);
-        match rollback {
-            Some(Ok(())) => anyhow::bail!(
-                "saved model preference update was interrupted: {error}; previous value restored"
-            ),
-            Some(Err(rollback)) => anyhow::bail!(
-                "saved model preference update was interrupted: {error}; restore failed: {rollback}; recovery bytes remain at {}",
-                restore_stage
-                    .as_deref()
-                    .expect("previous value has restore stage")
-                    .display()
-            ),
-            None => anyhow::bail!("saved model preference update was interrupted: {error}"),
-        }
-    }
-
-    if let Err(error) = fs::hard_link(&replacement_stage, path) {
-        let rollback = restore_stage
-            .as_deref()
-            .map(|restore| fs::hard_link(restore, path));
-        let preserve_restore = matches!(rollback, Some(Err(_)));
-        let cleanup_restore = if preserve_restore {
-            None
-        } else {
-            restore_stage.as_deref()
-        };
-        cleanup_preference_stages(&replacement_stage, cleanup_restore);
-        match rollback {
-            Some(Ok(())) => anyhow::bail!(
-                "could not publish saved model preference without clobbering: {error}; previous value restored"
-            ),
-            Some(Err(rollback)) => anyhow::bail!(
-                "could not publish saved model preference without clobbering: {error}; restore also failed: {rollback}; recovery bytes remain at {}",
-                restore_stage
-                    .as_deref()
-                    .expect("previous value has restore stage")
-                    .display()
-            ),
-            None => anyhow::bail!(
-                "could not publish saved model preference without clobbering: {error}"
-            ),
-        }
-    }
-    cleanup_preference_stages(&replacement_stage, restore_stage.as_deref());
-    Ok(())
-}
-
-fn probe_hard_link(directory: &Path, source: &Path) -> io::Result<()> {
-    for attempt in 0..64u8 {
-        let probe = directory.join(format!(
-            ".model.nh-link-probe-{}-{attempt}.tmp",
-            std::process::id()
-        ));
-        match fs::hard_link(source, &probe) {
-            Ok(()) => {
-                fs::remove_file(probe)?;
-                return Ok(());
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "could not allocate a unique hard-link probe",
-    ))
-}
-
-fn stage_preference(directory: &Path, purpose: &str, text: &str) -> io::Result<PathBuf> {
-    for attempt in 0..64u8 {
-        let path = directory.join(format!(
-            ".model.nh-{purpose}-{}-{attempt}.tmp",
-            std::process::id()
-        ));
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => {
-                if let Err(error) = file
-                    .write_all(text.as_bytes())
-                    .and_then(|()| file.sync_all())
-                {
-                    let _ = fs::remove_file(&path);
-                    return Err(error);
-                }
-                return Ok(path);
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "could not allocate a unique preference staging file",
-    ))
-}
-
-fn cleanup_preference_stages(replacement: &Path, restore: Option<&Path>) {
-    let _ = fs::remove_file(replacement);
-    if let Some(restore) = restore {
-        let _ = fs::remove_file(restore);
-    }
+    file.publish(previous.as_deref(), &replacement)
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "could not safely update saved model preference at ~/.nosis/model: {error}; inspect any reported recovery file, then retry `nh model set <id>`"
+            )
+        })
 }
 
 fn clear_with_home(home: &Path) -> anyhow::Result<bool> {
-    let Some(_) = inspect_preference_dir(home, false)? else {
+    let Some(file) = preference_file(home, false)? else {
         return Ok(false);
     };
-    let path = preference_path(home);
-    let original = match read_guarded(&path, Some(home), MAX_MODEL_BYTES) {
-        GuardedRead::Text(text) => text,
-        GuardedRead::Absent => return Ok(false),
-        GuardedRead::Refused(reason) => anyhow::bail!("refused saved model preference: {reason}"),
+    let original = match file.read().map_err(|error| {
+        anyhow::anyhow!(
+            "refused saved model preference at ~/.nosis/model before removal: {error}; inspect the file before retrying `nh model clear`"
+        )
+    })? {
+        PrivateStateRead::Text(text) => text,
+        PrivateStateRead::Absent | PrivateStateRead::Interrupted => return Ok(false),
     };
-    let unchanged = matches!(
-        read_guarded(&path, Some(home), MAX_MODEL_BYTES),
-        GuardedRead::Text(ref current) if current == &original
-    );
-    if !unchanged {
-        anyhow::bail!("saved model preference changed concurrently; retry the command")
-    }
-    fs::remove_file(path)?;
+    file.remove(&original).map_err(|error| {
+        anyhow::anyhow!(
+            "could not clear saved model preference at ~/.nosis/model: {error}; inspect the file before retrying `nh model clear`"
+        )
+    })?;
     Ok(true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::io;
 
     const TEST_CATALOG: &str = r#"
         [routes.default]
@@ -456,7 +266,8 @@ mod tests {
     #[test]
     fn interrupted_absent_preference_never_silently_enables_fallback() {
         let home = tempfile::tempdir().unwrap();
-        let directory = inspect_preference_dir(home.path(), true).unwrap().unwrap();
+        let file = preference_file(home.path(), true).unwrap().unwrap();
+        let directory = file.path().parent().unwrap();
         fs::write(directory.join(".model.nh-restore-123-0.tmp"), "saved\n").unwrap();
 
         let error = selected_model_with_home(None, &resolver(), Some(home.path()))
@@ -488,10 +299,10 @@ mod tests {
             .contains("exceeds"));
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
-        assert!(read_preference(home.path())
-            .unwrap_err()
-            .to_string()
-            .contains("regular file"));
+        let error = read_preference(home.path()).unwrap_err().to_string();
+        assert!(error.contains("refused saved model preference"), "{error}");
+        assert!(error.contains("regular file"), "{error}");
+        assert!(error.contains("nh model clear"), "{error}");
     }
 
     #[test]
@@ -509,37 +320,39 @@ mod tests {
     #[test]
     fn interrupted_preference_replacement_restores_previous_value() {
         let home = tempfile::tempdir().unwrap();
-        let directory = inspect_preference_dir(home.path(), true).unwrap().unwrap();
+        let file = preference_file(home.path(), true).unwrap().unwrap();
+        let directory = file.path().parent().unwrap();
         let path = preference_path(home.path());
         fs::write(&path, "saved\n").unwrap();
 
-        let error =
-            publish_preference_with(&directory, &path, Some("saved\n"), "explicit\n", || {
+        let error = file
+            .publish_with_test_hook(Some("saved\n"), "explicit\n", || {
                 Err(io::Error::new(io::ErrorKind::Interrupted, "test stop"))
             })
             .unwrap_err();
 
         assert!(error.to_string().contains("previous value restored"));
         assert_eq!(fs::read_to_string(&path).unwrap(), "saved\n");
-        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(directory).unwrap().count(), 1);
     }
 
     #[test]
     fn concurrent_preference_is_not_overwritten_and_restore_stage_is_retained() {
         let home = tempfile::tempdir().unwrap();
-        let directory = inspect_preference_dir(home.path(), true).unwrap().unwrap();
+        let file = preference_file(home.path(), true).unwrap().unwrap();
+        let directory = file.path().parent().unwrap();
         let path = preference_path(home.path());
         fs::write(&path, "saved\n").unwrap();
 
-        let error =
-            publish_preference_with(&directory, &path, Some("saved\n"), "explicit\n", || {
+        let error = file
+            .publish_with_test_hook(Some("saved\n"), "explicit\n", || {
                 fs::write(&path, "competitor\n")
             })
             .unwrap_err();
 
         assert!(error.to_string().contains("recovery bytes remain"));
         assert_eq!(fs::read_to_string(&path).unwrap(), "competitor\n");
-        let recovery = fs::read_dir(&directory)
+        let recovery = fs::read_dir(directory)
             .unwrap()
             .filter_map(Result::ok)
             .map(|entry| entry.path())

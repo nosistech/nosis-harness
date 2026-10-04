@@ -386,8 +386,9 @@ Serve the local MCP endpoint (preview; 127.0.0.1 only)
 Usage: nh.exe mcp [OPTIONS] <COMMAND>
 
 Commands:
-  serve  Start the local MCP server (route_resolve, fleet_run, fleet_status, why, route_cost, receipts)
-  help   Print this message or the help of the given subcommand(s)
+  review  Review and select remote tools for one configured server
+  serve   Start the local MCP server (route_resolve, fleet_run, fleet_status, why, route_cost, receipts)
+  help    Print this message or the help of the given subcommand(s)
 
 Options:
       --ascii <ASCII>  Force one-column ASCII fallback glyphs on or off (default: decide from stdout) [possible values: on, off]
@@ -406,4 +407,19 @@ Options:
       --ascii <ASCII>              Force one-column ASCII fallback glyphs on or off (default: decide from stdout) [possible values: on, off]
       --token-entry <TOKEN_ENTRY>
   -h, --help                       Print help
+```
+
+## nh mcp review
+
+```text
+Review and select remote tools for one configured server
+
+Usage: nh.exe mcp review [OPTIONS] <SERVER>
+
+Arguments:
+  <SERVER>
+
+Options:
+      --ascii <ASCII>  Force one-column ASCII fallback glyphs on or off (default: decide from stdout) [possible values: on, off]
+  -h, --help           Print help
 ```

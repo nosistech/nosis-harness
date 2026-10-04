@@ -35,6 +35,12 @@ Roles:
 - Every non-blocked shell command requires explicit approval at the execution operation.
 - Outbound MCP discovery/calls require `[send]` permission; repository MCP configuration
   cannot create a trusted destination or auto-trust a server.
+- Unreleased MCP clients also require an operator's saved tool selection, made with
+  `nh mcp review <server>`. Missing or changed connection identity disables the
+  connection's tools. New tools remain disabled; selected tools must still match
+  their reviewed metadata in a fresh list response before execution. This preserves
+  per-call approval and credential restrictions. It does not authenticate remote
+  implementation behavior. See [MCP review and limits](MCP_PREVIEW.md).
 
 Permissions:
 

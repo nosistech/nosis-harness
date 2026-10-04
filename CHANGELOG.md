@@ -11,6 +11,9 @@ commit passes local and remote gates.
 
 ### Added
 
+- Per-server MCP tool selection and definition review through `nh mcp review`.
+  Existing integrations need a one-time review; new or changed tools stay disabled
+  until selected and approved. Normal send, credential and action approvals remain.
 - A first text-edit exercise bundled in Windows packages built from rc.3 source,
   with an expected result and no Git, Python, Node.js or Rust prerequisite.
 - A live `/review` view of published file fragments and observed command outcomes,
@@ -81,6 +84,8 @@ commit passes local and remote gates.
 
 ### Fixed
 
+- Outbound MCP result and JSON-RPC error redaction includes credentials used by
+  the connection. Invalid response-type diagnostics no longer echo remote values.
 - MCP structured-only results are no longer lost. Mixed text/JSON and error
   results preserve useful data, with secret redaction before JSON serialization
   and an explicit omission notice if redacted object keys collide.

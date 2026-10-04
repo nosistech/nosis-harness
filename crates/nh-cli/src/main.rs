@@ -19,6 +19,7 @@ mod cmd_setup;
 mod cmd_tui;
 mod cmd_why;
 mod model_preference;
+mod private_state;
 mod usage_tracker;
 
 #[derive(Parser)]
@@ -198,6 +199,8 @@ enum FleetAction {
 
 #[derive(Subcommand)]
 enum McpAction {
+    /// Review and select remote tools for one configured server
+    Review { server: String },
     /// Start the local MCP server (route_resolve, fleet_run, fleet_status, why, route_cost, receipts)
     Serve {
         #[arg(long, default_value = "127.0.0.1:8765")]
@@ -349,6 +352,9 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Cmd::Mcp {
             action: McpAction::Serve { addr, token_entry },
         } => cmd_mcp::serve(&addr, token_entry.as_deref()),
+        Cmd::Mcp {
+            action: McpAction::Review { server },
+        } => cmd_mcp::review(&server),
     }
 }
 

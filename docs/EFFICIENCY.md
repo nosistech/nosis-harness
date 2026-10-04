@@ -133,9 +133,10 @@ request. Local coding tools remain available immediately. Discovery is a separat
 model tool call, so its extra turn can outweigh reduced schema size. Ordinary
 sessions without MCP tools have no target saving from this option.
 
-Only existing operator-configured servers are eligible. Invocation uses the original
-adapter, preserving configured trust, send policy, credentials, approval and
-cancellation. Finding a tool does not approve its execution. This option changes
+Only tools enabled through the operator's [MCP review](MCP_PREVIEW.md) are eligible.
+Invocation uses the original adapter, preserving definition checks, configured
+trust, send policy, credentials, approval and cancellation. Finding a tool does
+not approve its execution. This option changes
 schema exposure, not the MCP transport protocol. The remote registry is ordered
 deterministically, and ambiguous duplicate names are refused.
 The model uses `mcp_discover` to search/page through schemas, then `mcp_invoke`
