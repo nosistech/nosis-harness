@@ -673,6 +673,46 @@ fn parses_mcp_review_server() {
 }
 
 #[test]
+fn parses_mcp_integration_lifecycle_commands() {
+    assert!(matches!(
+        Cli::try_parse_from(["nh", "mcp", "connect"]).unwrap().cmd,
+        Cmd::Mcp {
+            action: McpAction::Connect
+        }
+    ));
+    assert!(matches!(
+        Cli::try_parse_from(["nh", "mcp", "status"]).unwrap().cmd,
+        Cmd::Mcp {
+            action: McpAction::Status { server: None }
+        }
+    ));
+    assert!(matches!(
+        Cli::try_parse_from(["nh", "mcp", "status", "fixture"])
+            .unwrap()
+            .cmd,
+        Cmd::Mcp {
+            action: McpAction::Status { server: Some(ref server) }
+        } if server == "fixture"
+    ));
+    assert!(matches!(
+        Cli::try_parse_from(["nh", "mcp", "check", "fixture"])
+            .unwrap()
+            .cmd,
+        Cmd::Mcp {
+            action: McpAction::Check { ref server }
+        } if server == "fixture"
+    ));
+    assert!(matches!(
+        Cli::try_parse_from(["nh", "mcp", "disable", "--", "-manual"])
+            .unwrap()
+            .cmd,
+        Cmd::Mcp {
+            action: McpAction::Disable { ref server }
+        } if server == "-manual"
+    ));
+}
+
+#[test]
 fn mcp_serve_help_names_all_six_runtime_tools() {
     use clap::CommandFactory as _;
 

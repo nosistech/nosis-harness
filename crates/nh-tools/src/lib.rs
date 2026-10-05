@@ -35,9 +35,10 @@ use exec::{
 };
 
 pub use mcp::{
-    inspect_mcp_server, load_mcp_config, mcp_discovery_tools, mcp_tools, McpAuth, McpClient,
-    McpReviewPolicy, McpReviewSnapshot, McpReviewState, McpServerConfig, McpToolInfo, McpToolset,
-    McpTrust, ReviewedTool, MAX_MCP_REVIEW_BYTES,
+    guided_mcp_url, inspect_mcp_server, load_mcp_config, mcp_discovery_tools, mcp_tools,
+    render_mcp_server_config, McpAuth, McpClient, McpReviewPolicy, McpReviewSnapshot,
+    McpReviewState, McpServerConfig, McpToolInfo, McpToolset, McpTrust, ReviewedTool,
+    MAX_MCP_CONFIG_BYTES, MAX_MCP_REVIEW_BYTES, MCP_SPEC_VERSION,
 };
 pub use observation::{ObservationRetainer, ObservationSession, RetainedObservation};
 pub use search::{GlobFiles, GrepFiles};

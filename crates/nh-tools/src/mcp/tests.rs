@@ -337,6 +337,35 @@ future_knob = "whatever"
 }
 
 #[test]
+fn guided_server_renderer_quotes_names_and_round_trips_every_supported_auth_field() {
+    let configured = McpServerConfig {
+        name: "server.with.dots".into(),
+        url: "https://mcp.example.invalid/path".into(),
+        spec: MCP_SPEC_VERSION.into(),
+        auth: McpAuth::OAuth2 {
+            token_url: "https://auth.example.invalid/token".into(),
+            client_id: "client-id".into(),
+            vault_entry: "server.oauth".into(),
+        },
+        scopes: vec!["read".into(), "write".into()],
+        default_mode: Some("discover".into()),
+        trust: McpTrust::Ask,
+    };
+
+    let rendered = render_mcp_server_config(&configured).unwrap();
+    let parsed = load_mcp_config(&rendered).unwrap();
+
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].name, configured.name);
+    assert_eq!(parsed[0].url, configured.url);
+    assert_eq!(parsed[0].spec, configured.spec);
+    assert_eq!(parsed[0].auth, configured.auth);
+    assert_eq!(parsed[0].scopes, configured.scopes);
+    assert_eq!(parsed[0].default_mode, configured.default_mode);
+    assert_eq!(parsed[0].trust, configured.trust);
+}
+
+#[test]
 fn config_rejects_legacy_spec_before_auth_configuration() {
     let toml_str = r#"
 [servers.korvin]
@@ -497,6 +526,48 @@ fn public_config_with_legacy_spec_is_rejected_before_network() {
 }
 
 #[test]
+fn client_rejects_ambiguous_server_and_oauth_urls_before_credentials_or_network() {
+    for url in [
+        "https:example.invalid/mcp",
+        "https:/example.invalid/mcp",
+        "http:/127.0.0.1:9/mcp",
+        "alice:password@example.invalid/mcp",
+        "localhost:8765/mcp",
+        "https:\t//example.invalid/mcp",
+    ] {
+        let mut configured = config(url, McpTrust::Ask);
+        configured.auth = McpAuth::ApiKey {
+            vault_entry: "fixture-must-not-be-read".into(),
+        };
+        let error = McpClient::new(configured)
+            .err()
+            .expect("ambiguous server URL is rejected by the constructor")
+            .to_string();
+        assert!(error.contains("explicit absolute HTTP(S) URL"), "{error}");
+        assert!(!error.contains("password"), "destination leaked: {error}");
+    }
+
+    for token_url in [
+        "https:auth.example.invalid/token",
+        "https:/auth.example.invalid/token",
+        "auth.example.invalid:443/token",
+    ] {
+        let mut configured = config("http://127.0.0.1:9/mcp", McpTrust::Ask);
+        configured.auth = McpAuth::OAuth2 {
+            token_url: token_url.into(),
+            client_id: "client".into(),
+            vault_entry: "fixture-must-not-be-read".into(),
+        };
+        let error = McpClient::new(configured)
+            .err()
+            .expect("ambiguous OAuth URL is rejected by the constructor")
+            .to_string();
+        assert!(error.contains("OAuth token destination"), "{error}");
+        assert!(error.contains("explicit absolute HTTP(S) URL"), "{error}");
+    }
+}
+
+#[test]
 fn client_rejects_literal_link_local_destinations_before_network() {
     for url in [
         "http://marker-user@169.254.169.254/mcp?marker-query=1",
@@ -543,12 +614,21 @@ fn client_keeps_explicit_loopback_and_private_lan_destinations() {
         "http://[::1]:9/mcp",
         "http://10.2.3.4:9/mcp",
         "http://192.168.50.7:9/mcp",
+        "https://example.invalid/mcp?existing=query",
     ] {
         assert!(
             McpClient::new(config(url, McpTrust::Ask)).is_ok(),
             "explicit local destination should remain configurable: {url}"
         );
     }
+
+    let mut oauth = config("http://127.0.0.1:9/mcp", McpTrust::Ask);
+    oauth.auth = McpAuth::OAuth2 {
+        token_url: "https://auth.example.invalid/token?existing=query".into(),
+        client_id: "client".into(),
+        vault_entry: "fixture-oauth".into(),
+    };
+    assert!(McpClient::new(oauth).is_ok());
 }
 
 #[test]

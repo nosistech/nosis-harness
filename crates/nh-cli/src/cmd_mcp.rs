@@ -1,5 +1,9 @@
 //! `nh mcp` - loopback preview serving and operator-owned remote tool review.
 
+mod integration;
+
+pub(crate) use integration::{check, connect, disable, status};
+
 use std::collections::BTreeSet;
 use std::io::IsTerminal as _;
 use std::path::Path;

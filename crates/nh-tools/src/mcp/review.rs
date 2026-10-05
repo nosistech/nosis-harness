@@ -478,6 +478,47 @@ fn reviewable_url(raw: &str) -> anyhow::Result<String> {
     Ok(raw.to_string())
 }
 
+pub(super) fn explicit_http_url(raw: &str) -> anyhow::Result<reqwest::Url> {
+    let raw = raw.trim();
+    let explicit_http = raw
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"));
+    let explicit_https = raw
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"));
+    if !explicit_http && !explicit_https {
+        anyhow::bail!("MCP connection URL must begin with explicit http:// or https://")
+    }
+    let parsed = reqwest::Url::parse(raw)
+        .map_err(|_| anyhow::anyhow!("MCP connection URL is not a valid HTTP(S) URL"))?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.cannot_be_a_base()
+        || parsed.host_str().is_none()
+    {
+        anyhow::bail!("MCP connection URL must be an explicit hierarchical HTTP(S) URL with a host")
+    }
+    Ok(parsed)
+}
+
+/// Parse and canonicalize a credential-free hierarchical HTTP(S) URL for guided setup or display.
+///
+/// This is intentionally stricter than the manual MCP configuration parser and the persisted
+/// review compatibility path. It must not be used to reinterpret an existing operator-authored
+/// destination.
+pub fn guided_mcp_url(raw: &str) -> anyhow::Result<String> {
+    let parsed = explicit_http_url(raw)?;
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        anyhow::bail!(
+            "MCP connection URLs with user info, query parameters, or fragments cannot be reviewed safely"
+        )
+    }
+    Ok(parsed.as_str().to_owned())
+}
+
 fn ensure_no_shaped_secret(value: &Value, label: &str) -> anyhow::Result<()> {
     let scrubber = nh_vault::Scrubber::new(Vec::new());
     let mut scrubbed = value.clone();
@@ -634,6 +675,27 @@ mod tests {
         assert_eq!(descriptor["scopes"], json!(["read", "write"]));
         assert_eq!(descriptor["defaultMode"], json!("discover"));
         assert_eq!(descriptor["auth"]["kind"], json!("oauth2"));
+    }
+
+    #[test]
+    fn guided_urls_require_explicit_hierarchical_http_and_canonicalize_parser_whitespace() {
+        for invalid in [
+            "alice:hunter2@example.invalid/mcp",
+            "localhost:8765/mcp",
+            "mailto:x@example.invalid",
+            "https:user@example.invalid/mcp",
+            "https:example.invalid/mcp",
+            "https:/example.invalid/mcp",
+            "http:/203.0.113.5/mcp",
+            "https:\t//example.invalid/mcp",
+        ] {
+            assert!(guided_mcp_url(invalid).is_err(), "accepted {invalid:?}");
+        }
+
+        assert_eq!(
+            guided_mcp_url(" \thttps://EXAMPLE.invalid:443/m\tcp\r ").unwrap(),
+            "https://example.invalid/mcp"
+        );
     }
 
     #[test]

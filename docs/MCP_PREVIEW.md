@@ -2,6 +2,8 @@
 
 MCP lets a model use tools provided by another program. It is optional in Nosis Harness.
 Normal `nh chat` and `nh tui` sessions do not require an MCP server.
+The connection guide and tool-review controls below are unreleased source features.
+Use `nh mcp --help` to check which commands your installed version provides.
 
 There are two separate features:
 
@@ -45,9 +47,60 @@ metadata and headers. See the official [HTTP transport specification](https://mo
 
 ## Connect Nosis to another server
 
+From an initialized project, start the guide:
+
+```powershell
+nh mcp connect
+```
+
+Give the connection a short name, enter the server URL, and choose its authentication
+method. Use a URL without a password or API key. For API-key authentication, give
+the vault entry's name; the guide never asks you to paste the key into configuration.
+It shows the destination before confirmation and saves new connections with
+approval required and no enabled tools. Cancelling leaves existing settings intact.
+Include `https://`, or `http://` for a literal loopback address; a bare host and
+port is not accepted by the guide.
+
+This saves settings only. It makes no server or model request. Follow the printed
+key and exact-origin permission instructions if needed, then inspect the connection:
+
+```powershell
+nh mcp status
+```
+
+Status is offline. It shows local readiness and the next action; it cannot prove
+that a server is reachable or accepts your credential. To contact just the server's
+tool-list endpoint, replace `local` with your chosen name:
+
+```powershell
+nh mcp check local
+```
+
+Checking reports available definitions and changes. It does not invoke a tool,
+make a model request or update the approved selection. Continue with the explicit
+review below before using any remote action.
+For manually configured OAuth connections, checking or reviewing can refresh
+stored authentication tokens as part of contacting the server.
+
+### Manual configuration
+
 Declare destinations in your user configuration, `~/.nosis/mcp.toml`. On Windows, `~` means
 your user profile directory. A project's `.nosis/mcp.toml` can restrict that configuration;
 it cannot add trusted destinations or redirect your credentials.
+Server and OAuth token URLs must include an explicit `https://` or `http://`
+prefix and a host. Malformed forms such as `https:example.invalid/mcp` are
+refused before any credential lookup or request, so permission checks and the
+HTTP client cannot interpret different destinations. Credential transport still
+requires HTTPS or a literal loopback HTTP address.
+
+The guided management commands refuse symlinked configuration paths and report
+the path to inspect. Keep an ordinary user-owned configuration file when using
+these commands.
+
+Guided saves replace the configuration file while preserving its existing text.
+On Unix the replacement has private permissions. Other hard links keep pointing
+to the previous file; use manual configuration for a managed setup that depends
+on retaining that file identity.
 
 Keep credentials in the OS vault through `nh key add <entry>`, using its hidden prompt.
 Do not paste keys into TOML, commands, tool arguments, or HTTP metadata headers. The configured
@@ -89,6 +142,19 @@ Windows and private permissions for newly created Unix files. Saving updates
 requires a filesystem that supports hard links. If a saved state cannot be read
 safely, the error names the file to inspect; Nosis does not overwrite it.
 
+## Disable a connection's tools
+
+```powershell
+nh mcp disable local
+```
+
+Confirm to clear its enabled selection. This works offline, including when the
+server is unavailable or its configuration has been removed. It keeps the saved
+definitions and connection settings, so you can review them again later.
+Existing chat/TUI sessions retain their startup selection; close them and start
+new sessions for the disabled state to apply. Disabling is not an immediate
+revocation of tools in already running sessions.
+
 ## Start the local Nosis server
 
 From an initialized project directory:
@@ -117,8 +183,10 @@ using the hidden prompt:
 nh key add nh-mcp-local
 ```
 
-Paste only the token value into that prompt, without the `Bearer ` prefix. Add this entry to
-your user `~/.nosis/mcp.toml`, preserving any existing entries:
+Paste only the token value into that prompt, without the `Bearer ` prefix. Run
+`nh mcp connect`, name the connection `local`, use the URL printed by the server,
+and select API-key authentication with vault entry `nh-mcp-local`. Alternatively,
+add this entry to your user `~/.nosis/mcp.toml`, preserving any existing entries:
 
 ```toml
 [servers.local]
@@ -138,7 +206,8 @@ audience = ["http://127.0.0.1:8765"]
 Merge these settings into existing tables if present. Use the address printed by the server
 if you selected a different port. Project send restrictions still apply.
 
-Run `nh mcp review local` and enable only the actions you need. Your next `nh chat`
+Run `nh mcp status local` to inspect local readiness, then `nh mcp review local`
+and enable only the actions you need. Your next `nh chat`
 session offers the selected tools named `mcp__local__...` and asks before each call.
 Chat still uses your configured model and its normal billing. When the server restarts with
 a new generated token, update the vault entry through the same hidden prompt.

@@ -16,9 +16,11 @@ the loopback address. Check the server's model and cloud settings before sending
 
 Two other features can create network traffic:
 
-- MCP discovery and tool calls go to endpoints that the operator placed in user-global
+- MCP checks, review, discovery and tool calls go to endpoints that the operator placed in user-global
   configuration and that the local `[send]` policy permits. Repository configuration can
   restrict those endpoints but cannot introduce a trusted destination.
+  In unreleased source, `nh mcp connect`, `status` and `disable` work offline;
+  `check` and `review` fetch metadata without invoking tools or contacting a model.
 - A shell command that you explicitly approve can perform any network activity that the
   command itself implements. `nh` does not proxy or inspect that traffic.
 
@@ -42,6 +44,16 @@ their own policies.
 - **Remembered model (unreleased)** is an opt-in route ID in `~/.nosis/model`,
   shared across projects. It contains no credential, endpoint or permission grant.
   `nh model clear` removes the preference; explicit `--model` overrides it.
+- **MCP settings and reviews (unreleased)** are user-global: connection settings
+  in `~/.nosis/mcp.toml`, and reviewed definitions and enabled tool names in
+  `~/.nosis/mcp-reviews/<server>.json`. The connection guide stores a vault entry
+  name rather than its key. Disabling tools retains their definitions and settings.
+- **Efficiency measurements (unreleased)** are opt-in metadata in
+  `.nosis/efficiency-v1.jsonl`: counts, timings, route and usage information, not
+  task text, tool arguments or results. They are not automatically uploaded.
+- **Retained observations (unreleased)** are opt-in scrubbed result/history files
+  under `.nosis/observations` for run-only experiments. Normal exit attempts cleanup;
+  a crash or cleanup failure can leave files behind. See [efficiency experiments](docs/EFFICIENCY.md).
 - **Catalog migration backups (unreleased)** stay beside the project catalog as
   `catalog.toml.nh-backup-*`. They contain the recognized older bundled catalog,
   not API keys. Keep them until you have verified the upgrade.
@@ -50,9 +62,9 @@ their own policies.
   the conversation itself, not only its cost. The same redaction is applied before each
   append. They are not uploaded by `nh`.
 - **Retention** is operator-controlled. Receipt, session and Fleet records are append-only
-  and are not automatically pruned; they grow until the operator deletes them. Other than the
-  configuration and Git hook created by an explicit `nh init`, `nh` creates no source-code
-  or cache artifacts of its own.
+  and are not automatically pruned; they grow until the operator deletes them.
+  Opt-in efficiency records remain until deleted and stop appending at their
+  documented size limit. Integration settings and reviews remain until removed.
 - **Redaction** is applied to application-controlled terminal, receipt, tool-result, and
   MCP-result paths using known key shapes plus active literal credentials. Redaction lowers
   risk but is not a reason to put secrets in prompts or task text.
@@ -80,6 +92,12 @@ does not prune history or limit how much a running session can write.
   to remove local run history and saved conversations. Deleting only `receipts.jsonl`
   leaves your `nh chat` and `nh tui` transcripts in `.nosis/sessions/`. These are ordinary
   local files; NosisTech has no server-side copy.
+- With sessions stopped, delete `.nosis/efficiency-v1.jsonl` to remove measurements
+  and `.nosis/observations/` to remove any remaining experimental observations.
+- To forget an integration, remove its table from user `~/.nosis/mcp.toml` and its
+  `~/.nosis/mcp-reviews/<server>.json` file. This does not delete its OS-vault key.
+  `nh mcp disable <server>` only clears the enabled selection; restart existing
+  sessions for that change to apply.
 
 ## The MCP preview
 

@@ -10,7 +10,6 @@ use crate::private_state::{PrivateStateFile, PrivateStateRead};
 
 pub(super) const BUNDLED_CATALOG: &str = include_str!("../../../../catalog.toml");
 const MAX_CATALOG_BYTES: usize = 1024 * 1024;
-const MAX_MCP_CONFIG_BYTES: usize = 64 * 1024;
 
 /// Walk up from `start` looking for the project marker `catalog.toml`.
 /// Repository route data is accepted only when it is byte-identical to the
@@ -192,7 +191,7 @@ fn read_optional_mcp_config(
     label: &str,
     warnings: &mut Vec<String>,
 ) -> Vec<McpServerConfig> {
-    let text = match read_guarded(path, contain_under, MAX_MCP_CONFIG_BYTES) {
+    let text = match read_guarded(path, contain_under, nh_tools::MAX_MCP_CONFIG_BYTES) {
         GuardedRead::Text(text) => text,
         GuardedRead::Absent => return Vec::new(),
         GuardedRead::Refused(reason) => {

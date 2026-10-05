@@ -646,6 +646,18 @@ fn print_tools(s: &ChatSession, out: &mut dyn Write, err: &mut dyn Write) {
             scrub_line(&s.scrubber, &format!("{} - {first}", spec.name))
         );
     }
+    let _ = writeln!(
+        out,
+        "Local tools need no remote discovery; normal permissions and approvals still apply."
+    );
+    let _ = writeln!(
+        out,
+        "Enabled integrations add schemas; --mcp-discovery may use a model turn to find a tool."
+    );
+    let _ = writeln!(
+        out,
+        "Integration results are sent to the selected provider under the session send policy."
+    );
     for w in &s.mcp_warnings {
         let _ = writeln!(err, "warning: {}", scrub_line(&s.scrubber, w));
     }

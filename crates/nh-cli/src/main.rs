@@ -202,6 +202,14 @@ enum FleetAction {
 
 #[derive(Subcommand)]
 enum McpAction {
+    /// Add one supported remote server without contacting it
+    Connect,
+    /// Show offline integration state for one server or all servers
+    Status { server: Option<String> },
+    /// Fetch current tool metadata without invoking or approving tools
+    Check { server: String },
+    /// Disable every reviewed tool for one server without contacting it
+    Disable { server: String },
     /// Review and select remote tools for one configured server
     Review { server: String },
     /// Start the local MCP server (route_resolve, fleet_run, fleet_status, why, route_cost, receipts)
@@ -354,6 +362,18 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
                     max_workers,
                 },
         } => cmd_fleet::resume_run(run_id.as_deref(), max_workers, terminal_capability),
+        Cmd::Mcp {
+            action: McpAction::Connect,
+        } => cmd_mcp::connect(),
+        Cmd::Mcp {
+            action: McpAction::Status { server },
+        } => cmd_mcp::status(server.as_deref()),
+        Cmd::Mcp {
+            action: McpAction::Check { server },
+        } => cmd_mcp::check(&server),
+        Cmd::Mcp {
+            action: McpAction::Disable { server },
+        } => cmd_mcp::disable(&server),
         Cmd::Mcp {
             action: McpAction::Serve { addr, token_entry },
         } => cmd_mcp::serve(&addr, token_entry.as_deref()),

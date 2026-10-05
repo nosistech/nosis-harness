@@ -605,7 +605,7 @@ fn safe_vault_entry(entry: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
-fn command_line(executable: &Path, arguments: &[&str]) -> String {
+pub(crate) fn command_line(executable: &Path, arguments: &[&str]) -> String {
     let mut command = String::new();
     if cfg!(windows) {
         command.push_str("& ");

@@ -11,6 +11,9 @@ commit passes local and remote gates.
 
 ### Added
 
+- Guided `nh mcp connect`, offline `status`, explicit metadata-only `check`, and
+  offline `disable` commands. New connections require tool review before use;
+  setup preserves existing settings and uses vault entry names for API-key authentication.
 - `nh chat --measure-efficiency` records each ordinary task separately, including
   the current model's usage and price context. Slash commands are excluded;
   measurement defaults off and is not enabled when resuming a session.
@@ -90,6 +93,9 @@ commit passes local and remote gates.
 
 ### Fixed
 
+- Malformed MCP server and OAuth token URLs are refused before credential access
+  or network requests, preventing differences between destination permission
+  checks and HTTP URL parsing. Status hides these URLs and gives repair guidance.
 - Outbound MCP result and JSON-RPC error redaction includes credentials used by
   the connection. Invalid response-type diagnostics no longer echo remote values.
 - MCP structured-only results are no longer lost. Mixed text/JSON and error

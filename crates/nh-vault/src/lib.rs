@@ -87,6 +87,38 @@ pub struct EnvFallbackVault<V: Vault> {
     pub inner: V,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryPresence {
+    Present,
+    Absent,
+    StoreUnavailable,
+}
+
+impl EnvFallbackVault<KeyringVault> {
+    /// Check the same OS-store and environment-fallback locations as [`Vault::get`] without
+    /// returning a credential value. Presence does not prove that a credential is valid.
+    pub fn entry_presence(&self, entry: &str) -> EntryPresence {
+        let stored = self.inner.entry_exists(entry);
+        let environment_present = std::env::var(env_var_name(entry))
+            .map(Zeroizing::new)
+            .is_ok_and(|value| !value.is_empty());
+        combine_entry_presence(stored, environment_present)
+    }
+}
+
+fn combine_entry_presence(
+    stored: anyhow::Result<bool>,
+    environment_present: bool,
+) -> EntryPresence {
+    if matches!(stored, Ok(true)) || environment_present {
+        EntryPresence::Present
+    } else if matches!(stored, Ok(false)) {
+        EntryPresence::Absent
+    } else {
+        EntryPresence::StoreUnavailable
+    }
+}
+
 impl<V: Vault> Vault for EnvFallbackVault<V> {
     fn get(&self, entry: &str) -> anyhow::Result<Zeroizing<String>> {
         let inner_err = match self.inner.get(entry) {

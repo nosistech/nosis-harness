@@ -1,4 +1,4 @@
-//! Opt-in, local-only efficiency measurements for one `nh run` task.
+//! Opt-in, local-only efficiency measurements for one agent task.
 //!
 //! Records contain sizes and observed outcomes only. Task text, message text,
 //! tool arguments/results, reasoning text, provider errors, headers, and
@@ -250,7 +250,7 @@ struct EfficiencyInner {
     tool_repetition: Mutex<ToolRepetitionState>,
 }
 
-/// Shared recorder used by request, tool, and task boundaries for one run.
+/// Shared recorder used by request, tool, and task boundaries for one measured task.
 #[derive(Clone)]
 pub struct EfficiencyRecorder {
     inner: Arc<EfficiencyInner>,

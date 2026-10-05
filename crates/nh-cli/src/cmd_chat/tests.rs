@@ -2049,7 +2049,7 @@ fn fifth_pending_image_is_refused_clearly() {
 }
 
 #[test]
-fn tools_lists_builtins_one_per_line() {
+fn tools_lists_builtins_and_explains_integration_context() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut s, _calls) = test_session("deepseek-v4-flash", tmp.path());
     let (out, _err) = drive(&mut s, &["/tools"]);
@@ -2063,7 +2063,19 @@ fn tools_lists_builtins_one_per_line() {
     ] {
         assert!(out.contains(name), "missing {name}: {out}");
     }
-    assert_eq!(out.lines().count(), 6, "one line per tool: {out}");
+    assert!(
+        out.contains("Local tools need no remote discovery"),
+        "{out}"
+    );
+    assert!(
+        out.contains("--mcp-discovery may use a model turn"),
+        "{out}"
+    );
+    assert!(
+        out.contains("Integration results are sent to the selected provider"),
+        "{out}"
+    );
+    assert_eq!(out.lines().count(), 9, "tool lines plus context: {out}");
 }
 
 /// Puts a session into the keyless-start state: stand-in client installed,

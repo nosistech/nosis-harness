@@ -1,5 +1,25 @@
 use super::*;
 
+#[test]
+fn fallback_presence_distinguishes_absent_unavailable_and_environment_recovery() {
+    assert_eq!(
+        combine_entry_presence(Ok(true), false),
+        EntryPresence::Present
+    );
+    assert_eq!(
+        combine_entry_presence(Ok(false), false),
+        EntryPresence::Absent
+    );
+    assert_eq!(
+        combine_entry_presence(Err(anyhow::anyhow!("locked")), false),
+        EntryPresence::StoreUnavailable
+    );
+    assert_eq!(
+        combine_entry_presence(Err(anyhow::anyhow!("locked")), true),
+        EntryPresence::Present
+    );
+}
+
 /// Inner vault that never has the key (keyring miss stand-in).
 struct AlwaysMiss;
 impl Vault for AlwaysMiss {

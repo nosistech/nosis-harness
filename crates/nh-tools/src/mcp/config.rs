@@ -4,6 +4,9 @@ use super::client::SPEC_DEFAULT;
 use anyhow::bail;
 use std::collections::BTreeMap;
 
+pub const MAX_MCP_CONFIG_BYTES: usize = 64 * 1024;
+pub const MCP_SPEC_VERSION: &str = SPEC_DEFAULT;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpAuth {
     None,
@@ -68,6 +71,77 @@ pub fn load_mcp_config(toml_str: &str) -> anyhow::Result<Vec<McpServerConfig>> {
         .into_iter()
         .map(|(name, server)| server_config(name, server))
         .collect()
+}
+
+/// Render one operator-owned server table with TOML's serializer. Callers may append the
+/// returned text to an already validated file without rewriting its existing bytes.
+pub fn render_mcp_server_config(config: &McpServerConfig) -> anyhow::Result<String> {
+    let mut server = toml::map::Map::new();
+    server.insert("url".into(), toml::Value::String(config.url.clone()));
+    server.insert("spec".into(), toml::Value::String(config.spec.clone()));
+    match &config.auth {
+        McpAuth::None => {
+            server.insert("auth".into(), toml::Value::String("none".into()));
+        }
+        McpAuth::ApiKey { vault_entry } => {
+            server.insert("auth".into(), toml::Value::String("apikey".into()));
+            server.insert(
+                "vault_entry".into(),
+                toml::Value::String(vault_entry.clone()),
+            );
+        }
+        McpAuth::OAuth2 {
+            token_url,
+            client_id,
+            vault_entry,
+        } => {
+            server.insert("auth".into(), toml::Value::String("oauth2".into()));
+            server.insert("token_url".into(), toml::Value::String(token_url.clone()));
+            server.insert("client_id".into(), toml::Value::String(client_id.clone()));
+            server.insert(
+                "vault_entry".into(),
+                toml::Value::String(vault_entry.clone()),
+            );
+        }
+    }
+    if !config.scopes.is_empty() {
+        server.insert(
+            "scopes".into(),
+            toml::Value::Array(
+                config
+                    .scopes
+                    .iter()
+                    .cloned()
+                    .map(toml::Value::String)
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(mode) = &config.default_mode {
+        server.insert("default_mode".into(), toml::Value::String(mode.clone()));
+    }
+    server.insert(
+        "trust".into(),
+        toml::Value::String(
+            match config.trust {
+                McpTrust::Auto => "auto",
+                McpTrust::Ask => "ask",
+                McpTrust::Block => "block",
+            }
+            .into(),
+        ),
+    );
+
+    let mut servers = toml::map::Map::new();
+    servers.insert(config.name.clone(), toml::Value::Table(server));
+    let mut root = toml::map::Map::new();
+    root.insert("servers".into(), toml::Value::Table(servers));
+    let rendered = toml::to_string(&toml::Value::Table(root))?;
+    let parsed = load_mcp_config(&rendered)?;
+    if parsed.len() != 1 || parsed[0].name != config.name {
+        anyhow::bail!("could not render MCP server configuration safely")
+    }
+    Ok(rendered)
 }
 
 fn server_config(name: String, raw: RawServer) -> anyhow::Result<McpServerConfig> {

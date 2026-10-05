@@ -106,9 +106,9 @@ impl McpClient {
                 SPEC_DEFAULT
             );
         }
-        reject_literal_link_local_destination(&config.name, "server", &config.url)?;
+        validate_explicit_destination(&config.name, "server", &config.url)?;
         if let McpAuth::OAuth2 { token_url, .. } = &config.auth {
-            reject_literal_link_local_destination(&config.name, "OAuth token", token_url)?;
+            validate_explicit_destination(&config.name, "OAuth token", token_url)?;
         }
         // Explicit timeouts, never the hidden 30 s blocking default.
         let http = reqwest::blocking::Client::builder()
@@ -459,13 +459,18 @@ impl McpClient {
     }
 }
 
-fn reject_literal_link_local_destination(
+fn validate_explicit_destination(
     server: &str,
     kind: &str,
     destination: &str,
 ) -> anyhow::Result<()> {
-    if nh_vault::host_of(destination)
-        .as_deref()
+    let parsed = super::review::explicit_http_url(destination).map_err(|_| {
+        anyhow::anyhow!(
+            "mcp server \"{server}\": {kind} destination must use an explicit absolute HTTP(S) URL"
+        )
+    })?;
+    if parsed
+        .host_str()
         .is_some_and(nh_vault::is_link_local_or_metadata)
     {
         bail!(

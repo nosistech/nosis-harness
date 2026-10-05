@@ -387,9 +387,85 @@ Serve the local MCP endpoint (preview; 127.0.0.1 only)
 Usage: nh.exe mcp [OPTIONS] <COMMAND>
 
 Commands:
-  review  Review and select remote tools for one configured server
-  serve   Start the local MCP server (route_resolve, fleet_run, fleet_status, why, route_cost, receipts)
-  help    Print this message or the help of the given subcommand(s)
+  connect  Add one supported remote server without contacting it
+  status   Show offline integration state for one server or all servers
+  check    Fetch current tool metadata without invoking or approving tools
+  disable  Disable every reviewed tool for one server without contacting it
+  review   Review and select remote tools for one configured server
+  serve    Start the local MCP server (route_resolve, fleet_run, fleet_status, why, route_cost, receipts)
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --ascii <ASCII>  Force one-column ASCII fallback glyphs on or off (default: decide from stdout) [possible values: on, off]
+  -h, --help           Print help
+```
+
+## nh mcp connect
+
+```text
+Add one supported remote server without contacting it
+
+Usage: nh.exe mcp connect [OPTIONS]
+
+Options:
+      --ascii <ASCII>  Force one-column ASCII fallback glyphs on or off (default: decide from stdout) [possible values: on, off]
+  -h, --help           Print help
+```
+
+## nh mcp status
+
+```text
+Show offline integration state for one server or all servers
+
+Usage: nh.exe mcp status [OPTIONS] [SERVER]
+
+Arguments:
+  [SERVER]
+
+Options:
+      --ascii <ASCII>  Force one-column ASCII fallback glyphs on or off (default: decide from stdout) [possible values: on, off]
+  -h, --help           Print help
+```
+
+## nh mcp check
+
+```text
+Fetch current tool metadata without invoking or approving tools
+
+Usage: nh.exe mcp check [OPTIONS] <SERVER>
+
+Arguments:
+  <SERVER>
+
+Options:
+      --ascii <ASCII>  Force one-column ASCII fallback glyphs on or off (default: decide from stdout) [possible values: on, off]
+  -h, --help           Print help
+```
+
+## nh mcp review
+
+```text
+Review and select remote tools for one configured server
+
+Usage: nh.exe mcp review [OPTIONS] <SERVER>
+
+Arguments:
+  <SERVER>
+
+Options:
+      --ascii <ASCII>  Force one-column ASCII fallback glyphs on or off (default: decide from stdout) [possible values: on, off]
+  -h, --help           Print help
+```
+
+## nh mcp disable
+
+```text
+Disable every reviewed tool for one server without contacting it
+
+Usage: nh.exe mcp disable [OPTIONS] <SERVER>
+
+Arguments:
+  <SERVER>
 
 Options:
       --ascii <ASCII>  Force one-column ASCII fallback glyphs on or off (default: decide from stdout) [possible values: on, off]
@@ -408,19 +484,4 @@ Options:
       --ascii <ASCII>              Force one-column ASCII fallback glyphs on or off (default: decide from stdout) [possible values: on, off]
       --token-entry <TOKEN_ENTRY>
   -h, --help                       Print help
-```
-
-## nh mcp review
-
-```text
-Review and select remote tools for one configured server
-
-Usage: nh.exe mcp review [OPTIONS] <SERVER>
-
-Arguments:
-  <SERVER>
-
-Options:
-      --ascii <ASCII>  Force one-column ASCII fallback glyphs on or off (default: decide from stdout) [possible values: on, off]
-  -h, --help           Print help
 ```
