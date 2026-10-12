@@ -188,6 +188,7 @@ price_confidence = "confirmed" # 2026-07-26 platform.kimi.ai/docs/pricing/chat-k
 # (mimo.mi.com/docs/pricing, the redirect target of platform.xiaomimimo.com) lists
 # the lower marketplace-side rates, superseding the May 27 $1/$3 notice.
 # preserve_reasoning ON: reasoning history must persist in thinking+tools mode (plan A.3).
+# MiMo V2.5 routes were removed before Xiaomi's 2026-10-21 retirement.
 
 # Xiaomi describes both V2.6 models as natively multimodal, but its structured
 # model specs currently say text input and its OpenAI image path has not been
@@ -235,52 +236,6 @@ cache_hit = 0.0036
 cache_miss = 0.435
 output = 0.87
 price_confidence = "confirmed" # 2026-09-22 mimo.mi.com/docs/en-US/price/pay-as-you-go
-
-# These legacy choices remain explicit and usable until Xiaomi's announced
-# retirement at 2026-10-21 10:00 Asia/Shanghai. They are never auto-replaced.
-[routes."mimo-v2.5-pro"]
-provider = "mimo"
-model_id = "mimo-v2.5-pro"
-base_url = "https://api.xiaomimimo.com/v1" # confirmed 2026-07-26 (mimo.mi.com first-api-call docs)
-wire = "openai"
-vault_entry = "mimo"
-class = "api"
-modality = ["text"] # text-only: verified live 2026-07-30 (404 no endpoints support image input)
-context = 1000000
-max_out = 131072
-thinking_dialect = "kimi-toggle"
-preserve_reasoning = true
-quirks = ["max-completion-tokens"]
-
-[routes."mimo-v2.5-pro".price]
-currency = "USD"
-unit = "per_million_tokens"
-cache_hit = 0.0036 # was 0.20 (reported) - first-party page supersedes
-cache_miss = 0.435 # conflict resolved: platform page lists $0.435, not the May 27 $1.00
-output = 0.87      # conflict resolved: platform page lists $0.87, not $3.00
-price_confidence = "confirmed" # 2026-07-26 mimo.mi.com/docs/en-US/price/pay-as-you-go
-
-[routes."mimo-v2.5"]
-provider = "mimo"
-model_id = "mimo-v2.5"
-base_url = "https://api.xiaomimimo.com/v1" # confirmed 2026-07-26 (mimo.mi.com first-api-call docs)
-wire = "openai"
-vault_entry = "mimo"
-class = "api"
-modality = ["text", "image", "video", "audio"] # cheapest 1M-context multimodal route (plan B.8)
-context = 1000000
-max_out = 131072
-thinking_dialect = "kimi-toggle"
-preserve_reasoning = true
-quirks = ["max-completion-tokens"]
-
-[routes."mimo-v2.5".price]
-currency = "USD"
-unit = "per_million_tokens"
-cache_hit = 0.0028 # was 0.14 worst-case; cache-hit rate now published first-party
-cache_miss = 0.14
-output = 0.28
-price_confidence = "confirmed" # 2026-07-26 mimo.mi.com/docs/en-US/price/pay-as-you-go
 
 # ------------------------------------------------------------------ GLM / Z.ai (plan B.4)
 # Free routes are the $0 CI/smoke-test lane. Zeros confirmed on Z.ai's own pricing
@@ -437,7 +392,8 @@ price_confidence = "confirmed" # 2026-07-26 docs.z.ai/guides/overview/pricing li
 # [routes.local-llama-cpp]
 # provider = "llama.cpp"
 # model_id = "<fill exact server model id or --alias>"
-# base_url = "http://127.0.0.1:8080/v1"
+# llama-server defaults to port 9931 from b11521 (2026-10-09); older builds and Docker use 8080.
+# base_url = "http://127.0.0.1:9931/v1"
 # wire = "openai"
 # vault_entry = "llama-cpp-local"
 # class = "local"

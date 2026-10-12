@@ -20,9 +20,20 @@ Premium speed variants are not included in this update.
 
 ## Existing MiMo users
 
-In its notice checked September 22, 2026, Xiaomi says `mimo-v2.5` and `mimo-v2.5-pro` stop working on **October 21, 2026 at
-10:00 Beijing time**, without automatic replacement.
+Xiaomi's retirement notice, updated October 9, 2026, says requests to `mimo-v2.5-pro` and
+`mimo-v2.5` are automatically routed to `mimo-v2.6-pro` and `mimo-v2.6-flash` from
+**October 14, 2026** (the notice gives both 10:00 and 18:00 UTC+8), and that the old IDs become
+invalid on **October 21, 2026 at 10:00 UTC+8 (02:00 UTC)**.
 [Official retirement notice](https://mimo.mi.com/docs/en-US/updates/deprecate).
+
+The unreleased source catalog no longer contains the two retiring routes, so the next build's
+`/provider mimo` selects `mimo-v2.6-flash`. If your saved model choice names a removed route,
+Nosis reports it; choose another with `nh model set <id>`. A session recorded on a removed route
+cannot be resumed; start a new session instead. MiMo currently has no route advertised for image
+input.
+
+**v0.2.2 contains only the retiring MiMo routes,** so its MiMo requests fail after October 21,
+2026.
 
 **For v0.2.2 users:** no published Nosis build contains these new routes yet.
 Keep your current installation and watch the [releases page](https://github.com/nosistech/nosis-harness/releases)

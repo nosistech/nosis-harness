@@ -229,8 +229,6 @@ fn parses_repo_catalog_with_all_class1_routes() {
             "kimi-k2.7-code",
             "kimi-k2.7-code-highspeed",
             "kimi-k3",
-            "mimo-v2.5",
-            "mimo-v2.5-pro",
             "mimo-v2.6-flash",
             "mimo-v2.6-pro",
         ]
@@ -431,8 +429,6 @@ fn kimi_k3_has_verified_capacity_price_and_effort_control() {
 fn mimo_routes_preserve_reasoning_with_route_specific_modalities() {
     let r = resolver();
     for (id, expected_modality) in [
-        ("mimo-v2.5", vec!["text", "image", "video", "audio"]),
-        ("mimo-v2.5-pro", vec!["text"]),
         ("mimo-v2.6-flash", vec!["text"]),
         ("mimo-v2.6-pro", vec!["text"]),
     ] {
@@ -818,12 +814,7 @@ fn free_glm_route_quotes_zero_without_expiry() {
 fn mimo_prices_are_confirmed_first_party() {
     // Plan B.3 pricing conflict resolved 2026-07-26 against mimo.mi.com/docs/pricing.
     let r = resolver();
-    for id in [
-        "mimo-v2.5",
-        "mimo-v2.5-pro",
-        "mimo-v2.6-flash",
-        "mimo-v2.6-pro",
-    ] {
+    for id in ["mimo-v2.6-flash", "mimo-v2.6-pro"] {
         let route = r.resolve(id).unwrap();
         let quote = route.price_at(utc(2026, 7, 15, 12, 0, 0)).unwrap();
         assert_eq!(quote.confidence, PriceConfidence::Confirmed, "{id}");
@@ -1332,7 +1323,7 @@ fn provider_default_picks_lowest_output_price() {
         "deepseek-v4-flash"
     );
     assert_eq!(r.provider_default("kimi").unwrap().id(), "kimi-k2.6");
-    assert_eq!(r.provider_default("mimo").unwrap().id(), "mimo-v2.5");
+    assert_eq!(r.provider_default("mimo").unwrap().id(), "mimo-v2.6-flash");
     // Three free GLM routes tie at 0 - alphabetical order breaks the tie.
     assert_eq!(r.provider_default("glm").unwrap().id(), "glm-4.5-flash");
 }
@@ -1417,15 +1408,7 @@ fn available_by_provider_groups_and_sorts() {
             "kimi-k3",
         ]
     );
-    assert_eq!(
-        map["mimo"],
-        vec![
-            "mimo-v2.5",
-            "mimo-v2.5-pro",
-            "mimo-v2.6-flash",
-            "mimo-v2.6-pro",
-        ]
-    );
+    assert_eq!(map["mimo"], vec!["mimo-v2.6-flash", "mimo-v2.6-pro"]);
 }
 
 // ---------------------------------------------------------------- banned strings

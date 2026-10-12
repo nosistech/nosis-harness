@@ -61,6 +61,16 @@ commit passes local and remote gates.
 
 ### Changed
 
+- The `mimo-v2.5` and `mimo-v2.5-pro` routes are removed from the catalog ahead of
+  Xiaomi's retirement of those model IDs on October 21, 2026 at 10:00 UTC+8.
+  `/provider mimo` now selects `mimo-v2.6-flash`; before this change a price tie
+  selected the retiring route. A saved model choice that names a removed route is
+  reported with the commands to choose another; resuming a session recorded on a
+  removed route is refused with an explanation. MiMo currently has no route
+  advertised for image input. See [model updates](docs/MODEL_UPDATES.md#existing-mimo-users).
+- The commented llama.cpp template in `catalog.toml` now uses port 9931, the
+  `llama-server` default from build b11521 (October 9, 2026). Older builds and the
+  official Docker image still use 8080.
 - Session resume and listing refuse a ledger above 64 MiB without changing it or
   replaying a partial history. Listing reads each ledger once and keeps summary
   state instead of assembling a conversation that will not be displayed.

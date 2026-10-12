@@ -39,8 +39,10 @@ history. This is documented rather than hidden or worked around.
 
 ## Configure a route
 
-The commented templates are in the local-routes section of `catalog.toml`. llama.cpp defaults to
-`http://127.0.0.1:8080/v1`; Ollama defaults to `http://127.0.0.1:11434/v1`.
+The commented templates are in the local-routes section of `catalog.toml`. Current `llama-server`
+builds (b11521 and later, from October 9, 2026) default to `http://127.0.0.1:9931/v1`; older
+builds and the official Docker image use port 8080. Use the address `llama-server` prints when it
+starts. Ollama defaults to `http://127.0.0.1:11434/v1`.
 
 1. Uncomment one template and replace its three symbolic values:
 

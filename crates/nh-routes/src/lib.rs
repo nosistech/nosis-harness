@@ -22,7 +22,7 @@ pub use route::{RouteClass, ThinkingDialect, Wire, LOCAL_METER_COPY};
 use pricing::format_money_digits;
 
 /// Dead/deprecated model ids (plan §A.9). Exact ids and prefixes; `mimo-v2-` does NOT
-/// match `mimo-v2.5-*` (those are current). Rejection errors must name the replacement
+/// match `mimo-v2.5-*` or `mimo-v2.6-*`. Rejection errors must name the replacement
 /// (e.g. "deepseek-chat is dead as of 2026-07-24 - use deepseek-v4-flash").
 pub const BANNED_EXACT: &[&str] = &["deepseek-chat", "deepseek-reasoner"];
 pub const BANNED_PREFIXES: &[&str] = &["mimo-v2-", "gpt-5.2", "gpt-5.3-codex", "moonshot-v1-"];
