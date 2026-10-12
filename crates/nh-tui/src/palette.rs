@@ -119,6 +119,16 @@ pub(super) fn builtin_palette_entries(shell_unavailable: bool) -> Vec<PaletteEnt
         ),
         ("/?", "alias for /help", PaletteAction::Palette),
         (
+            "/plan",
+            "read and search files; plan changes without editing",
+            PaletteAction::SetMode(crate::mode::Mode::Plan),
+        ),
+        (
+            "/change",
+            "edit files and run commands with current approvals",
+            PaletteAction::SetMode(crate::mode::Mode::Change),
+        ),
+        (
             "/trust",
             "view session autonomy and policy rules",
             PaletteAction::TrustDial,

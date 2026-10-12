@@ -11,6 +11,12 @@ commit passes local and remote gates.
 
 ### Added
 
+- Plan and Change modes in the full-screen interface. Plan is read-only: the model is
+  offered only the read and search tools, and edits, commands and remote tools are
+  refused by the program. Change is the previous behavior and remains the default for
+  new sessions. Switch with Shift+Tab, `/plan` or `/change`, only between turns; the
+  mode is shown as text on the input line, the model is told before its next request,
+  and a resumed session reopens in the mode it last worked in.
 - Guided `nh mcp connect`, offline `status`, explicit metadata-only `check`, and
   offline `disable` commands. New connections require tool review before use;
   setup preserves existing settings and uses vault entry names for API-key authentication.

@@ -239,6 +239,22 @@ pub(super) fn render_separator(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 pub(super) fn render_input(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    // Reserve a fixed column for the mode so horizontal/vertical composer
+    // scrolling cannot hide it, even in a narrow, ASCII, NO_COLOR terminal.
+    let label = format!("[{}] ", app.mode.get().name());
+    let label_width = u16::try_from(label.len())
+        .unwrap_or(u16::MAX)
+        .min(area.width);
+    frame.render_widget(
+        Paragraph::new(label).style(Style::default().add_modifier(Modifier::BOLD)),
+        Rect::new(area.x, area.y, label_width, area.height.min(1)),
+    );
+    let area = Rect::new(
+        area.x.saturating_add(label_width),
+        area.y,
+        area.width.saturating_sub(label_width),
+        area.height,
+    );
     let prompt = display_line(app, "❯ ");
     let queued = if app.pending_send {
         let marker = match (&app.status, app.budget_block_reason()) {
@@ -288,6 +304,8 @@ pub(super) fn render_input(frame: &mut Frame<'_>, app: &App, area: Rect) {
         if first && app.input.is_empty() {
             let placeholder = if let Some(reason) = app.budget_block_reason() {
                 format!("{reason} - press Ctrl+C twice to exit")
+            } else if app.mode.get() == crate::mode::Mode::Plan {
+                "Plan mode (read-only): ask a question or describe a change to plan...".to_owned()
             } else {
                 "type a task and press Enter…".to_owned()
             };
@@ -360,7 +378,7 @@ pub(super) fn render_overlay(frame: &mut Frame<'_>, app: &App) {
         }
         Overlay::Help => render_help(frame, app, modal_area(frame.area(), 22)),
         Overlay::TrustDial => {
-            let desired = u16::try_from(trust_dial_lines(&app.policy_view).len())
+            let desired = u16::try_from(trust_dial_lines(&app.policy_view).len() + 1)
                 .unwrap_or(u16::MAX)
                 .saturating_add(3)
                 .max(8);
@@ -529,8 +547,8 @@ pub(super) fn render_trust_dial(frame: &mut Frame<'_>, app: &App, area: Rect) {
         " Trust Dial · read-only ",
         "Read-only policy view · Esc close",
     );
-    let lines: Vec<Line<'static>> = trust_dial_lines(&app.policy_view)
-        .into_iter()
+    let lines: Vec<Line<'static>> = std::iter::once(format!("mode: {}", app.mode.get().label()))
+        .chain(trust_dial_lines(&app.policy_view))
         .map(|line| Line::from(display_line(app, &line)))
         .collect();
     frame.render_widget(

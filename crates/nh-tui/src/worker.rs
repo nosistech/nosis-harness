@@ -17,15 +17,16 @@ use nh_core::session_ledger::{
 use nh_core::wire::{
     ChatClient, ChatMessage, ChatRequest, ChatResponse, ThinkingEffort, Usage, UsageEvidence,
 };
-use nh_law::Law;
+use nh_law::{Law, Policy};
 use nh_routes::{Profiles, ResolvedRoute};
-use nh_tools::{builtin_tools_for_policy, Tool, ToolArgs, ToolCtx, ToolExecution, ToolSpec};
+use nh_tools::{Tool, ToolArgs, ToolCtx, ToolExecution, ToolSpec};
 #[cfg(test)]
 use nh_vault::Scrubber;
 use nh_vault::{SecretRegistry, SecretValue};
 
+use crate::mode::{mode_context_update, SharedMode};
 use crate::session::{
-    effort_for, identity_constitution, install_literal, safe_line, scrub_full_line,
+    effort_for, install_literal, mode_identity_constitution, safe_line, scrub_full_line,
 };
 use crate::state::PROMPT_ESTIMATE_UNAVAILABLE;
 use crate::{AgentEvent, ConnectFn, RecoveryHint, SharedScrubber, TimelineSummary};
@@ -212,6 +213,7 @@ pub(super) enum WorkerCommand {
     SwitchRoute(Box<ResolvedRoute>),
     SetEffort(ThinkingEffort),
     SetProfile(String),
+    ModeChanged,
     Stop,
 }
 
@@ -223,6 +225,7 @@ pub(super) enum WorkerShutdown {
 }
 
 pub(super) struct Worker {
+    pub(super) mode: SharedMode,
     pub(super) commands: Sender<WorkerCommand>,
     pub(super) events: Receiver<AgentEvent>,
     pub(super) prompt_base_tokens: Arc<AtomicU64>,
@@ -309,6 +312,13 @@ pub(super) struct WorkerConfig {
 }
 
 pub(super) fn spawn_worker(config: WorkerConfig) -> anyhow::Result<Worker> {
+    let mode = SharedMode::from_history(
+        config
+            .resume
+            .as_ref()
+            .map_or(&[], |saved| saved.history.as_slice()),
+    );
+    let worker_mode = mode.clone();
     let (command_tx, command_rx) = mpsc::channel();
     let (event_tx, event_rx) = mpsc::channel();
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -327,10 +337,12 @@ pub(super) fn spawn_worker(config: WorkerConfig) -> anyhow::Result<Worker> {
                 worker_shutdown,
                 worker_turn_cancel,
                 worker_prompt_base_tokens,
+                worker_mode,
             )
         })
         .context("could not start the agent worker")?;
     Ok(Worker {
+        mode,
         commands: command_tx,
         events: event_rx,
         prompt_base_tokens,
@@ -347,8 +359,17 @@ fn worker_loop(
     shutdown: Arc<AtomicBool>,
     turn_cancel: Arc<AtomicBool>,
     prompt_base_tokens: Arc<AtomicU64>,
+    mode: SharedMode,
 ) {
-    WorkerSession::new(config, events, shutdown, turn_cancel, prompt_base_tokens).run(commands);
+    WorkerSession::new(
+        config,
+        events,
+        shutdown,
+        turn_cancel,
+        prompt_base_tokens,
+        mode,
+    )
+    .run(commands);
 }
 
 enum CommandAction {
@@ -358,6 +379,8 @@ enum CommandAction {
 }
 
 struct WorkerSession {
+    mode: SharedMode,
+    policy: Policy,
     route: ResolvedRoute,
     profiles: Profiles,
     active_profile: String,
@@ -377,7 +400,7 @@ struct WorkerSession {
     ledger: SessionLedger,
     ledger_failed: bool,
     ledger_notice_sent: bool,
-    pending_route_context: Option<ChatMessage>,
+    pending_route_changed: bool,
     shell_unavailable: bool,
 }
 
@@ -388,6 +411,7 @@ impl WorkerSession {
         shutdown: Arc<AtomicBool>,
         turn_cancel: Arc<AtomicBool>,
         prompt_base_tokens: Arc<AtomicU64>,
+        mode: SharedMode,
     ) -> Self {
         let WorkerConfig {
             route,
@@ -448,20 +472,20 @@ impl WorkerSession {
         });
 
         let shell_unavailable = law.policy.blocks_all_shell_commands();
-        let builtin_tools = builtin_tools_for_policy(&law.policy);
+        let builtin_tools = mode.get().tools(&law.policy);
         let policy = law.policy.clone();
         let event_scrubber = Arc::clone(&scrubber);
         let progress_events = events.clone();
         let ctx = ToolCtx::new(
             workdir,
             approve,
-            nh_tools::policy_guard(policy),
+            mode.get().guard(policy.clone()),
             key_literals.scrubber(),
         )
         .with_cancel(Arc::clone(&turn_cancel));
         let law_constitution = law.constitution;
         let current_constitution =
-            identity_constitution(&law_constitution, &route, shell_unavailable);
+            mode_identity_constitution(&law_constitution, &route, shell_unavailable, mode.get());
         let agent = AgentLoop {
             client,
             tools: tracked_tools(builtin_tools, &events),
@@ -493,18 +517,11 @@ impl WorkerSession {
         let history = resume
             .as_ref()
             .map_or_else(Vec::new, |saved| saved.history.clone());
-        let pending_route_context = resume.as_ref().and_then(|saved| {
-            let route_changed = saved
+        let pending_route_changed = resume.as_ref().is_some_and(|saved| {
+            saved
                 .turns
                 .last()
-                .is_some_and(|turn| turn.route_id != saved.route_id);
-            nh_core::agent::capability_aware_route_context(
-                &saved.history,
-                route_changed,
-                &current_constitution,
-                shell_unavailable,
-            )
-            .map(route_context_message)
+                .is_some_and(|turn| turn.route_id != saved.route_id)
         });
         let mut session_usage = None;
         if let Some(saved) = &resume {
@@ -535,6 +552,8 @@ impl WorkerSession {
         }
 
         Self {
+            mode,
+            policy,
             route,
             profiles,
             active_profile,
@@ -554,7 +573,7 @@ impl WorkerSession {
             ledger,
             ledger_failed,
             ledger_notice_sent: ledger_failed,
-            pending_route_context,
+            pending_route_changed,
             shell_unavailable,
         }
     }
@@ -594,6 +613,7 @@ impl WorkerSession {
 
     fn estimate_prompt_base_tokens(&self) -> Option<u64> {
         let mut messages = self.history.clone();
+        self.append_context(&mut messages);
         if messages.is_empty() {
             messages.push(ChatMessage {
                 role: "system".into(),
@@ -603,9 +623,6 @@ impl WorkerSession {
                 tool_call_id: None,
                 reasoning_content: None,
             });
-        }
-        if let Some(context) = &self.pending_route_context {
-            messages.push(context.clone());
         }
         let tools = self
             .agent
@@ -620,6 +637,40 @@ impl WorkerSession {
             &tools,
             preserve_reasoning,
         ))
+    }
+
+    fn refresh_mode(&mut self) {
+        let mode = self.mode.get();
+        self.agent.tools = tracked_tools(mode.tools(&self.policy), &self.events);
+        self.agent.ctx.guard = mode.guard(self.policy.clone());
+        self.agent.constitution = Some(mode_identity_constitution(
+            &self.law_constitution,
+            &self.route,
+            self.shell_unavailable,
+            mode,
+        ));
+    }
+
+    fn append_context(&self, history: &mut Vec<ChatMessage>) {
+        // Both updates are computed at send time. An empty history must remain
+        // empty so the agent installs the complete constitution at index zero.
+        let constitution = mode_identity_constitution(
+            &self.law_constitution,
+            &self.route,
+            self.shell_unavailable,
+            self.mode.get(),
+        );
+        if let Some(context) = nh_core::agent::capability_aware_route_context(
+            history,
+            self.pending_route_changed,
+            &constitution,
+            self.shell_unavailable,
+        ) {
+            history.push(route_context_message(context));
+        }
+        if let Some(notice) = mode_context_update(history, self.mode.get()) {
+            history.push(route_context_message(notice.to_owned()));
+        }
     }
 
     fn stopped(&self) -> bool {
@@ -644,21 +695,14 @@ impl WorkerSession {
                 );
                 self.agent.profile = Some(execution_policy.profile.clone());
                 self.active_profile = execution_policy.profile;
-                let constitution = identity_constitution(
+                let constitution = mode_identity_constitution(
                     &self.law_constitution,
                     &next_route,
                     self.shell_unavailable,
+                    self.mode.get(),
                 );
                 self.agent.constitution = Some(constitution.clone());
-                if previous_route != next_route_id {
-                    self.pending_route_context = nh_core::agent::capability_aware_route_context(
-                        &self.history,
-                        true,
-                        &constitution,
-                        self.shell_unavailable,
-                    )
-                    .map(route_context_message);
-                }
+                self.pending_route_changed |= previous_route != next_route_id;
                 self.agent.context_limit = next_route.context();
                 self.route = *next_route;
                 let event = SessionEvent::RouteSwitched {
@@ -693,6 +737,10 @@ impl WorkerSession {
                     profile: self.active_profile.clone(),
                 };
                 self.append_session_event(&event);
+                CommandAction::Continue
+            }
+            WorkerCommand::ModeChanged => {
+                self.refresh_mode();
                 CommandAction::Continue
             }
             WorkerCommand::Stop => CommandAction::Stop,
@@ -765,10 +813,16 @@ impl WorkerSession {
             return true;
         }
 
+        // At every provider request: (a) tracked tools and (b) the installed guard
+        // derive from the ONE shared mode; (c) the last model-visible mode notice
+        // agrees with it; (d) the composer reads that same value. UI input cannot
+        // change it during a turn, including approval waits and follow-up calls.
+        self.refresh_mode();
         let history_before = self.history.len();
-        if let Some(message) = self.pending_route_context.take() {
-            self.history.push(message);
-        }
+        let mut history = std::mem::take(&mut self.history);
+        self.append_context(&mut history);
+        self.history = history;
+        self.pending_route_changed = false;
         let result = self.agent.run_with_persistent_history_and_cache(
             &mut self.history,
             &task,

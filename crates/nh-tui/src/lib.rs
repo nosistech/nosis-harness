@@ -2,6 +2,7 @@
 
 mod input;
 mod keymap;
+mod mode;
 mod palette;
 mod render;
 mod session;

@@ -7,6 +7,7 @@ pub(super) use commands::teaching_error;
 pub(super) use commands::{command_matches, execute_command_menu, explain_why};
 use commands::{open_timeline, resolved_route_action, set_profile};
 
+use crate::mode::{Mode, FINISH_BEFORE_SWITCHING};
 use crate::palette::filter_palette;
 use crate::state::{
     search_match_count, search_match_lines, AgentEvent, App, Overlay, PaletteAction, PaletteEntry,
@@ -28,6 +29,7 @@ pub(super) enum UiAction {
     SwitchRoute(String),
     SetEffort(ThinkingEffort),
     SetProfile(String),
+    SetMode(Mode),
     Interrupt,
     Quit,
 }
@@ -93,6 +95,27 @@ pub(super) fn handle_action(app: &mut App, worker: &mut Worker, action: UiAction
             }
             false
         }
+        UiAction::SetMode(mode) => {
+            if request_mode(app, mode) != UiAction::SetMode(mode) {
+                return false;
+            }
+            let previous = app.mode.get();
+            app.mode.set(mode);
+            if worker.commands.send(WorkerCommand::ModeChanged).is_err() {
+                app.mode.set(previous);
+                apply_event(
+                    app,
+                    AgentEvent::Failed("agent stopped - retry the task".into()),
+                );
+            } else {
+                app.invalidate_prompt_estimate();
+                app.push_line(
+                    mode.switched_notice(),
+                    crate::state::TranscriptKind::Progress,
+                );
+            }
+            false
+        }
         UiAction::SetProfile(profile) => {
             if worker
                 .commands
@@ -152,6 +175,22 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
         return reduce_ctrl_c(app);
     }
     app.last_ctrl_c = None;
+    if key.code == KeyCode::BackTab
+        || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
+    {
+        if !app.can_switch_mode() {
+            app.push_line(
+                FINISH_BEFORE_SWITCHING,
+                crate::state::TranscriptKind::Progress,
+            );
+            return UiAction::None;
+        }
+        return if app.overlay == Overlay::None {
+            request_mode(app, app.mode.get().toggled())
+        } else {
+            UiAction::None
+        };
+    }
     if key.code == KeyCode::Esc && app.status.esc_interrupts_turn() {
         if let Overlay::Search {
             original_scroll, ..
@@ -326,6 +365,24 @@ pub(super) fn reduce_key(app: &mut App, key: KeyEvent) -> UiAction {
         _ => {}
     }
     UiAction::None
+}
+
+pub(super) fn request_mode(app: &mut App, mode: Mode) -> UiAction {
+    if !app.can_switch_mode() {
+        app.push_line(
+            FINISH_BEFORE_SWITCHING,
+            crate::state::TranscriptKind::Progress,
+        );
+        return UiAction::None;
+    }
+    if app.mode.get() == mode {
+        app.push_line(
+            &format!("already in {} mode", mode.name()),
+            crate::state::TranscriptKind::Progress,
+        );
+        return UiAction::None;
+    }
+    UiAction::SetMode(mode)
 }
 
 fn reduce_ctrl_c(app: &mut App) -> UiAction {
@@ -1021,6 +1078,10 @@ pub(super) fn activate_palette_entry(app: &mut App, entry: PaletteEntry) -> UiAc
         PaletteAction::Search => {
             app.open_search();
             UiAction::None
+        }
+        PaletteAction::SetMode(mode) => {
+            app.overlay = Overlay::None;
+            request_mode(app, mode)
         }
         PaletteAction::TrustDial => {
             app.overlay = Overlay::TrustDial;

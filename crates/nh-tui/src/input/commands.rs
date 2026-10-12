@@ -1,6 +1,7 @@
 //! Slash-command parsing and execution.
 
-use super::{activate_palette_entry, UiAction};
+use super::{activate_palette_entry, request_mode, UiAction};
+use crate::mode::Mode;
 use crate::session::{effort_for, effort_name, parse_effort};
 use crate::state::{App, Overlay, PaletteEntry, PickerKind, PickerRow, TranscriptKind};
 use chrono::Utc;
@@ -79,6 +80,13 @@ pub(super) fn execute_command(app: &mut App) -> UiAction {
             open_timeline(app, true);
             UiAction::None
         }
+        ("plan", None) => request_mode(app, Mode::Plan),
+        ("change", None) => request_mode(app, Mode::Change),
+        ("plan" | "change", Some(_)) => command_error(
+            app,
+            &format!("/{name} takes no arguments"),
+            &format!("run /{name} by itself"),
+        ),
         ("search", None) => {
             app.open_search();
             UiAction::None

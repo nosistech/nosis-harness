@@ -536,6 +536,7 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
             record_timeline_summary(app, summary);
         }
         AgentEvent::CancelledTurn(summary) => {
+            app.turn_in_flight = false;
             app.active_model = None;
             app.active_tool = None;
             app.push_line(
@@ -555,10 +556,14 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
             app.set_status(status, Utc::now());
         }
         AgentEvent::Answer(answer) => {
+            app.turn_in_flight = false;
             app.active_model = None;
             app.active_tool = None;
             app.push_text("", &answer, TranscriptKind::Answer);
-            app.push_line(result_notice(false), TranscriptKind::Progress);
+            app.push_line(
+                result_notice(app.mode.get() == crate::mode::Mode::Plan),
+                TranscriptKind::Progress,
+            );
             let status = if let Some(reason) = app.budget_block_reason() {
                 Status::Blocked(reason.into())
             } else {
@@ -588,6 +593,7 @@ pub fn apply_event(app: &mut App, event: AgentEvent) -> &Status {
 }
 
 fn apply_failure(app: &mut App, reason: &str, hint: Option<&RecoveryHint>) {
+    app.turn_in_flight = false;
     app.active_model = None;
     app.active_tool = None;
     let status_reason = safe_line(&app.scrubber, reason);

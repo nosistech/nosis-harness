@@ -22,6 +22,14 @@ impl KeyBinding {
 
 pub(super) const KEY_BINDINGS: &[KeyBinding] = &[
     KeyBinding {
+        keys: "Shift+Tab",
+        action: "mode",
+        detail: " switch Plan/Change between turns with no overlay open",
+        show_in_hint: true,
+        hide_at_budget: false,
+        working_only: false,
+    },
+    KeyBinding {
         keys: "/",
         action: "commands",
         detail: " and tools",
@@ -214,7 +222,9 @@ pub(super) fn key_hint_line_for(
             });
         }
         for binding in visible_key_bindings(budget_reached, can_stop).filter(|binding| {
-            binding.show_in_hint && !matches!(binding.keys, "Enter" | "?/F1" | "Esc")
+            binding.show_in_hint
+                && !matches!(binding.keys, "Enter" | "?/F1" | "Esc")
+                && (!busy || binding.keys != "Shift+Tab")
         }) {
             let action = if binding.keys == "Ctrl+C" && can_stop {
                 "stop/exit"

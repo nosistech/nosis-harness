@@ -1,5 +1,6 @@
 use super::*;
 use crate::keymap::{key_hint_line, visible_key_bindings};
+use crate::mode::{Mode, CHANGE_MODE_NOTICE, FINISH_BEFORE_SWITCHING, PLAN_MODE_NOTICE};
 use crate::palette::{resolve_color_mode, trust_dial_lines, ColorMode};
 use crate::state::{
     search_match_lines, Overlay, PickerKind, RouteTimingHistory, UiInputs,
@@ -214,7 +215,7 @@ fn test_resolver() -> RouteResolver {
     RouteResolver::from_toml(TEST_CATALOG).expect("test catalog parses")
 }
 
-fn test_route() -> ResolvedRoute {
+pub(super) fn test_route() -> ResolvedRoute {
     test_resolver().resolve("test-route").unwrap()
 }
 
@@ -244,6 +245,7 @@ fn test_app_with_timing(budget: Option<u64>, route_timing_history: RouteTimingHi
             block_commands: Vec::new(),
         },
         UiInputs {
+            mode: crate::mode::SharedMode::default(),
             terminal_capability: TerminalCapability::Unicode,
             palette_entries: Vec::new(),
             credentialed_providers: Vec::new(),
@@ -275,6 +277,7 @@ fn meter_app_from(catalog: &str) -> App {
             block_commands: Vec::new(),
         },
         UiInputs {
+            mode: crate::mode::SharedMode::default(),
             terminal_capability: TerminalCapability::Unicode,
             palette_entries: Vec::new(),
             credentialed_providers: Vec::new(),
@@ -302,6 +305,7 @@ fn picker_app() -> App {
             block_commands: Vec::new(),
         },
         UiInputs {
+            mode: crate::mode::SharedMode::default(),
             terminal_capability: TerminalCapability::Unicode,
             palette_entries: Vec::new(),
             credentialed_providers: vec!["alpha".into(), "beta".into()],
@@ -1440,7 +1444,7 @@ fn modal_frames_clear_transcript_for_every_overlay() {
         (Overlay::Help, modal_area(terminal, 22), "Help"),
         (
             Overlay::TrustDial,
-            modal_area(terminal, 8),
+            modal_area(terminal, 9),
             "Trust Dial · read-only",
         ),
         (
@@ -1755,6 +1759,7 @@ fn every_new_surface_scrubs_literals_and_control_characters() {
             block_commands: Vec::new(),
         },
         UiInputs {
+            mode: crate::mode::SharedMode::default(),
             terminal_capability: TerminalCapability::Unicode,
             palette_entries: Vec::new(),
             credentialed_providers: Vec::new(),
@@ -6044,6 +6049,7 @@ fn rendered_line_is_redacted_and_has_no_control_characters() {
             block_commands: Vec::new(),
         },
         UiInputs {
+            mode: crate::mode::SharedMode::default(),
             terminal_capability: TerminalCapability::Unicode,
             palette_entries: Vec::new(),
             credentialed_providers: Vec::new(),
@@ -6080,6 +6086,7 @@ fn rendered_overlay_scrubs_descriptions_and_control_characters() {
             block_commands: Vec::new(),
         },
         UiInputs {
+            mode: crate::mode::SharedMode::default(),
             terminal_capability: TerminalCapability::Unicode,
             palette_entries: vec![PaletteEntry {
                 kind: "tool",
@@ -6468,7 +6475,7 @@ impl ChatClient for MockClient {
     }
 }
 
-fn temp_dir() -> PathBuf {
+pub(super) fn temp_dir() -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let nonce = NEXT.fetch_add(1, Ordering::Relaxed);
     let epoch = SystemTime::now()
@@ -7834,4 +7841,613 @@ fn keyless_worker_starts_and_task_surfaces_the_add_key_line() {
         .is_err());
     assert_eq!(worker.shutdown(), WorkerShutdown::Clean);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+struct ModeHarness {
+    root: PathBuf,
+    worker: Worker,
+    app: App,
+    requests: Arc<Mutex<Vec<RecordedRequest>>>,
+    law_constitution: String,
+    change_tools: Vec<String>,
+}
+
+impl ModeHarness {
+    fn new(resume: Option<nh_core::session_ledger::RestoredSession>) -> Self {
+        let root = temp_dir();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests_for_connect = Arc::clone(&requests);
+        let connect: ConnectFn = Box::new(move |_, _| {
+            Ok((
+                Box::new(RecordingClient {
+                    requests: Arc::clone(&requests_for_connect),
+                }),
+                nh_vault::secret("fake-mode-test-credential"),
+            ))
+        });
+        let law = nh_law::load(&root, &nh_law::LoadOptions { cli_autonomy: None });
+        let law_constitution = law.constitution.clone();
+        let change_tools = nh_tools::builtin_tools_for_policy(&law.policy)
+            .iter()
+            .map(|tool| tool.spec().name)
+            .collect();
+        let resolver = RouteResolver::from_toml(
+            &TEST_CATALOG
+                .replace("context = 1000", "context = 1000000")
+                .replace("context = 2000", "context = 1000000"),
+        )
+        .unwrap();
+        let route = resolver.resolve("test-route").unwrap();
+        let mut app = test_app(None);
+        app.resolver = resolver;
+        app.route = route.clone();
+        app.policy_view = law.policy.view();
+        if let Some(restored) = &resume {
+            restore_app(&mut app, restored, &law_constitution).unwrap();
+        }
+        let worker = spawn_worker(WorkerConfig {
+            route,
+            profiles: Profiles::bundled(),
+            active_profile: "balanced".into(),
+            budget: None,
+            law,
+            repo_root: root.clone(),
+            workdir: root.clone(),
+            scrubber: Arc::clone(&app.scrubber),
+            connect,
+            initial: None,
+            resume: resume.clone(),
+        })
+        .unwrap();
+        // Check both independently derived resume states before sharing them.
+        assert_eq!(app.mode.get(), worker.mode.get());
+        app.mode = worker.mode.clone();
+        Self {
+            root,
+            worker,
+            app,
+            requests,
+            law_constitution,
+            change_tools,
+        }
+    }
+
+    fn enter(&mut self, text: &str) {
+        assert!(self.app.input.is_empty());
+        type_text(&mut self.app, text);
+        assert!(!handle_key(
+            &mut self.app,
+            &mut self.worker,
+            code_key(KeyCode::Enter)
+        ));
+    }
+
+    fn task(&mut self, text: &str) {
+        self.enter(text);
+        receive_completed_task(&self.worker, &mut self.app);
+    }
+
+    fn finish(mut self) {
+        assert_eq!(self.worker.shutdown(), WorkerShutdown::Clean);
+        std::fs::remove_dir_all(&self.root).unwrap();
+    }
+}
+
+fn plan_tool_names() -> Vec<String> {
+    nh_tools::read_only_tools()
+        .iter()
+        .map(|tool| tool.spec().name)
+        .collect()
+}
+
+fn last_system(request: &RecordedRequest) -> &str {
+    &request
+        .history
+        .iter()
+        .rev()
+        .find(|(role, _)| role == "system")
+        .unwrap()
+        .1
+}
+
+fn recorded_mode_notices(request: &RecordedRequest) -> Vec<&str> {
+    request
+        .history
+        .iter()
+        .filter(|(role, _)| role == "system")
+        .flat_map(|(_, text)| {
+            let mut notices = [PLAN_MODE_NOTICE, CHANGE_MODE_NOTICE]
+                .into_iter()
+                .flat_map(|notice| {
+                    text.match_indices(notice)
+                        .map(move |(index, _)| (index, notice))
+                })
+                .collect::<Vec<_>>();
+            notices.sort_by_key(|(index, _)| *index);
+            notices.into_iter().map(|(_, notice)| notice)
+        })
+        .collect()
+}
+
+fn mode_message(role: &str, text: &str) -> nh_core::wire::ChatMessage {
+    nh_core::wire::ChatMessage {
+        role: role.into(),
+        content: Some(text.into()),
+        parts: None,
+        tool_calls: None,
+        tool_call_id: None,
+        reasoning_content: None,
+    }
+}
+
+fn mode_resume(
+    history: Vec<nh_core::wire::ChatMessage>,
+) -> nh_core::session_ledger::RestoredSession {
+    fold_session(&[
+        SessionEvent::Started {
+            session_id: "mode-resume".into(),
+            surface: Surface::Tui,
+            route_id: "test-route".into(),
+            model_id: "test-route".into(),
+            profile: "balanced".into(),
+            created_utc: "2026-10-11T12:00:00Z".into(),
+            budget: None,
+        },
+        SessionEvent::Turn {
+            ts_utc: "2026-10-11T12:01:00Z".into(),
+            route_id: "test-route".into(),
+            messages: history,
+            usage: None,
+        },
+    ])
+    .unwrap()
+}
+
+#[test]
+fn plan_first_request_keeps_constitution_and_exact_read_only_registry() {
+    // T1 + T4: assertions inspect what the provider actually received.
+    let mut harness = ModeHarness::new(None);
+    harness.enter("/plan");
+    harness.task("explain the files");
+    {
+        let requests = harness.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(request.tools, plan_tool_names());
+        for forbidden in ["write_file", "edit_file", "exec_shell"] {
+            assert!(!request.tools.iter().any(|name| name == forbidden));
+        }
+        assert_eq!(request.history[0].0, "system");
+        assert!(request.system.contains(PLAN_MODE_NOTICE));
+        assert!(request.system.contains("nosis on test-route"));
+        assert!(request.system.ends_with(&harness.law_constitution));
+        assert_eq!(
+            request
+                .history
+                .iter()
+                .filter(|(role, _)| role == "system")
+                .count(),
+            1
+        );
+        assert_eq!(
+            request.history[1],
+            ("user".into(), "explain the files".into())
+        );
+    }
+    harness.finish();
+}
+
+#[test]
+fn mode_switches_append_notices_and_restore_change_tools() {
+    // T1 + T3 + T5: the first system prompt remains an unchanged prefix.
+    let mut harness = ModeHarness::new(None);
+    harness.task("first change task");
+    harness.enter("/plan");
+    harness.task("plan this change");
+    harness.enter("/change");
+    harness.task("make the change");
+    {
+        let requests = harness.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].tools, harness.change_tools);
+        assert_eq!(
+            requests[0].system,
+            identity_constitution(
+                &harness.law_constitution,
+                &harness.app.route,
+                harness.app.policy_view.blocks_all_shell_commands(),
+            )
+        );
+        assert!(recorded_mode_notices(&requests[0]).is_empty());
+        assert_eq!(requests[1].tools, plan_tool_names());
+        assert_eq!(last_system(&requests[1]), PLAN_MODE_NOTICE);
+        assert_eq!(last_system(&requests[2]), CHANGE_MODE_NOTICE);
+        assert_eq!(requests[2].tools, harness.change_tools);
+        assert!(requests[2].tools.iter().any(|name| name == "exec_shell"));
+        for request in &requests[1..] {
+            assert_eq!(request.system, requests[0].system);
+        }
+    }
+    harness.finish();
+}
+
+#[test]
+fn mode_toggles_without_a_task_leave_no_stale_notice() {
+    // T6: test both empty and populated histories, plus Plan/Change/Plan.
+    let mut harness = ModeHarness::new(None);
+    for task in ["first", "second"] {
+        harness.enter("/plan");
+        harness.enter("/change");
+        harness.task(task);
+    }
+    harness.enter("/plan");
+    harness.task("record Plan");
+    harness.enter("/change");
+    harness.enter("/plan");
+    harness.task("still Plan");
+    {
+        let requests = harness.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        for request in &requests[..2] {
+            assert!(recorded_mode_notices(request).is_empty());
+            assert_eq!(request.tools, harness.change_tools);
+        }
+        for request in &requests[2..] {
+            assert_eq!(recorded_mode_notices(request), [PLAN_MODE_NOTICE]);
+            assert_eq!(request.tools, plan_tool_names());
+        }
+    }
+    harness.finish();
+}
+
+#[test]
+fn route_switch_context_uses_plan_at_send_time() {
+    // T7: a route selected before Plan must also receive the current mode.
+    let mut harness = ModeHarness::new(None);
+    harness.task("initial task");
+    harness.enter("/model other-route");
+    harness.enter("/plan");
+    harness.task("explain on the new route");
+    harness.enter("/model test-route");
+    harness.task("explain on the original route");
+    {
+        let requests = harness.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        for (request, route) in requests[1..].iter().zip(["other-route", "test-route"]) {
+            assert_eq!(request.model, route);
+            assert_eq!(request.tools, plan_tool_names());
+            assert!(last_system(request).contains(&format!("nosis on {route}")));
+            assert!(last_system(request).contains(PLAN_MODE_NOTICE));
+            assert_eq!(
+                recorded_mode_notices(request).last(),
+                Some(&PLAN_MODE_NOTICE)
+            );
+        }
+    }
+    harness.finish();
+}
+
+#[test]
+fn resume_restores_plan_in_worker_app_banner_and_first_request() {
+    // T8: exact last occurrence within a system message wins; user text does not.
+    let history = vec![
+        mode_message("system", "old law"),
+        mode_message(
+            "system",
+            &format!("{CHANGE_MODE_NOTICE}\n{PLAN_MODE_NOTICE}"),
+        ),
+        mode_message("user", CHANGE_MODE_NOTICE),
+        mode_message("assistant", "previous answer"),
+    ];
+    let mut harness = ModeHarness::new(Some(mode_resume(history)));
+    assert_eq!(harness.app.mode.get(), Mode::Plan);
+    assert!(harness
+        .app
+        .transcript
+        .iter()
+        .any(|line| line.text.contains("mode: Plan (read-only)")));
+    assert!(buffer_text(&render_buffer(&harness.app, 40, 15)).contains("[Plan]"));
+    harness.task("continue planning");
+    {
+        let requests = harness.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].tools, plan_tool_names());
+        assert_eq!(
+            recorded_mode_notices(&requests[0]),
+            [CHANGE_MODE_NOTICE, PLAN_MODE_NOTICE]
+        );
+    }
+    harness.finish();
+}
+
+#[test]
+fn legacy_and_explicit_change_history_resume_without_extra_notices() {
+    // T8: legacy and explicitly restored Change both keep their original prefix.
+    for notice in [
+        None,
+        Some(format!("{PLAN_MODE_NOTICE}\n{CHANGE_MODE_NOTICE}")),
+    ] {
+        let mut history = vec![mode_message("system", "old law")];
+        if let Some(notice) = &notice {
+            history.push(mode_message("system", notice));
+        }
+        history.push(mode_message("user", PLAN_MODE_NOTICE));
+        history.push(mode_message("assistant", "previous answer"));
+        let original_len = history.len();
+        let mut harness = ModeHarness::new(Some(mode_resume(history)));
+        assert_eq!(harness.app.mode.get(), Mode::Change);
+        assert!(harness
+            .app
+            .transcript
+            .iter()
+            .any(|line| line.text.ends_with("mode: Change")));
+        assert!(buffer_text(&render_buffer(&harness.app, 40, 15)).contains("[Change]"));
+        harness.task("continue");
+        {
+            let requests = harness.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].tools, harness.change_tools);
+            assert_eq!(requests[0].history.len(), original_len + 1);
+            let expected = if notice.is_some() {
+                vec![PLAN_MODE_NOTICE, CHANGE_MODE_NOTICE]
+            } else {
+                vec![]
+            };
+            assert_eq!(recorded_mode_notices(&requests[0]), expected);
+        }
+        harness.finish();
+    }
+}
+
+#[test]
+fn shift_tab_aliases_toggle_only_between_turns_without_touching_approvals() {
+    // T9: both Windows encodings, all busy states, overlays, and unbound Tab.
+    let mut harness = ModeHarness::new(None);
+    let keys = [
+        code_key(KeyCode::BackTab),
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT),
+    ];
+    for status in [Status::Idle, Status::Blocked("offline".into())] {
+        harness.app.status = status;
+        for (key, mode) in keys.into_iter().zip([Mode::Plan, Mode::Change]) {
+            let before = harness.app.transcript.len();
+            assert!(!handle_key(&mut harness.app, &mut harness.worker, key));
+            assert_eq!(harness.app.mode.get(), mode);
+            assert_eq!(harness.worker.mode.get(), mode);
+            assert_eq!(harness.app.transcript.len(), before + 1);
+            assert_eq!(
+                harness.app.transcript.last().unwrap().text,
+                mode.switched_notice()
+            );
+        }
+    }
+    harness
+        .app
+        .session_allow
+        .push("exec previously-approved".into());
+    for status in [
+        Status::Working,
+        Status::FinishingInterrupted,
+        Status::Waiting,
+    ] {
+        for key in keys {
+            let (event, answer) = approval("exec requires-an-answer");
+            apply_event(&mut harness.app, event);
+            harness.app.status = status.clone();
+            let before = harness.app.transcript.len();
+            assert!(!handle_key(&mut harness.app, &mut harness.worker, key));
+            assert_eq!(harness.app.status, status);
+            assert_eq!(harness.app.mode.get(), Mode::Change);
+            assert_eq!(harness.app.transcript.len(), before + 1);
+            assert_eq!(
+                harness.app.transcript.last().unwrap().text,
+                FINISH_BEFORE_SWITCHING
+            );
+            assert!(harness.app.pending_approval.is_some());
+            assert_eq!(answer.try_recv(), Err(TryRecvError::Empty));
+            assert_eq!(harness.app.session_allow, ["exec previously-approved"]);
+            harness.app.pending_approval = None;
+        }
+    }
+    harness.app.status = Status::Idle;
+    for overlay in [
+        Overlay::Help,
+        Overlay::TrustDial,
+        Overlay::CommandMenu { selected: 0 },
+    ] {
+        harness.app.overlay = overlay.clone();
+        for key in keys {
+            let before = harness.app.transcript.len();
+            assert!(!handle_key(&mut harness.app, &mut harness.worker, key));
+            assert_eq!(harness.app.mode.get(), Mode::Change);
+            assert_eq!(harness.app.overlay, overlay);
+            assert_eq!(harness.app.transcript.len(), before);
+        }
+    }
+    harness.app.overlay = Overlay::None;
+    let before = harness.app.transcript.len();
+    assert!(!handle_key(
+        &mut harness.app,
+        &mut harness.worker,
+        code_key(KeyCode::Tab)
+    ));
+    assert_eq!(harness.app.mode.get(), Mode::Change);
+    assert_eq!(harness.app.transcript.len(), before);
+    assert!(!handle_key(&mut harness.app, &mut harness.worker, keys[0]));
+    harness.task("check the keyboard-selected mode");
+    assert_eq!(harness.requests.lock().unwrap()[0].tools, plan_tool_names());
+    harness.finish();
+}
+
+#[test]
+fn mode_commands_teach_on_arguments_and_queue_until_the_turn_finishes() {
+    // T10: use the real input/action path, including completion-driven dispatch.
+    let mut harness = ModeHarness::new(None);
+    for (command, mode) in [("/plan", Mode::Plan), ("/change", Mode::Change)] {
+        harness.enter(&format!("{command} extra"));
+        assert_eq!(harness.app.mode.get(), mode.toggled());
+        assert_eq!(
+            harness.app.transcript.last().unwrap().text,
+            format!("{command} takes no arguments - run {command} by itself")
+        );
+        harness.app.status = Status::Working;
+        harness.enter(command);
+        assert_eq!(harness.app.mode.get(), mode.toggled());
+        assert!(harness.app.pending_send);
+        assert_eq!(harness.app.input, command);
+        let before = harness.app.transcript.len();
+        let (_, quit) = handle_agent_event(
+            &mut harness.app,
+            &mut harness.worker,
+            AgentEvent::Answer("finished".into()),
+        );
+        assert!(!quit);
+        assert_eq!(harness.app.mode.get(), mode);
+        assert!(!harness.app.pending_send);
+        assert!(harness.app.input.is_empty());
+        assert_eq!(
+            harness.app.transcript[before..]
+                .iter()
+                .filter(|line| line.text == mode.switched_notice())
+                .count(),
+            1
+        );
+        let before = harness.app.transcript.len();
+        harness.enter(command);
+        assert_eq!(harness.app.transcript.len(), before + 1);
+        assert_eq!(
+            harness.app.transcript.last().unwrap().text,
+            format!("already in {} mode", mode.name())
+        );
+    }
+    assert!(
+        harness.requests.lock().unwrap().is_empty(),
+        "slash commands must not call the model"
+    );
+    harness.finish();
+}
+
+#[test]
+fn mode_label_stays_on_composer_at_width_40_without_unicode_or_color() {
+    // T11: test empty, horizontally scrolled, and vertically scrolled composers.
+    let mut app = test_app(None);
+    app.terminal_capability = TerminalCapability::AsciiFallback;
+    app.color_mode = resolve_color_mode(Some(OsStr::new("1")));
+    for mode in [Mode::Plan, Mode::Change] {
+        app.mode.set(mode);
+        for input in [
+            String::new(),
+            "long input ".repeat(30),
+            "many lines\n".repeat(20),
+        ] {
+            app.replace_input(input);
+            let backend = TestBackend::new(40, 15);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| render(frame, &app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            assert_ascii_frame(buffer, "mode label");
+            let (x, y) = find_ascii_text(buffer, &format!("[{}]", mode.name()));
+            assert_eq!(x, 1, "mode stays at the composer's fixed left edge");
+            assert!(y > 5 && y < 13, "mode belongs on the composer: {y}");
+            assert_eq!(buffer[(x, y)].fg, Color::Reset);
+            assert_eq!(buffer[(x, y)].bg, Color::Reset);
+            let cursor = terminal.backend().cursor_position();
+            assert!(cursor.x > x + mode.name().len() as u16);
+            assert!(cursor.y >= y);
+        }
+    }
+    app.mode.set(Mode::Plan);
+    app.clear_input();
+    let text = buffer_text(&render_buffer(&app, 100, 15));
+    assert!(text.contains("Plan mode (read-only): ask a question"));
+}
+
+#[test]
+fn mode_help_palette_hint_and_trust_dial_explain_the_current_mode() {
+    let mut harness = ModeHarness::new(None);
+    harness.enter("/");
+    assert!(matches!(harness.app.overlay, Overlay::Palette { .. }));
+    assert_eq!(harness.app.mode.get(), Mode::Change);
+    harness.app.overlay = Overlay::None;
+    harness.app.clear_input();
+    for command in ["/plan", "/change"] {
+        assert!(harness
+            .app
+            .palette_entries
+            .iter()
+            .any(|entry| entry.name == command));
+        harness.enter(command);
+        harness.enter("/trust");
+        let text = buffer_text(&render_buffer(&harness.app, 80, 24));
+        assert!(text.contains(&format!("mode: {}", harness.app.mode.get().label())));
+        harness.app.overlay = Overlay::None;
+    }
+    assert!(key_hint_line(false, false, false, false, 80).contains("Shift+Tab mode"));
+    assert!(!key_hint_line(false, true, false, true, 120).contains("Shift+Tab mode"));
+    assert!(!key_hint_line(false, true, true, true, 120).contains("Shift+Tab mode"));
+    assert!(!handle_key(
+        &mut harness.app,
+        &mut harness.worker,
+        code_key(KeyCode::F(1))
+    ));
+    assert!(rendered_help_pages(&mut harness.app, 80, 24).contains("Shift+Tab"));
+    harness.finish();
+}
+
+#[test]
+fn plan_answer_uses_read_only_result_notice_then_change_restores_normal_notice() {
+    // T12: a completed provider answer drives the timeline notice.
+    let mut harness = ModeHarness::new(None);
+    for (command, read_only) in [("/plan", true), ("/change", false)] {
+        harness.enter(command);
+        harness.task("answer a question");
+        assert_eq!(
+            harness.app.transcript.last().unwrap().text,
+            nh_core::agent::result_notice(read_only)
+        );
+    }
+    assert_eq!(harness.requests.lock().unwrap().len(), 2);
+    harness.finish();
+}
+
+#[test]
+fn budget_block_before_answer_does_not_unlock_mode_switching() {
+    // T9 + T12: Usage can arrive before Answer; Blocked is not yet between turns.
+    let mut harness = ModeHarness::new(None);
+    harness.enter("/plan");
+    harness.app.budget = Some(1);
+    harness.app.input = "a pending turn".into();
+    assert_eq!(harness.app.dispatch().as_deref(), Some("a pending turn"));
+    apply_event(
+        &mut harness.app,
+        AgentEvent::Usage(Usage {
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            cached_tokens: Some(0),
+            evidence: UsageEvidence::Measured,
+        }),
+    );
+    assert!(matches!(harness.app.status, Status::Blocked(_)));
+    assert!(!handle_key(
+        &mut harness.app,
+        &mut harness.worker,
+        code_key(KeyCode::BackTab)
+    ));
+    assert_eq!(harness.app.mode.get(), Mode::Plan);
+    assert_eq!(
+        harness.app.transcript.last().unwrap().text,
+        FINISH_BEFORE_SWITCHING
+    );
+    apply_event(&mut harness.app, AgentEvent::Answer("finished".into()));
+    assert_eq!(
+        harness.app.transcript.last().unwrap().text,
+        nh_core::agent::result_notice(true)
+    );
+    assert!(!handle_key(
+        &mut harness.app,
+        &mut harness.worker,
+        code_key(KeyCode::BackTab)
+    ));
+    assert_eq!(harness.app.mode.get(), Mode::Change);
+    harness.finish();
 }

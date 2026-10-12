@@ -16,6 +16,7 @@ fn worker_around(join: JoinHandle<()>, shutdown: Arc<AtomicBool>) -> Worker {
     let (commands, _command_rx) = mpsc::channel();
     let (_event_tx, events) = mpsc::channel();
     Worker {
+        mode: SharedMode::default(),
         commands,
         events,
         prompt_base_tokens: Arc::new(AtomicU64::new(PROMPT_ESTIMATE_UNAVAILABLE)),
@@ -153,6 +154,7 @@ fn worker_drop_unblocks_a_parked_approval() {
         .unwrap();
     drop(event_tx);
     let worker = Worker {
+        mode: SharedMode::default(),
         commands,
         events,
         prompt_base_tokens: Arc::new(AtomicU64::new(PROMPT_ESTIMATE_UNAVAILABLE)),
@@ -511,4 +513,73 @@ fn tracked_client_emits_start_and_finish_on_success_and_failure() {
             _ => panic!("second event must finish the model request"),
         }
     }
+}
+
+#[test]
+fn plan_installed_guard_blocks_mutation_and_preserves_read_policy() {
+    // T2: exercise the guard installed on the real WorkerSession ToolCtx.
+    let root = crate::tests::temp_dir();
+    let law = nh_law::load(&root, &nh_law::LoadOptions { cli_autonomy: None });
+    let (events, _receiver) = mpsc::channel();
+    let mode = SharedMode::default();
+    let mut session = WorkerSession::new(
+        WorkerConfig {
+            route: crate::tests::test_route(),
+            profiles: Profiles::bundled(),
+            active_profile: "balanced".into(),
+            budget: None,
+            law,
+            repo_root: root.clone(),
+            workdir: root.clone(),
+            scrubber: Arc::new(std::sync::RwLock::new(Scrubber::new(Vec::new()))),
+            connect: Box::new(|_, _| anyhow::bail!("guard test must not connect")),
+            initial: None,
+            resume: None,
+        },
+        events,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicU64::new(PROMPT_ESTIMATE_UNAVAILABLE)),
+        mode.clone(),
+    );
+    assert!(matches!(
+        (session.agent.ctx.guard)(&nh_tools::Access::Exec("echo ok")),
+        nh_tools::Guard::Ask
+    ));
+    assert!(matches!(
+        (session.agent.ctx.guard)(&nh_tools::Access::Send("example.invalid")),
+        nh_tools::Guard::Allow
+    ));
+    mode.set(crate::mode::Mode::Plan);
+    assert!(matches!(
+        session.handle_command(WorkerCommand::ModeChanged),
+        CommandAction::Continue
+    ));
+    for access in [
+        nh_tools::Access::Write("ordinary.txt"),
+        nh_tools::Access::Exec("echo ok"),
+        nh_tools::Access::Send("example.invalid"),
+        nh_tools::Access::Read(".nosis/private.txt"),
+    ] {
+        assert!(matches!(
+            (session.agent.ctx.guard)(&access),
+            nh_tools::Guard::Block(_)
+        ));
+    }
+    assert!(matches!(
+        (session.agent.ctx.guard)(&nh_tools::Access::Read("ordinary.txt")),
+        nh_tools::Guard::Allow
+    ));
+    mode.set(crate::mode::Mode::Change);
+    session.handle_command(WorkerCommand::ModeChanged);
+    assert!(matches!(
+        (session.agent.ctx.guard)(&nh_tools::Access::Exec("echo ok")),
+        nh_tools::Guard::Ask
+    ));
+    assert!(matches!(
+        (session.agent.ctx.guard)(&nh_tools::Access::Read(".nosis/private.txt")),
+        nh_tools::Guard::Block(_)
+    ));
+    drop(session);
+    std::fs::remove_dir_all(root).unwrap();
 }

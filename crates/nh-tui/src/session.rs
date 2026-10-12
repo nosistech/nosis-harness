@@ -1,6 +1,7 @@
 //! Terminal session lifecycle, worker orchestration, and shared UI helpers.
 
 use crate::input::{handle_action, handle_input_event, reduce_agent_event};
+use crate::mode::{last_mode, Mode, PLAN_MODE_NOTICE};
 use crate::palette::resolve_color_mode;
 use crate::render::render;
 use crate::state::{
@@ -63,6 +64,8 @@ pub(super) fn restore_app(
     law_constitution: &str,
 ) -> anyhow::Result<()> {
     app.resumed = true;
+    app.mode
+        .set(last_mode(&restored.history).unwrap_or_default());
     for turn in &restored.turns {
         crate::worker::add_usage(&mut app.usage, turn.usage.as_ref());
         let route = app.resolver.resolve(&turn.route_id)?;
@@ -71,10 +74,11 @@ pub(super) fn restore_app(
     }
     app.push_line(
         &format!(
-            "resumed {} - {} turns restored on {}",
+            "resumed {} - {} turns restored on {} - mode: {}",
             restored.session_id,
             restored.turns.len(),
-            restored.route_id
+            restored.route_id,
+            app.mode.get().label()
         ),
         TranscriptKind::Progress,
     );
@@ -211,6 +215,7 @@ pub(super) fn run_tui_session(
         scrubber,
         policy_view,
         UiInputs {
+            mode: worker.mode.clone(),
             terminal_capability,
             palette_entries,
             credentialed_providers,
@@ -276,6 +281,20 @@ pub fn identity_constitution(
 ) -> String {
     let session_law = nh_core::agent::session_law_constitution(law_constitution, shell_unavailable);
     nh_core::agent::identity_constitution(&session_law, route.id(), route.provider())
+}
+
+/// TUI capability prefix; the public CLI helper keeps its original signature.
+pub(super) fn mode_identity_constitution(
+    law_constitution: &str,
+    route: &ResolvedRoute,
+    shell_unavailable: bool,
+    mode: Mode,
+) -> String {
+    let constitution = identity_constitution(law_constitution, route, shell_unavailable);
+    match mode {
+        Mode::Plan => format!("{PLAN_MODE_NOTICE}\n\n{constitution}"),
+        Mode::Change => constitution,
+    }
 }
 
 pub(super) fn install_literal(

@@ -8,6 +8,9 @@ The model can read and search permitted files. It cannot edit files, run command
 install software or invoke remote tools. These restrictions are enforced by the
 available tools and their guard, not just by words in the prompt.
 
+The full-screen interface offers the same boundary as its Plan mode; see
+[Plan and Change modes](TERMINAL_GUIDE.md#plan-and-change-modes-unreleased-source).
+
 After setup, run this from your project folder:
 
 ```powershell

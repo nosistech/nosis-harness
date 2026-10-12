@@ -200,6 +200,7 @@ pub(super) enum PaletteAction {
     Quit,
     Search,
     TrustDial,
+    SetMode(crate::mode::Mode),
     Timeline,
     Review,
     Why,
@@ -331,6 +332,7 @@ pub struct TuiConfig {
 }
 
 pub(super) struct UiInputs {
+    pub(super) mode: crate::mode::SharedMode,
     pub(super) terminal_capability: TerminalCapability,
     pub(super) palette_entries: Vec<PaletteEntry>,
     pub(super) credentialed_providers: Vec<String>,
@@ -440,8 +442,11 @@ impl RouteTimingHistory {
 
 /// Unit-testable state for the renderer.
 pub struct App {
+    pub(super) mode: crate::mode::SharedMode,
     pub(super) terminal_capability: TerminalCapability,
     pub(super) status: Status,
+    // A budget Usage event can show Blocked before the terminal answer arrives.
+    pub(super) turn_in_flight: bool,
     pub(super) working_since: Option<DateTime<Utc>>,
     pub(super) active_model: Option<ActiveModel>,
     pub(super) active_tool: Option<ActiveTool>,
@@ -508,6 +513,7 @@ impl App {
     ) -> Self {
         let (profiles, active_profile) = profile_config;
         let UiInputs {
+            mode,
             terminal_capability,
             palette_entries: mcp_entries,
             credentialed_providers,
@@ -520,12 +526,14 @@ impl App {
         let execution_policy = profiles.effective(&active_profile, &route);
         let typical_duration_ms = route_timing_history.typical_for(route.id());
         Self {
+            mode,
             terminal_capability,
             status: if budget == Some(0) {
                 Status::Blocked(BUDGET_REASON.into())
             } else {
                 Status::Idle
             },
+            turn_in_flight: false,
             working_since: None,
             active_model: None,
             active_tool: None,
@@ -714,6 +722,10 @@ impl App {
         );
     }
 
+    pub(super) fn can_switch_mode(&self) -> bool {
+        !self.turn_in_flight && matches!(self.status, Status::Idle | Status::Blocked(_))
+    }
+
     pub(super) fn dispatch(&mut self) -> Option<String> {
         if matches!(
             self.status,
@@ -736,6 +748,7 @@ impl App {
         self.last_compaction_hud = None;
         self.active_model = None;
         self.active_tool = None;
+        self.turn_in_flight = true;
         self.push_text("", &task, TranscriptKind::Task);
         self.set_status(Status::Working, Utc::now());
         Some(task)

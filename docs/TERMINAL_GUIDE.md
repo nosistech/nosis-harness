@@ -23,6 +23,35 @@ While work is active, Esc stops the current turn, including when Help or another
 overlay is open. When idle, Esc closes the overlay. On-screen Escape hints reflect
 the current state.
 
+## Plan and Change modes (unreleased source)
+
+The full-screen interface has two modes. The current one is always shown as text at
+the start of the input line, as `[Plan]` or `[Change]`, in every window width and in
+ASCII or no-color display.
+
+- **Change** is the normal mode and the one every new session starts in. Nosis can
+  edit files and run commands. Commands always ask first; edits follow your approval
+  settings.
+- **Plan** is read-only. Nosis can read and search files, answer questions and explain,
+  and if you describe a change it replies with a plan instead of making it. File edits,
+  commands and remote integrations are not offered to the model and are refused if
+  attempted. This is enforced by the program, not only by instructions.
+
+Switch with **Shift+Tab**, or type `/plan` or `/change`. Switching works only between
+turns: while Nosis is working or an approval is waiting, the key shows a reminder and
+changes nothing, and it never answers an approval. A `/plan` or `/change` typed during
+a turn waits in the input box and runs when the turn ends. Each switch prints one line
+describing what the new mode allows. Switching never grants or removes an approval.
+
+Switching modes does not restart the conversation. The model is told about the change
+before its next request, so a plan written in Plan mode can be carried out after you
+switch to Change and ask for it.
+
+A resumed session reopens in the mode it last worked in; the resume line shows it.
+Sessions saved before modes existed reopen in Change. `/trust` shows the current mode
+with the policy view. Some Windows terminals report Shift+Tab inconsistently; the
+slash commands always work.
+
 ## Write and send
 
 **v0.3.0-rc.1 candidate:** the full-screen composer preserves pasted line breaks. Paste does
@@ -103,6 +132,7 @@ still a claim to verify. No new checks run automatically.
 | Control | Purpose |
 | --- | --- |
 | F1 | Show keyboard help; unreleased source also closes Help on a second press |
+| Shift+Tab, `/plan`, `/change` | Unreleased source: switch between Plan (read-only) and Change between turns |
 | `/help` | Open the command palette |
 | `/model` | Inspect and explicitly choose a model |
 | `/profile` | Inspect execution profiles |
